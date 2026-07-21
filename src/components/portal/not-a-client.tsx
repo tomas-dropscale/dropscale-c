@@ -35,9 +35,11 @@ export function NotAClient({ email }: { email: string }) {
           No client account
         </h1>
         <p className="mt-2 text-[13px] leading-relaxed text-[var(--text-secondary)]">
-          <span className="text-[var(--text-primary)]">{email}</span> is signed in, but it
-          isn&apos;t linked to a Dropscale client account. If you believe this is a mistake,
-          contact your account manager.
+          {/* Explicit {" "}: a plain space here rides on JSX whitespace rules and
+              renders as "…dropscale.iois signed in" when the line wraps. */}
+          <span className="text-[var(--text-primary)]">{email}</span>{" "}
+          is signed in, but it isn&apos;t linked to a Dropscale client account. If you
+          believe this is a mistake, contact your account manager.
         </p>
 
         <Button variant="secondary" size="lg" className="mt-6 w-full" onClick={signOut}>
