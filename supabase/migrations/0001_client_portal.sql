@@ -1,12 +1,24 @@
 -- =============================================================================
 -- Dropscale IO — Client Portal schema
 --
--- Runs on the SAME Supabase project as the admin (dropscale-da). It depends on
--- public.is_admin() from the admin's migration 0001, so apply the admin
--- migrations first.
+-- Runs on the SAME Supabase project as the admin (dropscale-da). Apply ALL the
+-- admin migrations first — this one needs public.is_admin() from 0001 and
+-- public.clients from 0005_finance, and fails outright without either.
+--
+-- NAME COLLISION, ON PURPOSE
+--   The admin's 0005_finance.sql already owns public.clients — a CRM record
+--   (lead / active / paused / churned, notes, tied to commissions) that may
+--   never have a login at all. This table is a different thing: a portal
+--   LOGIN identity, keyed by auth.users.id. One CRM client can have several
+--   portal logins, or none. Hence portal_clients.
+--
+--   Do not "simplify" this back to `clients`. Because every create here is
+--   `if not exists`, that version runs green and silently binds every policy
+--   and foreign key to the CRM table, whose ids are random uuids that never
+--   equal auth.uid() — so no client can ever sign in, with no error anywhere.
 --
 -- Security model
---   * Clients are auth.users rows that ALSO have a row in public.clients.
+--   * Clients are auth.users rows that ALSO have a row in public.portal_clients.
 --     The team creates them (admin app / dashboard invite); there is no
 --     self-signup in the portal.
 --   * A client can only see rows chained to their own client_id — directly
@@ -16,25 +28,33 @@
 --   * The team (public.is_admin()) can do everything on every table.
 --   * The admin's handle_new_user trigger will also give each client a
 --     profiles row with role 'member'. That is harmless: the admin app gates
---     on role = 'admin', the portal gates on having a clients row.
+--     on role = 'admin', the portal gates on having a portal_clients row.
 -- =============================================================================
 
 -- -----------------------------------------------------------------------------
--- clients — who may use the portal. id doubles as the auth.users id.
+-- portal_clients — who may sign in to the portal. id IS the auth.users id.
 -- -----------------------------------------------------------------------------
-create table if not exists public.clients (
+create table if not exists public.portal_clients (
   id uuid references auth.users (id) on delete cascade primary key,
   full_name text not null,
   email text not null,
   avatar_url text,
+  -- Optional link to the CRM record in public.clients (admin 0005_finance).
+  -- Nullable because a portal login can exist before anyone files the client
+  -- in the CRM, and set null on delete so removing a CRM record never locks
+  -- a client out of their own dashboard.
+  crm_client_id uuid references public.clients (id) on delete set null,
   created_at timestamptz not null default now()
 );
+
+create index if not exists portal_clients_crm_client_id_idx
+  on public.portal_clients (crm_client_id);
 
 -- -----------------------------------------------------------------------------
 -- billing_profiles — 1:1 with clients.
 -- -----------------------------------------------------------------------------
 create table if not exists public.billing_profiles (
-  client_id uuid references public.clients (id) on delete cascade primary key,
+  client_id uuid references public.portal_clients (id) on delete cascade primary key,
   profile_type text not null default 'individual'
     check (profile_type in ('company', 'individual')),
   currency text not null default 'EUR',
@@ -47,7 +67,7 @@ create table if not exists public.billing_profiles (
 -- -----------------------------------------------------------------------------
 create table if not exists public.ad_accounts (
   id uuid primary key default gen_random_uuid(),
-  client_id uuid not null references public.clients (id) on delete cascade,
+  client_id uuid not null references public.portal_clients (id) on delete cascade,
   store_name text not null,
   google_ads_customer_id text,
   status text not null default 'active'
@@ -70,7 +90,7 @@ create index if not exists ad_accounts_client_id_idx on public.ad_accounts (clie
 -- -----------------------------------------------------------------------------
 create table if not exists public.account_requests (
   id uuid primary key default gen_random_uuid(),
-  client_id uuid not null references public.clients (id) on delete cascade,
+  client_id uuid not null references public.portal_clients (id) on delete cascade,
   request_type text not null check (request_type in ('google_ads', 'shopify')),
   google_ads_customer_id text,
   store_name text,
@@ -125,7 +145,7 @@ create index if not exists creative_deliveries_ad_account_id_idx
 -- =============================================================================
 -- Row Level Security
 -- =============================================================================
-alter table public.clients enable row level security;
+alter table public.portal_clients enable row level security;
 alter table public.billing_profiles enable row level security;
 alter table public.ad_accounts enable row level security;
 alter table public.account_requests enable row level security;
@@ -152,21 +172,21 @@ $$;
 -- ---- clients ----------------------------------------------------------------
 -- Read own row; the team reads all. Nobody self-inserts: rows are created by
 -- the team (service role / SQL / admin app), both of which bypass or pass RLS.
-drop policy if exists clients_select_self on public.clients;
-create policy clients_select_self on public.clients
+drop policy if exists portal_clients_select_self on public.portal_clients;
+create policy portal_clients_select_self on public.portal_clients
   for select using (id = auth.uid() or public.is_admin());
 
-drop policy if exists clients_update_self on public.clients;
-create policy clients_update_self on public.clients
+drop policy if exists portal_clients_update_self on public.portal_clients;
+create policy portal_clients_update_self on public.portal_clients
   for update using (id = auth.uid() or public.is_admin())
   with check (id = auth.uid() or public.is_admin());
 
-drop policy if exists clients_admin_insert on public.clients;
-create policy clients_admin_insert on public.clients
+drop policy if exists portal_clients_admin_insert on public.portal_clients;
+create policy portal_clients_admin_insert on public.portal_clients
   for insert with check (public.is_admin());
 
-drop policy if exists clients_admin_delete on public.clients;
-create policy clients_admin_delete on public.clients
+drop policy if exists portal_clients_admin_delete on public.portal_clients;
+create policy portal_clients_admin_delete on public.portal_clients
   for delete using (public.is_admin());
 
 -- ---- billing_profiles ---------------------------------------------------------

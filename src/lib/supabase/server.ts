@@ -46,7 +46,7 @@ export async function getSessionClient() {
   if (!user) return { user: null, client: null };
 
   const { data: client } = await supabase
-    .from("clients")
+    .from("portal_clients")
     .select("*")
     .eq("id", user.id)
     .maybeSingle();

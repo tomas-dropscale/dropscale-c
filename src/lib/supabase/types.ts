@@ -16,12 +16,13 @@ export type BillingProfileType = "company" | "individual";
 export type Database = {
   public: {
     Tables: {
-      clients: {
+      portal_clients: {
         Row: {
           id: string;
           full_name: string;
           email: string;
           avatar_url: string | null;
+          crm_client_id: string | null;
           created_at: string;
         };
         Insert: {
@@ -29,6 +30,7 @@ export type Database = {
           full_name: string;
           email: string;
           avatar_url?: string | null;
+          crm_client_id?: string | null;
           created_at?: string;
         };
         Update: {
@@ -36,6 +38,7 @@ export type Database = {
           full_name?: string;
           email?: string;
           avatar_url?: string | null;
+          crm_client_id?: string | null;
           created_at?: string;
         };
         Relationships: [];
@@ -67,7 +70,7 @@ export type Database = {
             foreignKeyName: "billing_profiles_client_id_fkey";
             columns: ["client_id"];
             isOneToOne: true;
-            referencedRelation: "clients";
+            referencedRelation: "portal_clients";
             referencedColumns: ["id"];
           },
         ];
@@ -126,7 +129,7 @@ export type Database = {
             foreignKeyName: "ad_accounts_client_id_fkey";
             columns: ["client_id"];
             isOneToOne: false;
-            referencedRelation: "clients";
+            referencedRelation: "portal_clients";
             referencedColumns: ["id"];
           },
         ];
@@ -170,7 +173,7 @@ export type Database = {
             foreignKeyName: "account_requests_client_id_fkey";
             columns: ["client_id"];
             isOneToOne: false;
-            referencedRelation: "clients";
+            referencedRelation: "portal_clients";
             referencedColumns: ["id"];
           },
         ];
@@ -279,7 +282,8 @@ export type Database = {
   };
 };
 
-export type Client = Database["public"]["Tables"]["clients"]["Row"];
+/** A portal login. Not the same as the admin CRM record in public.clients. */
+export type Client = Database["public"]["Tables"]["portal_clients"]["Row"];
 export type BillingProfile = Database["public"]["Tables"]["billing_profiles"]["Row"];
 export type AdAccount = Database["public"]["Tables"]["ad_accounts"]["Row"];
 export type AccountRequest = Database["public"]["Tables"]["account_requests"]["Row"];
