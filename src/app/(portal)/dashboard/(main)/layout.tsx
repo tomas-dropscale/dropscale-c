@@ -1,4 +1,4 @@
-import { getSessionClient } from "@/lib/supabase/server";
+import { getSessionClient, getSessionProfile } from "@/lib/supabase/server";
 import { fetchAccounts } from "@/lib/portal/data";
 import { PortalShell } from "@/components/portal/portal-shell";
 
@@ -13,8 +13,12 @@ export default async function MainLayout({ children }: { children: React.ReactNo
 
   if (!client) return null; // unreachable; satisfies the type-checker
 
+  // Someone who is BOTH a client and staff-admin gets a link into /admin.
+  // Cosmetic only — the /admin gate re-checks the role server-side.
+  const { profile } = await getSessionProfile();
+
   return (
-    <PortalShell client={client} accounts={accounts}>
+    <PortalShell client={client} accounts={accounts} isAdmin={profile?.role === "admin"}>
       {children}
     </PortalShell>
   );

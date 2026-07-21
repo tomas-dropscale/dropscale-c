@@ -1,26 +1,22 @@
 import type { Metadata } from "next";
 import { fetchAccounts } from "@/lib/portal/data";
 import { AdAccountSettingsCard } from "@/components/portal/ad-account-settings-card";
+import { PageContainer } from "@/components/ui/page-container";
+import { getServerDictionary } from "@/lib/i18n/server";
 
-export const metadata: Metadata = { title: "Google Ads Accounts" };
+export async function generateMetadata(): Promise<Metadata> {
+  const { d } = await getServerDictionary();
+  return { title: d.portal.adsAccounts };
+}
 
 export default async function AccountsSettingsPage() {
-  const accounts = await fetchAccounts();
+  const [accounts, { d }] = await Promise.all([fetchAccounts(), getServerDictionary()]);
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-[20px] font-semibold tracking-tight text-[var(--text-primary)]">
-          Google Ads Accounts
-        </h1>
-        <p className="mt-1 text-[13px] text-[var(--text-secondary)]">
-          Per-store targets and Shopify connections.
-        </p>
-      </div>
-
+    <PageContainer title={d.portal.adsAccounts} description={d.portal.adsAccountsSubtitle}>
       {accounts.length === 0 ? (
         <div className="panel px-6 py-14 text-center text-[13px] text-[var(--text-secondary)]">
-          No accounts linked yet. Add one from the dashboard sidebar.
+          {d.portal.noAdsAccounts}
         </div>
       ) : (
         <div className="max-w-[720px] space-y-4">
@@ -29,6 +25,6 @@ export default async function AccountsSettingsPage() {
           ))}
         </div>
       )}
-    </div>
+    </PageContainer>
   );
 }

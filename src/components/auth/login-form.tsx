@@ -12,6 +12,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input, Label, FieldError } from "@/components/ui/input";
 import { PasswordInput } from "@/components/auth/password-input";
 import { FormAlert } from "@/components/auth/auth-card";
+import { GoogleButton } from "@/components/auth/google-button";
 import { createClient } from "@/lib/supabase/client";
 import { loginSchema, authErrorMessage, type LoginInput } from "@/lib/validations/auth";
 
@@ -115,7 +116,12 @@ export function LoginForm() {
         <FormAlert tone="success">Password updated. Sign in with your new password.</FormAlert>
       )}
       {notice === "signed-out" && <FormAlert tone="success">You have been signed out.</FormAlert>}
+      {notice === "access-revoked" && (
+        <FormAlert>Your access level changed and this session was closed. Sign in again.</FormAlert>
+      )}
       {(serverError ?? linkError) && <FormAlert>{serverError ?? linkError}</FormAlert>}
+
+      <GoogleButton onError={setServerError} />
 
       <div className="space-y-1.5">
         <Label htmlFor="email">Email</Label>

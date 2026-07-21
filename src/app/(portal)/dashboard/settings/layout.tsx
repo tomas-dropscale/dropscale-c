@@ -12,19 +12,23 @@ export default async function SettingsLayout({ children }: { children: React.Rea
   if (!client) return null; // gate already handled this
 
   return (
-    <div className="flex min-h-svh flex-col p-3 sm:p-4">
+    <div className="flex h-svh flex-col p-2.5 md:p-5">
       <BrowserChrome
-        address="portal.dropscale.app/dashboard/settings"
+        address="dropscale.app/dashboard/settings"
         right={
           <>
             <LiveIndicator />
-            <UserBadge client={client} compact />
+            <span className="h-4 w-px bg-[var(--border-subtle)]" aria-hidden />
+            <UserBadge client={client} />
           </>
         }
       >
         <div className="flex min-h-0 flex-1">
-          <SettingsNav />
-          <main className="min-h-0 flex-1 overflow-y-auto px-5 py-6 sm:px-7">{children}</main>
+          <aside className="hidden w-[228px] shrink-0 md:block">
+            <SettingsNav />
+          </aside>
+
+          <main className="flex min-h-0 min-w-0 flex-1 flex-col">{children}</main>
         </div>
       </BrowserChrome>
     </div>

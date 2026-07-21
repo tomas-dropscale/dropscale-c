@@ -2,12 +2,17 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { HelpCircle, LogOut, PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 
 import { Logo } from "@/components/brand/logo";
 import { Button } from "@/components/ui/button";
-import { useSignOut } from "@/components/portal/user-menu";
+import { useI18n } from "@/lib/i18n/provider";
 import { cn } from "@/lib/utils";
+
+const TAB =
+  "transition-smooth rounded-full px-3.5 py-1 text-[12.5px] font-medium";
+const TAB_ACTIVE = "bg-[var(--accent-gold-dim)] text-[var(--accent-gold-strong)]";
+const TAB_IDLE = "text-[var(--text-secondary)] hover:text-[var(--text-primary)]";
 
 export function Topbar({
   collapsed,
@@ -19,7 +24,7 @@ export function Topbar({
   activeAccountId: string | null;
 }) {
   const pathname = usePathname();
-  const signOut = useSignOut();
+  const { d } = useI18n();
 
   const onCreatives = pathname.endsWith("/creatives");
 
@@ -34,65 +39,38 @@ export function Topbar({
         variant="ghost"
         size="icon-sm"
         onClick={onToggleSidebar}
-        aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+        aria-label={collapsed ? d.portal.expandSidebar : d.portal.collapseSidebar}
+        className="hidden md:inline-flex"
       >
         {collapsed ? <PanelLeftOpen /> : <PanelLeftClose />}
       </Button>
 
-      <Link href="/dashboard" className="hidden sm:block">
-        <Logo size="sm" />
-      </Link>
+      {/* The sidebar carries the brand; with it collapsed the topbar takes over. */}
+      {collapsed && (
+        <Link href="/dashboard" className="hidden md:block">
+          <Logo size="sm" />
+        </Link>
+      )}
 
       <div className="flex flex-1 justify-center">
         <div className="flex items-center gap-1 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-panel)] p-1">
-          <Link
-            href={performanceHref}
-            className={cn(
-              "transition-smooth rounded-full px-3.5 py-1 text-[12.5px] font-medium",
-              !onCreatives
-                ? "bg-[var(--accent-gold-dim)] text-[var(--accent-gold-strong)]"
-                : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]",
-            )}
-          >
-            Performance
+          <Link href={performanceHref} className={cn(TAB, !onCreatives ? TAB_ACTIVE : TAB_IDLE)}>
+            {d.portal.performance}
           </Link>
 
           {creativesHref ? (
-            <Link
-              href={creativesHref}
-              className={cn(
-                "transition-smooth rounded-full px-3.5 py-1 text-[12.5px] font-medium",
-                onCreatives
-                  ? "bg-[var(--accent-gold-dim)] text-[var(--accent-gold-strong)]"
-                  : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]",
-              )}
-            >
-              Creatives
+            <Link href={creativesHref} className={cn(TAB, onCreatives ? TAB_ACTIVE : TAB_IDLE)}>
+              {d.portal.creatives}
             </Link>
           ) : (
             <span
-              className="cursor-not-allowed rounded-full px-3.5 py-1 text-[12.5px] font-medium text-[var(--text-muted)]"
-              title="Select a store to see its creatives"
+              className={cn(TAB, "cursor-not-allowed text-[var(--text-muted)]")}
+              title={d.portal.creativesNeedStore}
             >
-              Creatives
+              {d.portal.creatives}
             </span>
           )}
         </div>
-      </div>
-
-      <div className="flex items-center gap-1">
-        <Button variant="ghost" size="icon-sm" aria-label="Help" title="Help">
-          <HelpCircle />
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          onClick={signOut}
-          aria-label="Sign out"
-          title="Sign out"
-        >
-          <LogOut />
-        </Button>
       </div>
     </div>
   );

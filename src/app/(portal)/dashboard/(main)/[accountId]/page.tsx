@@ -11,6 +11,9 @@ import { MetricsGrid } from "@/components/portal/metric-card";
 import { RangePicker } from "@/components/portal/range-picker";
 import { SuspendedBanner } from "@/components/portal/suspended-banner";
 import { CampaignsTable } from "@/components/portal/campaigns-table";
+import { PageContainer } from "@/components/ui/page-container";
+import { fmt } from "@/lib/i18n";
+import { getServerDictionary } from "@/lib/i18n/server";
 
 export const metadata: Metadata = { title: "Store performance" };
 
@@ -30,36 +33,37 @@ export default async function AccountPage({
   if (!account) notFound();
 
   const metrics = mockMetrics(account.id, range);
-  const campaigns = await fetchCampaigns(account.id, range);
+  const [campaigns, { d }] = await Promise.all([
+    fetchCampaigns(account.id, range),
+    getServerDictionary(),
+  ]);
 
   return (
-    <div className="space-y-6">
-      {account.status === "suspended" && <SuspendedBanner />}
-
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-[20px] font-semibold tracking-tight text-[var(--text-primary)]">
-            {account.store_name}
-          </h1>
-          <p className="mt-1 text-[12.5px] text-[var(--text-secondary)]">
-            Updated {dateTime(nowIso())} · next update at {nextSyncLabel()}
-          </p>
-        </div>
-
-        <div className="flex items-center gap-2">
+    <PageContainer
+      title={account.store_name}
+      description={fmt(d.portal.storeSubtitle, {
+        time: dateTime(nowIso()),
+        next: nextSyncLabel(),
+      })}
+      actions={
+        <>
           <Button variant="secondary" size="sm" className="relative">
             <FileBarChart />
-            Report
+            {d.portal.report}
             {/* New-report indicator */}
             <span className="absolute -top-1 -right-1 size-2 rounded-full bg-[var(--accent-gold)]" />
           </Button>
           <RangePicker current={range} />
-        </div>
+        </>
+      }
+    >
+      <div className="space-y-6">
+        {account.status === "suspended" && <SuspendedBanner />}
+
+        <MetricsGrid metrics={metrics} currency={account.currency} />
+
+        <CampaignsTable campaigns={campaigns} currency={account.currency} />
       </div>
-
-      <MetricsGrid metrics={metrics} currency={account.currency} />
-
-      <CampaignsTable campaigns={campaigns} currency={account.currency} />
-    </div>
+    </PageContainer>
   );
 }

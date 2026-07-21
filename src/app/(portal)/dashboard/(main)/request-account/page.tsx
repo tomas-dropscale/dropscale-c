@@ -1,25 +1,24 @@
 import type { Metadata } from "next";
 import { getSessionClient } from "@/lib/supabase/server";
 import { RequestAccountPanel } from "@/components/portal/request-account-panel";
+import { PageContainer } from "@/components/ui/page-container";
+import { getServerDictionary } from "@/lib/i18n/server";
 
-export const metadata: Metadata = { title: "Request Account" };
+export async function generateMetadata(): Promise<Metadata> {
+  const { d } = await getServerDictionary();
+  return { title: d.portal.requestAccount };
+}
 
 export default async function RequestAccountPage() {
-  const { client } = await getSessionClient();
+  const [{ client }, { d }] = await Promise.all([getSessionClient(), getServerDictionary()]);
   if (!client) return null; // gate already handled this
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-[20px] font-semibold tracking-tight text-[var(--text-primary)]">
-          Request Account
-        </h1>
-        <p className="mt-1 text-[13px] text-[var(--text-secondary)]">
-          Ask the team to link a new Google Ads account or connect a Shopify store.
-        </p>
-      </div>
-
+    <PageContainer
+      title={d.portal.requestAccount}
+      description={d.portal.requestAccountSubtitle}
+    >
       <RequestAccountPanel clientId={client.id} />
-    </div>
+    </PageContainer>
   );
 }

@@ -26,8 +26,18 @@ export async function GET(request: NextRequest) {
 
   if (code) {
     const { error } = await supabase.auth.exchangeCodeForSession(code);
-    if (!error) return NextResponse.redirect(new URL(next, origin));
-    return redirectWithError(origin, error.message);
+    if (error) return redirectWithError(origin, error.message);
+
+    // Only set by the portal's own OAuth button. Google sign-ins carry no
+    // metadata we control, so the portal_clients row that migration 0002's
+    // trigger creates for email signups has to be claimed here instead.
+    // Failure is non-fatal: the user still lands on the gate, which will show
+    // them the "no client account" screen rather than a broken redirect.
+    if (searchParams.get("portal_signup") === "1") {
+      await supabase.rpc("claim_portal_client");
+    }
+
+    return NextResponse.redirect(new URL(next, origin));
   }
 
   if (tokenHash && type) {

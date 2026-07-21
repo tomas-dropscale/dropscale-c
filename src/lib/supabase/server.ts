@@ -32,9 +32,32 @@ export async function createClient() {
 }
 
 /**
- * Authenticated user plus their clients row, or nulls when there is no
- * session. A user WITHOUT a clients row is not a portal client (e.g. a staff
- * account) — the layout treats that the same as not being signed in.
+ * Authenticated user plus their profiles row (team identity + role).
+ * `profile` comes from the database on every request, never from the JWT or
+ * anything the client can set — see admin migration 0004.
+ */
+export async function getSessionProfile() {
+  const supabase = await createClient();
+
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) return { user: null, profile: null };
+
+  const { data: profile } = await supabase
+    .from("profiles")
+    .select("*")
+    .eq("id", user.id)
+    .maybeSingle();
+
+  return { user, profile };
+}
+
+/**
+ * Authenticated user plus their portal_clients row, or nulls when there is no
+ * session. A user WITHOUT a portal_clients row is not a portal client (e.g. a
+ * staff account) — the layout treats that the same as not being signed in.
  */
 export async function getSessionClient() {
   const supabase = await createClient();

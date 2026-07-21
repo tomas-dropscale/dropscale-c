@@ -20,3 +20,16 @@ export function siteUrl() {
 export function authRedirect(next: string) {
   return `${siteUrl()}/auth/callback?next=${encodeURIComponent(next)}`;
 }
+
+/**
+ * Redirect target for "Continue with Google".
+ *
+ * The extra flag is the OAuth equivalent of the portal_signup metadata we set
+ * on email/password signup: signInWithOAuth() cannot inject custom metadata,
+ * so the callback has to be told that this sign-in came through the client
+ * portal and should claim a portal identity. Password-reset links go through
+ * the same route without it and are left alone.
+ */
+export function oauthRedirect(next = "/dashboard") {
+  return `${authRedirect(next)}&portal_signup=1`;
+}

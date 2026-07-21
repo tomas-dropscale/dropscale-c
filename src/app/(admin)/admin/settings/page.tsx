@@ -1,0 +1,45 @@
+import type { Metadata } from "next";
+import { Settings as SettingsIcon } from "lucide-react";
+
+import { PageContainer } from "@/components/ui/page-container";
+import { ModulePlaceholder } from "@/components/admin/placeholder";
+import { LanguageSwitcher } from "@/components/settings/language-switcher";
+import { TeamList } from "@/components/admin/team-list";
+import { createClient, getSessionProfile } from "@/lib/supabase/server";
+import { getServerDictionary } from "@/lib/i18n/server";
+
+export async function generateMetadata(): Promise<Metadata> {
+  const { d } = await getServerDictionary();
+  return { title: d.settings.title };
+}
+
+export default async function SettingsPage() {
+  const [{ profile }, { d }] = await Promise.all([getSessionProfile(), getServerDictionary()]);
+
+  const supabase = await createClient();
+  const { data: members } = await supabase.from("profiles").select("*").order("full_name");
+
+  return (
+    <PageContainer title={d.settings.title} description={d.settings.subtitle}>
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <TeamList
+          members={members ?? []}
+          currentUserId={profile?.id ?? ""}
+          isAdmin={profile?.role === "admin"}
+        />
+
+        <div className="flex flex-col gap-4">
+          <LanguageSwitcher />
+
+          <ModulePlaceholder
+            icon={SettingsIcon}
+            title={d.placeholder.preferences.heading}
+            description={d.placeholder.preferences.description}
+            planned={d.placeholder.preferences.tags}
+            footnote={d.placeholder.notImplemented}
+          />
+        </div>
+      </div>
+    </PageContainer>
+  );
+}

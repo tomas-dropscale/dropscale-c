@@ -1,0 +1,220 @@
+<!--
+  Dropscale IO — "Confirm signup" email template.
+
+  Paste into Supabase → Authentication → Email Templates → Confirm signup.
+  Subject line: Confirm your email address
+
+  Written for email clients, not browsers, which is why it looks nothing like
+  the app's markup:
+    * tables for layout — flexbox and grid are unsupported in Outlook desktop
+    * every style inlined — Gmail strips <style> blocks when a message is
+      clipped or forwarded
+    * no external images — most clients block remote content by default, so
+      the wordmark is live text; it also keeps the logo readable in dark mode
+    * the button is a table cell with bgcolor rather than a styled <a>,
+      because Outlook ignores padding on inline elements
+    * the raw URL is repeated below the button: some corporate gateways
+      rewrite or strip anchors entirely
+
+  Only {{ .ConfirmationURL }} is required. {{ .Email }} is used for the
+  "sent to" footer line and can be removed safely.
+-->
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="x-apple-disable-message-reformatting" />
+    <!-- Stops iOS/Outlook auto-inverting a design that is already dark. -->
+    <meta name="color-scheme" content="dark" />
+    <meta name="supported-color-schemes" content="dark" />
+    <title>Confirm your email address</title>
+  </head>
+
+  <body
+    style="margin: 0; padding: 0; background-color: #0a0908; -webkit-font-smoothing: antialiased"
+  >
+    <!-- Preview line in the inbox list; hidden inside the message itself. -->
+    <div
+      style="
+        display: none;
+        max-height: 0;
+        overflow: hidden;
+        mso-hide: all;
+        font-size: 1px;
+        line-height: 1px;
+        color: #0a0908;
+        opacity: 0;
+      "
+    >
+      Confirm your email address to finish setting up your Dropscale IO account.
+    </div>
+
+    <table
+      role="presentation"
+      width="100%"
+      cellpadding="0"
+      cellspacing="0"
+      border="0"
+      bgcolor="#0a0908"
+      style="background-color: #0a0908"
+    >
+      <tr>
+        <td align="center" style="padding: 32px 16px">
+          <table
+            role="presentation"
+            width="100%"
+            cellpadding="0"
+            cellspacing="0"
+            border="0"
+            style="max-width: 520px; margin: 0 auto"
+          >
+            <!-- Wordmark -->
+            <tr>
+              <td
+                align="left"
+                style="
+                  padding: 0 0 20px 4px;
+                  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica,
+                    Arial, sans-serif;
+                  font-size: 15px;
+                  font-weight: 600;
+                  letter-spacing: -0.2px;
+                  color: #f2efe9;
+                "
+              >
+                Dropscale <span style="color: #d4a86a">IO</span>
+              </td>
+            </tr>
+
+            <!-- Card -->
+            <tr>
+              <td
+                bgcolor="#111010"
+                style="
+                  background-color: #111010;
+                  border: 1px solid #1e1d1c;
+                  border-radius: 18px;
+                  padding: 36px 32px;
+                "
+              >
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+                  <tr>
+                    <td
+                      style="
+                        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+                          Helvetica, Arial, sans-serif;
+                        font-size: 20px;
+                        line-height: 28px;
+                        font-weight: 600;
+                        letter-spacing: -0.3px;
+                        color: #f2efe9;
+                        padding-bottom: 12px;
+                      "
+                    >
+                      Confirm your email address
+                    </td>
+                  </tr>
+
+                  <tr>
+                    <td
+                      style="
+                        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+                          Helvetica, Arial, sans-serif;
+                        font-size: 14px;
+                        line-height: 23px;
+                        color: #8a8680;
+                        padding-bottom: 28px;
+                      "
+                    >
+                      Confirm this address to finish creating your Dropscale IO account. Our team
+                      then reviews the account before it gets access to the dashboard — you will
+                      hear from us once it is approved.
+                    </td>
+                  </tr>
+
+                  <!-- Button. bgcolor on the cell so Outlook fills it too. -->
+                  <tr>
+                    <td style="padding-bottom: 24px">
+                      <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+                        <tr>
+                          <td
+                            bgcolor="#d4a86a"
+                            align="center"
+                            style="background-color: #d4a86a; border-radius: 10px"
+                          >
+                            <a
+                              href="{{ .ConfirmationURL }}"
+                              target="_blank"
+                              rel="noopener"
+                              style="
+                                display: inline-block;
+                                padding: 13px 26px;
+                                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+                                  Helvetica, Arial, sans-serif;
+                                font-size: 14px;
+                                font-weight: 600;
+                                line-height: 20px;
+                                color: #0a0908;
+                                text-decoration: none;
+                                border-radius: 10px;
+                              "
+                              >Confirm email address</a
+                            >
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+
+                  <!-- Fallback URL -->
+                  <tr>
+                    <td
+                      style="
+                        border-top: 1px solid #1e1d1c;
+                        padding-top: 22px;
+                        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+                          Helvetica, Arial, sans-serif;
+                        font-size: 12.5px;
+                        line-height: 20px;
+                        color: #565350;
+                      "
+                    >
+                      If the button does not work, paste this link into your browser:
+                      <br />
+                      <a
+                        href="{{ .ConfirmationURL }}"
+                        target="_blank"
+                        rel="noopener"
+                        style="color: #d4a86a; text-decoration: none; word-break: break-all"
+                        >{{ .ConfirmationURL }}</a
+                      >
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+
+            <!-- Footer -->
+            <tr>
+              <td
+                style="
+                  padding: 20px 4px 0;
+                  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica,
+                    Arial, sans-serif;
+                  font-size: 12px;
+                  line-height: 19px;
+                  color: #565350;
+                "
+              >
+                This link expires in 24 hours and can only be used once. Sent to
+                <span style="color: #8a8680">{{ .Email }}</span>. If you did not create a Dropscale
+                IO account, you can ignore this email — nothing will happen.
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

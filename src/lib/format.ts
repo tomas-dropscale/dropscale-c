@@ -5,6 +5,8 @@
  * Amounts come out of Postgres `numeric` as strings via PostgREST, so every
  * helper coerces with Number() rather than trusting the type.
  */
+import { compactParts, joinWithSuffix } from "@/lib/compact";
+
 const LOCALE = "en-GB";
 
 export function money(value: number | string, currency = "EUR") {
@@ -15,21 +17,26 @@ export function money(value: number | string, currency = "EUR") {
   }).format(Number(value));
 }
 
-/** Compact form for metric cards: €184.7K. */
+/** Compact form for metric cards: €184.7K. Suffix from ./compact — see why there. */
 export function moneyCompact(value: number | string, currency = "EUR") {
-  return new Intl.NumberFormat(LOCALE, {
+  const { value: scaled, suffix } = compactParts(Number(value));
+  const parts = new Intl.NumberFormat(LOCALE, {
     style: "currency",
     currency,
-    notation: "compact",
+    // Currency styling would otherwise force EUR's two decimals back on and
+    // print "€840.0"; compact notation used to imply this for us.
+    minimumFractionDigits: 0,
     maximumFractionDigits: 1,
-  }).format(Number(value));
+  }).formatToParts(scaled);
+
+  return joinWithSuffix(parts, suffix);
 }
 
 export function compact(value: number | string) {
-  return new Intl.NumberFormat(LOCALE, {
-    notation: "compact",
-    maximumFractionDigits: 1,
-  }).format(Number(value));
+  const { value: scaled, suffix } = compactParts(Number(value));
+  const parts = new Intl.NumberFormat(LOCALE, { maximumFractionDigits: 1 }).formatToParts(scaled);
+
+  return joinWithSuffix(parts, suffix);
 }
 
 export function integer(value: number | string) {

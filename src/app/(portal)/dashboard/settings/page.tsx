@@ -1,11 +1,17 @@
 import type { Metadata } from "next";
 import { createClient, getSessionClient } from "@/lib/supabase/server";
 import { BillingProfileForm } from "@/components/portal/billing-profile-form";
+import { LanguageSwitcher } from "@/components/settings/language-switcher";
+import { PageContainer } from "@/components/ui/page-container";
+import { getServerDictionary } from "@/lib/i18n/server";
 
-export const metadata: Metadata = { title: "Personal Settings" };
+export async function generateMetadata(): Promise<Metadata> {
+  const { d } = await getServerDictionary();
+  return { title: d.portal.personalSettings };
+}
 
 export default async function PersonalSettingsPage() {
-  const { client } = await getSessionClient();
+  const [{ client }, { d }] = await Promise.all([getSessionClient(), getServerDictionary()]);
   if (!client) return null; // gate already handled this
 
   const supabase = await createClient();
@@ -16,17 +22,14 @@ export default async function PersonalSettingsPage() {
     .maybeSingle();
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-[20px] font-semibold tracking-tight text-[var(--text-primary)]">
-          Personal Settings
-        </h1>
-        <p className="mt-1 text-[13px] text-[var(--text-secondary)]">
-          Your account details and billing profile.
-        </p>
+    <PageContainer
+      title={d.portal.personalSettings}
+      description={d.portal.personalSettingsSubtitle}
+    >
+      <div className="max-w-[720px] space-y-4">
+        <BillingProfileForm client={client} profile={profile} />
+        <LanguageSwitcher />
       </div>
-
-      <BillingProfileForm client={client} profile={profile} />
-    </div>
+    </PageContainer>
   );
 }

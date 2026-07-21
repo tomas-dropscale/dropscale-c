@@ -1,19 +1,31 @@
 import type { Metadata } from "next";
 import { Suspense } from "react";
+import Link from "next/link";
 import { AuthCard } from "@/components/auth/auth-card";
 import { LoginForm } from "@/components/auth/login-form";
+import { getServerDictionary } from "@/lib/i18n/server";
 
-export const metadata: Metadata = { title: "Sign in" };
+export async function generateMetadata(): Promise<Metadata> {
+  const { d } = await getServerDictionary();
+  return { title: d.auth.login.submit };
+}
 
-export default function LoginPage() {
+export default async function LoginPage() {
+  const { d } = await getServerDictionary();
+
   return (
     <AuthCard
-      title="Welcome back"
-      subtitle="Sign in to your Dropscale client portal."
+      title={d.auth.login.title}
+      subtitle={d.auth.login.subtitle}
       footer={
         <>
-          Don&apos;t have access yet? Your account is created by the Dropscale team —{" "}
-          <span className="text-[var(--text-primary)]">contact your account manager</span>.
+          {d.auth.login.noAccount}{" "}
+          <Link
+            href="/register"
+            className="transition-smooth font-medium text-[var(--accent-gold)] hover:text-[var(--accent-gold-strong)]"
+          >
+            {d.auth.login.register}
+          </Link>
         </>
       }
     >
