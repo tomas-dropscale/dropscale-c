@@ -1,0 +1,152 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/* ------------------------------------------------------------------
+   Dropscale IO — design tokens
+   Dark-only. Warm near-black surfaces, gold accent, subtle borders.
+   ------------------------------------------------------------------ */
+:root {
+  --bg-base: #0a0908;
+  --bg-panel: #111010;
+  --bg-panel-hover: #161514;
+  --bg-elevated: #1a1918;
+
+  --border-subtle: rgba(255, 255, 255, 0.06);
+  --border-strong: rgba(255, 255, 255, 0.1);
+
+  --accent-gold: #d4a86a;
+  --accent-gold-dim: rgba(212, 168, 106, 0.15);
+  --accent-gold-strong: #e8c088;
+
+  --text-primary: #f2efe9;
+  --text-secondary: #8a8680;
+  --text-muted: #565350;
+
+  --success-green: #6fae7a;
+  --danger-red: #c46a5f;
+  --warning-orange: #d98d54;
+
+  --radius-card: 14px;
+  --radius-window: 18px;
+}
+
+@theme inline {
+  --color-base: var(--bg-base);
+  --color-panel: var(--bg-panel);
+  --color-panel-hover: var(--bg-panel-hover);
+  --color-elevated: var(--bg-elevated);
+
+  --color-subtle: var(--border-subtle);
+  --color-strong: var(--border-strong);
+
+  --color-gold: var(--accent-gold);
+  --color-gold-dim: var(--accent-gold-dim);
+  --color-gold-strong: var(--accent-gold-strong);
+
+  --color-primary: var(--text-primary);
+  --color-secondary: var(--text-secondary);
+  --color-muted: var(--text-muted);
+
+  --color-success: var(--success-green);
+  --color-danger: var(--danger-red);
+  --color-warning: var(--warning-orange);
+
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  --radius-card: 14px;
+  --radius-window: 18px;
+}
+
+@layer base {
+  * {
+    border-color: var(--border-subtle);
+  }
+
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    background-color: var(--bg-base);
+    color: var(--text-primary);
+    font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  ::selection {
+    background-color: var(--accent-gold-dim);
+    color: var(--accent-gold-strong);
+  }
+
+  /* Thin, unobtrusive scrollbars — the board relies on these heavily */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.14);
+  }
+
+  input:-webkit-autofill,
+  input:-webkit-autofill:focus {
+    -webkit-text-fill-color: var(--text-primary);
+    -webkit-box-shadow: 0 0 0 1000px var(--bg-panel) inset;
+    caret-color: var(--text-primary);
+  }
+}
+
+@layer components {
+  /* Uppercase micro-label used on every metric card and section header */
+  .label-caps {
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+  }
+
+  .metric-value {
+    font-size: 34px;
+    line-height: 1.1;
+    font-weight: 650;
+    letter-spacing: -0.02em;
+    color: var(--accent-gold);
+  }
+
+  .panel {
+    background-color: var(--bg-panel);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-card);
+  }
+}
+
+@utility transition-smooth {
+  transition-property: color, background-color, border-color, opacity, transform, box-shadow;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  transition-duration: 180ms;
+}
+
+/* "LIVE" dot in the window chrome */
+@keyframes pulse-gold {
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 rgba(212, 168, 106, 0.45);
+  }
+  50% {
+    opacity: 0.7;
+    box-shadow: 0 0 0 4px rgba(212, 168, 106, 0);
+  }
+}
+
+.animate-pulse-gold {
+  animation: pulse-gold 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
