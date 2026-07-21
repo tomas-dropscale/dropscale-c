@@ -30,7 +30,9 @@ export function LoginForm() {
   const [serverError, setServerError] = React.useState<string | null>(null);
 
   const notice = searchParams.get("notice");
-  const linkError = searchParams.get("error");
+  // Errors bounced here by /auth/callback arrive as raw Supabase text.
+  const rawLinkError = searchParams.get("error");
+  const linkError = rawLinkError ? authErrorMessage({ message: rawLinkError }) : null;
 
   const {
     register,

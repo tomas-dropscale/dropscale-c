@@ -48,5 +48,14 @@ export function authErrorMessage(error: { message: string; code?: string }) {
   if (raw.includes("failed to fetch") || raw.includes("network"))
     return "Connection problem. Check your internet and try again.";
 
-  return error.message;
+  // Supabase's own wording here talks about @supabase/ssr and code verifiers.
+  // Accurate for us, meaningless to a client staring at a login form.
+  if (raw.includes("code verifier") || raw.includes("pkce"))
+    return "That link couldn't be opened in this browser. Sign in below, or open the link in the browser you started from.";
+
+  const message = error.message?.trim() ?? "";
+  if (message.length === 0 || message === "{}" || message === "[object Object]")
+    return "Something went wrong. Please try again.";
+
+  return message;
 }

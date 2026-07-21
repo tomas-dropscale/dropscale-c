@@ -16,8 +16,21 @@
     * the raw URL is repeated below the button: some corporate gateways
       rewrite or strip anchors entirely
 
-  Only {{ .ConfirmationURL }} is required. {{ .Email }} is used for the
-  "sent to" footer line and can be removed safely.
+  Why not {{ .ConfirmationURL }}
+    That variable builds a PKCE link: the code it carries can only be redeemed
+    by the browser that started the signup, because the matching verifier is
+    in that browser's cookies. Emailed links do not respect that assumption —
+    people register on a laptop and open the mail on their phone — and the
+    exchange then fails with "PKCE code verifier not found in storage".
+
+    {{ .TokenHash }} is a one-time token the SERVER verifies (verifyOtp in
+    /auth/callback), so the link works from any device or browser. It also
+    goes straight to our domain instead of bouncing through supabase.co,
+    which means it does not depend on the Redirect URLs allow-list.
+
+  {{ .SiteURL }} is the Site URL from Authentication → URL Configuration, so
+  it must point at the deployed domain. {{ .Email }} only feeds the "sent to"
+  footer line and can be removed safely.
 -->
 <!doctype html>
 <html lang="en">
@@ -144,7 +157,7 @@
                             style="background-color: #d4a86a; border-radius: 10px"
                           >
                             <a
-                              href="{{ .ConfirmationURL }}"
+                              href="{{ .SiteURL }}/auth/callback?token_hash={{ .TokenHash }}&amp;type=signup&amp;next=%2Fconfirmed"
                               target="_blank"
                               rel="noopener"
                               style="
@@ -183,11 +196,11 @@
                       If the button does not work, paste this link into your browser:
                       <br />
                       <a
-                        href="{{ .ConfirmationURL }}"
+                        href="{{ .SiteURL }}/auth/callback?token_hash={{ .TokenHash }}&amp;type=signup&amp;next=%2Fconfirmed"
                         target="_blank"
                         rel="noopener"
                         style="color: #d4a86a; text-decoration: none; word-break: break-all"
-                        >{{ .ConfirmationURL }}</a
+                        >{{ .SiteURL }}/auth/callback?token_hash={{ .TokenHash }}&amp;type=signup&amp;next=%2Fconfirmed</a
                       >
                     </td>
                   </tr>
