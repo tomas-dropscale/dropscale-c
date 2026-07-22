@@ -11,6 +11,11 @@
  * bundle. On Cloudflare they must be set as Worker secrets.
  */
 
+import {
+  parseServiceAccountKey,
+  type ServiceAccountKey,
+} from "@/lib/google-ads/service-account";
+
 export type GoogleAdsEnv = {
   developerToken: string;
   clientId: string;
@@ -57,4 +62,52 @@ export function googleAdsEnv(): GoogleAdsEnv {
     loginCustomerId: loginCustomerId || null,
     apiVersion: process.env.GOOGLE_ADS_API_VERSION?.trim() || "v21",
   };
+}
+
+/**
+ * Developer token + API version WITHOUT demanding the OAuth app credentials —
+ * the agency service-account path (service-account.ts) authenticates with its
+ * key alone and must not fail because clientId/clientSecret are absent.
+ */
+export function googleAdsApiBasics() {
+  const developerToken = process.env.GOOGLE_ADS_DEVELOPER_TOKEN;
+  if (!developerToken) {
+    throw new Error("Google Ads is not configured. Set GOOGLE_ADS_DEVELOPER_TOKEN.");
+  }
+  return {
+    developerToken,
+    apiVersion: process.env.GOOGLE_ADS_API_VERSION?.trim() || "v21",
+  };
+}
+
+/**
+ * The AGENCY's own connection: a service-account key in the environment
+ * (single-line JSON, or base64 of it). GOOGLE_ADS_LOGIN_CUSTOMER_ID is the
+ * agency's MCC and belongs to THIS path — per-client OAuth queries authorise
+ * each client's account directly and never send it.
+ */
+export function agencyServiceAccount(): {
+  key: ServiceAccountKey;
+  loginCustomerId: string | null;
+} | null {
+  const raw = process.env.GOOGLE_ADS_SA_KEY_JSON?.trim();
+  if (!raw) return null;
+
+  let json = raw;
+  if (!raw.startsWith("{")) {
+    try {
+      json = atob(raw);
+    } catch {
+      return null;
+    }
+  }
+  const key = parseServiceAccountKey(json);
+  if (!key) return null;
+
+  const mcc = digits(process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID);
+  return { key, loginCustomerId: mcc || null };
+}
+
+export function hasAgencyServiceAccount(): boolean {
+  return agencyServiceAccount() !== null;
 }

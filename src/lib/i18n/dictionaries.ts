@@ -392,6 +392,19 @@ export const en = {
     roleChangeFailed: "Could not change the role: {message}",
     cannotDemoteSelf: "You cannot revoke your own admin access.",
     onlyAdminsManage: "Only admins can change roles.",
+    agencyAds: {
+      title: "Google Ads (Agency)",
+      help: "The agency's own Google Ads API access — a service account that reads every ad account it has been granted in Google Ads → Admin → Access and security. Separate from the clients' portal connections.",
+      notConfigured: "Not configured. Set GOOGLE_ADS_SA_KEY_JSON on the deployment.",
+      connectedAs: "Service account: {email}",
+      mcc: "Manager account (MCC): {id}",
+      test: "Test Connection",
+      testResult: "{count} ad accounts reachable.",
+      testTruncated: "Showing the first {shown} of {count}.",
+      managerTag: "MCC",
+      apiError: "Google Ads API error: {message}",
+      genericError: "Something went wrong ({code}).",
+    },
   },
 
   placeholder: {
@@ -883,6 +896,19 @@ export const pt: Dictionary = {
     roleChangeFailed: "Não foi possível alterar o role: {message}",
     cannotDemoteSelf: "Não podes revogar o teu próprio acesso de admin.",
     onlyAdminsManage: "Só admins podem alterar roles.",
+    agencyAds: {
+      title: "Google Ads (Agência)",
+      help: "O acesso próprio da agência à Google Ads API — uma service account que lê todas as contas de anúncios a que lhe deres acesso em Google Ads → Admin → Acesso e segurança. Separado das ligações dos clientes no portal.",
+      notConfigured: "Por configurar. Define GOOGLE_ADS_SA_KEY_JSON no deployment.",
+      connectedAs: "Service account: {email}",
+      mcc: "Conta manager (MCC): {id}",
+      test: "Testar Ligação",
+      testResult: "{count} contas de anúncios acessíveis.",
+      testTruncated: "A mostrar as primeiras {shown} de {count}.",
+      managerTag: "MCC",
+      apiError: "Erro da Google Ads API: {message}",
+      genericError: "Algo correu mal ({code}).",
+    },
   },
 
   placeholder: {
@@ -1358,6 +1384,19 @@ export const ptBR: Dictionary = {
     roleChangeFailed: "Não foi possível alterar o papel: {message}",
     cannotDemoteSelf: "Você não pode revogar seu próprio acesso de admin.",
     onlyAdminsManage: "Só admins podem alterar papéis.",
+    agencyAds: {
+      title: "Google Ads (Agência)",
+      help: "O acesso próprio da agência à Google Ads API — uma service account que lê todas as contas de anúncios liberadas para ela em Google Ads → Admin → Acesso e segurança. Separado das conexões dos clientes no portal.",
+      notConfigured: "Não configurado. Defina GOOGLE_ADS_SA_KEY_JSON no deployment.",
+      connectedAs: "Service account: {email}",
+      mcc: "Conta de administrador (MCC): {id}",
+      test: "Testar Conexão",
+      testResult: "{count} contas de anúncios acessíveis.",
+      testTruncated: "Mostrando as primeiras {shown} de {count}.",
+      managerTag: "MCC",
+      apiError: "Erro da API do Google Ads: {message}",
+      genericError: "Algo deu errado ({code}).",
+    },
   },
 
   placeholder: {
@@ -1833,6 +1872,19 @@ export const es: Dictionary = {
     roleChangeFailed: "No se pudo cambiar el rol: {message}",
     cannotDemoteSelf: "No puedes retirarte tu propio acceso de administrador.",
     onlyAdminsManage: "Solo los administradores pueden cambiar roles.",
+    agencyAds: {
+      title: "Google Ads (Agencia)",
+      help: "El acceso propio de la agencia a la API de Google Ads — una service account que lee todas las cuentas publicitarias a las que se le dé acceso en Google Ads → Admin → Acceso y seguridad. Separado de las conexiones de los clientes en el portal.",
+      notConfigured: "Sin configurar. Define GOOGLE_ADS_SA_KEY_JSON en el deployment.",
+      connectedAs: "Service account: {email}",
+      mcc: "Cuenta de administrador (MCC): {id}",
+      test: "Probar Conexión",
+      testResult: "{count} cuentas publicitarias accesibles.",
+      testTruncated: "Mostrando las primeras {shown} de {count}.",
+      managerTag: "MCC",
+      apiError: "Error de la API de Google Ads: {message}",
+      genericError: "Algo salió mal ({code}).",
+    },
   },
 
   placeholder: {
@@ -2310,6 +2362,19 @@ export const fr: Dictionary = {
     roleChangeFailed: "Impossible de changer le rôle : {message}",
     cannotDemoteSelf: "Vous ne pouvez pas retirer votre propre accès administrateur.",
     onlyAdminsManage: "Seuls les administrateurs peuvent changer les rôles.",
+    agencyAds: {
+      title: "Google Ads (Agence)",
+      help: "L'accès propre de l'agence à l'API Google Ads — un compte de service qui lit tous les comptes publicitaires auxquels il a été autorisé dans Google Ads → Admin → Accès et sécurité. Distinct des connexions des clients dans le portail.",
+      notConfigured: "Non configuré. Définissez GOOGLE_ADS_SA_KEY_JSON sur le déploiement.",
+      connectedAs: "Compte de service : {email}",
+      mcc: "Compte administrateur (MCC) : {id}",
+      test: "Tester la Connexion",
+      testResult: "{count} comptes publicitaires accessibles.",
+      testTruncated: "Affichage des {shown} premiers sur {count}.",
+      managerTag: "MCC",
+      apiError: "Erreur de l'API Google Ads : {message}",
+      genericError: "Une erreur est survenue ({code}).",
+    },
   },
 
   placeholder: {

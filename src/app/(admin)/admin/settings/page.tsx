@@ -4,8 +4,10 @@ import { Settings as SettingsIcon } from "lucide-react";
 import { PageContainer } from "@/components/ui/page-container";
 import { ModulePlaceholder } from "@/components/admin/placeholder";
 import { LanguageSwitcher } from "@/components/settings/language-switcher";
+import { AgencyGoogleAdsCard } from "@/components/settings/agency-google-ads-card";
 import { TeamList } from "@/components/admin/team-list";
 import { createClient, getSessionProfile } from "@/lib/supabase/server";
+import { agencyServiceAccount } from "@/lib/google-ads/env";
 import { getServerDictionary } from "@/lib/i18n/server";
 
 export async function generateMetadata(): Promise<Metadata> {
@@ -19,6 +21,8 @@ export default async function SettingsPage() {
   const supabase = await createClient();
   const { data: members } = await supabase.from("profiles").select("*").order("full_name");
 
+  const agency = agencyServiceAccount();
+
   return (
     <PageContainer title={d.settings.title} description={d.settings.subtitle}>
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
@@ -30,6 +34,12 @@ export default async function SettingsPage() {
 
         <div className="flex flex-col gap-4">
           <LanguageSwitcher />
+
+          <AgencyGoogleAdsCard
+            configured={agency !== null}
+            email={agency?.key.client_email ?? null}
+            loginCustomerId={agency?.loginCustomerId ?? null}
+          />
 
           <ModulePlaceholder
             icon={SettingsIcon}
