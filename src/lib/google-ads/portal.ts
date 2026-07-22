@@ -118,3 +118,78 @@ export async function fetchLiveMetrics(
     conversionValue,
   };
 }
+
+/** One creative from the account's asset library. */
+export type CreativeAsset = {
+  id: string;
+  name: string;
+  kind: "image" | "video";
+  /** Image URL, or the YouTube thumbnail for videos. */
+  thumbnailUrl: string | null;
+  /** Where clicking should go — the full image, or the YouTube watch page. */
+  linkUrl: string | null;
+  width: number | null;
+  height: number | null;
+};
+
+/**
+ * Live creatives for one customer: the image and YouTube-video assets in the
+ * account's library. This is what "seeing your creatives" actually is on
+ * Google's side — ads reference these assets.
+ */
+export async function fetchLiveCreatives(
+  customerId: string,
+  refreshToken: string,
+): Promise<CreativeAsset[]> {
+  const query = `
+    SELECT
+      asset.id,
+      asset.name,
+      asset.type,
+      asset.image_asset.full_size.url,
+      asset.image_asset.full_size.width_pixels,
+      asset.image_asset.full_size.height_pixels,
+      asset.youtube_video_asset.youtube_video_id,
+      asset.youtube_video_asset.youtube_video_title
+    FROM asset
+    WHERE asset.type IN ('IMAGE', 'YOUTUBE_VIDEO')
+  `;
+
+  const rows = await searchGoogleAds(customerId, refreshToken, query);
+
+  return rows.flatMap((row): CreativeAsset[] => {
+    const asset = row.asset ?? {};
+    const image = (asset.imageAsset ?? null) as { fullSize?: Record<string, unknown> } | null;
+    const video = (asset.youtubeVideoAsset ?? null) as Record<string, unknown> | null;
+
+    if (String(asset.type) === "IMAGE") {
+      const full = image?.fullSize ?? {};
+      const url = full.url != null ? String(full.url) : null;
+      return [
+        {
+          id: String(asset.id ?? ""),
+          name: String(asset.name ?? "Image asset"),
+          kind: "image",
+          thumbnailUrl: url,
+          linkUrl: url,
+          width: full.widthPixels != null ? Number(full.widthPixels) : null,
+          height: full.heightPixels != null ? Number(full.heightPixels) : null,
+        },
+      ];
+    }
+
+    const videoId = video?.youtubeVideoId != null ? String(video.youtubeVideoId) : null;
+    if (!videoId) return [];
+    return [
+      {
+        id: String(asset.id ?? ""),
+        name: String(video?.youtubeVideoTitle ?? asset.name ?? "Video asset"),
+        kind: "video",
+        thumbnailUrl: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+        linkUrl: `https://www.youtube.com/watch?v=${videoId}`,
+        width: null,
+        height: null,
+      },
+    ];
+  });
+}

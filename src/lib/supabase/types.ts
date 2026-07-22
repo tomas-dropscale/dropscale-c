@@ -206,6 +206,8 @@ export type AdAccount = {
   google_ads_refresh_token: string | null;
   google_ads_connected_email: string | null;
   google_ads_connected: boolean;
+  /** % of ad spend the agency bills; admin-only via guard (migration 0006). */
+  commission_rate: number;
 };
 
 export type AccountRequest = {
@@ -496,6 +498,7 @@ export type Database = {
           | "google_ads_refresh_token"
           | "google_ads_connected_email"
           | "google_ads_connected"
+          | "commission_rate"
         >;
         Update: Partial<AdAccount>;
         Relationships: [

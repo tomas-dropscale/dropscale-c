@@ -1,5 +1,6 @@
 import { getSessionClient, getSessionProfile } from "@/lib/supabase/server";
 import { fetchAccounts } from "@/lib/portal/data";
+import { fetchPendingCounts } from "@/lib/admin/approvals";
 import { PortalShell } from "@/components/portal/portal-shell";
 
 /**
@@ -13,12 +14,15 @@ export default async function MainLayout({ children }: { children: React.ReactNo
 
   if (!client) return null; // unreachable; satisfies the type-checker
 
-  // Someone who is BOTH a client and staff-admin gets a link into /admin.
-  // Cosmetic only — the /admin gate re-checks the role server-side.
+  // Someone who is BOTH a client and staff-admin gets a link into /admin and
+  // keeps the approval bell. Cosmetic only — the /admin gate re-checks the
+  // role server-side, and the portal DATA stays scoped to their own account.
   const { profile } = await getSessionProfile();
+  const isAdmin = profile?.role === "admin";
+  const pending = isAdmin ? await fetchPendingCounts() : null;
 
   return (
-    <PortalShell client={client} accounts={accounts} isAdmin={profile?.role === "admin"}>
+    <PortalShell client={client} accounts={accounts} isAdmin={isAdmin} pending={pending}>
       {children}
     </PortalShell>
   );

@@ -1,5 +1,7 @@
-import { getSessionClient } from "@/lib/supabase/server";
+import { getSessionClient, getSessionProfile } from "@/lib/supabase/server";
+import { fetchPendingCounts } from "@/lib/admin/approvals";
 import { BrowserChrome, LiveIndicator } from "@/components/portal/browser-chrome";
+import { NotificationsMenu } from "@/components/admin/notifications-menu";
 import { SettingsNav } from "@/components/portal/settings-nav";
 import { UserBadge } from "@/components/portal/user-menu";
 
@@ -11,6 +13,10 @@ export default async function SettingsLayout({ children }: { children: React.Rea
   const { client } = await getSessionClient();
   if (!client) return null; // gate already handled this
 
+  // Same rule as the main shell: admins keep the approval bell in every zone.
+  const { profile } = await getSessionProfile();
+  const pending = profile?.role === "admin" ? await fetchPendingCounts() : null;
+
   return (
     <div className="flex h-svh flex-col p-2.5 md:p-5">
       <BrowserChrome
@@ -19,6 +25,7 @@ export default async function SettingsLayout({ children }: { children: React.Rea
           <>
             <LiveIndicator />
             <span className="h-4 w-px bg-[var(--border-subtle)]" aria-hidden />
+            {pending && <NotificationsMenu counts={pending} />}
             <UserBadge client={client} />
           </>
         }

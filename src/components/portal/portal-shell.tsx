@@ -6,7 +6,9 @@ import { Menu } from "lucide-react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 
 import type { AdAccount, Client } from "@/lib/supabase/types";
+import type { PendingCounts } from "@/lib/admin/approvals";
 import { BrowserChrome, LiveIndicator } from "@/components/portal/browser-chrome";
+import { NotificationsMenu } from "@/components/admin/notifications-menu";
 import { Sidebar } from "@/components/portal/sidebar";
 import { Topbar } from "@/components/portal/topbar";
 import { UserBadge } from "@/components/portal/user-menu";
@@ -24,11 +26,14 @@ export function PortalShell({
   client,
   accounts,
   isAdmin = false,
+  pending = null,
   children,
 }: {
   client: Client;
   accounts: AdAccount[];
   isAdmin?: boolean;
+  /** Approval counts — only supplied when the viewer is staff-admin. */
+  pending?: PendingCounts | null;
   children: React.ReactNode;
 }) {
   const { d } = useI18n();
@@ -62,6 +67,9 @@ export function PortalShell({
           <>
             <LiveIndicator />
             <span className="h-4 w-px bg-[var(--border-subtle)]" aria-hidden />
+            {/* Admins keep sight of the approval queue even while in the
+                client zone — the zone scopes DATA, not their duties. */}
+            {isAdmin && pending && <NotificationsMenu counts={pending} />}
             <UserBadge client={client} />
 
             <DialogPrimitive.Root open={mobileNavOpen} onOpenChange={setMobileNavOpen}>

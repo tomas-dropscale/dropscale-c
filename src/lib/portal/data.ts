@@ -23,31 +23,59 @@ import type { MetricSet } from "@/lib/portal/mock";
 import type { RangeKey } from "@/lib/portal/range";
 import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
 import { decryptToken } from "@/lib/google-ads/crypto";
-import { fetchLiveCampaigns, fetchLiveMetrics } from "@/lib/google-ads/portal";
+import {
+  fetchLiveCampaigns,
+  fetchLiveCreatives,
+  fetchLiveMetrics,
+  type CreativeAsset,
+} from "@/lib/google-ads/portal";
 
 // Every column except the encrypted token, which must not leave the server
 // inside an account payload.
-const ACCOUNT_COLUMNS =
+export const ACCOUNT_COLUMNS =
   "id, client_id, store_name, google_ads_customer_id, status, currency, breakeven_roas, " +
   "lifetime_ads_budget_usd, shopify_url, shopify_connected, shopify_client_id, shopify_scopes, " +
-  "color_dot, created_at, google_ads_connected_email, google_ads_connected";
+  "color_dot, created_at, google_ads_connected_email, google_ads_connected, commission_rate";
+
+/**
+ * The portal is the CLIENT's zone, so every read here is pinned to the
+ * signed-in user's own client_id — explicitly, not via RLS alone. RLS carries
+ * an `or is_admin()` escape hatch for the admin area, which means an admin
+ * browsing the portal would otherwise see every account in the system. Which
+ * data you see is decided by the zone you are in, never by your role.
+ */
+async function sessionUserId(): Promise<string | null> {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  return user?.id ?? null;
+}
 
 export async function fetchAccounts(): Promise<AdAccount[]> {
+  const userId = await sessionUserId();
+  if (!userId) return [];
+
   const supabase = await createClient();
   const { data } = await supabase
     .from("ad_accounts")
     .select(ACCOUNT_COLUMNS)
+    .eq("client_id", userId)
     .order("created_at", { ascending: true });
   return (data as AdAccount[] | null) ?? [];
 }
 
-/** One account, RLS-scoped: another client's id comes back null → 404. */
+/** One OWN account; someone else's id (even for an admin) comes back null → 404. */
 export async function fetchAccount(accountId: string): Promise<AdAccount | null> {
+  const userId = await sessionUserId();
+  if (!userId) return null;
+
   const supabase = await createClient();
   const { data } = await supabase
     .from("ad_accounts")
     .select(ACCOUNT_COLUMNS)
     .eq("id", accountId)
+    .eq("client_id", userId)
     .maybeSingle();
   return (data as AdAccount | null) ?? null;
 }
@@ -116,6 +144,28 @@ export async function fetchAccountMetrics(account: AdAccount, range: RangeKey): 
   // Configured but not connected → zeroes, not fabricated numbers.
   if (hasGoogleAdsEnv()) return aggregateMetrics([]);
   return mockMetrics(account.id, range);
+}
+
+/**
+ * Live creatives for a connected account.
+ *
+ * Returns null when Google Ads isn't configured at all — the caller then falls
+ * back to the demo deliveries grid. Configured-but-not-connected (or a failed
+ * query) returns an empty list: honest nothing, never fake creatives.
+ */
+export async function fetchCreativeAssets(account: AdAccount): Promise<CreativeAsset[] | null> {
+  if (!hasGoogleAdsEnv()) return null;
+
+  if (!isGoogleAdsConnected(account)) return [];
+
+  try {
+    const token = await accountRefreshToken(account.id);
+    if (!token) return [];
+    return await fetchLiveCreatives(account.google_ads_customer_id!, token);
+  } catch (error) {
+    console.error(`Google Ads creatives failed for ${account.id}:`, error);
+    return [];
+  }
 }
 
 export async function fetchDeliveries(accountId: string): Promise<CreativeDelivery[]> {
