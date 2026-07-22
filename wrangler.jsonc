@@ -3,7 +3,16 @@
   "name": "dropscale-da",
   "main": ".open-next/worker.js",
   "compatibility_date": "2025-03-25",
-  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  // populate_process_env: with a compatibility_date before 2025-04-01, Workers
+  // do NOT copy bindings into process.env — so every runtime secret (the
+  // GOOGLE_ADS_* set) read via process.env comes back undefined even though
+  // `wrangler secret list` shows it. This flag turns the copying on without
+  // moving the compat date and risking other runtime behaviour changes.
+  "compatibility_flags": [
+    "nodejs_compat",
+    "nodejs_compat_populate_process_env",
+    "global_fetch_strictly_public"
+  ],
   "assets": {
     "directory": ".open-next/assets",
     "binding": "ASSETS"
