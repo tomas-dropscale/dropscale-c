@@ -9,8 +9,10 @@ import { Button } from "@/components/ui/button";
 import { MetricsGrid } from "@/components/portal/metric-card";
 import { RangePicker } from "@/components/portal/range-picker";
 import { SuspendedBanner } from "@/components/portal/suspended-banner";
+import { ConnectAdsBanner } from "@/components/portal/connect-ads-banner";
 import { CampaignsTable } from "@/components/portal/campaigns-table";
 import { PageContainer } from "@/components/ui/page-container";
+import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
 import { fmt } from "@/lib/i18n";
 import { getServerDictionary } from "@/lib/i18n/server";
 
@@ -58,6 +60,7 @@ export default async function AccountPage({
     >
       <div className="space-y-6">
         {account.status === "suspended" && <SuspendedBanner />}
+        {hasGoogleAdsEnv() && !account.google_ads_connected && <ConnectAdsBanner />}
 
         <MetricsGrid metrics={metrics} currency={account.currency} />
 

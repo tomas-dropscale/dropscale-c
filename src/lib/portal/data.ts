@@ -95,6 +95,9 @@ export async function fetchCampaigns(account: AdAccount, range: RangeKey): Promi
     }
   }
 
+  // Configured but this account isn't connected → honest empty, never fake.
+  // Mock is the DEMO state, reserved for when the API isn't set up at all.
+  if (hasGoogleAdsEnv()) return [];
   return mockCampaigns(account.id, range);
 }
 
@@ -110,6 +113,8 @@ export async function fetchAccountMetrics(account: AdAccount, range: RangeKey): 
     }
   }
 
+  // Configured but not connected → zeroes, not fabricated numbers.
+  if (hasGoogleAdsEnv()) return aggregateMetrics([]);
   return mockMetrics(account.id, range);
 }
 
