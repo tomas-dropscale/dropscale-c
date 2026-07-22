@@ -150,3 +150,30 @@
 .animate-pulse-gold {
   animation: pulse-gold 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
+
+/* ---------------------------------------------------------------------------
+ * Marketing-site scroll reveal. Elements start slightly lowered and
+ * transparent; the Reveal component flips them visible when they enter the
+ * viewport. Motion-sensitive users get the content immediately.
+ * ------------------------------------------------------------------------- */
+.reveal {
+  opacity: 0;
+  transform: translateY(18px);
+  transition:
+    opacity 0.6s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.6s cubic-bezier(0.22, 1, 0.36, 1);
+  transition-delay: var(--reveal-delay, 0ms);
+}
+
+.reveal-visible {
+  opacity: 1;
+  transform: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reveal {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+}
