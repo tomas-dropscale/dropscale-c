@@ -2,8 +2,7 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { FileBarChart } from "lucide-react";
 
-import { fetchAccount, fetchCampaigns } from "@/lib/portal/data";
-import { mockMetrics } from "@/lib/portal/mock";
+import { fetchAccount, fetchAccountMetrics, fetchCampaigns } from "@/lib/portal/data";
 import { parseRange } from "@/lib/portal/range";
 import { dateTime, nextSyncLabel, nowIso } from "@/lib/format";
 import { Button } from "@/components/ui/button";
@@ -32,9 +31,9 @@ export default async function AccountPage({
   const account = await fetchAccount(accountId);
   if (!account) notFound();
 
-  const metrics = mockMetrics(account.id, range);
-  const [campaigns, { d }] = await Promise.all([
-    fetchCampaigns(account.id, range),
+  const [metrics, campaigns, { d }] = await Promise.all([
+    fetchAccountMetrics(account, range),
+    fetchCampaigns(account, range),
     getServerDictionary(),
   ]);
 

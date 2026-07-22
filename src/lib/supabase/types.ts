@@ -200,6 +200,12 @@ export type AdAccount = {
   shopify_scopes: string | null;
   color_dot: string;
   created_at: string;
+  // Per-client Google Ads OAuth (migration 0005). The token is AES-GCM
+  // ciphertext and never leaves the server — the portal's list/detail selects
+  // omit it, so it is not present on the AdAccount objects pages receive.
+  google_ads_refresh_token: string | null;
+  google_ads_connected_email: string | null;
+  google_ads_connected: boolean;
 };
 
 export type AccountRequest = {
@@ -487,6 +493,9 @@ export type Database = {
           | "shopify_scopes"
           | "color_dot"
           | "created_at"
+          | "google_ads_refresh_token"
+          | "google_ads_connected_email"
+          | "google_ads_connected"
         >;
         Update: Partial<AdAccount>;
         Relationships: [

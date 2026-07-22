@@ -1,8 +1,8 @@
 import type { Metadata } from "next";
 import { PackageOpen } from "lucide-react";
 
-import { fetchAccounts } from "@/lib/portal/data";
-import { aggregateMetrics, mockMetrics } from "@/lib/portal/mock";
+import { fetchAccounts, fetchAccountMetrics } from "@/lib/portal/data";
+import { aggregateMetrics } from "@/lib/portal/mock";
 import { parseRange } from "@/lib/portal/range";
 import { dateTime } from "@/lib/format";
 import { MetricsGrid } from "@/components/portal/metric-card";
@@ -28,10 +28,13 @@ export default async function OverviewPage({
   const range = parseRange((await searchParams).range);
   const [accounts, { d }] = await Promise.all([fetchAccounts(), getServerDictionary()]);
 
-  const perAccount = accounts.map((account) => ({
-    account,
-    metrics: mockMetrics(account.id, range),
-  }));
+  // Per-account metrics run in parallel: each may be a live Google Ads call.
+  const perAccount = await Promise.all(
+    accounts.map(async (account) => ({
+      account,
+      metrics: await fetchAccountMetrics(account, range),
+    })),
+  );
   const totals = aggregateMetrics(perAccount.map((entry) => entry.metrics));
 
   const comparisonRows: StoreComparisonRow[] = perAccount.map(({ account, metrics }) => ({
