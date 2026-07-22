@@ -48,3 +48,9 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Local-only secret material handed over out of band (service-account keys,
+# MCC ids, connection notes). MUST NEVER be committed.
+/prompts/
+*.key.json
+GOOGLE_ADS_SA_KEY_JSON*.txt
