@@ -11,7 +11,7 @@
  */
 
 import type { Campaign, CreativeDelivery } from "@/lib/supabase/types";
-import { RANGE_SCALE, type RangeKey } from "@/lib/portal/range";
+import { rangeScale, type RangeSelection } from "@/lib/portal/range";
 
 export type MetricSet = {
   spend: number;
@@ -53,9 +53,9 @@ function between(rand: () => number, min: number, max: number) {
 }
 
 /** Metrics for one ad account over one range. Same inputs → same numbers. */
-export function mockMetrics(accountId: string, range: RangeKey): MetricSet {
-  const rand = mulberry32(hashSeed(`${accountId}:${range}`));
-  const scale = RANGE_SCALE[range];
+export function mockMetrics(accountId: string, range: RangeSelection): MetricSet {
+  const rand = mulberry32(hashSeed(`${accountId}:${range.from}:${range.to}`));
+  const scale = rangeScale(range);
 
   const spend = between(rand, 120, 900) * scale;
   const cpc = between(rand, 0.35, 1.6);
@@ -130,9 +130,9 @@ const CAMPAIGN_NAMES = [
 ];
 
 /** Campaigns for one account. Same shape as the campaigns table rows. */
-export function mockCampaigns(accountId: string, range: RangeKey): Campaign[] {
-  const rand = mulberry32(hashSeed(`campaigns:${accountId}:${range}`));
-  const scale = RANGE_SCALE[range];
+export function mockCampaigns(accountId: string, range: RangeSelection): Campaign[] {
+  const rand = mulberry32(hashSeed(`campaigns:${accountId}:${range.from}:${range.to}`));
+  const scale = rangeScale(range);
   const count = 3 + Math.floor(rand() * 4); // 3..6
 
   return Array.from({ length: count }, (_, index) => {

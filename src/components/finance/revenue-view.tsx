@@ -19,6 +19,7 @@ import {
 } from "@/components/finance/finance-ui";
 import { CommissionDialog, type CommissionTarget } from "@/components/finance/commission-dialog";
 import { SourceDialog, type SourceTarget } from "@/components/finance/source-dialog";
+import { RevenueTimeline } from "@/components/finance/revenue-timeline";
 import { useFinance } from "@/components/finance/use-finance";
 import { revenueBySource, sum } from "@/lib/finance/queries";
 import { COMMISSION_STATUS_BADGE, commissionStatusLabel, sourceTint } from "@/lib/finance/config";
@@ -123,6 +124,10 @@ export function RevenueView({
             tone="primary"
           />
         </div>
+
+        {/* Day/week/month revenue with its own calendar — independent of the
+            page's range selector so exploring dates never reloads the lists. */}
+        <RevenueTimeline />
 
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)]">
           <Breakdown

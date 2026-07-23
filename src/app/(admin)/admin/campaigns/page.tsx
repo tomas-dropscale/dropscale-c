@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { CommissionRate } from "@/components/admin/commission-rate";
 import { RangePicker } from "@/components/portal/range-picker";
 import { fetchAdminCampaigns } from "@/lib/admin/campaigns";
-import { parseRange, RANGE_LABELS } from "@/lib/portal/range";
+import { parseRange } from "@/lib/portal/range";
 import { money, percent } from "@/lib/format-intl";
 import { getServerDictionary } from "@/lib/i18n/server";
 import { intlLocale } from "@/lib/i18n";
@@ -32,9 +32,9 @@ const STATUS_BADGE: Record<CampaignStatus, { label: string; variant: "success" |
 export default async function AdminCampaignsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ range?: string }>;
+  searchParams: Promise<{ range?: string; from?: string; to?: string }>;
 }) {
-  const range = parseRange((await searchParams).range);
+  const range = parseRange(await searchParams);
   const [overview, { d, locale }] = await Promise.all([
     fetchAdminCampaigns(range),
     getServerDictionary(),
@@ -44,7 +44,7 @@ export default async function AdminCampaignsPage({
   return (
     <PageContainer
       title={d.placeholder.campaigns.title}
-      description={`All client campaigns and agency commissions · ${RANGE_LABELS[range]}`}
+      description={`All client campaigns and agency commissions · ${range.from} → ${range.to}`}
       actions={<RangePicker current={range} />}
     >
       {/* Totals strip */}

@@ -1,41 +1,23 @@
 "use client";
 
-import Link from "next/link";
-import { usePathname } from "next/navigation";
-import { Calendar, ChevronDown } from "lucide-react";
+import { usePathname, useRouter } from "next/navigation";
 
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { RANGES, RANGE_LABELS, type RangeKey } from "@/lib/portal/range";
-import { cn } from "@/lib/utils";
+import { DateRangePicker } from "@/components/ui/date-range-picker";
+import { rangeQuery, type RangeSelection } from "@/lib/portal/range";
 
-/** "Today ▾" date-range button. The range travels as a ?range= search param. */
-export function RangePicker({ current }: { current: RangeKey }) {
+/**
+ * URL-backed wrapper around the shared DateRangePicker: the selection travels
+ * as search params (?range=…, or ?range=custom&from=…&to=…), so ranges are
+ * shareable links and the server components re-render with the new window.
+ */
+export function RangePicker({ current }: { current: RangeSelection }) {
   const pathname = usePathname();
+  const router = useRouter();
 
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger className="transition-smooth flex h-9 items-center gap-2 rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-panel)] px-3.5 text-[13px] font-medium text-[var(--text-primary)] outline-none hover:border-[var(--border-strong)] hover:bg-[var(--bg-panel-hover)]">
-        <Calendar className="size-3.5 text-[var(--text-secondary)]" />
-        {RANGE_LABELS[current]}
-        <ChevronDown className="size-3.5 text-[var(--text-muted)]" />
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-44">
-        {RANGES.map((range) => (
-          <DropdownMenuItem key={range} asChild>
-            <Link
-              href={range === "today" ? pathname : `${pathname}?range=${range}`}
-              className={cn(range === current && "text-[var(--accent-gold)]")}
-            >
-              {RANGE_LABELS[range]}
-            </Link>
-          </DropdownMenuItem>
-        ))}
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <DateRangePicker
+      value={current}
+      onApply={(selection) => router.push(`${pathname}${rangeQuery(selection)}`)}
+    />
   );
 }

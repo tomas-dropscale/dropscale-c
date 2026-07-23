@@ -23,9 +23,9 @@ export async function generateMetadata(): Promise<Metadata> {
 export default async function OverviewPage({
   searchParams,
 }: {
-  searchParams: Promise<{ range?: string }>;
+  searchParams: Promise<{ range?: string; from?: string; to?: string }>;
 }) {
-  const range = parseRange((await searchParams).range);
+  const range = parseRange(await searchParams);
   const [accounts, { d }] = await Promise.all([fetchAccounts(), getServerDictionary()]);
 
   // Per-account metrics run in parallel: each may be a live Google Ads call.

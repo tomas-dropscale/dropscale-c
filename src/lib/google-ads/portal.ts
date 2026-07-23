@@ -1,18 +1,15 @@
 import { searchGoogleAds, type GaqlRow } from "@/lib/google-ads/client";
 import type { Campaign, CampaignStatus } from "@/lib/supabase/types";
 import { DROPSCALE_FEE_RATE, type MetricSet } from "@/lib/portal/mock";
-import type { RangeKey } from "@/lib/portal/range";
+import type { RangeSelection } from "@/lib/portal/range";
 
 /**
- * Maps the portal's ranges onto GAQL's predefined date ranges. Keeping to the
- * named ranges avoids timezone drift between our server and the account's
- * configured timezone.
+ * Every selection arrives as concrete from/to dates (parseRange resolves the
+ * presets), so GAQL always gets a BETWEEN. The dates are regex-validated ISO
+ * at parse time — safe to inline in the query string.
  */
-const DURING: Record<RangeKey, string> = {
-  today: "TODAY",
-  d7: "LAST_7_DAYS",
-  d30: "LAST_30_DAYS",
-};
+const dateClause = (range: RangeSelection) =>
+  `segments.date BETWEEN '${range.from}' AND '${range.to}'`;
 
 const STATUS: Record<string, CampaignStatus> = {
   ENABLED: "active",
@@ -28,7 +25,7 @@ export async function fetchLiveCampaigns(
   customerId: string,
   refreshToken: string,
   accountId: string,
-  range: RangeKey,
+  range: RangeSelection,
 ): Promise<Campaign[]> {
   const query = `
     SELECT
@@ -42,7 +39,7 @@ export async function fetchLiveCampaigns(
       metrics.ctr,
       metrics.average_cpc
     FROM campaign
-    WHERE segments.date DURING ${DURING[range]}
+    WHERE ${dateClause(range)}
     ORDER BY metrics.cost_micros DESC
   `;
 
@@ -80,7 +77,7 @@ export async function fetchLiveCampaigns(
 export async function fetchLiveMetrics(
   customerId: string,
   refreshToken: string,
-  range: RangeKey,
+  range: RangeSelection,
 ): Promise<MetricSet> {
   const query = `
     SELECT
@@ -92,7 +89,7 @@ export async function fetchLiveMetrics(
       metrics.ctr,
       metrics.average_cpc
     FROM customer
-    WHERE segments.date DURING ${DURING[range]}
+    WHERE ${dateClause(range)}
   `;
 
   const rows = await searchGoogleAds(customerId, refreshToken, query);
@@ -117,6 +114,34 @@ export async function fetchLiveMetrics(
     roas: spend > 0 ? conversionValue / spend : 0,
     conversionValue,
   };
+}
+
+/** Spend for one calendar day, straight from Google. */
+export type DailySpend = { date: string; spend: number };
+
+/**
+ * Per-day spend for the last 7 days. Feeds the commission ledger sync — a
+ * seven-day window so a missed day (deploy, outage, weekend) self-heals on
+ * the next run instead of leaving a hole in the ledger.
+ */
+export async function fetchLiveDailySpend(
+  customerId: string,
+  refreshToken: string,
+): Promise<DailySpend[]> {
+  const query = `
+    SELECT segments.date, metrics.cost_micros
+    FROM customer
+    WHERE segments.date DURING LAST_7_DAYS
+  `;
+
+  const rows = await searchGoogleAds(customerId, refreshToken, query);
+
+  return rows
+    .map((row) => ({
+      date: String((row.segments ?? {}).date ?? ""),
+      spend: micros((row.metrics ?? {}).costMicros),
+    }))
+    .filter((entry) => entry.date !== "");
 }
 
 /** One creative from the account's asset library. */

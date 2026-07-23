@@ -182,8 +182,31 @@
  * Quiet gold glow for the money-earned figures. Two wide, low-alpha layers —
  * reads as light coming off the number, never as neon.
  */
+/*
+ * One wide, faint halo — far from the glyphs so the number stays razor sharp.
+ * A tight text-shadow is what makes gold numbers look smeared and fake.
+ */
 .text-glow-gold {
-  text-shadow:
-    0 0 14px rgba(212, 168, 106, 0.35),
-    0 0 40px rgba(212, 168, 106, 0.14);
+  text-shadow: 0 0 26px rgba(212, 168, 106, 0.3);
+}
+
+/*
+ * Gold treatment for the one hero card (the client's Revenue).
+ *
+ * Deliberately NOT a neon ring: symmetric glow rings around a box read as
+ * signage. Instead it behaves like material under light — a warm wash falling
+ * from the top edge, a slightly warmer hairline border, and one soft ambient
+ * shadow underneath. Luminous at a glance, physical on inspection.
+ */
+.card-glow-gold {
+  border-color: rgba(212, 168, 106, 0.32);
+  background:
+    linear-gradient(
+      180deg,
+      rgba(212, 168, 106, 0.09),
+      rgba(212, 168, 106, 0.025) 45%,
+      transparent 72%
+    ),
+    var(--bg-panel);
+  box-shadow: 0 6px 28px -8px rgba(212, 168, 106, 0.22);
 }

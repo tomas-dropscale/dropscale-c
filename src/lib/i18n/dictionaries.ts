@@ -7,6 +7,7 @@
 export const en = {
   common: {
     cancel: "Cancel",
+    apply: "Apply",
     save: "Save",
     delete: "Delete",
     close: "Close",
@@ -14,6 +15,16 @@ export const en = {
     clear: "Clear",
     all: "All",
     you: "you",
+  },
+
+  ranges: {
+    today: "Today",
+    yesterday: "Yesterday",
+    d7: "Last 7 days",
+    d30: "Last 30 days",
+    mtd: "This month",
+    ytd: "This year",
+    custom: "Custom",
   },
 
   auth: {
@@ -182,6 +193,14 @@ export const en = {
   finance: {
     range: { d7: "7D", d30: "30D", d90: "90D", mtd: "MTD", ytd: "YTD" },
     rangeLabel: "Period",
+    timeline: {
+      title: "Revenue over time",
+      day: "Day",
+      week: "Week",
+      month: "Month",
+      from: "From",
+      to: "To",
+    },
     entries: "{count} entries",
     entriesOne: "{count} entry",
     total: "Total",
@@ -512,6 +531,7 @@ export type Dictionary = Widen<typeof en>;
 export const pt: Dictionary = {
   common: {
     cancel: "Cancelar",
+    apply: "Aplicar",
     save: "Guardar",
     delete: "Apagar",
     close: "Fechar",
@@ -519,6 +539,16 @@ export const pt: Dictionary = {
     clear: "Limpar",
     all: "Todas",
     you: "tu",
+  },
+
+  ranges: {
+    today: "Hoje",
+    yesterday: "Ontem",
+    d7: "Últimos 7 dias",
+    d30: "Últimos 30 dias",
+    mtd: "Este mês",
+    ytd: "Este ano",
+    custom: "Personalizado",
   },
 
   auth: {
@@ -686,6 +716,14 @@ export const pt: Dictionary = {
   finance: {
     range: { d7: "7D", d30: "30D", d90: "90D", mtd: "Mês", ytd: "Ano" },
     rangeLabel: "Período",
+    timeline: {
+      title: "Receita ao longo do tempo",
+      day: "Dia",
+      week: "Semana",
+      month: "Mês",
+      from: "De",
+      to: "Até",
+    },
     entries: "{count} registos",
     entriesOne: "{count} registo",
     total: "Total",
@@ -1000,6 +1038,7 @@ export const pt: Dictionary = {
 export const ptBR: Dictionary = {
   common: {
     cancel: "Cancelar",
+    apply: "Aplicar",
     save: "Salvar",
     delete: "Excluir",
     close: "Fechar",
@@ -1007,6 +1046,16 @@ export const ptBR: Dictionary = {
     clear: "Limpar",
     all: "Todas",
     you: "você",
+  },
+
+  ranges: {
+    today: "Hoje",
+    yesterday: "Ontem",
+    d7: "Últimos 7 dias",
+    d30: "Últimos 30 dias",
+    mtd: "Este mês",
+    ytd: "Este ano",
+    custom: "Personalizado",
   },
 
   auth: {
@@ -1174,6 +1223,14 @@ export const ptBR: Dictionary = {
   finance: {
     range: { d7: "7D", d30: "30D", d90: "90D", mtd: "Mês", ytd: "Ano" },
     rangeLabel: "Período",
+    timeline: {
+      title: "Receita ao longo do tempo",
+      day: "Dia",
+      week: "Semana",
+      month: "Mês",
+      from: "De",
+      to: "Até",
+    },
     entries: "{count} registros",
     entriesOne: "{count} registro",
     total: "Total",
@@ -1487,6 +1544,7 @@ export const ptBR: Dictionary = {
 export const es: Dictionary = {
   common: {
     cancel: "Cancelar",
+    apply: "Aplicar",
     save: "Guardar",
     delete: "Eliminar",
     close: "Cerrar",
@@ -1494,6 +1552,16 @@ export const es: Dictionary = {
     clear: "Limpiar",
     all: "Todas",
     you: "tú",
+  },
+
+  ranges: {
+    today: "Hoy",
+    yesterday: "Ayer",
+    d7: "Últimos 7 días",
+    d30: "Últimos 30 días",
+    mtd: "Este mes",
+    ytd: "Este año",
+    custom: "Personalizado",
   },
 
   auth: {
@@ -1661,6 +1729,14 @@ export const es: Dictionary = {
   finance: {
     range: { d7: "7D", d30: "30D", d90: "90D", mtd: "Mes", ytd: "Año" },
     rangeLabel: "Periodo",
+    timeline: {
+      title: "Ingresos a lo largo del tiempo",
+      day: "Día",
+      week: "Semana",
+      month: "Mes",
+      from: "Desde",
+      to: "Hasta",
+    },
     entries: "{count} registros",
     entriesOne: "{count} registro",
     total: "Total",
@@ -1976,6 +2052,7 @@ export const es: Dictionary = {
 export const fr: Dictionary = {
   common: {
     cancel: "Annuler",
+    apply: "Appliquer",
     save: "Enregistrer",
     delete: "Supprimer",
     close: "Fermer",
@@ -1983,6 +2060,16 @@ export const fr: Dictionary = {
     clear: "Effacer",
     all: "Toutes",
     you: "vous",
+  },
+
+  ranges: {
+    today: "Aujourd'hui",
+    yesterday: "Hier",
+    d7: "7 derniers jours",
+    d30: "30 derniers jours",
+    mtd: "Ce mois-ci",
+    ytd: "Cette année",
+    custom: "Personnalisée",
   },
 
   auth: {
@@ -2151,6 +2238,14 @@ export const fr: Dictionary = {
   finance: {
     range: { d7: "7J", d30: "30J", d90: "90J", mtd: "Mois", ytd: "Année" },
     rangeLabel: "Période",
+    timeline: {
+      title: "Revenus dans le temps",
+      day: "Jour",
+      week: "Semaine",
+      month: "Mois",
+      from: "Du",
+      to: "Au",
+    },
     entries: "{count} entrées",
     entriesOne: "{count} entrée",
     total: "Total",

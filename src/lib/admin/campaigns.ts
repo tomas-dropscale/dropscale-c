@@ -4,7 +4,7 @@ import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
 import { fetchLiveCampaigns } from "@/lib/google-ads/portal";
 import { ACCOUNT_COLUMNS } from "@/lib/portal/data";
 import type { AdAccount, Campaign } from "@/lib/supabase/types";
-import type { RangeKey } from "@/lib/portal/range";
+import type { RangeSelection } from "@/lib/portal/range";
 
 /**
  * The admin zone's cross-client campaigns view.
@@ -40,7 +40,7 @@ export type AdminCampaignsOverview = {
   totals: { spend: number; commission: number; activeCampaigns: number; connectedAccounts: number };
 };
 
-export async function fetchAdminCampaigns(range: RangeKey): Promise<AdminCampaignsOverview> {
+export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminCampaignsOverview> {
   const supabase = await createClient();
   const configured = hasGoogleAdsEnv();
 

@@ -23,10 +23,10 @@ export default async function AccountPage({
   searchParams,
 }: {
   params: Promise<{ accountId: string }>;
-  searchParams: Promise<{ range?: string }>;
+  searchParams: Promise<{ range?: string; from?: string; to?: string }>;
 }) {
   const { accountId } = await params;
-  const range = parseRange((await searchParams).range);
+  const range = parseRange(await searchParams);
 
   // RLS scopes the query to the signed-in client: someone else's accountId
   // (or a junk id) comes back null and 404s without leaking that it exists.

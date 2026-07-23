@@ -20,7 +20,7 @@ import { createClient } from "@/lib/supabase/server";
 import type { AdAccount, Campaign, CreativeDelivery } from "@/lib/supabase/types";
 import { aggregateMetrics, mockCampaigns, mockDeliveries, mockMetrics } from "@/lib/portal/mock";
 import type { MetricSet } from "@/lib/portal/mock";
-import type { RangeKey } from "@/lib/portal/range";
+import type { RangeSelection } from "@/lib/portal/range";
 import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
 import { decryptToken } from "@/lib/google-ads/crypto";
 import {
@@ -110,7 +110,7 @@ async function accountRefreshToken(accountId: string): Promise<string | null> {
   }
 }
 
-export async function fetchCampaigns(account: AdAccount, range: RangeKey): Promise<Campaign[]> {
+export async function fetchCampaigns(account: AdAccount, range: RangeSelection): Promise<Campaign[]> {
   if (isGoogleAdsConnected(account)) {
     try {
       const token = await accountRefreshToken(account.id);
@@ -129,7 +129,7 @@ export async function fetchCampaigns(account: AdAccount, range: RangeKey): Promi
   return mockCampaigns(account.id, range);
 }
 
-export async function fetchAccountMetrics(account: AdAccount, range: RangeKey): Promise<MetricSet> {
+export async function fetchAccountMetrics(account: AdAccount, range: RangeSelection): Promise<MetricSet> {
   if (isGoogleAdsConnected(account)) {
     try {
       const token = await accountRefreshToken(account.id);

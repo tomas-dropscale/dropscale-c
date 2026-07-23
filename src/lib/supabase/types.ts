@@ -134,6 +134,8 @@ export type Commission = {
   created_by: string | null;
   created_at: string;
   updated_at: string;
+  /** Set on rows auto-synced from Google Ads (migration 0007); null = manual. */
+  ad_account_id: string | null;
 };
 
 export type Expense = {
@@ -406,6 +408,7 @@ export type Database = {
           | "created_by"
           | "created_at"
           | "updated_at"
+          | "ad_account_id"
         >;
         Update: Partial<Commission>;
         Relationships: [

@@ -22,19 +22,28 @@ export function MetricCard({
   value,
   hint,
   glow = false,
+  highlight = false,
 }: {
   label: string;
   icon: LucideIcon;
   value: string;
   hint?: string;
-  /** Soft gold halo — reserved for the money-earned figure. */
+  /** Soft gold halo on the value — reserved for the money-earned figure. */
   glow?: boolean;
+  /** Gold neon border around the whole card — the grid's one hero. */
+  highlight?: boolean;
 }) {
   return (
-    <div className="panel flex flex-col gap-3 p-4">
+    <div className={cn("panel flex flex-col gap-3 p-4", highlight && "card-glow-gold")}>
       <div className="flex items-start justify-between gap-2">
         <p className="label-caps">{label}</p>
-        <Icon className="size-4 shrink-0 text-[var(--text-muted)]" aria-hidden />
+        <Icon
+          className={cn(
+            "size-4 shrink-0",
+            highlight ? "text-[var(--accent-gold)]" : "text-[var(--text-muted)]",
+          )}
+          aria-hidden
+        />
       </div>
       <p className={cn("metric-value truncate text-[clamp(22px,2vw,32px)]", glow && "text-glow-gold")}>
         {value}
@@ -48,11 +57,25 @@ export function MetricCard({
 
 /**
  * The 10-card grid shared by the Overview and the per-store view.
- * Row 1: volume. Row 2: efficiency.
+ * Revenue leads — it is the client's number — and gets the gold treatment;
+ * spend closes the grid where the revenue figure used to sit.
  */
 export function MetricsGrid({ metrics, currency }: { metrics: MetricSet; currency: string }) {
-  const cards: { label: string; icon: LucideIcon; value: string; hint?: string; glow?: boolean }[] = [
-    { label: "Amount Spent", icon: Wallet, value: money(metrics.spend, currency) },
+  const cards: {
+    label: string;
+    icon: LucideIcon;
+    value: string;
+    hint?: string;
+    glow?: boolean;
+    highlight?: boolean;
+  }[] = [
+    {
+      label: "Revenue",
+      icon: BadgeDollarSign,
+      value: money(metrics.conversionValue, currency),
+      glow: true,
+      highlight: true,
+    },
     { label: "Impressions", icon: Eye, value: compact(metrics.impressions) },
     { label: "Clicks", icon: MousePointerClick, value: integer(metrics.clicks) },
     { label: "Conversions", icon: Target, value: integer(metrics.conversions) },
@@ -70,14 +93,7 @@ export function MetricsGrid({ metrics, currency }: { metrics: MetricSet; currenc
       value: money(metrics.costPerConversion, currency),
     },
     { label: "ROAS", icon: TrendingUp, value: multiplier(metrics.roas) },
-    {
-      // The client's "revenue": what their ads earned. The one gold-glow
-      // figure in the grid, matching the Revenue cards on the admin side.
-      label: "Conversion Value",
-      icon: BadgeDollarSign,
-      value: money(metrics.conversionValue, currency),
-      glow: true,
-    },
+    { label: "Amount Spent", icon: Wallet, value: money(metrics.spend, currency) },
   ];
 
   return (
