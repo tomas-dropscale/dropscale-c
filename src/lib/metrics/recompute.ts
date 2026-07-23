@@ -21,8 +21,15 @@ import { createClient } from "@/lib/supabase/server";
 import { decryptToken } from "@/lib/google-ads/crypto";
 import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
 import { fetchLiveDailyBreakdown, type DailyBreakdown } from "@/lib/google-ads/portal";
-import { fetchDailySales, resolveAdminToken, type DailySales } from "@/lib/shopify/client";
+import {
+  fetchDailySales,
+  resolveAdminToken,
+  type DailySales,
+  type SyncedOrder,
+} from "@/lib/shopify/client";
 import { fxDailyRates, rateOn } from "@/lib/shopify/fx";
+import { orderCogs, paymentFee } from "@/lib/cogs/engine";
+import { loadCostContext, registerSoldProducts } from "@/lib/cogs/context";
 import type { AdAccount, Database } from "@/lib/supabase/types";
 
 export const RECOMPUTE_INTERVAL_MS = 15 * 60 * 1000;
@@ -102,6 +109,9 @@ async function syncAccountWindow(
   }
 
   let sales: DailySales[] = [];
+  // Per-day cost chain (reporting currency): COGS, payment fees, shipping.
+  const costByDay = new Map<string, { product: number; fees: number; shipping: number }>();
+
   if (account.shopify_connected && account.shopify_url && secret?.shopify_admin_token) {
     // The stored credential may be a direct shpat_ token or the app's shpss_
     // secret; resolveAdminToken exchanges the latter (cached ~24h).
@@ -118,12 +128,48 @@ async function syncAccountWindow(
     // kept in the account's reporting currency. Convert with the day's ECB
     // rate. An FX failure throws — this account's sync skips rather than
     // booking forints as euros.
-    if (result.currency && result.currency !== account.currency && sales.length > 0) {
-      const rates = await fxDailyRates(result.currency, account.currency, from, to);
+    const needsFx = Boolean(result.currency && result.currency !== account.currency);
+    const rates =
+      needsFx && (sales.length > 0 || result.orders.length > 0)
+        ? await fxDailyRates(result.currency!, account.currency, from, to)
+        : null;
+    if (rates) {
       sales = sales.map((day) => {
         const rate = rateOn(rates, day.date);
         return { ...day, revenue: day.revenue * rate, refunds: day.refunds * rate };
       });
+    }
+
+    // ---- COGS + fees, per ORDER (tiers depend on units bought together) ---
+    // The principle: none of this touches revenue. It only writes the cost
+    // columns, so a cost edit moves profit by exactly the cost delta.
+    if (result.orders.length > 0) {
+      await registerSoldProducts(supabase, account.id, result.orders, result.currency ?? account.currency);
+      const ctx = await loadCostContext(
+        supabase,
+        account.id,
+        Number(account.default_product_cost_pct),
+        account.currency,
+      );
+
+      for (const order of result.orders as SyncedOrder[]) {
+        const rate = rates ? rateOn(rates, order.date) : 1;
+        const lines = order.lines.map((line) => ({
+          productKey: line.productKey,
+          quantity: line.quantity,
+          unitPrice: line.unitPrice * rate,
+        }));
+
+        const entry = costByDay.get(order.date) ?? { product: 0, fees: 0, shipping: 0 };
+        entry.product += orderCogs(lines, order.date, ctx);
+        entry.fees += paymentFee(
+          order.total * rate,
+          Number(account.payment_fee_pct),
+          Number(account.payment_fee_fixed),
+        );
+        entry.shipping += Number(account.shipping_cost_per_order);
+        costByDay.set(order.date, entry);
+      }
     }
   }
 
@@ -136,6 +182,7 @@ async function syncAccountWindow(
   const rows = days.map((day) => {
     const ads = googleByDay.get(day);
     const shop = salesByDay.get(day);
+    const costs = costByDay.get(day);
     return {
       ad_account_id: account.id,
       day,
@@ -147,6 +194,9 @@ async function syncAccountWindow(
       revenue: shop?.revenue ?? 0,
       orders_count: shop?.orders ?? 0,
       refunds_amount: shop?.refunds ?? 0,
+      product_cost: costs?.product ?? 0,
+      payment_fees: costs?.fees ?? 0,
+      shipping_cost: costs?.shipping ?? 0,
       computed_at: new Date().toISOString(),
     };
   });

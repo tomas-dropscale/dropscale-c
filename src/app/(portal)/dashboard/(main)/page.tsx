@@ -83,17 +83,24 @@ export default async function DashboardPage({
     const spend = accountRows.reduce((sum, row) => sum + Number(row.ad_spend), 0);
     fee += (spend * (rateById.get(accountId) ?? 0)) / 100;
   }
-  const netProfit = totals.grossProfit - fee;
-  const totalCosts = totals.adSpend + fee + totals.refunds;
+  // The full chain (spec: COGS moves PROFIT, never revenue):
+  // net − COGS − payment fees − shipping − ad spend − Dropscale fee.
+  const netProfit = totals.profit - fee;
+  const totalCosts =
+    totals.adSpend + totals.productCost + totals.paymentFees + totals.shippingCost + fee;
 
   const chartDays: ChartDay[] = [...groupByDay(rows)]
     .map(([day, dayRows]) => {
       const daySums = sumMetrics(dayRows);
+      const dayFee = dayRows.reduce(
+        (sum, row) => sum + (Number(row.ad_spend) * (rateById.get(row.ad_account_id) ?? 0)) / 100,
+        0,
+      );
       return {
         day,
         revenue: daySums.netRevenue,
         adSpend: daySums.adSpend,
-        profit: daySums.grossProfit,
+        profit: daySums.profit - dayFee,
       };
     })
     .sort((a, b) => a.day.localeCompare(b.day));
@@ -157,7 +164,7 @@ export default async function DashboardPage({
               label="Net Profit"
               icon={TrendingUp}
               value={money(netProfit, currency)}
-              hint="after ad spend, fee & refunds"
+              hint={`margin ${totals.netRevenue > 0 ? percent(netProfit / totals.netRevenue) : "—"}`}
             />
             <MetricCard
               label="Ad Spend"
@@ -207,8 +214,10 @@ export default async function DashboardPage({
                 {(
                   [
                     ["Ad spend", totals.adSpend],
+                    ["Product costs (COGS)", totals.productCost],
+                    ["Payment fees", totals.paymentFees],
+                    ["Shipping", totals.shippingCost],
                     ["Dropscale fee", fee],
-                    ["Refunds", totals.refunds],
                   ] as const
                 ).map(([label, value]) => (
                   <div key={label} className="flex items-center justify-between gap-3">

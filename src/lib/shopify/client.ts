@@ -192,6 +192,25 @@ export type DailySales = {
   refunds: number;
 };
 
+/** One synced order line, ready for the COGS engine. */
+export type SyncedOrderLine = {
+  /** SKU when the store sets them, else the line title — the product key.
+   *  Product/variant ids would be stronger but require read_products. */
+  productKey: string;
+  title: string;
+  quantity: number;
+  /** Unit selling price in the store's base currency. */
+  unitPrice: number;
+};
+
+export type SyncedOrder = {
+  /** ISO day the order was created. */
+  date: string;
+  /** Current total (after discounts, incl. shipping), store base currency. */
+  total: number;
+  lines: SyncedOrderLine[];
+};
+
 // Orders per page × page cap. 2 500 orders per recompute window is plenty for
 // the 7-day incremental sync; a bigger backfill just runs again next window.
 const PAGE_SIZE = 250;
@@ -210,8 +229,9 @@ export async function fetchDailySales(
   accessToken: string,
   from: string,
   to: string,
-): Promise<{ currency: string | null; days: DailySales[] }> {
+): Promise<{ currency: string | null; days: DailySales[]; orders: SyncedOrder[] }> {
   const byDay = new Map<string, { revenue: number; orders: number; refunds: number }>();
+  const syncedOrders: SyncedOrder[] = [];
   let currency: string | null = null;
 
   let cursor: string | null = null;
@@ -226,6 +246,14 @@ export async function fetchDailySales(
           cancelledAt: string | null;
           currentTotalPriceSet: { shopMoney: { amount: string } } | null;
           totalRefundedSet: { shopMoney: { amount: string } } | null;
+          lineItems: {
+            nodes: {
+              title: string;
+              sku: string | null;
+              quantity: number;
+              originalUnitPriceSet: { shopMoney: { amount: string } } | null;
+            }[];
+          };
         }[];
       };
     } = await shopifyGraphql(
@@ -241,6 +269,14 @@ export async function fetchDailySales(
             cancelledAt
             currentTotalPriceSet { shopMoney { amount } }
             totalRefundedSet { shopMoney { amount } }
+            lineItems(first: 100) {
+              nodes {
+                title
+                sku
+                quantity
+                originalUnitPriceSet { shopMoney { amount } }
+              }
+            }
           }
         }
       }`,
@@ -257,11 +293,23 @@ export async function fetchDailySales(
       if (order.test || order.cancelledAt) continue;
 
       const day = order.createdAt.slice(0, 10);
+      const total = Number(order.currentTotalPriceSet?.shopMoney.amount ?? 0);
       const entry = byDay.get(day) ?? { revenue: 0, orders: 0, refunds: 0 };
-      entry.revenue += Number(order.currentTotalPriceSet?.shopMoney.amount ?? 0);
+      entry.revenue += total;
       entry.refunds += Number(order.totalRefundedSet?.shopMoney.amount ?? 0);
       entry.orders += 1;
       byDay.set(day, entry);
+
+      syncedOrders.push({
+        date: day,
+        total,
+        lines: order.lineItems.nodes.map((line) => ({
+          productKey: line.sku?.trim() || line.title,
+          title: line.title,
+          quantity: line.quantity,
+          unitPrice: Number(line.originalUnitPriceSet?.shopMoney.amount ?? 0),
+        })),
+      });
     }
 
     if (!data.orders.pageInfo.hasNextPage) break;
@@ -273,5 +321,6 @@ export async function fetchDailySales(
     days: [...byDay.entries()]
       .map(([date, sums]) => ({ date, ...sums }))
       .sort((a, b) => a.date.localeCompare(b.date)),
+    orders: syncedOrders,
   };
 }

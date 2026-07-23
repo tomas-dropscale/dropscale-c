@@ -18,6 +18,9 @@ export type DailyMetricRow = {
   revenue: number;
   orders_count: number;
   refunds_amount: number;
+  product_cost: number;
+  payment_fees: number;
+  shipping_cost: number;
   computed_at: string;
 };
 
@@ -50,8 +53,15 @@ export type MetricTotals = {
   clicks: number;
   conversions: number;
   conversionValue: number;
-  /** revenue − refunds − adSpend. Fees/COGS come later, in the P&L phase. */
+  productCost: number;
+  paymentFees: number;
+  shippingCost: number;
+  /** revenue − refunds − adSpend, BEFORE COGS/fees — kept for charts. */
   grossProfit: number;
+  /** The real chain: net − COGS − payment fees − shipping − ad spend. */
+  profit: number;
+  /** profit / netRevenue — the number COGS edits actually move. */
+  margin: number;
   roas: number;
   ctr: number;
   cpc: number;
@@ -73,6 +83,9 @@ export function sumMetrics(rows: DailyMetricRow[]): MetricTotals {
       clicks: sum.clicks + row.clicks,
       conversions: sum.conversions + Number(row.conversions),
       conversionValue: sum.conversionValue + Number(row.conversion_value),
+      productCost: sum.productCost + Number(row.product_cost ?? 0),
+      paymentFees: sum.paymentFees + Number(row.payment_fees ?? 0),
+      shippingCost: sum.shippingCost + Number(row.shipping_cost ?? 0),
     }),
     {
       revenue: 0,
@@ -83,15 +96,22 @@ export function sumMetrics(rows: DailyMetricRow[]): MetricTotals {
       clicks: 0,
       conversions: 0,
       conversionValue: 0,
+      productCost: 0,
+      paymentFees: 0,
+      shippingCost: 0,
     },
   );
 
   const netRevenue = total.revenue - total.refunds;
+  const profit =
+    netRevenue - total.productCost - total.paymentFees - total.shippingCost - total.adSpend;
 
   return {
     ...total,
     netRevenue,
     grossProfit: netRevenue - total.adSpend,
+    profit,
+    margin: netRevenue > 0 ? profit / netRevenue : 0,
     roas: total.adSpend > 0 ? total.conversionValue / total.adSpend : 0,
     ctr: total.impressions > 0 ? total.clicks / total.impressions : 0,
     cpc: total.clicks > 0 ? total.adSpend / total.clicks : 0,

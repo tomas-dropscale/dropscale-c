@@ -176,6 +176,8 @@ export const en = {
     allStoresOption: "All stores",
     connections: "Shopify",
     connectionsSubtitle: "Link each store’s Shopify so revenue and profit flow into your dashboard.",
+    cogs: "COGS",
+    cogsSubtitle: "Product costs, tiers and bundles — what each sale costs to serve.",
   },
 
   overview: {
@@ -707,6 +709,8 @@ export const pt: Dictionary = {
     allStoresOption: "Todas as lojas",
     connections: "Shopify",
     connectionsSubtitle: "Liga o Shopify de cada loja para a receita e o lucro entrarem no teu dashboard.",
+    cogs: "COGS",
+    cogsSubtitle: "Custos de produto, tiers e bundles — o que cada venda custa a servir.",
   },
 
   overview: {
@@ -1222,6 +1226,8 @@ export const ptBR: Dictionary = {
     allStoresOption: "Todas as lojas",
     connections: "Shopify",
     connectionsSubtitle: "Conecte o Shopify de cada loja para a receita e o lucro entrarem no seu dashboard.",
+    cogs: "COGS",
+    cogsSubtitle: "Custos de produto, tiers e bundles — o que cada venda custa para servir.",
   },
 
   overview: {
@@ -1736,6 +1742,8 @@ export const es: Dictionary = {
     allStoresOption: "Todas las tiendas",
     connections: "Shopify",
     connectionsSubtitle: "Conecta el Shopify de cada tienda para que ingresos y beneficio lleguen a tu panel.",
+    cogs: "COGS",
+    cogsSubtitle: "Costes de producto, tramos y bundles — lo que cuesta servir cada venta.",
   },
 
   overview: {
@@ -2253,6 +2261,8 @@ export const fr: Dictionary = {
     allStoresOption: "Toutes les boutiques",
     connections: "Shopify",
     connectionsSubtitle: "Reliez le Shopify de chaque boutique pour alimenter votre tableau de bord.",
+    cogs: "COGS",
+    cogsSubtitle: "Coûts produits, paliers et bundles — ce que chaque vente coûte à servir.",
   },
 
   overview: {

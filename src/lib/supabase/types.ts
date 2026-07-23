@@ -216,6 +216,11 @@ export type AdAccount = {
   shopify_admin_token: string | null;
   shopify_token_last4: string | null;
   shopify_connected_at: string | null;
+  // COGS / profit-chain settings (migration 0009)
+  default_product_cost_pct: number;
+  payment_fee_pct: number;
+  payment_fee_fixed: number;
+  shipping_cost_per_order: number;
 };
 
 export type AccountRequest = {
@@ -256,6 +261,10 @@ export type DailyMetric = {
   revenue: number;
   orders_count: number;
   refunds_amount: number;
+  // Cost side of the profit chain (migration 0009), reporting currency.
+  product_cost: number;
+  payment_fees: number;
+  shipping_cost: number;
   computed_at: string;
 };
 
@@ -268,6 +277,57 @@ export type CreativeDelivery = {
   size_mb: number;
   thumbnail_urls: string[];
   created_at: string;
+};
+
+// ---------------------------------------------------------------------------
+// COGS (migration 0009)
+// ---------------------------------------------------------------------------
+
+export type StoreProduct = {
+  id: string;
+  ad_account_id: string;
+  platform_key: string;
+  title: string;
+  price: number;
+  currency: string;
+  source: "orders" | "catalog";
+  last_seen: string;
+  created_at: string;
+};
+
+export type ProductCost = {
+  id: string;
+  product_id: string;
+  cost: number;
+  currency: string;
+  effective_from: string;
+  created_at: string;
+};
+
+export type ProductCostTier = {
+  id: string;
+  product_id: string;
+  min_qty: number;
+  total_cost: number;
+};
+
+export type CogsCollectionRow = {
+  id: string;
+  ad_account_id: string;
+  name: string;
+  created_at: string;
+};
+
+export type CogsCollectionMember = {
+  collection_id: string;
+  product_id: string;
+};
+
+export type CogsCollectionTier = {
+  id: string;
+  collection_id: string;
+  min_qty: number;
+  total_cost: number;
 };
 
 // ---------------------------------------------------------------------------
@@ -526,6 +586,10 @@ export type Database = {
           | "shopify_admin_token"
           | "shopify_token_last4"
           | "shopify_connected_at"
+          | "default_product_cost_pct"
+          | "payment_fee_pct"
+          | "payment_fee_fixed"
+          | "shipping_cost_per_order"
         >;
         Update: Partial<AdAccount>;
         Relationships: [
@@ -586,6 +650,97 @@ export type Database = {
           },
         ];
       };
+      store_products: {
+        Row: Row<StoreProduct>;
+        Insert: Insert<StoreProduct, "id" | "price" | "currency" | "source" | "last_seen" | "created_at">;
+        Update: Partial<StoreProduct>;
+        Relationships: [
+          {
+            foreignKeyName: "store_products_ad_account_id_fkey";
+            columns: ["ad_account_id"];
+            isOneToOne: false;
+            referencedRelation: "ad_accounts";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      product_costs: {
+        Row: Row<ProductCost>;
+        Insert: Insert<ProductCost, "id" | "currency" | "effective_from" | "created_at">;
+        Update: Partial<ProductCost>;
+        Relationships: [
+          {
+            foreignKeyName: "product_costs_product_id_fkey";
+            columns: ["product_id"];
+            isOneToOne: false;
+            referencedRelation: "store_products";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      product_cost_tiers: {
+        Row: Row<ProductCostTier>;
+        Insert: Insert<ProductCostTier, "id">;
+        Update: Partial<ProductCostTier>;
+        Relationships: [
+          {
+            foreignKeyName: "product_cost_tiers_product_id_fkey";
+            columns: ["product_id"];
+            isOneToOne: false;
+            referencedRelation: "store_products";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      cogs_collections: {
+        Row: Row<CogsCollectionRow>;
+        Insert: Insert<CogsCollectionRow, "id" | "created_at">;
+        Update: Partial<CogsCollectionRow>;
+        Relationships: [
+          {
+            foreignKeyName: "cogs_collections_ad_account_id_fkey";
+            columns: ["ad_account_id"];
+            isOneToOne: false;
+            referencedRelation: "ad_accounts";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      cogs_collection_members: {
+        Row: Row<CogsCollectionMember>;
+        Insert: Row<CogsCollectionMember>;
+        Update: Partial<CogsCollectionMember>;
+        Relationships: [
+          {
+            foreignKeyName: "cogs_collection_members_collection_id_fkey";
+            columns: ["collection_id"];
+            isOneToOne: false;
+            referencedRelation: "cogs_collections";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "cogs_collection_members_product_id_fkey";
+            columns: ["product_id"];
+            isOneToOne: true;
+            referencedRelation: "store_products";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      cogs_collection_tiers: {
+        Row: Row<CogsCollectionTier>;
+        Insert: Insert<CogsCollectionTier, "id">;
+        Update: Partial<CogsCollectionTier>;
+        Relationships: [
+          {
+            foreignKeyName: "cogs_collection_tiers_collection_id_fkey";
+            columns: ["collection_id"];
+            isOneToOne: false;
+            referencedRelation: "cogs_collections";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
       daily_metrics: {
         Row: Row<DailyMetric>;
         Insert: Insert<
@@ -598,6 +753,9 @@ export type Database = {
           | "revenue"
           | "orders_count"
           | "refunds_amount"
+          | "product_cost"
+          | "payment_fees"
+          | "shipping_cost"
           | "computed_at"
         >;
         Update: Partial<DailyMetric>;
@@ -641,6 +799,14 @@ export type Database = {
       };
       owns_ad_account: {
         Args: { p_ad_account_id: string };
+        Returns: boolean;
+      };
+      owns_store_product: {
+        Args: { p_product_id: string };
+        Returns: boolean;
+      };
+      owns_cogs_collection: {
+        Args: { p_collection_id: string };
         Returns: boolean;
       };
       /** Creates the caller's pending portal_clients row (migration 0004). */
