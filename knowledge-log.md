@@ -27,3 +27,19 @@ trust the response.
 
 **Also:** Shopify HTML error pages hide the real message after a large
 `<style>` block — strip it before reading (`scripts/shopify-test.mjs` does).
+
+## 2026-07-23 — "Access denied for orders field" with read_all_orders granted
+
+**Symptom:** connect succeeded, first sync failed with ACCESS_DENIED on the
+`orders` GraphQL field. The app's scopes were `read_all_orders,
+read_analytics, …` — orders access looked covered.
+
+**Cause:** `read_all_orders` does NOT grant the orders field by itself. It is
+only the ">60 days of history" extension and requires the base `read_orders`
+(or `write_orders`) alongside it. The connect-time scope check treated
+`read_all_orders` as sufficient — false positive.
+
+**Fix:** the check now requires `read_orders`/`write_orders` specifically and
+its error message spells out the trap. App-side fix: Configuration → Admin
+API integration → enable `read_orders` (keep `read_all_orders` too) → save →
+install/update the app → reconnect in the panel.

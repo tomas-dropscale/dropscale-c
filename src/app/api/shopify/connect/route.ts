@@ -119,21 +119,23 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: message }, { status: 422 });
   }
 
-  // Sales come from the orders API: without an orders scope the sync fails
-  // silently later, which reads as "connected but no data". Refuse now, with
-  // the fix in the message. read_all_orders implies orders access (it is the
-  // ">60 days" superset), so either name passes. (An empty scope list means
+  // Sales come from the orders API. The base scope is read_orders (or
+  // write_orders, which implies it); read_all_orders ALONE does not grant the
+  // orders field — it is only the ">60 days" extension on top of read_orders,
+  // and without the base the query fails with ACCESS_DENIED. Learned the hard
+  // way: a shop with read_all_orders + read_analytics and no read_orders
+  // passed the old check and then couldn't sync. (An empty scope list means
   // the shop didn't report them — proceed rather than false-positive.)
   const hasOrdersScope =
-    shop.accessScopes.includes("read_orders") ||
-    shop.accessScopes.includes("read_all_orders") ||
-    shop.accessScopes.includes("write_orders");
+    shop.accessScopes.includes("read_orders") || shop.accessScopes.includes("write_orders");
   if (shop.accessScopes.length > 0 && !hasOrdersScope) {
     return NextResponse.json(
       {
         error:
-          "Connected, but the app is missing the read_orders scope, so revenue can't sync. " +
-          "In the app's Configuration → Admin API integration, enable read_orders and install/update the app, then connect again.",
+          "The app is missing the read_orders scope, so revenue can't sync — and note that " +
+          "read_all_orders alone does NOT include it. In the app's Configuration → Admin API " +
+          "integration, enable read_orders (keep read_all_orders for history beyond 60 days), " +
+          "save, install/update the app, then connect again.",
       },
       { status: 422 },
     );
