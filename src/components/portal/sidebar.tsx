@@ -43,13 +43,6 @@ export function Sidebar({
             active={pathname === "/dashboard"}
             onNavigate={onNavigate}
           />
-          <SideNavItem
-            href="/dashboard/costs"
-            icon={Boxes}
-            label={d.portal.cogs}
-            active={pathname === "/dashboard/costs"}
-            onNavigate={onNavigate}
-          />
         </ul>
 
         {/* Google section: all stores + one entry per store. */}
@@ -88,6 +81,21 @@ export function Sidebar({
                 }
               />
             ))}
+          </ul>
+        </div>
+
+        {/* Finance section: the client's costs & real profit, same style as Google. */}
+        <div>
+          <SideNavLabel>{d.portal.financeGroup}</SideNavLabel>
+
+          <ul className="flex flex-col gap-0.5">
+            <SideNavItem
+              href="/dashboard/costs"
+              icon={Boxes}
+              label={d.portal.cogs}
+              active={pathname === "/dashboard/costs"}
+              onNavigate={onNavigate}
+            />
           </ul>
         </div>
 
