@@ -122,7 +122,7 @@ export function OverviewView({
 
       <div className="space-y-4">
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-          <StatCard label={d.overview.revenue} value={money(figures.revenue, intl)} />
+          <StatCard label={d.overview.revenue} value={money(figures.revenue, intl)} glow />
           <StatCard
             label={d.overview.expenses}
             value={money(figures.expenses, intl)}

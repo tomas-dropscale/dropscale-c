@@ -14,17 +14,21 @@ import {
 
 import type { MetricSet } from "@/lib/portal/mock";
 import { compact, integer, money, multiplier, percent } from "@/lib/format";
+import { cn } from "@/lib/utils";
 
 export function MetricCard({
   label,
   icon: Icon,
   value,
   hint,
+  glow = false,
 }: {
   label: string;
   icon: LucideIcon;
   value: string;
   hint?: string;
+  /** Soft gold halo — reserved for the money-earned figure. */
+  glow?: boolean;
 }) {
   return (
     <div className="panel flex flex-col gap-3 p-4">
@@ -32,7 +36,9 @@ export function MetricCard({
         <p className="label-caps">{label}</p>
         <Icon className="size-4 shrink-0 text-[var(--text-muted)]" aria-hidden />
       </div>
-      <p className="metric-value truncate text-[clamp(22px,2vw,32px)]">{value}</p>
+      <p className={cn("metric-value truncate text-[clamp(22px,2vw,32px)]", glow && "text-glow-gold")}>
+        {value}
+      </p>
       <p className="text-[11.5px] text-[var(--text-muted)]">
         {hint ?? "— vs previous period"}
       </p>
@@ -45,7 +51,7 @@ export function MetricCard({
  * Row 1: volume. Row 2: efficiency.
  */
 export function MetricsGrid({ metrics, currency }: { metrics: MetricSet; currency: string }) {
-  const cards: { label: string; icon: LucideIcon; value: string; hint?: string }[] = [
+  const cards: { label: string; icon: LucideIcon; value: string; hint?: string; glow?: boolean }[] = [
     { label: "Amount Spent", icon: Wallet, value: money(metrics.spend, currency) },
     { label: "Impressions", icon: Eye, value: compact(metrics.impressions) },
     { label: "Clicks", icon: MousePointerClick, value: integer(metrics.clicks) },
@@ -65,9 +71,12 @@ export function MetricsGrid({ metrics, currency }: { metrics: MetricSet; currenc
     },
     { label: "ROAS", icon: TrendingUp, value: multiplier(metrics.roas) },
     {
+      // The client's "revenue": what their ads earned. The one gold-glow
+      // figure in the grid, matching the Revenue cards on the admin side.
       label: "Conversion Value",
       icon: BadgeDollarSign,
       value: money(metrics.conversionValue, currency),
+      glow: true,
     },
   ];
 

@@ -177,3 +177,13 @@
     transition: none;
   }
 }
+
+/*
+ * Quiet gold glow for the money-earned figures. Two wide, low-alpha layers —
+ * reads as light coming off the number, never as neon.
+ */
+.text-glow-gold {
+  text-shadow:
+    0 0 14px rgba(212, 168, 106, 0.35),
+    0 0 40px rgba(212, 168, 106, 0.14);
+}

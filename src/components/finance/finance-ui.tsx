@@ -79,6 +79,7 @@ export function StatCard({
   hint,
   delta,
   tone = "gold",
+  glow = false,
 }: {
   label: string;
   value: string;
@@ -86,6 +87,8 @@ export function StatCard({
   /** Change vs the previous window of the same length, as a ratio. */
   delta?: number | null;
   tone?: "gold" | "primary" | "danger" | "success";
+  /** Soft gold halo behind the value — reserved for revenue figures. */
+  glow?: boolean;
 }) {
   const toneClass = {
     gold: "text-[var(--accent-gold)]",
@@ -116,7 +119,9 @@ export function StatCard({
         )}
       </div>
 
-      <p className={cn("metric-value mt-3.5 truncate", toneClass)}>{value}</p>
+      <p className={cn("metric-value mt-3.5 truncate", toneClass, glow && "text-glow-gold")}>
+        {value}
+      </p>
       {hint && <p className="mt-1.5 text-[11.5px] text-[var(--text-secondary)]">{hint}</p>}
     </div>
   );

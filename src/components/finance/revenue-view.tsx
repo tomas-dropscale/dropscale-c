@@ -105,7 +105,7 @@ export function RevenueView({
 
       <div className="space-y-4">
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-          <StatCard label={t.title} value={money(total, intl)} />
+          <StatCard label={t.title} value={money(total, intl)} glow />
           <StatCard
             label={commissionStatusLabel(d, "pending")}
             value={money(pending, intl)}
