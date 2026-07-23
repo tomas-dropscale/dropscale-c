@@ -144,6 +144,56 @@ export async function fetchLiveDailySpend(
     .filter((entry) => entry.date !== "");
 }
 
+/** Full per-day metric row, for the daily_metrics recompute. */
+export type DailyBreakdown = {
+  date: string;
+  spend: number;
+  impressions: number;
+  clicks: number;
+  conversions: number;
+  conversionValue: number;
+};
+
+/**
+ * Per-day account metrics for [from, to] (ISO dates, inclusive). This is the
+ * Google side of recomputeDailyMetrics — the only caller that may aggregate
+ * over live Google data. Pages read daily_metrics instead.
+ */
+export async function fetchLiveDailyBreakdown(
+  customerId: string,
+  refreshToken: string,
+  from: string,
+  to: string,
+): Promise<DailyBreakdown[]> {
+  const query = `
+    SELECT
+      segments.date,
+      metrics.cost_micros,
+      metrics.impressions,
+      metrics.clicks,
+      metrics.conversions,
+      metrics.conversions_value
+    FROM customer
+    WHERE segments.date BETWEEN '${from}' AND '${to}'
+  `;
+
+  const rows = await searchGoogleAds(customerId, refreshToken, query);
+
+  return rows
+    .map((row) => {
+      const metrics = row.metrics ?? {};
+      return {
+        date: String((row.segments ?? {}).date ?? ""),
+        spend: micros(metrics.costMicros),
+        impressions: num(metrics.impressions),
+        clicks: num(metrics.clicks),
+        conversions: num(metrics.conversions),
+        conversionValue: num(metrics.conversionsValue),
+      };
+    })
+    .filter((entry) => entry.date !== "");
+}
+
 /** One creative from the account's asset library. */
 export type CreativeAsset = {
   id: string;

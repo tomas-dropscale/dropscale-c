@@ -28,9 +28,10 @@ export function Topbar({
 
   const onCreatives = pathname.endsWith("/creatives");
 
-  // Performance/Creatives are per-store views; on All Stores the Creatives
-  // tab has no store to show, so it stays disabled (as in the reference).
-  const performanceHref = activeAccountId ? `/dashboard/${activeAccountId}` : "/dashboard";
+  // Performance/Creatives are per-store views; without a store selected,
+  // Performance falls back to the Google all-stores view and Creatives stays
+  // disabled (as in the reference).
+  const performanceHref = activeAccountId ? `/dashboard/${activeAccountId}` : "/dashboard/google";
   const creativesHref = activeAccountId ? `/dashboard/${activeAccountId}/creatives` : null;
 
   return (

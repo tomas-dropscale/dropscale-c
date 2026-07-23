@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { createClient, getSessionClient } from "@/lib/supabase/server";
 import { exchangeGoogleAdsCode } from "@/lib/google-ads/oauth";
 import { encryptToken } from "@/lib/google-ads/crypto";
+import { resyncAccountNow } from "@/lib/metrics/recompute";
 
 /**
  * Where Google returns after the client consents. Verifies the CSRF state,
@@ -57,6 +58,17 @@ export async function GET(request: NextRequest) {
       google_ads_connected: true,
     })
     .eq("id", accountId);
+
+  // Same rule as the Shopify connect: a fresh connection pulls its history
+  // now — the lazy sync's coverage check can't tell a new source appeared on
+  // an account that already had rows. Failure here doesn't fail the connect.
+  if (!updateError) {
+    try {
+      await resyncAccountNow(accountId);
+    } catch (cause) {
+      console.error(`Post-connect resync failed for ${accountId}:`, cause);
+    }
+  }
 
   const res = updateError ? back("gads=error") : back("gads=connected");
   // One-shot cookie — clear it whatever the outcome.

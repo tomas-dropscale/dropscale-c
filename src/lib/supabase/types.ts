@@ -210,6 +210,12 @@ export type AdAccount = {
   google_ads_connected: boolean;
   /** % of ad spend the agency bills; admin-only via guard (migration 0006). */
   commission_rate: number;
+  // Shopify custom-app credentials (migration 0008). The token is AES-GCM
+  // ciphertext, excluded from ACCOUNT_COLUMNS like the Google token; the UI
+  // only ever sees shopify_token_last4.
+  shopify_admin_token: string | null;
+  shopify_token_last4: string | null;
+  shopify_connected_at: string | null;
 };
 
 export type AccountRequest = {
@@ -236,6 +242,21 @@ export type Campaign = {
   cpc: number;
   daily_budget: number | null;
   updated_at: string;
+};
+
+/** One pre-aggregated day for one store (migration 0008). */
+export type DailyMetric = {
+  ad_account_id: string;
+  day: string;
+  ad_spend: number;
+  impressions: number;
+  clicks: number;
+  conversions: number;
+  conversion_value: number;
+  revenue: number;
+  orders_count: number;
+  refunds_amount: number;
+  computed_at: string;
 };
 
 export type CreativeDelivery = {
@@ -502,6 +523,9 @@ export type Database = {
           | "google_ads_connected_email"
           | "google_ads_connected"
           | "commission_rate"
+          | "shopify_admin_token"
+          | "shopify_token_last4"
+          | "shopify_connected_at"
         >;
         Update: Partial<AdAccount>;
         Relationships: [
@@ -555,6 +579,31 @@ export type Database = {
         Relationships: [
           {
             foreignKeyName: "campaigns_ad_account_id_fkey";
+            columns: ["ad_account_id"];
+            isOneToOne: false;
+            referencedRelation: "ad_accounts";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      daily_metrics: {
+        Row: Row<DailyMetric>;
+        Insert: Insert<
+          DailyMetric,
+          | "ad_spend"
+          | "impressions"
+          | "clicks"
+          | "conversions"
+          | "conversion_value"
+          | "revenue"
+          | "orders_count"
+          | "refunds_amount"
+          | "computed_at"
+        >;
+        Update: Partial<DailyMetric>;
+        Relationships: [
+          {
+            foreignKeyName: "daily_metrics_ad_account_id_fkey";
             columns: ["ad_account_id"];
             isOneToOne: false;
             referencedRelation: "ad_accounts";

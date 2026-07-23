@@ -120,10 +120,13 @@ export function DateRangePicker({
   value,
   onApply,
   align = "end",
+  footer,
 }: {
   value: RangeSelection;
   onApply: (selection: RangeSelection) => void;
   align?: "start" | "end";
+  /** Left slot of the bottom bar — e.g. the "TOTAL ROAS" figure. */
+  footer?: React.ReactNode;
 }) {
   const { d, intl } = useI18n();
   const today = isoDay(new Date());
@@ -247,6 +250,11 @@ export function DateRangePicker({
             </div>
 
             <div className="mt-3 flex items-center justify-end gap-2 border-t border-[var(--border-subtle)] pt-3">
+              {footer && (
+                <span className="mr-auto text-[11px] font-medium tracking-[0.08em] text-[var(--text-secondary)] uppercase">
+                  {footer}
+                </span>
+              )}
               <Button variant="ghost" size="sm" onClick={() => setOpen(false)}>
                 {d.common.cancel}
               </Button>

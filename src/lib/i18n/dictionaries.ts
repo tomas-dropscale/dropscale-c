@@ -168,6 +168,14 @@ export const en = {
     noStoresHelp:
       "Use “{add}” in the sidebar to link an existing Google Ads account, or “{request}” to have the team set one up for you.",
     noAdsAccounts: "No accounts linked yet. Add one from the dashboard sidebar.",
+    dashboard: "Dashboard",
+    googleGroup: "Google",
+    noData: "No data for this period yet",
+    noDataHelp: "Numbers appear once your Google Ads or Shopify connection syncs.",
+    roasTotal: "Total ROAS",
+    allStoresOption: "All stores",
+    connections: "Shopify",
+    connectionsSubtitle: "Link each store’s Shopify so revenue and profit flow into your dashboard.",
   },
 
   overview: {
@@ -691,6 +699,14 @@ export const pt: Dictionary = {
     noStoresHelp:
       "Usa “{add}” na barra lateral para ligares uma conta Google Ads existente, ou “{request}” para a equipa criar uma por ti.",
     noAdsAccounts: "Ainda não há contas ligadas. Adiciona uma a partir da barra lateral.",
+    dashboard: "Dashboard",
+    googleGroup: "Google",
+    noData: "Ainda não há dados para este período",
+    noDataHelp: "Os números aparecem assim que a ligação Google Ads ou Shopify sincronizar.",
+    roasTotal: "ROAS total",
+    allStoresOption: "Todas as lojas",
+    connections: "Shopify",
+    connectionsSubtitle: "Liga o Shopify de cada loja para a receita e o lucro entrarem no teu dashboard.",
   },
 
   overview: {
@@ -1198,6 +1214,14 @@ export const ptBR: Dictionary = {
     noStoresHelp:
       "Use “{add}” na barra lateral para vincular uma conta do Google Ads existente, ou “{request}” para o time criar uma para você.",
     noAdsAccounts: "Nenhuma conta vinculada ainda. Adicione uma pela barra lateral.",
+    dashboard: "Dashboard",
+    googleGroup: "Google",
+    noData: "Ainda não há dados para este período",
+    noDataHelp: "Os números aparecem assim que a conexão Google Ads ou Shopify sincronizar.",
+    roasTotal: "ROAS total",
+    allStoresOption: "Todas as lojas",
+    connections: "Shopify",
+    connectionsSubtitle: "Conecte o Shopify de cada loja para a receita e o lucro entrarem no seu dashboard.",
   },
 
   overview: {
@@ -1704,6 +1728,14 @@ export const es: Dictionary = {
     noStoresHelp:
       "Usa «{add}» en la barra lateral para vincular una cuenta de Google Ads existente, o «{request}» para que el equipo cree una por ti.",
     noAdsAccounts: "Todavía no hay cuentas vinculadas. Añade una desde la barra lateral.",
+    dashboard: "Panel",
+    googleGroup: "Google",
+    noData: "Aún no hay datos para este período",
+    noDataHelp: "Los números aparecen cuando la conexión de Google Ads o Shopify sincronice.",
+    roasTotal: "ROAS total",
+    allStoresOption: "Todas las tiendas",
+    connections: "Shopify",
+    connectionsSubtitle: "Conecta el Shopify de cada tienda para que ingresos y beneficio lleguen a tu panel.",
   },
 
   overview: {
@@ -2213,6 +2245,14 @@ export const fr: Dictionary = {
     noStoresHelp:
       "Utilisez « {add} » dans le menu latéral pour relier un compte Google Ads existant, ou « {request} » pour que l'équipe en crée un pour vous.",
     noAdsAccounts: "Aucun compte relié pour l'instant. Ajoutez-en un depuis le menu latéral.",
+    dashboard: "Tableau de bord",
+    googleGroup: "Google",
+    noData: "Pas encore de données pour cette période",
+    noDataHelp: "Les chiffres apparaissent dès que la connexion Google Ads ou Shopify se synchronise.",
+    roasTotal: "ROAS total",
+    allStoresOption: "Toutes les boutiques",
+    connections: "Shopify",
+    connectionsSubtitle: "Reliez le Shopify de chaque boutique pour alimenter votre tableau de bord.",
   },
 
   overview: {

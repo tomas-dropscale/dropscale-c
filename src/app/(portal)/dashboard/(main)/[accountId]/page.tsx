@@ -2,9 +2,11 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { FileBarChart } from "lucide-react";
 
-import { fetchAccount, fetchAccountMetrics, fetchCampaigns } from "@/lib/portal/data";
+import { fetchAccount, fetchCampaigns } from "@/lib/portal/data";
+import { ensureDailyCoverage, recomputeDailyMetrics } from "@/lib/metrics/recompute";
+import { fetchDailyMetrics, freshness, metricSetFromRows } from "@/lib/metrics/queries";
 import { parseRange } from "@/lib/portal/range";
-import { dateTime, nextSyncLabel, nowIso } from "@/lib/format";
+import { dateTime, multiplier } from "@/lib/format";
 import { Button } from "@/components/ui/button";
 import { MetricsGrid } from "@/components/portal/metric-card";
 import { RangePicker } from "@/components/portal/range-picker";
@@ -18,6 +20,12 @@ import { getServerDictionary } from "@/lib/i18n/server";
 
 export const metadata: Metadata = { title: "Store performance" };
 
+/**
+ * Per-store Google page (the "Lorena Taller" format): 10-metric grid from
+ * daily_metrics, freshness line from real computed_at. The campaigns table is
+ * the one deliberate exception to the pre-aggregated rule — campaign-level
+ * rows are not in daily_metrics, and folding them in is its own migration.
+ */
 export default async function AccountPage({
   params,
   searchParams,
@@ -33,19 +41,32 @@ export default async function AccountPage({
   const account = await fetchAccount(accountId);
   if (!account) notFound();
 
-  const [metrics, campaigns, { d }] = await Promise.all([
-    fetchAccountMetrics(account, range),
+  await ensureDailyCoverage([account], range.from);
+  await recomputeDailyMetrics([account]);
+
+  const [rows, campaigns, { d }] = await Promise.all([
+    fetchDailyMetrics([account.id], range.from, range.to),
     fetchCampaigns(account, range),
     getServerDictionary(),
   ]);
 
+  const metrics = metricSetFromRows(rows, Number(account.commission_rate));
+  const { updatedAt, nextUpdateAt } = freshness(rows);
+
   return (
     <PageContainer
       title={account.store_name}
-      description={fmt(d.portal.storeSubtitle, {
-        time: dateTime(nowIso()),
-        next: nextSyncLabel(),
-      })}
+      description={
+        updatedAt && nextUpdateAt
+          ? fmt(d.portal.storeSubtitle, {
+              time: dateTime(updatedAt),
+              next: new Date(nextUpdateAt).toLocaleTimeString("en-GB", {
+                hour: "2-digit",
+                minute: "2-digit",
+              }),
+            })
+          : d.portal.noData
+      }
       actions={
         <>
           <Button variant="secondary" size="sm" className="relative">
@@ -54,7 +75,10 @@ export default async function AccountPage({
             {/* New-report indicator */}
             <span className="absolute -top-1 -right-1 size-2 rounded-full bg-[var(--accent-gold)]" />
           </Button>
-          <RangePicker current={range} />
+          <RangePicker
+            current={range}
+            footer={`${d.portal.roasTotal}: ${multiplier(metrics.roas)}`}
+          />
         </>
       }
     >

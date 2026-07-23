@@ -35,7 +35,8 @@ import {
 export const ACCOUNT_COLUMNS =
   "id, client_id, store_name, google_ads_customer_id, status, currency, breakeven_roas, " +
   "lifetime_ads_budget_usd, shopify_url, shopify_connected, shopify_client_id, shopify_scopes, " +
-  "color_dot, created_at, google_ads_connected_email, google_ads_connected, commission_rate";
+  "color_dot, created_at, google_ads_connected_email, google_ads_connected, commission_rate, " +
+  "shopify_token_last4, shopify_connected_at";
 
 /**
  * The portal is the CLIENT's zone, so every read here is pinned to the

@@ -1,7 +1,8 @@
 "use client";
 
 import * as React from "react";
-import { AlertCircle, LayoutGrid, Plus, ShieldCheck, Store, UserPlus } from "lucide-react";
+import { usePathname } from "next/navigation";
+import { AlertCircle, Gauge, LayoutGrid, Plus, ShieldCheck, Store, UserPlus } from "lucide-react";
 
 import type { AdAccount, Client } from "@/lib/supabase/types";
 import { AddAccountModal } from "@/components/portal/add-account-modal";
@@ -23,6 +24,7 @@ export function Sidebar({
   onNavigate?: () => void;
 }) {
   const { d } = useI18n();
+  const pathname = usePathname();
   const [addOpen, setAddOpen] = React.useState(false);
 
   return (
@@ -32,15 +34,27 @@ export function Sidebar({
       </div>
 
       <div className="flex flex-1 flex-col gap-5">
+        {/* The client's home: revenue/profit overview. */}
+        <ul className="flex flex-col gap-0.5">
+          <SideNavItem
+            href="/dashboard"
+            icon={Gauge}
+            label={d.portal.dashboard}
+            active={pathname === "/dashboard"}
+            onNavigate={onNavigate}
+          />
+        </ul>
+
+        {/* Google section: all stores + one entry per store. */}
         <div>
-          <SideNavLabel>{d.portal.accounts}</SideNavLabel>
+          <SideNavLabel>{d.portal.googleGroup}</SideNavLabel>
 
           <ul className="flex flex-col gap-0.5">
             <SideNavItem
-              href="/dashboard"
+              href="/dashboard/google"
               icon={LayoutGrid}
               label={d.portal.allStores}
-              active={activeAccountId === null}
+              active={pathname === "/dashboard/google"}
               onNavigate={onNavigate}
             />
 
