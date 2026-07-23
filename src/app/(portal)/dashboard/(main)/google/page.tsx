@@ -56,6 +56,10 @@ export default async function GoogleAllStoresPage({
   }));
   const totals = combineMetricSets(perAccount.map((entry) => entry.metrics));
 
+  // One fee percentage is only honest when every store bills at the same rate.
+  const rates = new Set(accounts.map((account) => Number(account.commission_rate)));
+  const uniformFeeRate = rates.size === 1 ? [...rates][0] : null;
+
   const comparisonRows: StoreComparisonRow[] = perAccount.map(({ account, metrics }) => ({
     accountId: account.id,
     storeName: account.store_name,
@@ -99,7 +103,11 @@ export default async function GoogleAllStoresPage({
         </div>
       ) : (
         <div className="space-y-6">
-          <MetricsGrid metrics={totals} currency={accounts[0]?.currency ?? "EUR"} />
+          <MetricsGrid
+            metrics={totals}
+            currency={accounts[0]?.currency ?? "EUR"}
+            feeRate={uniformFeeRate}
+          />
           <StoreComparisonTable rows={comparisonRows} />
         </div>
       )}

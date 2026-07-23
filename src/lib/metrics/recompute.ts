@@ -57,6 +57,11 @@ type SecretColumns = {
 };
 
 function syncable(account: AdAccount): boolean {
+  // Pending accounts are connected but not yet approved by the team — no
+  // data flows until an admin activates them (the approval IS the product
+  // gate). The lazy sync picks them up on the first page view after
+  // activation, history included via the coverage backfill.
+  if (account.status === "pending") return false;
   return (
     (account.google_ads_connected && Boolean(account.google_ads_customer_id)) ||
     account.shopify_connected

@@ -41,7 +41,7 @@ async function ownAccount(accountId: string) {
   // the portal by accident.
   const { data: account } = await supabase
     .from("ad_accounts")
-    .select("id, client_id")
+    .select("id, client_id, status")
     .eq("id", accountId)
     .eq("client_id", user.id)
     .maybeSingle();
@@ -165,15 +165,21 @@ export async function POST(request: NextRequest) {
 
   // Pull the store's history right away. Waiting for the lazy sync would show
   // a connected store with an empty dashboard — the per-account throttle and
-  // coverage checks don't know a NEW source just appeared.
+  // coverage checks don't know a NEW source just appeared. Pending accounts
+  // are the exception: approval is the gate, so nothing syncs yet.
   let syncWarning: string | null = null;
-  try {
-    await resyncAccountNow(accountId);
-  } catch (error) {
-    console.error(`Post-connect resync failed for ${accountId}:`, error);
+  if (account.status === "pending") {
     syncWarning =
-      "Connected, but the first data sync failed — the dashboard will retry within 15 minutes. " +
-      (error instanceof Error ? error.message : "");
+      "Connected. Data will start syncing once the Dropscale team approves this account.";
+  } else {
+    try {
+      await resyncAccountNow(accountId);
+    } catch (error) {
+      console.error(`Post-connect resync failed for ${accountId}:`, error);
+      syncWarning =
+        "Connected, but the first data sync failed — the dashboard will retry within 15 minutes. " +
+        (error instanceof Error ? error.message : "");
+    }
   }
 
   return NextResponse.json({

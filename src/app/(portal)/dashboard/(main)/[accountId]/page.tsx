@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
-import { FileBarChart } from "lucide-react";
+import { FileBarChart, Hourglass } from "lucide-react";
 
 import { fetchAccount, fetchCampaigns } from "@/lib/portal/data";
 import { ensureDailyCoverage, recomputeDailyMetrics } from "@/lib/metrics/recompute";
@@ -84,9 +84,32 @@ export default async function AccountPage({
     >
       <div className="space-y-6">
         {account.status === "suspended" && <SuspendedBanner />}
-        {hasGoogleAdsEnv() && !account.google_ads_connected && <ConnectAdsBanner />}
+        {account.status === "pending" && (
+          <div className="flex items-start gap-3 rounded-[var(--radius-card)] border border-[var(--accent-gold)]/30 bg-[var(--accent-gold-dim)] px-4 py-3.5">
+            <Hourglass className="mt-0.5 size-4 shrink-0 text-[var(--accent-gold)]" />
+            <div>
+              <p className="text-[13.5px] font-semibold text-[var(--text-primary)]">
+                Waiting for team approval
+              </p>
+              <p className="text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
+                This account is connected but not active yet. Data starts syncing the
+                moment the Dropscale team approves it — history included.
+              </p>
+            </div>
+          </div>
+        )}
+        {account.status !== "pending" &&
+          hasGoogleAdsEnv() &&
+          !account.google_ads_connected && <ConnectAdsBanner />}
 
-        <MetricsGrid metrics={metrics} currency={account.currency} />
+        <section className="space-y-3">
+          <h2 className="text-[15px] font-semibold text-[var(--text-primary)]">Metrics</h2>
+          <MetricsGrid
+            metrics={metrics}
+            currency={account.currency}
+            feeRate={Number(account.commission_rate)}
+          />
+        </section>
 
         <CampaignsTable campaigns={campaigns} currency={account.currency} />
       </div>

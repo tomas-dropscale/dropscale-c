@@ -3,6 +3,7 @@ import { CircleCheck, CircleDashed, Store } from "lucide-react";
 
 import { fetchAccounts } from "@/lib/portal/data";
 import { ShopifyConnectPanel } from "@/components/portal/shopify-connect-panel";
+import { ShopifyLinkForm } from "@/components/portal/shopify-link-form";
 import { Badge } from "@/components/ui/badge";
 import { PageContainer } from "@/components/ui/page-container";
 import { getServerDictionary } from "@/lib/i18n/server";
@@ -21,6 +22,11 @@ export async function generateMetadata(): Promise<Metadata> {
 export default async function ConnectionsPage() {
   const [accounts, { d }] = await Promise.all([fetchAccounts(), getServerDictionary()]);
 
+  // A store maps to ONE ad account; the link form offers only the accounts
+  // still free. Connected ones are managed on their own cards below.
+  const unlinked = accounts.filter((account) => !account.shopify_connected);
+  const linked = accounts.filter((account) => account.shopify_connected);
+
   return (
     <PageContainer title={d.portal.connections} description={d.portal.connectionsSubtitle}>
       {accounts.length === 0 ? (
@@ -29,7 +35,9 @@ export default async function ConnectionsPage() {
         </div>
       ) : (
         <div className="max-w-[720px] space-y-4">
-          {accounts.map((account) => (
+          {unlinked.length > 0 && <ShopifyLinkForm accounts={unlinked} />}
+
+          {linked.map((account) => (
             <section key={account.id} className="panel space-y-4 p-5">
               <header className="flex flex-wrap items-center gap-3">
                 <div className="flex size-9 items-center justify-center rounded-[10px] bg-[var(--accent-gold-dim)]">
@@ -47,12 +55,8 @@ export default async function ConnectionsPage() {
                     )}
                     Google Ads
                   </Badge>
-                  <Badge variant={account.shopify_connected ? "success" : "neutral"}>
-                    {account.shopify_connected ? (
-                      <CircleCheck className="size-3" aria-hidden />
-                    ) : (
-                      <CircleDashed className="size-3" aria-hidden />
-                    )}
+                  <Badge variant="success">
+                    <CircleCheck className="size-3" aria-hidden />
                     Shopify
                   </Badge>
                 </div>

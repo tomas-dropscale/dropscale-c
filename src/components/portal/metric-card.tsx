@@ -56,11 +56,25 @@ export function MetricCard({
 }
 
 /**
- * The 10-card grid shared by the Overview and the per-store view.
- * Revenue leads — it is the client's number — and gets the gold treatment;
- * spend closes the grid where the revenue figure used to sit.
+ * The 10-card grid shared by the Google views, in the Infinite Scaling
+ * "Lorena Taller" order: Amount Spent leads, row 2 runs Fee → CPC →
+ * Cost/Conv → ROAS → Conversion Value.
+ *
+ * Every card ranks equal — no hero treatment here; the gold highlight is the
+ * main dashboard's Revenue card, and only there.
+ * `feeRate` personalises the fee hint (accounts bill their own
+ * commission_rate); null means mixed rates across stores, so no single
+ * percentage would be true.
  */
-export function MetricsGrid({ metrics, currency }: { metrics: MetricSet; currency: string }) {
+export function MetricsGrid({
+  metrics,
+  currency,
+  feeRate = null,
+}: {
+  metrics: MetricSet;
+  currency: string;
+  feeRate?: number | null;
+}) {
   const cards: {
     label: string;
     icon: LucideIcon;
@@ -69,13 +83,7 @@ export function MetricsGrid({ metrics, currency }: { metrics: MetricSet; currenc
     glow?: boolean;
     highlight?: boolean;
   }[] = [
-    {
-      label: "Revenue",
-      icon: BadgeDollarSign,
-      value: money(metrics.conversionValue, currency),
-      glow: true,
-      highlight: true,
-    },
+    { label: "Amount Spent", icon: Wallet, value: money(metrics.spend, currency) },
     { label: "Impressions", icon: Eye, value: compact(metrics.impressions) },
     { label: "Clicks", icon: MousePointerClick, value: integer(metrics.clicks) },
     { label: "Conversions", icon: Target, value: integer(metrics.conversions) },
@@ -84,7 +92,7 @@ export function MetricsGrid({ metrics, currency }: { metrics: MetricSet; currenc
       label: "Dropscale Fee",
       icon: HandCoins,
       value: money(metrics.fee, currency),
-      hint: "10% of ad spend",
+      hint: feeRate != null ? `${feeRate}% of ad spend` : "per-store rate of ad spend",
     },
     { label: "CPC", icon: Coins, value: money(metrics.cpc, currency) },
     {
@@ -93,7 +101,11 @@ export function MetricsGrid({ metrics, currency }: { metrics: MetricSet; currenc
       value: money(metrics.costPerConversion, currency),
     },
     { label: "ROAS", icon: TrendingUp, value: multiplier(metrics.roas) },
-    { label: "Amount Spent", icon: Wallet, value: money(metrics.spend, currency) },
+    {
+      label: "Conversion Value",
+      icon: BadgeDollarSign,
+      value: money(metrics.conversionValue, currency),
+    },
   ];
 
   return (
