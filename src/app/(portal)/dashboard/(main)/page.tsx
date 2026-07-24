@@ -165,13 +165,7 @@ export default async function DashboardPage({
               step as it's done. Once everything's set but data is still
               syncing, the quiet banner. */}
           {!setupComplete ? (
-            <GettingStartedGuide
-              hasAccounts={accounts.length > 0}
-              googleConnected={googleConnected}
-              shopifyConnected={shopifyConnected}
-              costsSet={costsSet}
-              showGoogle={needsGoogle}
-            />
+            <GettingStartedGuide accounts={visible} costsSet={costsSet} showGoogle={needsGoogle} />
           ) : (
             rows.length === 0 && (
               <div className="panel flex items-center gap-3 px-4 py-3.5">

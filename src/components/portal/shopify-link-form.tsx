@@ -24,7 +24,14 @@ import {
  *
  * Same POST as the per-account panel; the dropdown supplies the accountId.
  */
-export function ShopifyLinkForm({ accounts }: { accounts: AdAccount[] }) {
+export function ShopifyLinkForm({
+  accounts,
+  onConnected,
+}: {
+  accounts: AdAccount[];
+  /** Fired after a successful connect — e.g. to close the modal it lives in. */
+  onConnected?: () => void;
+}) {
   const router = useRouter();
   const [accountId, setAccountId] = React.useState(accounts[0]?.id ?? "");
   const [shopDomain, setShopDomain] = React.useState("");
@@ -65,6 +72,8 @@ export function ShopifyLinkForm({ accounts }: { accounts: AdAccount[] }) {
     setShopDomain("");
     setClientId("");
     router.refresh();
+    // A sync warning is worth reading, so only auto-dismiss on a clean connect.
+    if (!body?.syncWarning) onConnected?.();
   }
 
   return (

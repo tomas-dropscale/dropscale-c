@@ -1,46 +1,63 @@
+"use client";
+
+import * as React from "react";
 import Link from "next/link";
 import { ArrowRight, Check, PlugZap, ShoppingBag, Store, Boxes } from "lucide-react";
 
+import type { AdAccount } from "@/lib/supabase/types";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { ShopifyLinkForm } from "@/components/portal/shopify-link-form";
 import { cn } from "@/lib/utils";
 
 /**
- * First-run guide on the client's dashboard, shown while nothing is connected
- * yet — so an empty dashboard reads as "here's how to start", not "broken".
- * Each step self-marks as done, so the same panel doubles as a setup checklist
- * until the store is live.
+ * First-run guide on the client's dashboard. It doesn't vanish after the first
+ * connection — it stays, ticking each step off, until the store is fully set
+ * up. Each step goes STRAIGHT to its own action: Google Ads starts its OAuth,
+ * Shopify opens the connect form in a dialog, costs open the Costs page.
  */
+type StepAction =
+  | { kind: "link"; href: string } // in-app navigation
+  | { kind: "external"; href: string } // full-page (e.g. an OAuth start route)
+  | { kind: "shopify" }; // opens the Shopify connect dialog
+
 type Step = {
   icon: typeof Store;
   title: string;
   body: string;
-  href: string;
   cta: string;
   done: boolean;
+  action: StepAction;
 };
 
 export function GettingStartedGuide({
-  hasAccounts,
-  googleConnected,
-  shopifyConnected,
+  accounts,
   costsSet,
   showGoogle,
 }: {
-  hasAccounts: boolean;
-  googleConnected: boolean;
-  shopifyConnected: boolean;
+  accounts: AdAccount[];
   /** Any manual product cost saved yet — marks the costs step done. */
   costsSet: boolean;
   /** Hide the Google step where Google Ads isn't configured for the platform. */
   showGoogle: boolean;
 }) {
+  const [shopifyOpen, setShopifyOpen] = React.useState(false);
+
+  const hasAccounts = accounts.length > 0;
+  const googleConnected = accounts.some((account) => account.google_ads_connected);
+  const shopifyConnected = accounts.some((account) => account.shopify_connected);
+
+  // The specific account each connect targets (onboarding is usually one store).
+  const googleTarget = accounts.find((account) => !account.google_ads_connected);
+  const unlinkedShopify = accounts.filter((account) => !account.shopify_connected);
+
   const steps: Step[] = [
     {
       icon: Store,
       title: "Add your store",
       body: "Create an account for your store so we have somewhere to bring the numbers into.",
-      href: "/dashboard/settings/accounts",
       cta: "Manage accounts",
       done: hasAccounts,
+      action: { kind: "link", href: "/dashboard/settings/accounts" },
     },
     ...(showGoogle
       ? [
@@ -48,9 +65,11 @@ export function GettingStartedGuide({
             icon: PlugZap,
             title: "Connect Google Ads",
             body: "Link your Google Ads so spend, ROAS and conversions flow in automatically.",
-            href: "/dashboard/settings/connections",
             cta: "Connect Google Ads",
             done: googleConnected,
+            action: googleTarget
+              ? ({ kind: "external", href: `/api/google-ads/connect?account=${googleTarget.id}` } as StepAction)
+              : ({ kind: "link", href: "/dashboard/settings/accounts" } as StepAction),
           } as Step,
         ]
       : []),
@@ -58,21 +77,27 @@ export function GettingStartedGuide({
       icon: ShoppingBag,
       title: "Connect Shopify",
       body: "Link your store’s Shopify to pull in revenue, orders and refunds. We walk you through the app and scopes.",
-      href: "/dashboard/settings/connections",
       cta: "Connect Shopify",
       done: shopifyConnected,
+      action:
+        unlinkedShopify.length > 0
+          ? { kind: "shopify" }
+          : { kind: "link", href: "/dashboard/settings/connections" },
     },
     {
       icon: Boxes,
       title: "Set your product costs",
       body: "Add product costs under Finance → Costs so your real profit and margin are exact.",
-      href: "/dashboard/costs",
       cta: "Open Costs",
       done: costsSet,
+      action: { kind: "link", href: "/dashboard/costs" },
     },
   ];
 
   const remaining = steps.filter((step) => !step.done).length;
+
+  const ctaClass =
+    "transition-smooth inline-flex shrink-0 items-center gap-1 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-panel)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-primary)] hover:border-[var(--accent-gold)]/40 hover:text-[var(--accent-gold-strong)]";
 
   return (
     <section className="panel p-5 sm:p-6">
@@ -124,18 +149,38 @@ export function GettingStartedGuide({
               </span>
             </span>
 
-            {!step.done && (
-              <Link
-                href={step.href}
-                className="transition-smooth inline-flex shrink-0 items-center gap-1 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-panel)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-primary)] hover:border-[var(--accent-gold)]/40 hover:text-[var(--accent-gold-strong)]"
-              >
-                {step.cta}
-                <ArrowRight className="size-3.5" aria-hidden />
-              </Link>
-            )}
+            {!step.done &&
+              (step.action.kind === "shopify" ? (
+                <button type="button" onClick={() => setShopifyOpen(true)} className={ctaClass}>
+                  {step.cta}
+                  <ArrowRight className="size-3.5" aria-hidden />
+                </button>
+              ) : step.action.kind === "external" ? (
+                <a href={step.action.href} className={ctaClass}>
+                  {step.cta}
+                  <ArrowRight className="size-3.5" aria-hidden />
+                </a>
+              ) : (
+                <Link href={step.action.href} className={ctaClass}>
+                  {step.cta}
+                  <ArrowRight className="size-3.5" aria-hidden />
+                </Link>
+              ))}
           </li>
         ))}
       </ol>
+
+      {/* Shopify connect, right here — no detour through settings. */}
+      <Dialog open={shopifyOpen} onOpenChange={setShopifyOpen}>
+        <DialogContent className="max-w-[560px]">
+          <DialogHeader>
+            <DialogTitle>Connect Shopify</DialogTitle>
+          </DialogHeader>
+          {unlinkedShopify.length > 0 && (
+            <ShopifyLinkForm accounts={unlinkedShopify} onConnected={() => setShopifyOpen(false)} />
+          )}
+        </DialogContent>
+      </Dialog>
     </section>
   );
 }
