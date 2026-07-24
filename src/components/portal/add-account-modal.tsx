@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
+import { Clock } from "lucide-react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -84,6 +85,16 @@ export function AddAccountModal({
 
         <form onSubmit={onSubmit} className="space-y-4" noValidate>
           {serverError && <FormAlert>{serverError}</FormAlert>}
+
+          {/* Set expectations up front: adding is not the same as being live. */}
+          <div className="flex items-start gap-2 rounded-[8px] border border-[var(--warning-orange)]/25 bg-[var(--warning-orange)]/10 px-3 py-2.5 text-[12px] leading-relaxed text-[var(--text-secondary)]">
+            <Clock className="mt-0.5 size-3.5 shrink-0 text-[var(--warning-orange)]" aria-hidden />
+            <span>
+              New accounts are reviewed by our team before data starts syncing. Once added, it
+              stays <span className="text-[var(--text-primary)]">pending</span>{" "}
+              until approved — you&apos;ll find it under the bell next to your profile.
+            </span>
+          </div>
 
           <div className="space-y-1.5">
             <Label htmlFor="storeName">Account Name</Label>

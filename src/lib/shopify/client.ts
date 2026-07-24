@@ -216,6 +216,16 @@ export type SyncedOrder = {
 const PAGE_SIZE = 250;
 const MAX_PAGES = 10;
 
+// Revenue counts only orders the customer actually PAID for — a pending or
+// authorised-but-not-captured order is not a sale yet and must not inflate
+// revenue, orders or COGS. Refunds keep their sale (it was paid, then returned).
+const PAID_FINANCIAL_STATUSES = new Set([
+  "PAID",
+  "PARTIALLY_PAID",
+  "PARTIALLY_REFUNDED",
+  "REFUNDED",
+]);
+
 /**
  * Per-day sales for [from, to] (ISO dates, inclusive), plus the currency the
  * amounts are denominated in — the store's BASE currency, which is what
@@ -223,6 +233,9 @@ const MAX_PAGES = 10;
  * Revenue books on the order's creation day; refunds book on the order's
  * creation day too — a simplification (Shopify refunds carry their own dates)
  * that keeps one query and matches how the P&L will read it.
+ *
+ * Only PAID orders count. Pending / authorised orders are excluded entirely
+ * (revenue, orders and COGS) until the customer actually pays.
  */
 export async function fetchDailySales(
   shopDomain: string,
@@ -244,6 +257,7 @@ export async function fetchDailySales(
           createdAt: string;
           test: boolean;
           cancelledAt: string | null;
+          displayFinancialStatus: string | null;
           currentTotalPriceSet: { shopMoney: { amount: string } } | null;
           totalRefundedSet: { shopMoney: { amount: string } } | null;
           lineItems: {
@@ -267,6 +281,7 @@ export async function fetchDailySales(
             createdAt
             test
             cancelledAt
+            displayFinancialStatus
             currentTotalPriceSet { shopMoney { amount } }
             totalRefundedSet { shopMoney { amount } }
             lineItems(first: 100) {
@@ -291,6 +306,11 @@ export async function fetchDailySales(
       // client trusts. Filtered here, in code — the search-query syntax for
       // these is less reliable than the fields themselves.
       if (order.test || order.cancelledAt) continue;
+
+      // Revenue is PAID orders only: a pending / authorised order hasn't been
+      // paid, so it counts nowhere (revenue, orders or COGS) until it is.
+      if (!order.displayFinancialStatus || !PAID_FINANCIAL_STATUSES.has(order.displayFinancialStatus))
+        continue;
 
       const day = order.createdAt.slice(0, 10);
       const total = Number(order.currentTotalPriceSet?.shopMoney.amount ?? 0);

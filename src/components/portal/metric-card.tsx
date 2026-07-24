@@ -23,6 +23,7 @@ export function MetricCard({
   hint,
   glow = false,
   highlight = false,
+  valueClassName,
 }: {
   label: string;
   icon: LucideIcon;
@@ -32,6 +33,8 @@ export function MetricCard({
   glow?: boolean;
   /** Gold neon border around the whole card — the grid's one hero. */
   highlight?: boolean;
+  /** Extra classes on the value line — e.g. the Net Profit neon-green treatment. */
+  valueClassName?: string;
 }) {
   return (
     <div className={cn("panel flex flex-col gap-3 p-4", highlight && "card-glow-gold")}>
@@ -45,7 +48,13 @@ export function MetricCard({
           aria-hidden
         />
       </div>
-      <p className={cn("metric-value truncate text-[clamp(22px,2vw,32px)]", glow && "text-glow-gold")}>
+      <p
+        className={cn(
+          "metric-value truncate text-[clamp(22px,2vw,32px)]",
+          glow && "text-glow-gold",
+          valueClassName,
+        )}
+      >
         {value}
       </p>
       <p className="text-[11.5px] text-[var(--text-muted)]">

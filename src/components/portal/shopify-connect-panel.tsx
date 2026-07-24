@@ -18,6 +18,15 @@ import { FormAlert } from "@/components/auth/auth-card";
  * tail (`••••1234`) that the server stored alongside the ciphertext. There is
  * no way to read the token back out — not from this UI, not from the API.
  */
+/** Monospace chip for a Shopify Admin API scope handle. */
+function Scope({ children }: { children: React.ReactNode }) {
+  return (
+    <li className="list-none rounded-[6px] border border-[var(--border-subtle)] bg-[var(--bg-base)] px-2 py-0.5 font-mono text-[11px] text-[var(--text-secondary)]">
+      {children}
+    </li>
+  );
+}
+
 export function ShopifyConnectPanel({ account }: { account: AdAccount }) {
   const router = useRouter();
   const [editing, setEditing] = React.useState(false);
@@ -147,16 +156,55 @@ export function ShopifyConnectPanel({ account }: { account: AdAccount }) {
 
       {(!connected || editing) && (
         <div className="space-y-3">
-          <p className="text-[12.5px] leading-relaxed text-[var(--text-muted)]">
-            In your Shopify admin: Settings → Apps and sales channels → Develop apps →
-            your app → API credentials. Paste the store URL, the{" "}
-            <span className="text-[var(--text-secondary)]">Client ID (API key)</span> and
-            the <span className="text-[var(--text-secondary)]">API secret key</span>{" "}
-            (shpss_…) — copy both from the same tab, as a pair. A direct Admin API
-            access token (shpat_…) works too. We validate against Shopify before
-            saving, and the secret is encrypted at rest — never shown again after
-            this.
-          </p>
+          <div className="space-y-2 rounded-[8px] border border-[var(--border-subtle)] bg-[var(--bg-panel)] px-3.5 py-3 text-[12.5px] leading-relaxed text-[var(--text-muted)]">
+            <p className="label-caps text-[var(--text-secondary)]">How to connect your store</p>
+            <ol className="list-decimal space-y-1.5 pl-4">
+              <li>
+                In your Shopify admin, open{" "}
+                <span className="text-[var(--text-secondary)]">
+                  Settings → Apps and sales channels → Develop apps
+                </span>{" "}
+                and click <span className="text-[var(--text-secondary)]">Create an app</span> (any
+                name, e.g. “Dropscale”).
+              </li>
+              <li>
+                In the app, go to{" "}
+                <span className="text-[var(--text-secondary)]">Configuration</span> →{" "}
+                <span className="text-[var(--text-secondary)]">Admin API integration</span> →{" "}
+                <span className="text-[var(--text-secondary)]">Configure</span>, and enable these
+                read scopes:
+                <ul className="mt-1.5 flex flex-wrap gap-1.5">
+                  <Scope>read_orders</Scope>
+                  <Scope>read_all_orders</Scope>
+                  <Scope>read_fulfillments</Scope>
+                  <Scope>read_inventory</Scope>
+                  <Scope>read_products</Scope>
+                  <Scope>read_reports</Scope>
+                </ul>
+                <span className="mt-1 block text-[11.5px]">
+                  These cover orders (incl. history &amp; refunds), fulfilment, inventory cost,
+                  product prices and analytics — everything the dashboard needs, read-only. We
+                  never write to your store.
+                </span>
+              </li>
+              <li>
+                Click <span className="text-[var(--text-secondary)]">Save</span>, then{" "}
+                <span className="text-[var(--text-secondary)]">Install app</span> (top right).
+              </li>
+              <li>
+                Open the <span className="text-[var(--text-secondary)]">API credentials</span> tab
+                and copy, from the same screen, the{" "}
+                <span className="text-[var(--text-secondary)]">API key (Client ID)</span> and the{" "}
+                <span className="text-[var(--text-secondary)]">API secret key</span> (starts with{" "}
+                <span className="font-mono">shpss_</span>). Paste both below, with your store URL.
+              </li>
+            </ol>
+            <p>
+              We validate the credentials against Shopify before saving; the secret is encrypted
+              at rest and never shown again. A direct Admin API access token (
+              <span className="font-mono">shpat_…</span>) works too, if you already have one.
+            </p>
+          </div>
 
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div className="space-y-1.5">

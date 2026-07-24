@@ -15,6 +15,7 @@ import {
 import { fetchAccounts } from "@/lib/portal/data";
 import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
 import { ConnectAdsBanner } from "@/components/portal/connect-ads-banner";
+import { GettingStartedGuide } from "@/components/portal/getting-started-guide";
 import { ensureDailyCoverage, recomputeDailyMetrics } from "@/lib/metrics/recompute";
 import {
   fetchDailyMetrics,
@@ -75,6 +76,12 @@ export default async function DashboardPage({
   const totals = sumMetrics(rows);
   const { updatedAt } = freshness(rows);
   const currency = visible[0]?.currency ?? "EUR";
+
+  // Connection state drives the first-run guide: an empty dashboard should
+  // teach the next step, not just say "no data".
+  const googleConnected = visible.some((account) => account.google_ads_connected);
+  const shopifyConnected = visible.some((account) => account.shopify_connected);
+  const nothingConnected = !googleConnected && !shopifyConnected;
 
   // Fee respects each account's own commission_rate.
   const rateById = new Map(accounts.map((account) => [account.id, Number(account.commission_rate)]));
@@ -141,13 +148,24 @@ export default async function DashboardPage({
           {hasGoogleAdsEnv() &&
             visible.some((account) => !account.google_ads_connected) && <ConnectAdsBanner />}
 
-          {rows.length === 0 && (
-            <div className="panel flex items-center gap-3 px-4 py-3.5">
-              <Database className="size-4 shrink-0 text-[var(--text-muted)]" />
-              <p className="text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
-                {d.portal.noData} — {d.portal.noDataHelp}
-              </p>
-            </div>
+          {/* Nothing linked yet → walk the client through setup. Once a
+              connection exists but data is still syncing, the quiet banner. */}
+          {nothingConnected ? (
+            <GettingStartedGuide
+              hasAccounts={accounts.length > 0}
+              googleConnected={googleConnected}
+              shopifyConnected={shopifyConnected}
+              showGoogle={hasGoogleAdsEnv()}
+            />
+          ) : (
+            rows.length === 0 && (
+              <div className="panel flex items-center gap-3 px-4 py-3.5">
+                <Database className="size-4 shrink-0 text-[var(--text-muted)]" />
+                <p className="text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
+                  {d.portal.noData} — {d.portal.noDataHelp}
+                </p>
+              </div>
+            )
           )}
 
           {/* Hero — the client's money, RevFlow-style: rev/profit lead. */}
@@ -165,6 +183,7 @@ export default async function DashboardPage({
               icon={TrendingUp}
               value={money(netProfit, currency)}
               hint={`margin ${totals.netRevenue > 0 ? percent(netProfit / totals.netRevenue) : "—"}`}
+              valueClassName={netProfit >= 0 ? "text-neon-green" : "text-[var(--danger-red)]"}
             />
             <MetricCard
               label="Ad Spend"

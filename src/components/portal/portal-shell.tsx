@@ -9,6 +9,7 @@ import type { AdAccount, Client } from "@/lib/supabase/types";
 import type { PendingCounts } from "@/lib/admin/approvals";
 import { BrowserChrome, LiveIndicator } from "@/components/portal/browser-chrome";
 import { NotificationsMenu } from "@/components/admin/notifications-menu";
+import { ClientNotifications } from "@/components/portal/client-notifications";
 import { Sidebar } from "@/components/portal/sidebar";
 import { Topbar } from "@/components/portal/topbar";
 import { UserBadge } from "@/components/portal/user-menu";
@@ -70,6 +71,8 @@ export function PortalShell({
             {/* Admins keep sight of the approval queue even while in the
                 client zone — the zone scopes DATA, not their duties. */}
             {isAdmin && pending && <NotificationsMenu counts={pending} />}
+            {/* The client's own bell: their accounts still awaiting approval. */}
+            <ClientNotifications accounts={accounts} />
             <UserBadge client={client} />
 
             <DialogPrimitive.Root open={mobileNavOpen} onOpenChange={setMobileNavOpen}>
