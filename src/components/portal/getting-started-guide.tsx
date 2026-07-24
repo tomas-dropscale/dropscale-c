@@ -22,11 +22,14 @@ export function GettingStartedGuide({
   hasAccounts,
   googleConnected,
   shopifyConnected,
+  costsSet,
   showGoogle,
 }: {
   hasAccounts: boolean;
   googleConnected: boolean;
   shopifyConnected: boolean;
+  /** Any manual product cost saved yet — marks the costs step done. */
+  costsSet: boolean;
   /** Hide the Google step where Google Ads isn't configured for the platform. */
   showGoogle: boolean;
 }) {
@@ -65,7 +68,7 @@ export function GettingStartedGuide({
       body: "Add product costs under Finance → Costs so your real profit and margin are exact.",
       href: "/dashboard/costs",
       cta: "Open Costs",
-      done: false,
+      done: costsSet,
     },
   ];
 

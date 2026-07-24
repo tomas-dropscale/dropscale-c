@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 
 import { fetchAccounts } from "@/lib/portal/data";
+import { createClient } from "@/lib/supabase/server";
 import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
 import { ConnectAdsBanner } from "@/components/portal/connect-ads-banner";
 import { GettingStartedGuide } from "@/components/portal/getting-started-guide";
@@ -77,11 +78,23 @@ export default async function DashboardPage({
   const { updatedAt } = freshness(rows);
   const currency = visible[0]?.currency ?? "EUR";
 
-  // Connection state drives the first-run guide: an empty dashboard should
-  // teach the next step, not just say "no data".
+  // Setup state drives the first-run guide. It does NOT vanish after the first
+  // connection: it stays, ticking each step off, until EVERY applicable step is
+  // done. Costs count as set once any manual product cost exists (RLS scopes
+  // the check to this client's own products).
   const googleConnected = visible.some((account) => account.google_ads_connected);
   const shopifyConnected = visible.some((account) => account.shopify_connected);
-  const nothingConnected = !googleConnected && !shopifyConnected;
+
+  const supabase = await createClient();
+  const { data: costRows } = await supabase.from("product_costs").select("id").limit(1);
+  const costsSet = (costRows?.length ?? 0) > 0;
+
+  const needsGoogle = hasGoogleAdsEnv();
+  const setupComplete =
+    accounts.length > 0 &&
+    (needsGoogle ? googleConnected : true) &&
+    shopifyConnected &&
+    costsSet;
 
   // Fee respects each account's own commission_rate.
   const rateById = new Map(accounts.map((account) => [account.id, Number(account.commission_rate)]));
@@ -148,14 +161,16 @@ export default async function DashboardPage({
           {hasGoogleAdsEnv() &&
             visible.some((account) => !account.google_ads_connected) && <ConnectAdsBanner />}
 
-          {/* Nothing linked yet → walk the client through setup. Once a
-              connection exists but data is still syncing, the quiet banner. */}
-          {nothingConnected ? (
+          {/* Setup still in progress → keep the guide up, ticking off each
+              step as it's done. Once everything's set but data is still
+              syncing, the quiet banner. */}
+          {!setupComplete ? (
             <GettingStartedGuide
               hasAccounts={accounts.length > 0}
               googleConnected={googleConnected}
               shopifyConnected={shopifyConnected}
-              showGoogle={hasGoogleAdsEnv()}
+              costsSet={costsSet}
+              showGoogle={needsGoogle}
             />
           ) : (
             rows.length === 0 && (
