@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
-import { PackageOpen, Database } from "lucide-react";
+import Link from "next/link";
+import { cookies } from "next/headers";
+import { ArrowRight, Info, PackageOpen, Database } from "lucide-react";
 import {
   BadgeDollarSign,
   Coins,
@@ -15,7 +17,6 @@ import {
 import { fetchAccounts } from "@/lib/portal/data";
 import { createClient } from "@/lib/supabase/server";
 import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
-import { ConnectAdsBanner } from "@/components/portal/connect-ads-banner";
 import { GettingStartedGuide } from "@/components/portal/getting-started-guide";
 import { ensureDailyCoverage, recomputeDailyMetrics } from "@/lib/metrics/recompute";
 import {
@@ -86,15 +87,42 @@ export default async function DashboardPage({
   const shopifyConnected = visible.some((account) => account.shopify_connected);
 
   const supabase = await createClient();
-  const { data: costRows } = await supabase.from("product_costs").select("id").limit(1);
-  const costsSet = (costRows?.length ?? 0) > 0;
+
+  // Products of the visible stores, and how many still have NO cost (no manual
+  // cost and not in a bundle) — those fall back to the default percentage.
+  const { data: productRows } =
+    visible.length > 0
+      ? await supabase.from("store_products").select("id").in("ad_account_id", visible.map((a) => a.id))
+      : { data: [] as { id: string }[] };
+  const products = productRows ?? [];
+
+  let uncostedCount = 0;
+  let hasAnyCost = false;
+  if (products.length > 0) {
+    const productIds = products.map((product) => product.id);
+    const [costsRes, membersRes] = await Promise.all([
+      supabase.from("product_costs").select("product_id").in("product_id", productIds),
+      supabase.from("cogs_collection_members").select("product_id").in("product_id", productIds),
+    ]);
+    const costed = new Set<string>();
+    for (const row of costsRes.data ?? []) costed.add(row.product_id);
+    for (const row of membersRes.data ?? []) costed.add(row.product_id);
+    hasAnyCost = (costsRes.data ?? []).length > 0;
+    uncostedCount = products.filter((product) => !costed.has(product.id)).length;
+  }
+
+  // The costs step counts as done once a cost is set OR the client has simply
+  // opened the Costs page (cookie set by VisitMarker there) — so the guide can
+  // complete even if they keep the default percentage.
+  const cogsVisited = (await cookies()).get("cogs_visited")?.value === "1";
+  const costsDone = hasAnyCost || cogsVisited;
 
   const needsGoogle = hasGoogleAdsEnv();
   const setupComplete =
     accounts.length > 0 &&
     (needsGoogle ? googleConnected : true) &&
     shopifyConnected &&
-    costsSet;
+    costsDone;
 
   // Fee respects each account's own commission_rate.
   const rateById = new Map(accounts.map((account) => [account.id, Number(account.commission_rate)]));
@@ -156,16 +184,34 @@ export default async function DashboardPage({
         </div>
       ) : (
         <div className="space-y-4">
-          {/* Real zeroes beat a blank page: the dashboard always renders, and
-              a missing connection explains itself instead of hiding it. */}
-          {hasGoogleAdsEnv() &&
-            visible.some((account) => !account.google_ads_connected) && <ConnectAdsBanner />}
+          {/* While any product has no cost, nudge — those sales use the default
+              percentage, so profit isn't exact until they're filled in. */}
+          {uncostedCount > 0 && (
+            <Link
+              href="/dashboard/costs"
+              className="transition-smooth flex items-center gap-3 rounded-[var(--radius-card)] border border-[#5b93d6]/30 bg-[#5b93d6]/12 px-4 py-3.5 hover:border-[#5b93d6]/55"
+            >
+              <Info className="size-4 shrink-0 text-[#7db0ea]" />
+              <span className="min-w-0 flex-1">
+                <span className="block text-[13.5px] font-semibold text-[var(--text-primary)]">
+                  {uncostedCount} {uncostedCount === 1 ? "product has" : "products have"} no cost set
+                </span>
+                <span className="block text-[12.5px] text-[var(--text-secondary)]">
+                  They fall back to the default percentage — set their cost for exact profit and margin.
+                </span>
+              </span>
+              <span className="flex shrink-0 items-center gap-1 text-[12px] font-medium text-[#7db0ea]">
+                Set costs
+                <ArrowRight className="size-3.5" />
+              </span>
+            </Link>
+          )}
 
           {/* Setup still in progress → keep the guide up, ticking off each
               step as it's done. Once everything's set but data is still
               syncing, the quiet banner. */}
           {!setupComplete ? (
-            <GettingStartedGuide accounts={visible} costsSet={costsSet} showGoogle={needsGoogle} />
+            <GettingStartedGuide accounts={visible} costsSet={costsDone} showGoogle={needsGoogle} />
           ) : (
             rows.length === 0 && (
               <div className="panel flex items-center gap-3 px-4 py-3.5">
