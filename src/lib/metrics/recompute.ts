@@ -209,6 +209,8 @@ async function syncAccountWindow(
           }
 
           for (const order of result.orders as SyncedOrder[]) {
+            // The revenue share is billed on PAID revenue only.
+            if (!order.paid) continue;
             const rate = rates ? rateOn(rates, order.date) : 1;
             const attributed = orderRevShare(
               {

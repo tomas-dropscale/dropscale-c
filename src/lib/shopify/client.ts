@@ -208,6 +208,8 @@ export type SyncedOrder = {
   date: string;
   /** Current total (after discounts, incl. shipping), store base currency. */
   total: number;
+  /** Whether the customer actually paid — the revenue-share base uses only these. */
+  paid: boolean;
   /** Path the customer FIRST landed on (rev-share landing rule), or null. */
   landingPath: string | null;
   lines: SyncedOrderLine[];
@@ -218,9 +220,9 @@ export type SyncedOrder = {
 const PAGE_SIZE = 250;
 const MAX_PAGES = 10;
 
-// Revenue counts only orders the customer actually PAID for — a pending or
-// authorised-but-not-captured order is not a sale yet and must not inflate
-// revenue, orders or COGS. Refunds keep their sale (it was paid, then returned).
+// Which financial statuses count as "the customer paid". This does NOT gate the
+// dashboard's revenue (that is the TOTAL of all real orders, to match Shopify) —
+// it only tags each order so the agency REVENUE SHARE is billed on paid revenue.
 const PAID_FINANCIAL_STATUSES = new Set([
   "PAID",
   "PARTIALLY_PAID",
@@ -236,8 +238,9 @@ const PAID_FINANCIAL_STATUSES = new Set([
  * creation day too — a simplification (Shopify refunds carry their own dates)
  * that keeps one query and matches how the P&L will read it.
  *
- * Only PAID orders count. Pending / authorised orders are excluded entirely
- * (revenue, orders and COGS) until the customer actually pays.
+ * Revenue is the TOTAL of every real order (test/cancelled aside), so it lines
+ * up with Shopify's own sales. Payment status doesn't gate it — it's only
+ * carried per order (`paid`) so the agency revenue share bills paid revenue.
  */
 export async function fetchDailySales(
   shopDomain: string,
@@ -311,10 +314,12 @@ export async function fetchDailySales(
       // these is less reliable than the fields themselves.
       if (order.test || order.cancelledAt) continue;
 
-      // Revenue is PAID orders only: a pending / authorised order hasn't been
-      // paid, so it counts nowhere (revenue, orders or COGS) until it is.
-      if (!order.displayFinancialStatus || !PAID_FINANCIAL_STATUSES.has(order.displayFinancialStatus))
-        continue;
+      // Every real order counts toward revenue (matching Shopify). Payment
+      // status is kept per order, not used to exclude — only the revenue share
+      // narrows to paid orders.
+      const paid =
+        !!order.displayFinancialStatus &&
+        PAID_FINANCIAL_STATUSES.has(order.displayFinancialStatus);
 
       const day = order.createdAt.slice(0, 10);
       const total = Number(order.currentTotalPriceSet?.shopMoney.amount ?? 0);
@@ -327,6 +332,7 @@ export async function fetchDailySales(
       syncedOrders.push({
         date: day,
         total,
+        paid,
         landingPath: order.customerJourneySummary?.firstVisit?.landingPage ?? null,
         lines: order.lineItems.nodes.map((line) => ({
           productKey: line.sku?.trim() || line.title,
