@@ -104,6 +104,7 @@ export async function syncCommissionLedger(): Promise<void> {
             .from("commissions")
             .select("id, occurred_on, gross_amount")
             .eq("ad_account_id", account.id)
+            .eq("source_id", source.id)
             .in("occurred_on", days.map((day) => day.date));
           const existing = new Map(
             (existingRows ?? []).map((row) => [row.occurred_on, row]),
@@ -154,5 +155,129 @@ export async function syncCommissionLedger(): Promise<void> {
   } catch (error) {
     // The ledger must never take a finance page down with it.
     console.error("Commission sync failed:", error);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Revenue-share ledger
+// ---------------------------------------------------------------------------
+
+const REV_SHARE_SOURCE = "Revenue Share";
+const REV_SHARE_WINDOW_DAYS = 90;
+let lastRevShareRunAt = 0;
+
+function isoDay(offsetDays: number): string {
+  return new Date(Date.now() + offsetDays * 86_400_000).toISOString().slice(0, 10);
+}
+
+/**
+ * Books the collection-based revenue share into the finance ledger: one
+ * commissions row per rev-share account per day, read straight from the
+ * daily_metrics the sync already computed (revenue_share_amount). No external
+ * calls — attribution happened at sync time — so this is a cheap DB pass that
+ * rides the admin's session, throttled and idempotent like the ad-spend ledger.
+ */
+export async function syncRevenueShareLedger(): Promise<void> {
+  if (Date.now() - lastRevShareRunAt < THROTTLE_MS) return;
+
+  try {
+    const supabase = await createClient();
+
+    const { data: source } = await supabase
+      .from("revenue_sources")
+      .select("id")
+      .eq("name", REV_SHARE_SOURCE)
+      .maybeSingle();
+    if (!source) {
+      console.error("Rev-share sync: revenue source missing — run migration 0010.");
+      return;
+    }
+
+    const { data: accountRows } = await supabase
+      .from("ad_accounts")
+      .select("id, client_id, store_name, currency, revenue_share_enabled")
+      .eq("revenue_share_enabled", true);
+    const accounts = (accountRows ?? []) as unknown as Pick<
+      AdAccount,
+      "id" | "client_id" | "store_name" | "currency" | "revenue_share_enabled"
+    >[];
+    if (accounts.length === 0) {
+      lastRevShareRunAt = Date.now();
+      return;
+    }
+
+    const { data: portalClients } = await supabase
+      .from("portal_clients")
+      .select("id, crm_client_id")
+      .in("id", [...new Set(accounts.map((account) => account.client_id))]);
+    const crmByLogin = new Map((portalClients ?? []).map((row) => [row.id, row.crm_client_id]));
+
+    const from = isoDay(-REV_SHARE_WINDOW_DAYS);
+    const accountIds = accounts.map((account) => account.id);
+
+    // The days that actually carry a rev-share amount, straight from the rollup.
+    const { data: metricRows } = await supabase
+      .from("daily_metrics")
+      .select("ad_account_id, day, revenue_share_base, revenue_share_amount")
+      .in("ad_account_id", accountIds)
+      .gte("day", from)
+      .gt("revenue_share_amount", 0);
+    if (!metricRows || metricRows.length === 0) {
+      lastRevShareRunAt = Date.now();
+      return;
+    }
+
+    // Existing rev-share rows in the window, keyed (account|day), to update in place.
+    const { data: existingRows } = await supabase
+      .from("commissions")
+      .select("id, ad_account_id, occurred_on, amount")
+      .eq("source_id", source.id)
+      .in("ad_account_id", accountIds)
+      .gte("occurred_on", from);
+    const existing = new Map(
+      (existingRows ?? []).map((row) => [`${row.ad_account_id}|${row.occurred_on}`, row]),
+    );
+
+    const accountById = new Map(accounts.map((account) => [account.id, account]));
+
+    await Promise.all(
+      metricRows.map(async (metric) => {
+        const account = accountById.get(metric.ad_account_id);
+        if (!account) return;
+
+        const base = Number(metric.revenue_share_base);
+        const amount = Number(metric.revenue_share_amount);
+        const rate = base > 0 ? (amount / base) * 100 : 0; // blended, for display
+        const current = existing.get(`${metric.ad_account_id}|${metric.day}`);
+
+        try {
+          if (!current) {
+            await supabase.from("commissions").insert({
+              source_id: source.id,
+              client_id: crmByLogin.get(account.client_id) ?? null,
+              ad_account_id: account.id,
+              occurred_on: metric.day,
+              gross_amount: base,
+              rate,
+              amount,
+              currency: account.currency,
+              status: "confirmed",
+              notes: `Auto-synced revenue share · ${account.store_name}`,
+            });
+          } else if (Math.abs(Number(current.amount) - amount) > 0.01) {
+            await supabase
+              .from("commissions")
+              .update({ gross_amount: base, rate, amount, updated_at: new Date().toISOString() })
+              .eq("id", current.id);
+          }
+        } catch (error) {
+          console.error(`Rev-share book failed for ${account.id} ${metric.day}:`, error);
+        }
+      }),
+    );
+
+    lastRevShareRunAt = Date.now();
+  } catch (error) {
+    console.error("Rev-share sync failed:", error);
   }
 }

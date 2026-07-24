@@ -208,6 +208,8 @@ export type SyncedOrder = {
   date: string;
   /** Current total (after discounts, incl. shipping), store base currency. */
   total: number;
+  /** Path the customer FIRST landed on (rev-share landing rule), or null. */
+  landingPath: string | null;
   lines: SyncedOrderLine[];
 };
 
@@ -258,6 +260,7 @@ export async function fetchDailySales(
           test: boolean;
           cancelledAt: string | null;
           displayFinancialStatus: string | null;
+          customerJourneySummary: { firstVisit: { landingPage: string | null } | null } | null;
           currentTotalPriceSet: { shopMoney: { amount: string } } | null;
           totalRefundedSet: { shopMoney: { amount: string } } | null;
           lineItems: {
@@ -282,6 +285,7 @@ export async function fetchDailySales(
             test
             cancelledAt
             displayFinancialStatus
+            customerJourneySummary { firstVisit { landingPage } }
             currentTotalPriceSet { shopMoney { amount } }
             totalRefundedSet { shopMoney { amount } }
             lineItems(first: 100) {
@@ -323,6 +327,7 @@ export async function fetchDailySales(
       syncedOrders.push({
         date: day,
         total,
+        landingPath: order.customerJourneySummary?.firstVisit?.landingPage ?? null,
         lines: order.lineItems.nodes.map((line) => ({
           productKey: line.sku?.trim() || line.title,
           title: line.title,
@@ -343,4 +348,68 @@ export async function fetchDailySales(
       .sort((a, b) => a.date.localeCompare(b.date)),
     orders: syncedOrders,
   };
+}
+
+/**
+ * Product keys (variant SKU, else product title — how order line items are
+ * keyed) for every product in a collection, by handle. Returns an empty set
+ * when the collection is missing or read_products isn't granted, so the
+ * rev-share simply falls back to its landing-page rule.
+ */
+export async function fetchCollectionProductKeys(
+  shopDomain: string,
+  accessToken: string,
+  handle: string,
+): Promise<Set<string>> {
+  const keys = new Set<string>();
+  let cursor: string | null = null;
+
+  for (let page = 0; page < MAX_PAGES; page++) {
+    let data: {
+      collectionByHandle: {
+        products: {
+          pageInfo: { hasNextPage: boolean; endCursor: string | null };
+          nodes: { title: string; variants: { nodes: { sku: string | null }[] } }[];
+        };
+      } | null;
+    };
+    try {
+      data = await shopifyGraphql(
+        shopDomain,
+        accessToken,
+        `query ($handle: String!, $cursor: String) {
+          collectionByHandle(handle: $handle) {
+            products(first: ${PAGE_SIZE}, after: $cursor) {
+              pageInfo { hasNextPage endCursor }
+              nodes {
+                title
+                variants(first: 100) { nodes { sku } }
+              }
+            }
+          }
+        }`,
+        { handle, cursor },
+      );
+    } catch {
+      // Missing scope, removed field, or unknown handle — degrade to empty.
+      return keys;
+    }
+
+    const collection = data.collectionByHandle;
+    if (!collection) return keys;
+
+    for (const product of collection.products.nodes) {
+      // Add both: SKU-keyed lines and (for SKU-less products) title-keyed lines.
+      if (product.title) keys.add(product.title);
+      for (const variant of product.variants.nodes) {
+        const sku = variant.sku?.trim();
+        if (sku) keys.add(sku);
+      }
+    }
+
+    if (!collection.products.pageInfo.hasNextPage) break;
+    cursor = collection.products.pageInfo.endCursor;
+  }
+
+  return keys;
 }

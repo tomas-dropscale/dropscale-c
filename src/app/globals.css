@@ -191,15 +191,11 @@
 }
 
 /*
- * Net Profit hero: a bright neon-green value with a green halo. Unlike the
- * deliberately-quiet gold, this one is meant to pop — it is the number the
- * client cares about most. Brighter and more saturated than --success-green.
+ * Net Profit hero: just a bright neon-green value — no halo/box, the glow read
+ * as a green box behind the number. The saturated colour alone carries it.
  */
 .text-neon-green {
   color: #2bff88;
-  text-shadow:
-    0 0 22px rgba(43, 255, 136, 0.5),
-    0 0 6px rgba(43, 255, 136, 0.35);
 }
 
 /*

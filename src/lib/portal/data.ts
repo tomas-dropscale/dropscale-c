@@ -37,7 +37,8 @@ export const ACCOUNT_COLUMNS =
   "lifetime_ads_budget_usd, shopify_url, shopify_connected, shopify_client_id, shopify_scopes, " +
   "color_dot, created_at, google_ads_connected_email, google_ads_connected, commission_rate, " +
   "shopify_token_last4, shopify_connected_at, " +
-  "default_product_cost_pct, payment_fee_pct, payment_fee_fixed, shipping_cost_per_order";
+  "default_product_cost_pct, payment_fee_pct, payment_fee_fixed, shipping_cost_per_order, " +
+  "revenue_share_enabled";
 
 /**
  * The portal is the CLIENT's zone, so every read here is pinned to the

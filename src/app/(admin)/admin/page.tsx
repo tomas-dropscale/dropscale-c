@@ -4,7 +4,7 @@ import { redirect } from "next/navigation";
 import { OverviewView } from "@/components/finance/overview-view";
 import { createClient, getSessionProfile } from "@/lib/supabase/server";
 import { fetchFinanceSnapshot } from "@/lib/finance/queries";
-import { syncCommissionLedger } from "@/lib/admin/commission-sync";
+import { syncCommissionLedger, syncRevenueShareLedger } from "@/lib/admin/commission-sync";
 import { getServerDictionary } from "@/lib/i18n/server";
 import { DEFAULT_FINANCE_RANGE, defaultBounds } from "@/lib/finance/defaults";
 
@@ -17,8 +17,9 @@ export default async function OverviewPage() {
   const { profile } = await getSessionProfile();
   if (!profile) redirect("/login");
 
-  // Fresh Google Ads commissions before reading; throttled to once an hour.
+  // Fresh Google Ads commissions + revenue share before reading; throttled.
   await syncCommissionLedger();
+  await syncRevenueShareLedger();
 
   const supabase = await createClient();
   const { from, to } = defaultBounds();

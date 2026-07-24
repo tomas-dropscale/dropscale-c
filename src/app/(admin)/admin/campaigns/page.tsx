@@ -118,6 +118,7 @@ export default async function AdminCampaignsPage({
                     <CommissionRate
                       accountId={entry.account.id}
                       rate={Number(entry.account.commission_rate)}
+                      revenueShareEnabled={entry.account.revenue_share_enabled}
                     />
                     {!entry.connected && (
                       <Badge variant="warning">

@@ -21,6 +21,8 @@ export type DailyMetricRow = {
   product_cost: number;
   payment_fees: number;
   shipping_cost: number;
+  revenue_share_base: number;
+  revenue_share_amount: number;
   computed_at: string;
 };
 

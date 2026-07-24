@@ -20,8 +20,13 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 import { decryptToken } from "@/lib/google-ads/crypto";
 import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
-import { fetchLiveDailyBreakdown, type DailyBreakdown } from "@/lib/google-ads/portal";
 import {
+  fetchCampaignNames,
+  fetchLiveDailyBreakdown,
+  type DailyBreakdown,
+} from "@/lib/google-ads/portal";
+import {
+  fetchCollectionProductKeys,
   fetchDailySales,
   resolveAdminToken,
   type DailySales,
@@ -30,6 +35,7 @@ import {
 import { fxDailyRates, rateOn } from "@/lib/shopify/fx";
 import { orderCogs, paymentFee } from "@/lib/cogs/engine";
 import { loadCostContext, registerSoldProducts } from "@/lib/cogs/context";
+import { dealsFromCampaigns, orderRevShare, type AttributionDeal } from "@/lib/finance/rev-share";
 import type { AdAccount, Database } from "@/lib/supabase/types";
 
 export const RECOMPUTE_INTERVAL_MS = 15 * 60 * 1000;
@@ -111,6 +117,8 @@ async function syncAccountWindow(
   let sales: DailySales[] = [];
   // Per-day cost chain (reporting currency): COGS, payment fees, shipping.
   const costByDay = new Map<string, { product: number; fees: number; shipping: number }>();
+  // Per-day revenue share (reporting currency): base revenue + billed amount.
+  const revShareByDay = new Map<string, { base: number; amount: number }>();
 
   if (account.shopify_connected && account.shopify_url && secret?.shopify_admin_token) {
     // The stored credential may be a direct shpat_ token or the app's shpss_
@@ -171,6 +179,59 @@ async function syncAccountWindow(
         costByDay.set(order.date, entry);
       }
     }
+
+    // ---- revenue share (collection-based), reporting currency -------------
+    // Deals come from the Google Ads campaign NAMES (collection URL + rate);
+    // attribution is by collection membership or landing page. Fully isolated:
+    // a failure here never blocks the revenue/COGS rollup.
+    if (
+      account.revenue_share_enabled &&
+      result.orders.length > 0 &&
+      hasGoogleAdsEnv() &&
+      account.google_ads_connected &&
+      account.google_ads_customer_id &&
+      secret?.google_ads_refresh_token
+    ) {
+      try {
+        const googleToken = await decryptToken(secret.google_ads_refresh_token);
+        const names = await fetchCampaignNames(account.google_ads_customer_id, googleToken);
+        const dealMap = dealsFromCampaigns(names);
+
+        if (dealMap.size > 0) {
+          const deals: AttributionDeal[] = [];
+          for (const deal of dealMap.values()) {
+            const productKeys = await fetchCollectionProductKeys(
+              account.shopify_url!,
+              token,
+              deal.handle,
+            );
+            deals.push({ ...deal, productKeys });
+          }
+
+          for (const order of result.orders as SyncedOrder[]) {
+            const rate = rates ? rateOn(rates, order.date) : 1;
+            const attributed = orderRevShare(
+              {
+                total: order.total * rate,
+                landingPath: order.landingPath,
+                lines: order.lines.map((line) => ({
+                  productKey: line.productKey,
+                  revenue: line.unitPrice * line.quantity * rate,
+                })),
+              },
+              deals,
+            );
+            if (attributed.amount <= 0 && attributed.base <= 0) continue;
+            const entry = revShareByDay.get(order.date) ?? { base: 0, amount: 0 };
+            entry.base += attributed.base;
+            entry.amount += attributed.amount;
+            revShareByDay.set(order.date, entry);
+          }
+        }
+      } catch (error) {
+        console.error(`revenue-share sync failed for ${account.id}:`, error);
+      }
+    }
   }
 
   if (google.length === 0 && sales.length === 0) return;
@@ -183,6 +244,7 @@ async function syncAccountWindow(
     const ads = googleByDay.get(day);
     const shop = salesByDay.get(day);
     const costs = costByDay.get(day);
+    const rev = revShareByDay.get(day);
     return {
       ad_account_id: account.id,
       day,
@@ -197,6 +259,8 @@ async function syncAccountWindow(
       product_cost: costs?.product ?? 0,
       payment_fees: costs?.fees ?? 0,
       shipping_cost: costs?.shipping ?? 0,
+      revenue_share_base: rev?.base ?? 0,
+      revenue_share_amount: rev?.amount ?? 0,
       computed_at: new Date().toISOString(),
     };
   });

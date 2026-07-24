@@ -20,6 +20,25 @@ const STATUS: Record<string, CampaignStatus> = {
 const micros = (value: unknown) => Number(value ?? 0) / 1_000_000;
 const num = (value: unknown) => Number(value ?? 0);
 
+/**
+ * Just the names of an account's non-removed campaigns — for rev-share deal
+ * discovery (the deal's collection + rate are encoded in the campaign name).
+ * No metrics, so no date clause is needed.
+ */
+export async function fetchCampaignNames(
+  customerId: string,
+  refreshToken: string,
+): Promise<string[]> {
+  const rows = await searchGoogleAds(
+    customerId,
+    refreshToken,
+    `SELECT campaign.name FROM campaign WHERE campaign.status != 'REMOVED'`,
+  );
+  return rows
+    .map((row: GaqlRow) => String(row.campaign?.name ?? "").trim())
+    .filter((name) => name.length > 0);
+}
+
 /** Live campaigns for one customer, shaped exactly like the DB/mock rows. */
 export async function fetchLiveCampaigns(
   customerId: string,

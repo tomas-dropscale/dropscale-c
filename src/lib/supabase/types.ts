@@ -221,6 +221,9 @@ export type AdAccount = {
   payment_fee_pct: number;
   payment_fee_fixed: number;
   shipping_cost_per_order: number;
+  // Agency revenue share (migration 0010); admin-only via the same guard.
+  // Rate is not stored here — it lives in the Google Ads campaign name.
+  revenue_share_enabled: boolean;
 };
 
 export type AccountRequest = {
@@ -265,6 +268,9 @@ export type DailyMetric = {
   product_cost: number;
   payment_fees: number;
   shipping_cost: number;
+  // Revenue share (migration 0010), reporting currency.
+  revenue_share_base: number;
+  revenue_share_amount: number;
   computed_at: string;
 };
 
@@ -590,6 +596,7 @@ export type Database = {
           | "payment_fee_pct"
           | "payment_fee_fixed"
           | "shipping_cost_per_order"
+          | "revenue_share_enabled"
         >;
         Update: Partial<AdAccount>;
         Relationships: [
@@ -756,6 +763,8 @@ export type Database = {
           | "product_cost"
           | "payment_fees"
           | "shipping_cost"
+          | "revenue_share_base"
+          | "revenue_share_amount"
           | "computed_at"
         >;
         Update: Partial<DailyMetric>;
