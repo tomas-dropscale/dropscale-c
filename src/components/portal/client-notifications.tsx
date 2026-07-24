@@ -1,12 +1,14 @@
 "use client";
 
 import * as React from "react";
-import { Bell, Clock } from "lucide-react";
+import Link from "next/link";
+import { Bell, Boxes, Clock, PlugZap, ShoppingBag, Store, type LucideIcon } from "lucide-react";
 
 import type { AdAccount } from "@/lib/supabase/types";
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
@@ -14,16 +16,14 @@ import { fmt } from "@/lib/i18n";
 import { useI18n } from "@/lib/i18n/provider";
 
 /**
- * The client's own notification bell, sat next to their profile.
- *
- * Deliberately state-free: there is no notifications table. The one thing a
- * client waits on is a newly-added account being approved, so the bell simply
- * reflects how many of THEIR accounts are still `pending` — derived from the
- * accounts the shell already has. A soft chime plays when a new pending
- * account appears (e.g. the moment they add one), never on first paint.
+ * The client's own notification bell, next to their profile. State-free (no
+ * notifications table): it reflects two things until they're resolved —
+ *   1. store SETUP steps still open (connect Google/Shopify, set costs);
+ *   2. accounts still PENDING team approval.
+ * A soft chime plays when the count rises (e.g. a new pending account), never
+ * on first paint.
  */
 
-/** A soft two-note chime, synthesised so we ship no audio asset. */
 function playChime() {
   try {
     const Ctx =
@@ -50,17 +50,68 @@ function playChime() {
   }
 }
 
-export function ClientNotifications({ accounts }: { accounts: AdAccount[] }) {
+type SetupTask = { key: string; label: string; help: string; href: string; icon: LucideIcon };
+
+export function ClientNotifications({
+  accounts,
+  setup,
+}: {
+  accounts: AdAccount[];
+  setup?: { needsGoogle: boolean; costsDone: boolean };
+}) {
   const { d } = useI18n();
 
   const pending = React.useMemo(
     () => accounts.filter((account) => account.status === "pending"),
     [accounts],
   );
-  const count = pending.length;
 
-  // Chime only when the count RISES (a new pending account). Seeded on mount so
-  // an initial load that already has pending accounts stays silent.
+  const setupTasks = React.useMemo<SetupTask[]>(() => {
+    if (!setup) return [];
+    const hasAccounts = accounts.length > 0;
+    const googleConnected = accounts.some((account) => account.google_ads_connected);
+    const shopifyConnected = accounts.some((account) => account.shopify_connected);
+
+    const tasks: SetupTask[] = [];
+    if (!hasAccounts)
+      tasks.push({
+        key: "store",
+        label: "Add your store",
+        help: "Create your store account",
+        href: "/dashboard/settings/accounts",
+        icon: Store,
+      });
+    if (setup.needsGoogle && !googleConnected)
+      tasks.push({
+        key: "google",
+        label: "Connect Google Ads",
+        help: "Bring in spend, ROAS & conversions",
+        href: "/dashboard/settings/accounts",
+        icon: PlugZap,
+      });
+    if (!shopifyConnected)
+      tasks.push({
+        key: "shopify",
+        label: "Connect Shopify",
+        help: "Bring in revenue, orders & refunds",
+        href: "/dashboard/settings/connections",
+        icon: ShoppingBag,
+      });
+    if (!setup.costsDone)
+      tasks.push({
+        key: "cogs",
+        label: "Set your product costs",
+        help: "For exact profit and margin",
+        href: "/dashboard/costs",
+        icon: Boxes,
+      });
+    return tasks;
+  }, [accounts, setup]);
+
+  const count = setupTasks.length + pending.length;
+
+  // Chime only when the count RISES. Seeded on mount so a first load with open
+  // items stays silent.
   const prev = React.useRef<number | null>(null);
   React.useEffect(() => {
     if (prev.current !== null && count > prev.current) playChime();
@@ -75,25 +126,17 @@ export function ClientNotifications({ accounts }: { accounts: AdAccount[] }) {
       >
         <Bell className="size-4" aria-hidden />
         {count > 0 && (
-          <span
-            className="absolute -top-0.5 -right-0.5 flex min-w-[15px] items-center justify-center rounded-full bg-[var(--warning-orange)] px-1 text-[9px] font-semibold text-[var(--bg-base)]"
-            aria-label={fmt(d.notifications.awaitingApproval, { count })}
-          >
+          <span className="absolute -top-0.5 -right-0.5 flex min-w-[15px] items-center justify-center rounded-full bg-[var(--warning-orange)] px-1 text-[9px] font-semibold text-[var(--bg-base)]">
             {count > 9 ? "9+" : count}
           </span>
         )}
       </DropdownMenuTrigger>
 
-      <DropdownMenuContent align="end" className="min-w-[280px]">
-        <div className="flex items-baseline justify-between gap-2 px-2.5 py-2.5">
+      <DropdownMenuContent align="end" className="min-w-[300px]">
+        <div className="px-2.5 py-2.5">
           <p className="text-[13px] font-medium text-[var(--text-primary)]">
             {d.notifications.title}
           </p>
-          {count > 0 && (
-            <span className="text-[11.5px] text-[var(--text-muted)]">
-              {fmt(d.notifications.awaitingApproval, { count })}
-            </span>
-          )}
         </div>
 
         <DropdownMenuSeparator />
@@ -103,24 +146,56 @@ export function ClientNotifications({ accounts }: { accounts: AdAccount[] }) {
             {d.notifications.empty}
           </p>
         ) : (
-          <ul className="py-1">
-            {pending.map((account) => (
-              <li key={account.id} className="flex items-start gap-2.5 px-2.5 py-2">
-                <Clock
-                  className="mt-0.5 size-4 shrink-0 text-[var(--warning-orange)]"
-                  aria-hidden
-                />
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-[13px] text-[var(--text-primary)]">
-                    {account.store_name}
-                  </span>
-                  <span className="block text-[11.5px] text-[var(--text-muted)]">
-                    {d.portal.accountPending}
-                  </span>
-                </span>
-              </li>
-            ))}
-          </ul>
+          <>
+            {setupTasks.length > 0 && (
+              <>
+                <p className="label-caps px-2.5 pt-2 pb-1 text-[var(--text-muted)]">Finish setup</p>
+                {setupTasks.map((task) => (
+                  <DropdownMenuItem key={task.key} asChild>
+                    <Link href={task.href} className="items-start gap-2.5">
+                      <task.icon
+                        className="mt-0.5 size-4 shrink-0 text-[var(--accent-gold)]"
+                        aria-hidden
+                      />
+                      <span className="min-w-0 flex-1">
+                        <span className="block text-[13px] text-[var(--text-primary)]">
+                          {task.label}
+                        </span>
+                        <span className="block text-[11.5px] text-[var(--text-muted)]">
+                          {task.help}
+                        </span>
+                      </span>
+                    </Link>
+                  </DropdownMenuItem>
+                ))}
+              </>
+            )}
+
+            {pending.length > 0 && (
+              <>
+                {setupTasks.length > 0 && <DropdownMenuSeparator />}
+                <p className="label-caps px-2.5 pt-2 pb-1 text-[var(--text-muted)]">
+                  {fmt(d.notifications.awaitingApproval, { count: pending.length })}
+                </p>
+                {pending.map((account) => (
+                  <div key={account.id} className="flex items-start gap-2.5 px-2.5 py-2">
+                    <Clock
+                      className="mt-0.5 size-4 shrink-0 text-[var(--warning-orange)]"
+                      aria-hidden
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[13px] text-[var(--text-primary)]">
+                        {account.store_name}
+                      </span>
+                      <span className="block text-[11.5px] text-[var(--text-muted)]">
+                        {d.portal.accountPending}
+                      </span>
+                    </span>
+                  </div>
+                ))}
+              </>
+            )}
+          </>
         )}
       </DropdownMenuContent>
     </DropdownMenu>

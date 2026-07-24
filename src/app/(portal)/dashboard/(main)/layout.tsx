@@ -1,6 +1,9 @@
-import { getSessionClient, getSessionProfile } from "@/lib/supabase/server";
+import { cookies } from "next/headers";
+
+import { createClient, getSessionClient, getSessionProfile } from "@/lib/supabase/server";
 import { fetchAccounts } from "@/lib/portal/data";
 import { fetchPendingCounts } from "@/lib/admin/approvals";
+import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
 import { PortalShell } from "@/components/portal/portal-shell";
 
 /**
@@ -21,8 +24,19 @@ export default async function MainLayout({ children }: { children: React.ReactNo
   const isAdmin = profile?.role === "admin";
   const pending = isAdmin ? await fetchPendingCounts() : null;
 
+  // Onboarding state for the notification bell: the store's setup steps stay in
+  // the bell until every one is done. Costs count once a cost exists OR the
+  // Costs page has been opened (VisitMarker's cookie).
+  const supabase = await createClient();
+  const { data: costRows } = await supabase.from("product_costs").select("id").limit(1);
+  const cogsVisited = (await cookies()).get("cogs_visited")?.value === "1";
+  const setup = {
+    needsGoogle: hasGoogleAdsEnv(),
+    costsDone: (costRows?.length ?? 0) > 0 || cogsVisited,
+  };
+
   return (
-    <PortalShell client={client} accounts={accounts} isAdmin={isAdmin} pending={pending}>
+    <PortalShell client={client} accounts={accounts} isAdmin={isAdmin} pending={pending} setup={setup}>
       {children}
     </PortalShell>
   );

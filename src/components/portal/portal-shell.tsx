@@ -28,6 +28,7 @@ export function PortalShell({
   accounts,
   isAdmin = false,
   pending = null,
+  setup,
   children,
 }: {
   client: Client;
@@ -35,6 +36,8 @@ export function PortalShell({
   isAdmin?: boolean;
   /** Approval counts — only supplied when the viewer is staff-admin. */
   pending?: PendingCounts | null;
+  /** Onboarding state for the client bell: which setup steps are still open. */
+  setup?: { needsGoogle: boolean; costsDone: boolean };
   children: React.ReactNode;
 }) {
   const { d } = useI18n();
@@ -71,8 +74,9 @@ export function PortalShell({
             {/* Admins keep sight of the approval queue even while in the
                 client zone — the zone scopes DATA, not their duties. */}
             {isAdmin && pending && <NotificationsMenu counts={pending} />}
-            {/* The client's own bell: their accounts still awaiting approval. */}
-            <ClientNotifications accounts={accounts} />
+            {/* The client's own bell: setup steps still open + accounts
+                awaiting approval. */}
+            <ClientNotifications accounts={accounts} setup={setup} />
             <UserBadge client={client} />
 
             <DialogPrimitive.Root open={mobileNavOpen} onOpenChange={setMobileNavOpen}>
