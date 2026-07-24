@@ -353,6 +353,45 @@ export async function resyncAccountNow(accountId: string): Promise<void> {
 }
 
 /**
+ * Force-refresh the RECENT window for a set of accounts NOW, bypassing the
+ * 15-minute throttle — this backs the dashboard's "Refresh" button. Lighter
+ * than resyncAccountNow: it re-pulls only the incremental window, enough to
+ * bring today's revenue and spend current on demand. Never throws per account;
+ * one store's upstream hiccup mustn't fail the whole refresh.
+ */
+export async function refreshAccountsNow(accountIds: string[]): Promise<void> {
+  if (accountIds.length === 0) return;
+  const supabase = await createClient();
+
+  const { data: rows } = await supabase.from("ad_accounts").select("*").in("id", accountIds);
+  const accounts = ((rows ?? []) as AdAccount[]).filter(syncable);
+  if (accounts.length === 0) return;
+
+  const from = isoDay(-(WINDOW_DAYS - 1));
+  const to = isoDay(0);
+
+  await Promise.all(
+    accounts.map(async (account) => {
+      try {
+        await syncAccountWindow(
+          supabase,
+          account,
+          {
+            google_ads_refresh_token: account.google_ads_refresh_token,
+            shopify_admin_token: account.shopify_admin_token,
+          },
+          from,
+          to,
+        );
+        lastRunByAccount.set(account.id, Date.now());
+      } catch (error) {
+        console.error(`manual refresh failed for ${account.id}:`, error);
+      }
+    }),
+  );
+}
+
+/**
  * Backfill so the selected range has history to show. Runs once per gap: the
  * next call finds coverage already reaching `from` and does nothing. Ranges
  * older than BACKFILL_LIMIT_DAYS are served from whatever exists.

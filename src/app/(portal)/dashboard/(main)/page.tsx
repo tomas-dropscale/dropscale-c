@@ -29,6 +29,7 @@ import {
 import { parseRange } from "@/lib/portal/range";
 import { compact, dateTime, integer, money, multiplier, percent } from "@/lib/format";
 import { MetricCard } from "@/components/portal/metric-card";
+import { RefreshButton } from "@/components/portal/refresh-button";
 import { DailyPerformanceChart, type ChartDay } from "@/components/portal/daily-performance-chart";
 import { PageContainer } from "@/components/ui/page-container";
 import { RangePicker } from "@/components/portal/range-picker";
@@ -163,6 +164,7 @@ export default async function DashboardPage({
       }
       actions={
         <>
+          {accounts.length > 0 && <RefreshButton accountIds={visible.map((account) => account.id)} />}
           <StoreSelector accounts={accounts} current={selectedStore} />
           <RangePicker
             current={range}
