@@ -177,10 +177,29 @@ export async function getHstStatus(): Promise<{
 // Commission fetch + booking
 // ---------------------------------------------------------------------------
 
-type HstRow = { express_date?: string | null; total?: string | number | null };
+type HstRow = {
+  express_date?: string | null;
+  total?: string | number | null;
+  shopName?: string | null;
+};
 type HstResponse = {
   data?: { data?: HstRow[]; last_page?: number; all?: { count?: string; total?: string } };
 };
+
+/** One day's commission for one client. */
+export type HstEntry = { day: string; client: string; amount: number };
+
+/**
+ * The client name is the last "-" segment of the HST shop name, e.g.
+ * "AZL90266-РАЯ НИКОЛОВА-Tomas" → "Tomas", "AYW98711-椿工房-Caio" → "Caio".
+ */
+function clientNameFromShop(shopName: string): string {
+  const parts = shopName
+    .split("-")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return parts.length > 0 ? parts[parts.length - 1] : shopName.trim() || "Unknown";
+}
 
 async function fetchPage(token: string, page: number): Promise<HstResponse> {
   const res = await fetch(`${COMMISSION_URL}?shopIds=&page=${page}&limit=${PAGE_LIMIT}`, {
@@ -193,10 +212,10 @@ async function fetchPage(token: string, page: number): Promise<HstResponse> {
   return (await res.json()) as HstResponse;
 }
 
-/** Commission summed per day plus the grand total across pages. */
+/** Commission summed per (day, client) plus the grand total across pages. */
 export async function fetchHstCommissions(
   token: string,
-): Promise<{ byDay: Map<string, number>; grandTotal: number }> {
+): Promise<{ entries: HstEntry[]; grandTotal: number }> {
   const first = await fetchPage(token, 1);
   const rows = [...(first.data?.data ?? [])];
   const lastPage = first.data?.last_page ?? 1;
@@ -205,13 +224,17 @@ export async function fetchHstCommissions(
     rows.push(...(next.data?.data ?? []));
   }
 
-  const byDay = new Map<string, number>();
+  const grouped = new Map<string, HstEntry>();
   for (const row of rows) {
     const day = row.express_date;
     if (!day) continue;
-    byDay.set(day, (byDay.get(day) ?? 0) + Number(row.total ?? 0));
+    const client = clientNameFromShop((row.shopName ?? "").toString());
+    const key = `${day}|${client}`;
+    const entry = grouped.get(key) ?? { day, client, amount: 0 };
+    entry.amount += Number(row.total ?? 0);
+    grouped.set(key, entry);
   }
-  return { byDay, grandTotal: Number(first.data?.all?.total ?? 0) };
+  return { entries: [...grouped.values()], grandTotal: Number(first.data?.all?.total ?? 0) };
 }
 
 export type HstSyncResult = {
@@ -245,45 +268,38 @@ export async function syncHstCommission(opts?: { force?: boolean }): Promise<Hst
     .maybeSingle();
   if (!source) return { ok: false, error: "HST revenue source missing — run migration 0011." };
 
-  let byDay: Map<string, number>;
+  let entries: HstEntry[];
   let grandTotal: number;
   try {
-    ({ byDay, grandTotal } = await fetchHstCommissions(token));
+    ({ entries, grandTotal } = await fetchHstCommissions(token));
   } catch (error) {
     return { ok: false, error: error instanceof HstError ? error.message : "HST fetch failed." };
   }
 
-  const days = [...byDay.keys()];
-  if (days.length > 0) {
-    const { data: existingRows } = await supabase
-      .from("commissions")
-      .select("id, occurred_on, amount")
-      .eq("source_id", source.id)
-      .in("occurred_on", days);
-    const existing = new Map((existingRows ?? []).map((row) => [row.occurred_on, row]));
+  // Attribute to a CRM client by name (exact, case-insensitive) when one exists.
+  const { data: crmClients } = await supabase.from("clients").select("id, name");
+  const clientIdByName = new Map(
+    (crmClients ?? []).map((row) => [row.name.trim().toLowerCase(), row.id]),
+  );
 
-    for (const [day, amount] of byDay) {
-      const current = existing.get(day);
-      if (!current) {
-        await supabase.from("commissions").insert({
-          source_id: source.id,
-          client_id: null,
-          ad_account_id: null,
-          occurred_on: day,
-          gross_amount: amount,
-          rate: 100,
-          amount,
-          currency: HST_CURRENCY,
-          status: "confirmed",
-          notes: "Auto-synced from HST ERP",
-        });
-      } else if (Math.abs(Number(current.amount) - amount) > 0.001) {
-        await supabase
-          .from("commissions")
-          .update({ gross_amount: amount, amount, updated_at: new Date().toISOString() })
-          .eq("id", current.id);
-      }
-    }
+  // The HST ledger is fully auto-synced: replace it wholesale so per-client
+  // splits and amounts always match what HST currently reports.
+  await supabase.from("commissions").delete().eq("source_id", source.id);
+
+  if (entries.length > 0) {
+    const rows = entries.map((entry) => ({
+      source_id: source.id,
+      client_id: clientIdByName.get(entry.client.toLowerCase()) ?? null,
+      ad_account_id: null,
+      occurred_on: entry.day,
+      gross_amount: entry.amount,
+      rate: 100,
+      amount: entry.amount,
+      currency: HST_CURRENCY,
+      status: "confirmed" as const,
+      notes: `HST · ${entry.client}`,
+    }));
+    await supabase.from("commissions").insert(rows);
   }
 
   await supabase
@@ -292,5 +308,5 @@ export async function syncHstCommission(opts?: { force?: boolean }): Promise<Hst
     .eq("id", true);
 
   lastRunAt = Date.now();
-  return { ok: true, total: grandTotal, days: byDay.size };
+  return { ok: true, total: grandTotal, days: new Set(entries.map((entry) => entry.day)).size };
 }
