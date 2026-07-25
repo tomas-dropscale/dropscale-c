@@ -206,7 +206,7 @@ export type SyncedOrderLine = {
 export type SyncedOrder = {
   /** ISO day the order was created. */
   date: string;
-  /** Current total (after discounts, incl. shipping), store base currency. */
+  /** Gross order total (after discounts, incl. shipping, BEFORE refunds), store base currency. */
   total: number;
   /** Whether the customer actually paid — the revenue-share base uses only these. */
   paid: boolean;
@@ -264,7 +264,7 @@ export async function fetchDailySales(
           cancelledAt: string | null;
           displayFinancialStatus: string | null;
           customerJourneySummary: { firstVisit: { landingPage: string | null } | null } | null;
-          currentTotalPriceSet: { shopMoney: { amount: string } } | null;
+          totalPriceSet: { shopMoney: { amount: string } } | null;
           totalRefundedSet: { shopMoney: { amount: string } } | null;
           lineItems: {
             nodes: {
@@ -289,7 +289,7 @@ export async function fetchDailySales(
             cancelledAt
             displayFinancialStatus
             customerJourneySummary { firstVisit { landingPage } }
-            currentTotalPriceSet { shopMoney { amount } }
+            totalPriceSet { shopMoney { amount } }
             totalRefundedSet { shopMoney { amount } }
             lineItems(first: 100) {
               nodes {
@@ -322,7 +322,10 @@ export async function fetchDailySales(
         PAID_FINANCIAL_STATUSES.has(order.displayFinancialStatus);
 
       const day = order.createdAt.slice(0, 10);
-      const total = Number(order.currentTotalPriceSet?.shopMoney.amount ?? 0);
+      // GROSS order total (before refunds). Refunds are subtracted ONCE via
+      // totalRefundedSet below — using currentTotalPriceSet here (already net of
+      // refunds) would double-count them and understate net revenue.
+      const total = Number(order.totalPriceSet?.shopMoney.amount ?? 0);
       const entry = byDay.get(day) ?? { revenue: 0, orders: 0, refunds: 0 };
       entry.revenue += total;
       entry.refunds += Number(order.totalRefundedSet?.shopMoney.amount ?? 0);

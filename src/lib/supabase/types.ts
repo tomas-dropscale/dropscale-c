@@ -274,6 +274,16 @@ export type DailyMetric = {
   computed_at: string;
 };
 
+// HST supplier-commission integration (migration 0011). Single-row config.
+export type HstIntegration = {
+  id: boolean;
+  access_token: string | null;
+  refresh_token: string | null;
+  token_expires_at: string | null;
+  last_synced_at: string | null;
+  updated_at: string;
+};
+
 export type CreativeDelivery = {
   id: string;
   ad_account_id: string;
@@ -777,6 +787,20 @@ export type Database = {
             referencedColumns: ["id"];
           },
         ];
+      };
+      hst_integration: {
+        Row: Row<HstIntegration>;
+        Insert: Insert<
+          HstIntegration,
+          | "id"
+          | "access_token"
+          | "refresh_token"
+          | "token_expires_at"
+          | "last_synced_at"
+          | "updated_at"
+        >;
+        Update: Partial<HstIntegration>;
+        Relationships: [];
       };
       creative_deliveries: {
         Row: Row<CreativeDelivery>;

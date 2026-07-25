@@ -19,6 +19,51 @@ import type { AdAccount } from "@/lib/supabase/types";
 const SOURCE_NAME = "Google Ads Management";
 const THROTTLE_MS = 60 * 60 * 1000;
 
+type Supa = Awaited<ReturnType<typeof createClient>>;
+
+/**
+ * Client-login ids that belong to staff-admins. Their OWN ad accounts are
+ * internal/test — the agency doesn't bill itself, so those accounts must never
+ * book agency revenue.
+ */
+async function adminClientIds(supabase: Supa): Promise<Set<string>> {
+  const { data } = await supabase.from("profiles").select("id").eq("role", "admin");
+  return new Set((data ?? []).map((row) => row.id));
+}
+
+let lastPurgeAt = 0;
+
+/**
+ * Delete EVERY synced commission booked for an admin-owned ad account — past
+ * and present, any source, any connection status. Admin accounts are internal,
+ * so their revenue must not exist in the ledger at all. Throttled; after the
+ * first pass there is nothing left to remove (the ledgers stop booking them).
+ */
+export async function purgeAdminAccountRevenue(): Promise<void> {
+  if (Date.now() - lastPurgeAt < THROTTLE_MS) return;
+
+  try {
+    const supabase = await createClient();
+    const adminIds = await adminClientIds(supabase);
+    if (adminIds.size === 0) {
+      lastPurgeAt = Date.now();
+      return;
+    }
+
+    const { data: adminAccounts } = await supabase
+      .from("ad_accounts")
+      .select("id")
+      .in("client_id", [...adminIds]);
+    const ids = (adminAccounts ?? []).map((row) => row.id);
+    if (ids.length > 0) {
+      await supabase.from("commissions").delete().in("ad_account_id", ids);
+    }
+    lastPurgeAt = Date.now();
+  } catch (error) {
+    console.error("Admin-account revenue purge failed:", error);
+  }
+}
+
 // Per-isolate memo so a burst of admin navigation doesn't even hit the
 // database to discover it has nothing to do.
 let lastRunAt = 0;
@@ -83,17 +128,26 @@ export async function syncCommissionLedger(): Promise<void> {
       return;
     }
 
+    // Admins' own ad accounts are internal — never agency revenue. Exclude
+    // them from billing here; past rows are removed by purgeAdminAccountRevenue.
+    const adminIds = await adminClientIds(supabase);
+    const billable = accounts.filter((account) => !adminIds.has(account.client_id));
+    if (billable.length === 0) {
+      lastRunAt = Date.now();
+      return;
+    }
+
     // Portal login → CRM record, for the finance rows' client attribution.
     const { data: portalClients } = await supabase
       .from("portal_clients")
       .select("id, crm_client_id")
-      .in("id", [...new Set(accounts.map((account) => account.client_id))]);
+      .in("id", [...new Set(billable.map((account) => account.client_id))]);
     const crmByLogin = new Map(
       (portalClients ?? []).map((row) => [row.id, row.crm_client_id]),
     );
 
     await Promise.all(
-      accounts.map(async (account) => {
+      billable.map(async (account) => {
         try {
           if (!account.google_ads_refresh_token) return;
           const token = await decryptToken(account.google_ads_refresh_token);
@@ -206,14 +260,23 @@ export async function syncRevenueShareLedger(): Promise<void> {
       return;
     }
 
+    // Admins' own accounts don't book agency revenue — exclude here (past rows
+    // are removed by purgeAdminAccountRevenue).
+    const adminIds = await adminClientIds(supabase);
+    const billable = accounts.filter((account) => !adminIds.has(account.client_id));
+    if (billable.length === 0) {
+      lastRevShareRunAt = Date.now();
+      return;
+    }
+
     const { data: portalClients } = await supabase
       .from("portal_clients")
       .select("id, crm_client_id")
-      .in("id", [...new Set(accounts.map((account) => account.client_id))]);
+      .in("id", [...new Set(billable.map((account) => account.client_id))]);
     const crmByLogin = new Map((portalClients ?? []).map((row) => [row.id, row.crm_client_id]));
 
     const from = isoDay(-REV_SHARE_WINDOW_DAYS);
-    const accountIds = accounts.map((account) => account.id);
+    const accountIds = billable.map((account) => account.id);
 
     // The days that actually carry a rev-share amount, straight from the rollup.
     const { data: metricRows } = await supabase
@@ -238,7 +301,7 @@ export async function syncRevenueShareLedger(): Promise<void> {
       (existingRows ?? []).map((row) => [`${row.ad_account_id}|${row.occurred_on}`, row]),
     );
 
-    const accountById = new Map(accounts.map((account) => [account.id, account]));
+    const accountById = new Map(billable.map((account) => [account.id, account]));
 
     await Promise.all(
       metricRows.map(async (metric) => {

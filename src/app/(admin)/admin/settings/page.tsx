@@ -5,8 +5,10 @@ import { PageContainer } from "@/components/ui/page-container";
 import { ModulePlaceholder } from "@/components/admin/placeholder";
 import { LanguageSwitcher } from "@/components/settings/language-switcher";
 import { AgencyGoogleAdsCard } from "@/components/settings/agency-google-ads-card";
+import { HstCommissionCard } from "@/components/admin/hst-commission-card";
 import { TeamList } from "@/components/admin/team-list";
 import { createClient, getSessionProfile } from "@/lib/supabase/server";
+import { getHstStatus } from "@/lib/admin/hst";
 import { agencyServiceAccount } from "@/lib/google-ads/env";
 import { getServerDictionary } from "@/lib/i18n/server";
 
@@ -22,6 +24,7 @@ export default async function SettingsPage() {
   const { data: members } = await supabase.from("profiles").select("*").order("full_name");
 
   const agency = agencyServiceAccount();
+  const hst = await getHstStatus();
 
   return (
     <PageContainer title={d.settings.title} description={d.settings.subtitle}>
@@ -39,6 +42,12 @@ export default async function SettingsPage() {
             configured={agency !== null}
             email={agency?.key.client_email ?? null}
             loginCustomerId={agency?.loginCustomerId ?? null}
+          />
+
+          <HstCommissionCard
+            hasSession={hst.hasSession}
+            lastSyncedAt={hst.lastSyncedAt}
+            tokenExpiresAt={hst.tokenExpiresAt}
           />
 
           <ModulePlaceholder
