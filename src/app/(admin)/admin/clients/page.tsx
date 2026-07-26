@@ -2,6 +2,11 @@ import type { Metadata } from "next";
 import { PageContainer } from "@/components/ui/page-container";
 import { ClientsManager } from "@/components/admin/clients-manager";
 import { createClient, getSessionProfile } from "@/lib/supabase/server";
+import {
+  ensureWeeklyInvoices,
+  fetchBillingSummaries,
+  reconcileInvoices,
+} from "@/lib/billing/invoices";
 
 export const metadata: Metadata = { title: "Clients" };
 
@@ -49,6 +54,12 @@ export default async function ClientsPage() {
     accountCount.set(row.client_id, (accountCount.get(row.client_id) ?? 0) + 1);
   }
 
+  // Billing state per client. Generation and reconciliation run first, exactly
+  // like the ledgers: opening this tab is what makes Monday's invoices exist.
+  await ensureWeeklyInvoices();
+  await reconcileInvoices();
+  const billing = await fetchBillingSummaries();
+
   return (
     <PageContainer
       title="Clients"
@@ -58,6 +69,7 @@ export default async function ClientsPage() {
         clients={clients.map((client) => ({
           ...client,
           accounts: accountCount.get(client.id) ?? 0,
+          billing: billing.get(client.id) ?? null,
         }))}
         pendingClients={pendingClients}
         candidates={profiles.filter((profile) => !clientIds.has(profile.id))}

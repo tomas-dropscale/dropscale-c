@@ -2,7 +2,17 @@
 
 import * as React from "react";
 import { usePathname } from "next/navigation";
-import { AlertCircle, Boxes, Gauge, LayoutGrid, Plus, ShieldCheck, Store, UserPlus } from "lucide-react";
+import {
+  AlertCircle,
+  Boxes,
+  CreditCard,
+  Gauge,
+  LayoutGrid,
+  Plus,
+  ShieldCheck,
+  Store,
+  UserPlus,
+} from "lucide-react";
 
 import type { AdAccount, Client } from "@/lib/supabase/types";
 import { AddAccountModal } from "@/components/portal/add-account-modal";
@@ -94,6 +104,13 @@ export function Sidebar({
               icon={Boxes}
               label={d.portal.cogs}
               active={pathname === "/dashboard/costs"}
+              onNavigate={onNavigate}
+            />
+            <SideNavItem
+              href="/dashboard/payments"
+              icon={CreditCard}
+              label={d.portal.payments}
+              active={pathname === "/dashboard/payments"}
               onNavigate={onNavigate}
             />
           </ul>

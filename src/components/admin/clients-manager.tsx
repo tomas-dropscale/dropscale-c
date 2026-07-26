@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { Check, ShieldOff, Store, UserPlus, X } from "lucide-react";
+import { Check, ChevronRight, ShieldOff, Store, TriangleAlert, UserPlus, X } from "lucide-react";
 
 import type {
   AccountRequest,
@@ -10,6 +10,8 @@ import type {
   Client,
   Profile,
 } from "@/lib/supabase/types";
+import type { ClientBillingSummary } from "@/lib/billing/invoices";
+import { money } from "@/lib/format";
 import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -32,7 +34,7 @@ export function ClientsManager({
   pendingRequests,
   adminId,
 }: {
-  clients: (Client & { accounts: number })[];
+  clients: (Client & { accounts: number; billing: ClientBillingSummary | null })[];
   /** self-registered clients waiting on approval_status (migration 0002) */
   pendingClients: Client[];
   /** profiles with no portal_clients row — can be promoted to clients */
@@ -44,6 +46,11 @@ export function ClientsManager({
   const router = useRouter();
   const [error, setError] = React.useState<string | null>(null);
   const [busy, setBusy] = React.useState<string | null>(null);
+
+  // Who owes money that is past its due date, and how much of it.
+  const lateClients = clients.filter((client) => (client.billing?.overdue ?? 0) > 0);
+  const lateCount = lateClients.reduce((sum, client) => sum + client.billing!.overdue, 0);
+  const lateAmount = lateClients.reduce((sum, client) => sum + client.billing!.overdueAmount, 0);
 
   async function run(key: string, action: () => Promise<{ error: { message: string } | null }>) {
     setBusy(key);
@@ -247,6 +254,44 @@ export function ClientsManager({
       {/* ---- portal clients --------------------------------------------- */}
       <section className="space-y-3">
         <h2 className="label-caps">Portal clients ({clients.length})</h2>
+
+        {/* Billing state, summed across clients. Collapsed to one line unless
+            money is actually late — an alert that is always on is furniture. */}
+        {lateClients.length > 0 && (
+          <details className="group/late overflow-hidden rounded-[var(--radius-card)] border border-[var(--danger-red)]/30 bg-[var(--danger-red)]/8">
+            <summary className="transition-smooth flex cursor-pointer list-none items-center gap-3 px-4 py-3 hover:bg-[var(--danger-red)]/12 [&::-webkit-details-marker]:hidden">
+              <ChevronRight className="size-4 shrink-0 text-[var(--danger-red)] transition-transform group-open/late:rotate-90" />
+              <TriangleAlert className="size-4 shrink-0 text-[var(--danger-red)]" aria-hidden />
+              <span className="min-w-0 flex-1 text-[13.5px] font-semibold text-[var(--text-primary)]">
+                {lateCount} {lateCount === 1 ? "invoice" : "invoices"} overdue across{" "}
+                {lateClients.length} {lateClients.length === 1 ? "client" : "clients"}
+              </span>
+              <span className="shrink-0 text-[13.5px] font-semibold text-[var(--danger-red)] tabular-nums">
+                {money(lateAmount, "EUR")}
+              </span>
+            </summary>
+
+            <ul className="border-t border-[var(--danger-red)]/20">
+              {lateClients.map((client) => (
+                <li
+                  key={client.id}
+                  className="flex flex-wrap items-center gap-3 border-b border-[var(--danger-red)]/10 px-4 py-2.5 last:border-b-0"
+                >
+                  <Avatar name={client.full_name} src={client.avatar_url} seed={client.id} size="sm" />
+                  <span className="min-w-0 flex-1 truncate text-[13px] text-[var(--text-primary)]">
+                    {client.full_name}
+                  </span>
+                  <Badge variant="danger">
+                    {client.billing!.overdue} overdue
+                  </Badge>
+                  <span className="text-[13px] font-medium text-[var(--text-primary)] tabular-nums">
+                    {money(client.billing!.overdueAmount, "EUR")}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
         {clients.length === 0 ? (
           <p className="text-[13px] text-[var(--text-muted)]">
             No portal clients yet. Promote a registered user below, or create one in
@@ -263,6 +308,18 @@ export function ClientsManager({
                   </p>
                   <p className="truncate text-[12px] text-[var(--text-muted)]">{client.email}</p>
                 </div>
+                {client.billing && client.billing.overdue > 0 && (
+                  <Badge variant="danger">
+                    {client.billing.overdue} overdue · {money(client.billing.overdueAmount, "EUR")}
+                  </Badge>
+                )}
+                {client.billing &&
+                  client.billing.overdue === 0 &&
+                  client.billing.open > 0 && (
+                    <Badge variant="warning">
+                      {client.billing.open} unpaid · {money(client.billing.openAmount, "EUR")}
+                    </Badge>
+                  )}
                 {client.approval_status === "rejected" ? (
                   <Badge variant="danger">rejected</Badge>
                 ) : (

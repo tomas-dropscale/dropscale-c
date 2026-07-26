@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { Check, Pencil, X } from "lucide-react";
+import { Check, Pencil, Percent, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -70,68 +70,105 @@ export function CommissionRate({
       <button
         type="button"
         onClick={open}
-        className="transition-smooth inline-flex items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[12px] text-[var(--text-secondary)] hover:bg-[var(--bg-panel-hover)] hover:text-[var(--text-primary)]"
+        className="transition-smooth group/fee inline-flex items-center gap-1.5 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-base)] px-2.5 py-1 hover:border-[var(--accent-gold)]/40"
         title="Edit billing"
       >
-        <span>{Number(rate)}% spend</span>
-        {revenueShareEnabled && <span className="text-[var(--accent-gold)]">· rev share on</span>}
-        <Pencil className="size-3" aria-hidden />
+        <span className="inline-flex items-center gap-1 text-[11.5px] font-medium text-[var(--text-secondary)]">
+          <Percent className="size-3 text-[var(--text-muted)]" aria-hidden />
+          {Number(rate)}% ad spend
+        </span>
+        <span
+          className={cn(
+            "inline-flex items-center rounded-full px-1.5 py-0.5 text-[10.5px] leading-none font-medium",
+            revenueShareEnabled
+              ? "bg-[var(--success-green)]/15 text-[var(--success-green)]"
+              : "text-[var(--text-muted)]",
+          )}
+        >
+          {revenueShareEnabled ? "+ rev share" : "no rev share"}
+        </span>
+        <Pencil
+          className="size-3 text-[var(--text-muted)] opacity-0 transition-opacity group-hover/fee:opacity-100"
+          aria-hidden
+        />
       </button>
     );
   }
 
   return (
-    <span className="inline-flex flex-wrap items-center gap-2 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-base)] px-2 py-1.5">
-      {/* Lever 1 — % of ad spend */}
-      <label className="inline-flex items-center gap-1 text-[11.5px] text-[var(--text-muted)]">
-        Spend
-        <Input
-          value={spend}
-          onChange={(event) => setSpend(event.target.value)}
-          inputMode="decimal"
-          aria-invalid={error}
-          className="h-7 w-14 px-2 text-[12px]"
-          aria-label="Ad spend percentage"
-        />
-        %
-      </label>
+    <div className="w-full max-w-[420px] space-y-3 rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3">
+      {/* Lever 1 — % of ad spend. Always on; 10% unless changed. */}
+      <div className="flex items-center gap-3">
+        <div className="min-w-0 flex-1">
+          <p className="text-[12.5px] font-medium text-[var(--text-primary)]">
+            Management fee
+          </p>
+          <p className="text-[11.5px] leading-relaxed text-[var(--text-muted)]">
+            Billed on ad spend, every day this store spends.
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          <Input
+            value={spend}
+            onChange={(event) => setSpend(event.target.value)}
+            inputMode="decimal"
+            aria-invalid={error}
+            className="h-8 w-16 px-2 text-center text-[12.5px]"
+            aria-label="Ad spend percentage"
+          />
+          <span className="text-[12.5px] text-[var(--text-muted)]">%</span>
+        </div>
+      </div>
 
-      <span className="h-4 w-px bg-[var(--border-subtle)]" aria-hidden />
+      <div className="h-px bg-[var(--border-subtle)]" aria-hidden />
 
-      {/* Lever 2 — revenue share on/off (rate comes from campaign names) */}
-      <button
-        type="button"
-        onClick={() => setRevOn((value) => !value)}
-        aria-pressed={revOn}
-        title="Bill a % of revenue on advertised collections — rate read from campaign names"
-        className={cn(
-          "transition-smooth inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-medium",
-          revOn
-            ? "bg-[var(--accent-gold-dim)] text-[var(--accent-gold-strong)]"
-            : "bg-[var(--bg-panel)] text-[var(--text-muted)] hover:text-[var(--text-secondary)]",
-        )}
-      >
-        Rev share {revOn ? "on" : "off"}
-      </button>
+      {/* Lever 2 — revenue share. On/off here; the RATE lives in the campaign
+          name, because the rate and the collection it applies to are one
+          decision and must not be able to disagree. */}
+      <div className="flex items-start gap-3">
+        <div className="min-w-0 flex-1">
+          <p className="text-[12.5px] font-medium text-[var(--text-primary)]">Revenue share</p>
+          <p className="text-[11.5px] leading-relaxed text-[var(--text-muted)]">
+            A % of the store revenue that comes from an advertised collection. The rate is
+            whatever the campaign name ends with —{" "}
+            <span className="font-mono text-[10.5px]">… /collections/velas — 5%</span> bills 5%.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => setRevOn((value) => !value)}
+          aria-pressed={revOn}
+          className={cn(
+            "transition-smooth relative h-5 w-9 shrink-0 rounded-full",
+            revOn ? "bg-[var(--success-green)]" : "bg-[var(--border-strong)]",
+          )}
+          aria-label="Toggle revenue share"
+        >
+          <span
+            className={cn(
+              "absolute top-0.5 size-4 rounded-full bg-white transition-all",
+              revOn ? "left-[18px]" : "left-0.5",
+            )}
+          />
+        </button>
+      </div>
 
-      <Button
-        variant="primary"
-        size="icon-sm"
-        onClick={save}
-        loading={busy}
-        aria-label="Save billing"
-      >
-        {!busy && <Check />}
-      </Button>
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        onClick={() => setEditing(false)}
-        disabled={busy}
-        aria-label="Cancel"
-      >
-        <X />
-      </Button>
-    </span>
+      {error && (
+        <p className="text-[11.5px] text-[var(--danger-red)]">
+          Enter a percentage between 0 and 100.
+        </p>
+      )}
+
+      <div className="flex justify-end gap-2">
+        <Button variant="ghost" size="sm" onClick={() => setEditing(false)} disabled={busy}>
+          <X />
+          Cancel
+        </Button>
+        <Button variant="primary" size="sm" onClick={save} loading={busy}>
+          {!busy && <Check />}
+          Save
+        </Button>
+      </div>
+    </div>
   );
 }

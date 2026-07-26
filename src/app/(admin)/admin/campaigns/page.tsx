@@ -96,6 +96,24 @@ export default async function AdminCampaignsPage({
                 <Badge variant="neutral">
                   {client.accounts.length} {client.accounts.length === 1 ? "store" : "stores"}
                 </Badge>
+
+                {/* How this client is billed, readable without expanding: the
+                    ad-spend fee always, plus rev share when any store has it. */}
+                {(() => {
+                  const rates = [
+                    ...new Set(client.accounts.map((e) => Number(e.account.commission_rate))),
+                  ];
+                  const revShare = client.accounts.some((e) => e.account.revenue_share_enabled);
+                  return (
+                    <>
+                      <Badge variant="neutral">
+                        {rates.length === 1 ? `${rates[0]}% ad spend` : "mixed ad spend %"}
+                      </Badge>
+                      {revShare && <Badge variant="success">+ rev share</Badge>}
+                    </>
+                  );
+                })()}
+
                 <div className="text-right">
                   <p className="text-[13.5px] font-semibold text-[var(--text-primary)]">
                     {money(client.spend, intl)}
@@ -210,52 +228,30 @@ export default async function AdminCampaignsPage({
         </div>
       )}
 
-      {/* Internal stores, last and deliberately colourless: they belong to the
-          team, not to a client, so they must never read as agency revenue. */}
+      {/* Internal accounts, last and deliberately colourless. Names only — an
+          admin's stores are not part of the agency's book of business, and
+          listing them here invites reading them as one. */}
       {overview.internal.length > 0 && (
         <section className="mt-8 space-y-3 opacity-70">
           <div className="flex items-center gap-2.5 rounded-[var(--radius-card)] border border-dashed border-[var(--border-strong)] bg-[var(--bg-base)] px-4 py-3">
             <ShieldAlert className="size-4 shrink-0 text-[var(--text-muted)]" aria-hidden />
             <p className="text-[12.5px] leading-relaxed text-[var(--text-muted)]">
-              Admin stores — campaigns for admin accounts aren’t shown here, and their spend
+              Admin accounts — their stores and campaigns aren’t shown here, and their spend
               never counts towards agency totals.
             </p>
           </div>
 
-          {overview.internal.map((client) => (
-            <details
-              key={client.clientId}
-              className="group/internal overflow-hidden rounded-[var(--radius-card)] border border-dashed border-[var(--border-subtle)] bg-[var(--bg-base)]"
-            >
-              <summary className="transition-smooth flex cursor-pointer list-none flex-wrap items-center gap-3 px-5 py-3.5 hover:bg-[var(--bg-panel-hover)] [&::-webkit-details-marker]:hidden">
-                <ChevronRight className="size-4 shrink-0 text-[var(--text-muted)] transition-transform group-open/internal:rotate-90" />
-                <p className="min-w-0 flex-1 truncate text-[13.5px] font-medium text-[var(--text-secondary)]">
-                  {client.clientName}
-                </p>
+          <ul className="flex flex-wrap gap-2">
+            {overview.internal.map((client) => (
+              <li
+                key={client.clientId}
+                className="flex items-center gap-2 rounded-full border border-dashed border-[var(--border-subtle)] bg-[var(--bg-base)] px-3 py-1.5 text-[12.5px] text-[var(--text-muted)]"
+              >
+                {client.clientName}
                 <Badge variant="neutral">Admin</Badge>
-                <Badge variant="neutral">
-                  {client.accounts.length} {client.accounts.length === 1 ? "store" : "stores"}
-                </Badge>
-              </summary>
-
-              <ul className="border-t border-dashed border-[var(--border-subtle)]">
-                {client.accounts.map((entry) => (
-                  <li
-                    key={entry.account.id}
-                    className="flex items-center gap-2.5 px-5 py-2.5 text-[12.5px] text-[var(--text-muted)]"
-                  >
-                    <span
-                      className="size-2 shrink-0 rounded-full opacity-60"
-                      style={{ backgroundColor: entry.account.color_dot }}
-                      aria-hidden
-                    />
-                    <span className="min-w-0 flex-1 truncate">{entry.account.store_name}</span>
-                    <span>{entry.connected ? "Google Ads connected" : "Not connected"}</span>
-                  </li>
-                ))}
-              </ul>
-            </details>
-          ))}
+              </li>
+            ))}
+          </ul>
         </section>
       )}
     </PageContainer>

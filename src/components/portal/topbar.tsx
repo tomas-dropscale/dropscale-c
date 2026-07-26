@@ -28,6 +28,17 @@ export function Topbar({
 
   const onCreatives = pathname.endsWith("/creatives");
 
+  /**
+   * The switch belongs to the dashboard and the store views it moves between —
+   * nowhere else. On Costs, Payments or Request account it offered to navigate
+   * away from the page you just opened, which is noise, not navigation.
+   *
+   * A whitelist rather than a blacklist: a section added later should stay
+   * clean by default and opt in, not inherit a control that doesn't apply.
+   */
+  const showTabs =
+    pathname === "/dashboard" || pathname === "/dashboard/google" || activeAccountId !== null;
+
   // Performance/Creatives are per-store views; without a store selected,
   // Performance falls back to the Google all-stores view and Creatives stays
   // disabled (as in the reference).
@@ -54,24 +65,26 @@ export function Topbar({
       )}
 
       <div className="flex flex-1 justify-center">
-        <div className="flex items-center gap-1 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-panel)] p-1">
-          <Link href={performanceHref} className={cn(TAB, !onCreatives ? TAB_ACTIVE : TAB_IDLE)}>
-            {d.portal.performance}
-          </Link>
-
-          {creativesHref ? (
-            <Link href={creativesHref} className={cn(TAB, onCreatives ? TAB_ACTIVE : TAB_IDLE)}>
-              {d.portal.creatives}
+        {showTabs && (
+          <div className="flex items-center gap-1 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-panel)] p-1">
+            <Link href={performanceHref} className={cn(TAB, !onCreatives ? TAB_ACTIVE : TAB_IDLE)}>
+              {d.portal.performance}
             </Link>
-          ) : (
-            <span
-              className={cn(TAB, "cursor-not-allowed text-[var(--text-muted)]")}
-              title={d.portal.creativesNeedStore}
-            >
-              {d.portal.creatives}
-            </span>
-          )}
-        </div>
+
+            {creativesHref ? (
+              <Link href={creativesHref} className={cn(TAB, onCreatives ? TAB_ACTIVE : TAB_IDLE)}>
+                {d.portal.creatives}
+              </Link>
+            ) : (
+              <span
+                className={cn(TAB, "cursor-not-allowed text-[var(--text-muted)]")}
+                title={d.portal.creativesNeedStore}
+              >
+                {d.portal.creatives}
+              </span>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

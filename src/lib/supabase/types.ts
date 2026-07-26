@@ -177,6 +177,32 @@ export type Client = {
   approved_at: string | null;
   approved_by: string | null;
   created_at: string;
+  /** Stripe customer, created on this client's first invoice (migration 0013). */
+  stripe_customer_id: string | null;
+};
+
+export type InvoiceStatus = "draft" | "open" | "paid" | "void" | "uncollectible";
+
+/** One line of what an invoice is made of — a snapshot, never re-derived. */
+export type InvoiceLine = { label: string; amount: number; accountId: string | null };
+
+/** A week's agency commission, billed to one portal client (migration 0013). */
+export type Invoice = {
+  id: string;
+  client_id: string;
+  period_start: string;
+  period_end: string;
+  amount: number;
+  currency: string;
+  status: InvoiceStatus;
+  due_date: string | null;
+  line_items: InvoiceLine[];
+  stripe_invoice_id: string | null;
+  stripe_hosted_url: string | null;
+  issued_at: string | null;
+  paid_at: string | null;
+  created_at: string;
+  updated_at: string;
 };
 
 export type BillingProfile = {
@@ -558,6 +584,33 @@ export type Database = {
         Update: Partial<Expense>;
         Relationships: [];
       };
+      invoices: {
+        Row: Row<Invoice>;
+        Insert: Insert<
+          Invoice,
+          | "id"
+          | "currency"
+          | "status"
+          | "due_date"
+          | "line_items"
+          | "stripe_invoice_id"
+          | "stripe_hosted_url"
+          | "issued_at"
+          | "paid_at"
+          | "created_at"
+          | "updated_at"
+        >;
+        Update: Partial<Invoice>;
+        Relationships: [
+          {
+            foreignKeyName: "invoices_client_id_fkey";
+            columns: ["client_id"];
+            isOneToOne: false;
+            referencedRelation: "portal_clients";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
       portal_clients: {
         Row: Row<Client>;
         Insert: Insert<
@@ -568,6 +621,7 @@ export type Database = {
           | "approved_at"
           | "approved_by"
           | "created_at"
+          | "stripe_customer_id"
         >;
         Update: Partial<Client>;
         Relationships: [
