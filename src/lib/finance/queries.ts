@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { commissionClientLabel } from "@/lib/finance/config";
 import type {
   CrmClient,
   Commission,
@@ -25,17 +26,6 @@ export function isoDay(date: Date) {
   const m = String(date.getMonth() + 1).padStart(2, "0");
   const d = String(date.getDate()).padStart(2, "0");
   return `${y}-${m}-${d}`;
-}
-
-export function daysAgo(days: number) {
-  const date = new Date();
-  date.setDate(date.getDate() - days);
-  return isoDay(date);
-}
-
-export function startOfMonth() {
-  const date = new Date();
-  return isoDay(new Date(date.getFullYear(), date.getMonth(), 1));
 }
 
 /**
@@ -115,6 +105,51 @@ export function revenueBySource(
       if (!source) return [];
       return [{ source, ...bucket, share: total > 0 ? bucket.amount / total : 0 }];
     })
+    .sort((a, b) => b.amount - a.amount);
+}
+
+export type ClientTotal = {
+  /** CRM id when the row is linked, else `name:<reported name>`. */
+  key: string;
+  name: string;
+  amount: number;
+  count: number;
+  /** Share of total revenue, 0–1. */
+  share: number;
+};
+
+/**
+ * Revenue grouped by CLIENT — answers "who pays us the most".
+ *
+ * Rows with no CRM record group under the name their source reported (HST
+ * carries the client name in the shop string), so the ranking covers supplier
+ * commissions too instead of collapsing them into one anonymous bucket.
+ * `fallback` labels whatever names neither.
+ */
+export function revenueByClient(
+  commissions: Commission[],
+  clients: CrmClient[],
+  fallback: string,
+): ClientTotal[] {
+  const totals = new Map<string, { name: string; amount: number; count: number }>();
+
+  for (const entry of commissions) {
+    const name = commissionClientLabel(entry, clients, fallback);
+    const key = entry.client_id ?? `name:${name}`;
+    const bucket = totals.get(key) ?? { name, amount: 0, count: 0 };
+    bucket.amount += Number(entry.amount);
+    bucket.count += 1;
+    totals.set(key, bucket);
+  }
+
+  const total = [...totals.values()].reduce((sum, bucket) => sum + bucket.amount, 0);
+
+  return [...totals.entries()]
+    .map(([key, bucket]) => ({
+      key,
+      ...bucket,
+      share: total > 0 ? bucket.amount / total : 0,
+    }))
     .sort((a, b) => b.amount - a.amount);
 }
 

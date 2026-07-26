@@ -260,15 +260,19 @@ export default async function DashboardPage({
           <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
             <MetricCard label="MER" icon={Percent} value={multiplier(totals.mer)} />
             <MetricCard label="AOV" icon={ShoppingBag} value={money(totals.aov, currency)} />
+            {/* Conversions here are the STORE's orders, not Google's attributed
+                conversions — the Google numbers live in the Google section. */}
             <MetricCard
               label="Cost / Conversion"
               icon={Coins}
-              value={money(totals.costPerConversion, currency)}
+              value={money(totals.costPerOrder, currency)}
+              hint="ad spend per store order"
             />
             <MetricCard
               label="Conversion Rate"
               icon={MousePointerClick}
-              value={percent(totals.conversionRate)}
+              value={percent(totals.orderConversionRate)}
+              hint="store orders per ad click"
             />
             <MetricCard label="Orders" icon={ShoppingBag} value={integer(totals.orders)} />
             <MetricCard

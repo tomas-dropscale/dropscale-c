@@ -9,20 +9,25 @@ import {
   Breakdown,
   DataTable,
   ErrorBanner,
-  RangeTabs,
   StatCard,
   Td,
   Th,
   Tr,
   type BreakdownRow,
-  type RangeKey,
 } from "@/components/finance/finance-ui";
+import { DateRangePicker } from "@/components/ui/date-range-picker";
+import type { RangeSelection } from "@/lib/portal/range";
 import { CommissionDialog, type CommissionTarget } from "@/components/finance/commission-dialog";
 import { SourceDialog, type SourceTarget } from "@/components/finance/source-dialog";
 import { RevenueTimeline } from "@/components/finance/revenue-timeline";
 import { useFinance } from "@/components/finance/use-finance";
-import { revenueBySource, sum } from "@/lib/finance/queries";
-import { COMMISSION_STATUS_BADGE, commissionStatusLabel, sourceTint } from "@/lib/finance/config";
+import { revenueByClient, revenueBySource, sum } from "@/lib/finance/queries";
+import {
+  COMMISSION_STATUS_BADGE,
+  commissionClientLabel,
+  commissionStatusLabel,
+  sourceTint,
+} from "@/lib/finance/config";
 import { useI18n } from "@/lib/i18n/provider";
 import { fmt } from "@/lib/i18n";
 import { money, percent, shortDate } from "@/lib/format-intl";
@@ -35,7 +40,7 @@ export function RevenueView({
   currentUserId,
 }: {
   initial: FinanceSnapshot;
-  initialRange: RangeKey;
+  initialRange: RangeSelection;
   currentUserId: string;
 }) {
   const { d, intl } = useI18n();
@@ -50,6 +55,11 @@ export function RevenueView({
   const bySource = React.useMemo(
     () => revenueBySource(data.commissions, data.sources),
     [data.commissions, data.sources],
+  );
+
+  const byClient = React.useMemo(
+    () => revenueByClient(data.commissions, data.clients, d.overview.unattributed),
+    [data.commissions, data.clients, d],
   );
 
   const total = sum(data.commissions.map((entry) => Number(entry.amount)));
@@ -75,9 +85,16 @@ export function RevenueView({
     color: sourceTint(index),
   }));
 
+  const clientRows: BreakdownRow[] = byClient.map((row, index) => ({
+    key: row.key,
+    label: row.name,
+    sublabel: fmt(row.count === 1 ? d.finance.entriesOne : d.finance.entries, { count: row.count }),
+    amount: money(row.amount, intl),
+    share: row.share,
+    color: sourceTint(index),
+  }));
+
   const sourceName = (id: string) => data.sources.find((s) => s.id === id)?.name ?? "—";
-  const clientName = (id: string | null) =>
-    id ? (data.clients.find((c) => c.id === id)?.name ?? "—") : d.overview.unattributed;
 
   return (
     <PageContainer
@@ -85,7 +102,7 @@ export function RevenueView({
       description={t.subtitle}
       actions={
         <>
-          <RangeTabs value={range} onChange={setRange} />
+          <DateRangePicker value={range} onApply={setRange} />
           <Button variant="secondary" size="sm" onClick={() => setShowSources((v) => !v)}>
             <Settings2 />
             {t.manageSources}
@@ -130,13 +147,25 @@ export function RevenueView({
         <RevenueTimeline />
 
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)]">
-          <Breakdown
-            title={t.bySource}
-            rows={rows}
-            empty={
-              <p className="text-[13px] text-[var(--text-muted)]">{d.overview.noRevenueYet}</p>
-            }
-          />
+          <div className="flex flex-col gap-4">
+            <Breakdown
+              title={t.bySource}
+              rows={rows}
+              empty={
+                <p className="text-[13px] text-[var(--text-muted)]">{d.overview.noRevenueYet}</p>
+              }
+            />
+
+            {/* Who the money comes from, ranked. Supplier commissions (HST)
+                carry their own client names, so this covers them too. */}
+            <Breakdown
+              title={t.byClient}
+              rows={clientRows}
+              empty={
+                <p className="text-[13px] text-[var(--text-muted)]">{d.overview.noRevenueYet}</p>
+              }
+            />
+          </div>
 
           {showSources ? (
             <section className="panel flex flex-col p-5">
@@ -208,7 +237,9 @@ export function RevenueView({
                     <Tr key={entry.id}>
                       <Td>{shortDate(entry.occurred_on, intl)}</Td>
                       <Td className="text-[var(--text-primary)]">{sourceName(entry.source_id)}</Td>
-                      <Td>{clientName(entry.client_id)}</Td>
+                      <Td>
+                        {commissionClientLabel(entry, data.clients, d.overview.unattributed)}
+                      </Td>
                       <Td>
                         <span
                           className={cn(

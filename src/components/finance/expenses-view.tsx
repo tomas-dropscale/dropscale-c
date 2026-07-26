@@ -9,14 +9,14 @@ import {
   Breakdown,
   DataTable,
   ErrorBanner,
-  RangeTabs,
   StatCard,
   Td,
   Th,
   Tr,
   type BreakdownRow,
-  type RangeKey,
 } from "@/components/finance/finance-ui";
+import { DateRangePicker } from "@/components/ui/date-range-picker";
+import type { RangeSelection } from "@/lib/portal/range";
 import { ExpenseDialog, type ExpenseTarget } from "@/components/finance/expense-dialog";
 import { useFinance } from "@/components/finance/use-finance";
 import { expensesByCategory, sum } from "@/lib/finance/queries";
@@ -32,7 +32,7 @@ export function ExpensesView({
   currentUserId,
 }: {
   initial: FinanceSnapshot;
-  initialRange: RangeKey;
+  initialRange: RangeSelection;
   currentUserId: string;
 }) {
   const { d, intl } = useI18n();
@@ -67,7 +67,7 @@ export function ExpensesView({
       description={t.subtitle}
       actions={
         <>
-          <RangeTabs value={range} onChange={setRange} />
+          <DateRangePicker value={range} onApply={setRange} />
           <Button variant="primary" size="sm" onClick={() => setTarget({ mode: "create" })}>
             <Plus />
             {t.newEntry}

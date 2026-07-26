@@ -1,10 +1,45 @@
 import type {
   ClientStatus,
+  Commission,
   CommissionStatus,
+  CrmClient,
   ExpenseCategory,
   SourceCategory,
 } from "@/lib/supabase/types";
 import type { Dictionary } from "@/lib/i18n";
+
+/**
+ * How the HST sync records who a commission is for: `HST · <client>`.
+ *
+ * HST names a shop as `CODE-store-client` ("AZL90266-РАЯ НИКОЛОВА-Tomas"), so
+ * the client name exists only inside that string — most of those people have
+ * no CRM record here, and the ledger row's client_id is null. The name still
+ * travels on the row, and this prefix is what lets the tables show it instead
+ * of "no client". Writer (lib/admin/hst) and readers share this constant so
+ * the two can never drift apart.
+ */
+export const HST_NOTE_PREFIX = "HST · ";
+
+/** The client name an HST row carries, or null for any other row. */
+export function noteClientName(notes: string | null): string | null {
+  if (!notes?.startsWith(HST_NOTE_PREFIX)) return null;
+  return notes.slice(HST_NOTE_PREFIX.length).trim() || null;
+}
+
+/**
+ * What to show in a commission's "client" column: the CRM record when the row
+ * is linked to one, else the name the source itself reported, else `fallback`.
+ */
+export function commissionClientLabel(
+  entry: Pick<Commission, "client_id" | "notes">,
+  clients: CrmClient[],
+  fallback: string,
+): string {
+  if (entry.client_id) {
+    return clients.find((client) => client.id === entry.client_id)?.name ?? "—";
+  }
+  return noteClientName(entry.notes) ?? fallback;
+}
 
 export const SOURCE_CATEGORIES: SourceCategory[] = [
   "platform",

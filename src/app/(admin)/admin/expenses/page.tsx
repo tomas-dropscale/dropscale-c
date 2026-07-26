@@ -5,7 +5,7 @@ import { ExpensesView } from "@/components/finance/expenses-view";
 import { createClient, getSessionProfile } from "@/lib/supabase/server";
 import { fetchFinanceSnapshot } from "@/lib/finance/queries";
 import { getServerDictionary } from "@/lib/i18n/server";
-import { DEFAULT_FINANCE_RANGE, defaultBounds } from "@/lib/finance/defaults";
+import { defaultSelection } from "@/lib/finance/defaults";
 
 export async function generateMetadata(): Promise<Metadata> {
   const { d } = await getServerDictionary();
@@ -17,13 +17,13 @@ export default async function ExpensesPage() {
   if (!profile) redirect("/login");
 
   const supabase = await createClient();
-  const { from, to } = defaultBounds();
-  const snapshot = await fetchFinanceSnapshot(supabase, from, to);
+  const range = defaultSelection();
+  const snapshot = await fetchFinanceSnapshot(supabase, range.from, range.to);
 
   return (
     <ExpensesView
       initial={snapshot}
-      initialRange={DEFAULT_FINANCE_RANGE}
+      initialRange={range}
       currentUserId={profile.id}
     />
   );

@@ -11,7 +11,7 @@ import {
 } from "@/lib/admin/commission-sync";
 import { syncHstCommission } from "@/lib/admin/hst";
 import { getServerDictionary } from "@/lib/i18n/server";
-import { DEFAULT_FINANCE_RANGE, defaultBounds } from "@/lib/finance/defaults";
+import { defaultSelection } from "@/lib/finance/defaults";
 
 export async function generateMetadata(): Promise<Metadata> {
   const { d } = await getServerDictionary();
@@ -30,13 +30,13 @@ export default async function RevenuePage() {
   await syncHstCommission();
 
   const supabase = await createClient();
-  const { from, to } = defaultBounds();
-  const snapshot = await fetchFinanceSnapshot(supabase, from, to);
+  const range = defaultSelection();
+  const snapshot = await fetchFinanceSnapshot(supabase, range.from, range.to);
 
   return (
     <RevenueView
       initial={snapshot}
-      initialRange={DEFAULT_FINANCE_RANGE}
+      initialRange={range}
       currentUserId={profile.id}
     />
   );

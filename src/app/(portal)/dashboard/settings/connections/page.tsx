@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { CircleCheck, CircleDashed, Store } from "lucide-react";
+import { CircleCheck, CircleDashed, Hourglass, Store } from "lucide-react";
 
 import { fetchAccounts } from "@/lib/portal/data";
 import { ShopifyConnectPanel } from "@/components/portal/shopify-connect-panel";
@@ -24,7 +24,16 @@ export default async function ConnectionsPage() {
 
   // A store maps to ONE ad account; the link form offers only the accounts
   // still free. Connected ones are managed on their own cards below.
-  const unlinked = accounts.filter((account) => !account.shopify_connected);
+  //
+  // Accounts we haven't approved yet are NOT offered — the connect route
+  // rejects them anyway, and an enabled form that fails on submit is worse
+  // than one that explains the wait. They're listed separately instead.
+  const connectable = accounts.filter(
+    (account) => !account.shopify_connected && account.status !== "pending",
+  );
+  const awaitingApproval = accounts.filter(
+    (account) => !account.shopify_connected && account.status === "pending",
+  );
   const linked = accounts.filter((account) => account.shopify_connected);
 
   return (
@@ -35,7 +44,36 @@ export default async function ConnectionsPage() {
         </div>
       ) : (
         <div className="max-w-[720px] space-y-4">
-          {unlinked.length > 0 && <ShopifyLinkForm accounts={unlinked} />}
+          {connectable.length > 0 && <ShopifyLinkForm accounts={connectable} />}
+
+          {awaitingApproval.length > 0 && (
+            <section className="panel space-y-3 p-5">
+              <header className="flex items-center gap-2.5">
+                <Hourglass className="size-4 text-[var(--accent-gold)]" />
+                <h2 className="text-[15px] font-semibold text-[var(--text-primary)]">
+                  Waiting for team approval
+                </h2>
+              </header>
+              <p className="text-[12.5px] leading-relaxed text-[var(--text-muted)]">
+                Shopify can be connected once we’ve accepted the store. You’ll be able to link it
+                here the moment that happens — nothing else is needed from you.
+              </p>
+              <ul className="flex flex-col gap-1.5">
+                {awaitingApproval.map((account) => (
+                  <li
+                    key={account.id}
+                    className="flex items-center gap-2.5 rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] px-3 py-2.5"
+                  >
+                    <Store className="size-3.5 shrink-0 text-[var(--text-muted)]" aria-hidden />
+                    <span className="min-w-0 flex-1 truncate text-[13px] text-[var(--text-primary)]">
+                      {account.store_name}
+                    </span>
+                    <Badge variant="warning">Pending</Badge>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
 
           {linked.map((account) => (
             <section key={account.id} className="panel space-y-4 p-5">

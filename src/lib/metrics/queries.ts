@@ -67,11 +67,24 @@ export type MetricTotals = {
   roas: number;
   ctr: number;
   cpc: number;
+  /** Google-attributed CPA: ad spend / Google conversions. The Google views. */
   costPerConversion: number;
   aov: number;
   /** Marketing Efficiency Ratio: net revenue / ad spend. */
   mer: number;
+  /** Google-attributed CR: Google conversions / clicks. The Google views. */
   conversionRate: number;
+  /**
+   * Store-wide conversion figures — the dashboard's. A conversion there is a
+   * real order in the shop (Shopify orders_count), not a Google-attributed
+   * one: the client's store sells through channels Google never sees, so the
+   * Google number understates what the store actually converted.
+   *
+   * Shopify's Admin API gives no sessions, so the rate's denominator stays ad
+   * clicks — read it as "store orders per ad click", not as a site-wide CR.
+   */
+  costPerOrder: number;
+  orderConversionRate: number;
 };
 
 export function sumMetrics(rows: DailyMetricRow[]): MetricTotals {
@@ -121,6 +134,8 @@ export function sumMetrics(rows: DailyMetricRow[]): MetricTotals {
     aov: total.orders > 0 ? netRevenue / total.orders : 0,
     mer: total.adSpend > 0 ? netRevenue / total.adSpend : 0,
     conversionRate: total.clicks > 0 ? total.conversions / total.clicks : 0,
+    costPerOrder: total.orders > 0 ? total.adSpend / total.orders : 0,
+    orderConversionRate: total.clicks > 0 ? total.orders / total.clicks : 0,
   };
 }
 

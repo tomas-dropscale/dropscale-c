@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { ArrowRight, Check, PlugZap, ShoppingBag, Store, Boxes } from "lucide-react";
+import { ArrowRight, Check, Lock, PlugZap, ShoppingBag, Store, Boxes } from "lucide-react";
 
 import type { AdAccount } from "@/lib/supabase/types";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -14,6 +14,11 @@ import { cn } from "@/lib/utils";
  * connection — it stays, ticking each step off, until the store is fully set
  * up. Each step goes STRAIGHT to its own action: Google Ads starts its OAuth,
  * Shopify opens the connect form in a dialog, costs open the Costs page.
+ *
+ * Order is enforced, not merely suggested: Shopify stays locked until the team
+ * has approved the store's ad account, because a store connected before then
+ * syncs nothing and may still be turned down. Costs are never locked — they
+ * are the client's own data and cost us nothing to accept early.
  */
 type StepAction =
   | { kind: "link"; href: string } // in-app navigation
@@ -27,6 +32,8 @@ type Step = {
   cta: string;
   done: boolean;
   action: StepAction;
+  /** Why this step can't be started yet — shown instead of its button. */
+  locked?: string;
 };
 
 export function GettingStartedGuide({
@@ -46,9 +53,19 @@ export function GettingStartedGuide({
   const googleConnected = accounts.some((account) => account.google_ads_connected);
   const shopifyConnected = accounts.some((account) => account.shopify_connected);
 
+  // "Approved" is the whole gate: a pending account is one we haven't accepted
+  // yet, and nothing may be wired to it.
+  const approved = accounts.filter((account) => account.status !== "pending");
+
   // The specific account each connect targets (onboarding is usually one store).
   const googleTarget = accounts.find((account) => !account.google_ads_connected);
-  const unlinkedShopify = accounts.filter((account) => !account.shopify_connected);
+  const unlinkedShopify = approved.filter((account) => !account.shopify_connected);
+
+  const shopifyLock = !hasAccounts
+    ? "Add your store first"
+    : approved.length === 0
+      ? "Waiting for our approval"
+      : undefined;
 
   const steps: Step[] = [
     {
@@ -76,9 +93,12 @@ export function GettingStartedGuide({
     {
       icon: ShoppingBag,
       title: "Connect Shopify",
-      body: "Link your store’s Shopify to pull in revenue, orders and refunds. We walk you through the app and scopes.",
+      body: shopifyLock
+        ? "Available once we’ve accepted your store — then link Shopify to pull in revenue, orders and refunds."
+        : "Link your store’s Shopify to pull in revenue, orders and refunds. We walk you through the app and scopes.",
       cta: "Connect Shopify",
       done: shopifyConnected,
+      locked: shopifyLock,
       action:
         unlinkedShopify.length > 0
           ? { kind: "shopify" }
@@ -149,7 +169,15 @@ export function GettingStartedGuide({
               </span>
             </span>
 
+            {!step.done && step.locked ? (
+              <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-[var(--border-subtle)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-muted)]">
+                <Lock className="size-3.5" aria-hidden />
+                {step.locked}
+              </span>
+            ) : null}
+
             {!step.done &&
+              !step.locked &&
               (step.action.kind === "shopify" ? (
                 <button type="button" onClick={() => setShopifyOpen(true)} className={ctaClass}>
                   {step.cta}

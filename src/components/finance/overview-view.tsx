@@ -9,15 +9,15 @@ import { PageContainer } from "@/components/ui/page-container";
 import {
   Breakdown,
   ErrorBanner,
-  RangeTabs,
   StatCard,
   type BreakdownRow,
-  type RangeKey,
 } from "@/components/finance/finance-ui";
+import { DateRangePicker } from "@/components/ui/date-range-picker";
+import type { RangeSelection } from "@/lib/portal/range";
 import { PnLChart } from "@/components/finance/pnl-chart";
 import { CommissionDialog, type CommissionTarget } from "@/components/finance/commission-dialog";
 import { useFinance } from "@/components/finance/use-finance";
-import { dailyPnL, revenueBySource, totals } from "@/lib/finance/queries";
+import { dailyPnL, revenueByClient, revenueBySource, totals } from "@/lib/finance/queries";
 import { sourceTint } from "@/lib/finance/config";
 import { useI18n } from "@/lib/i18n/provider";
 import { fmt } from "@/lib/i18n";
@@ -32,7 +32,7 @@ export function OverviewView({
   currentUserId,
 }: {
   initial: FinanceSnapshot;
-  initialRange: RangeKey;
+  initialRange: RangeSelection;
   firstName: string;
   currentUserId: string;
 }) {
@@ -55,30 +55,11 @@ export function OverviewView({
     [data.commissions, data.sources],
   );
 
-  /** Revenue attributed per client, so the top accounts are visible at a glance. */
-  const byClient = React.useMemo(() => {
-    const totalsByClient = new Map<string, number>();
-
-    for (const entry of data.commissions) {
-      const key = entry.client_id ?? "__none__";
-      totalsByClient.set(key, (totalsByClient.get(key) ?? 0) + Number(entry.amount));
-    }
-
-    const grand = [...totalsByClient.values()].reduce((sum, value) => sum + value, 0);
-
-    return [...totalsByClient.entries()]
-      .map(([id, amount]) => ({
-        id,
-        name:
-          id === "__none__"
-            ? d.overview.unattributed
-            : (data.clients.find((client) => client.id === id)?.name ?? "—"),
-        amount,
-        share: grand > 0 ? amount / grand : 0,
-      }))
-      .sort((a, b) => b.amount - a.amount)
-      .slice(0, 6);
-  }, [data.commissions, data.clients, d]);
+  /** Top clients by revenue — the same ranking the Revenue page shows in full. */
+  const byClient = React.useMemo(
+    () => revenueByClient(data.commissions, data.clients, d.overview.unattributed).slice(0, 6),
+    [data.commissions, data.clients, d],
+  );
 
   const activeClients = data.clients.filter((client) => client.status === "active").length;
 
@@ -92,8 +73,9 @@ export function OverviewView({
   }));
 
   const clientRows: BreakdownRow[] = byClient.map((row, index) => ({
-    key: row.id,
+    key: row.key,
     label: row.name,
+    sublabel: fmt(row.count === 1 ? d.finance.entriesOne : d.finance.entries, { count: row.count }),
     amount: money(row.amount, intl),
     share: row.share,
     color: sourceTint(index),
@@ -105,7 +87,7 @@ export function OverviewView({
       description={d.overview.subtitle}
       actions={
         <>
-          <RangeTabs value={range} onChange={setRange} />
+          <DateRangePicker value={range} onApply={setRange} />
           <Button
             variant="primary"
             size="sm"

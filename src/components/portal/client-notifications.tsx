@@ -89,7 +89,11 @@ export function ClientNotifications({
         href: "/dashboard/settings/accounts",
         icon: PlugZap,
       });
-    if (!shopifyConnected)
+    // Shopify is gated on approval: while every store is still pending, this
+    // would nag about a step the client is not allowed to take. The pending
+    // accounts are already listed on their own below.
+    const anyApproved = accounts.some((account) => account.status !== "pending");
+    if (!shopifyConnected && anyApproved)
       tasks.push({
         key: "shopify",
         label: "Connect Shopify",

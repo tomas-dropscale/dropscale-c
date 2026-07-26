@@ -4,70 +4,11 @@ import * as React from "react";
 import { AlertTriangle, ArrowDownRight, ArrowUpRight } from "lucide-react";
 
 import { useI18n } from "@/lib/i18n/provider";
-import { daysAgo, isoDay, startOfMonth } from "@/lib/finance/queries";
 import { cn } from "@/lib/utils";
 
-// ---------------------------------------------------------------------------
-// Date range
-// ---------------------------------------------------------------------------
-
-export type RangeKey = "d7" | "d30" | "d90" | "mtd" | "ytd";
-
-export const RANGE_KEYS: RangeKey[] = ["d7", "d30", "d90", "mtd", "ytd"];
-
-/** Inclusive [from, to] ISO bounds for a range key. */
-export function rangeBounds(key: RangeKey): { from: string; to: string } {
-  const to = isoDay(new Date());
-
-  switch (key) {
-    case "d7":
-      return { from: daysAgo(6), to };
-    case "d30":
-      return { from: daysAgo(29), to };
-    case "d90":
-      return { from: daysAgo(89), to };
-    case "mtd":
-      return { from: startOfMonth(), to };
-    case "ytd":
-      return { from: isoDay(new Date(new Date().getFullYear(), 0, 1)), to };
-  }
-}
-
-export function RangeTabs({
-  value,
-  onChange,
-}: {
-  value: RangeKey;
-  onChange: (next: RangeKey) => void;
-}) {
-  const { d } = useI18n();
-
-  return (
-    <div
-      role="tablist"
-      aria-label={d.finance.rangeLabel}
-      className="flex items-center gap-1 rounded-full border border-[var(--border-subtle)] p-0.5"
-    >
-      {RANGE_KEYS.map((key) => (
-        <button
-          key={key}
-          type="button"
-          role="tab"
-          aria-selected={value === key}
-          onClick={() => onChange(key)}
-          className={cn(
-            "rounded-full px-2.5 py-1 text-[11.5px] font-medium transition-smooth",
-            value === key
-              ? "bg-[var(--accent-gold-dim)] text-[var(--accent-gold-strong)]"
-              : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]",
-          )}
-        >
-          {d.finance.range[key]}
-        </button>
-      ))}
-    </div>
-  );
-}
+// The date window is no longer a control of its own here: the admin pages use
+// the shared DateRangePicker (presets + two-month calendar), the same one the
+// client portal uses, driven by a RangeSelection from lib/portal/range.
 
 // ---------------------------------------------------------------------------
 // Stat card

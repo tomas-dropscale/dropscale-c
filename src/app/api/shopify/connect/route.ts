@@ -101,6 +101,23 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Account not found." }, { status: 404 });
   }
 
+  // Onboarding has an order, and this is where it is enforced — the UI hides
+  // the form, but the rule lives here. A store is wired to Shopify only after
+  // the team has accepted its ad account: connecting earlier stored real
+  // credentials for an account that might still be rejected, and left the
+  // client with a "connected" store that synced nothing (pending accounts are
+  // skipped by the sync). Approval first, then data.
+  if (account.status === "pending") {
+    return NextResponse.json(
+      {
+        error:
+          "This store is still waiting for our approval. As soon as the Dropscale team accepts it, " +
+          "you can connect Shopify.",
+      },
+      { status: 409 },
+    );
+  }
+
   let shop;
   try {
     // Secrets go through the client_credentials exchange first; the shop
@@ -165,21 +182,16 @@ export async function POST(request: NextRequest) {
 
   // Pull the store's history right away. Waiting for the lazy sync would show
   // a connected store with an empty dashboard — the per-account throttle and
-  // coverage checks don't know a NEW source just appeared. Pending accounts
-  // are the exception: approval is the gate, so nothing syncs yet.
+  // coverage checks don't know a NEW source just appeared. (Only approved
+  // accounts reach this line, so the sync always has the green light.)
   let syncWarning: string | null = null;
-  if (account.status === "pending") {
+  try {
+    await resyncAccountNow(accountId);
+  } catch (error) {
+    console.error(`Post-connect resync failed for ${accountId}:`, error);
     syncWarning =
-      "Connected. Data will start syncing once the Dropscale team approves this account.";
-  } else {
-    try {
-      await resyncAccountNow(accountId);
-    } catch (error) {
-      console.error(`Post-connect resync failed for ${accountId}:`, error);
-      syncWarning =
-        "Connected, but the first data sync failed — the dashboard will retry within 15 minutes. " +
-        (error instanceof Error ? error.message : "");
-    }
+      "Connected, but the first data sync failed — the dashboard will retry within 15 minutes. " +
+      (error instanceof Error ? error.message : "");
   }
 
   return NextResponse.json({

@@ -6,13 +6,13 @@ import { PageContainer } from "@/components/ui/page-container";
 import {
   DataTable,
   ErrorBanner,
-  RangeTabs,
   StatCard,
   Td,
   Th,
   Tr,
-  type RangeKey,
 } from "@/components/finance/finance-ui";
+import { DateRangePicker } from "@/components/ui/date-range-picker";
+import type { RangeSelection } from "@/lib/portal/range";
 import { PnLChart } from "@/components/finance/pnl-chart";
 import { useFinance } from "@/components/finance/use-finance";
 import { dailyPnL, totals } from "@/lib/finance/queries";
@@ -26,7 +26,7 @@ export function ProfitView({
   initialRange,
 }: {
   initial: FinanceSnapshot;
-  initialRange: RangeKey;
+  initialRange: RangeSelection;
 }) {
   const { d, intl } = useI18n();
   const t = d.finance.profit;
@@ -66,7 +66,7 @@ export function ProfitView({
     <PageContainer
       title={t.title}
       description={t.subtitle}
-      actions={<RangeTabs value={range} onChange={setRange} />}
+      actions={<DateRangePicker value={range} onApply={setRange} />}
     >
       {error && <ErrorBanner message={error} onDismiss={() => setError(null)} />}
 

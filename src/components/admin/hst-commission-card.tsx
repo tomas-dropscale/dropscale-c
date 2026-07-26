@@ -56,7 +56,14 @@ export function HstCommissionCard({
     setNotice(null);
     const res = await fetch("/api/hst/sync", { method: "POST" });
     const body = (await res.json().catch(() => null)) as
-      | { ok?: boolean; error?: string; total?: number; days?: number }
+      | {
+          ok?: boolean;
+          error?: string;
+          total?: number;
+          days?: number;
+          booked?: number;
+          ignoredRows?: number;
+        }
       | null;
     setBusy(null);
     if (!res.ok || !body?.ok) {
@@ -64,7 +71,11 @@ export function HstCommissionCard({
       return;
     }
     const total = typeof body.total === "number" ? body.total.toFixed(2) : body.total;
-    setNotice(`Synced — commission total ${total} across ${body.days} day(s).`);
+    // The booked count is the honest one: it's what actually reached the ledger.
+    setNotice(
+      `Synced — ${body.booked} entries booked across ${body.days} day(s), commission total ${total}.` +
+        (body.ignoredRows ? ` ${body.ignoredRows} HST row(s) had no usable date and were skipped.` : ""),
+    );
     router.refresh();
   }
 
@@ -90,6 +101,11 @@ export function HstCommissionCard({
         <span className="font-mono">login</span> request → <span className="text-[var(--text-secondary)]">Response</span>{" "}
         → copy it all and paste below. It carries the refresh token, so the sync renews itself —
         you only repeat this if the refresh token expires (weeks). Stored encrypted.
+      </p>
+      <p className="text-[12.5px] leading-relaxed text-[var(--text-muted)]">
+        Use the <span className="text-[var(--text-secondary)]">Response</span> tab, not{" "}
+        <span className="text-[var(--text-secondary)]">Preview</span>: Preview shortens long values
+        with a <span className="font-mono">…</span>, and a token cut that way can never be sent.
       </p>
 
       <div className="space-y-1.5">
