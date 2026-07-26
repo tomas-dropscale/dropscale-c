@@ -3,16 +3,15 @@
 import { usePathname } from "next/navigation";
 import {
   BarChart3,
-  KanbanSquare,
   LayoutGrid,
   Receipt,
   Settings,
   Store,
   Target,
   TrendingUp,
+  Truck,
   UserCheck,
   Users,
-  Wallet,
   type LucideIcon,
 } from "lucide-react";
 
@@ -33,15 +32,17 @@ const NAV_GROUPS: Group[] = [
     label: null,
     items: [
       { href: "/admin", icon: LayoutGrid, label: (d) => d.nav.overview },
-      { href: "/admin/board", icon: KanbanSquare, label: (d) => d.nav.board },
     ],
   },
   {
     label: (d) => d.nav.groupFinance,
     items: [
+      // Revenue and the daily P&L are one screen: money in, then what it left
+      // behind, then every transaction that produced it.
       { href: "/admin/revenue", icon: TrendingUp, label: (d) => d.nav.revenue },
       { href: "/admin/expenses", icon: Receipt, label: (d) => d.nav.expenses },
-      { href: "/admin/profit", icon: Wallet, label: (d) => d.nav.profit },
+      // A brand name — the same word in every locale, so no dictionary entry.
+      { href: "/admin/hst", icon: Truck, label: () => "HST" },
     ],
   },
   {

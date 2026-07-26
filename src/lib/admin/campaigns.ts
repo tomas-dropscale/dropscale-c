@@ -36,20 +36,63 @@ export type AdminClientCampaigns = {
 
 export type AdminCampaignsOverview = {
   clients: AdminClientCampaigns[];
+  /**
+   * Staff-admins' own stores. Listed, never queried: they're internal/test
+   * accounts the agency doesn't bill itself for, so pulling their campaigns
+   * would cost a Google round trip to show numbers that mean nothing here.
+   */
+  internal: AdminClientCampaigns[];
   configured: boolean;
   totals: { spend: number; commission: number; activeCampaigns: number; connectedAccounts: number };
 };
+
+type Owner = { name: string; email: string };
+
+/** Group accounts under their owner, biggest spender first. */
+function groupByOwner(
+  entries: AdminAccountCampaigns[],
+  owners: Map<string, Owner>,
+): AdminClientCampaigns[] {
+  const byClient = new Map<string, AdminClientCampaigns>();
+
+  for (const entry of entries) {
+    const owner = owners.get(entry.account.client_id);
+    const group = byClient.get(entry.account.client_id) ?? {
+      clientId: entry.account.client_id,
+      clientName: owner?.name ?? "Unknown client",
+      clientEmail: owner?.email ?? "",
+      accounts: [],
+      spend: 0,
+      commission: 0,
+    };
+    group.accounts.push(entry);
+    group.spend += entry.spend;
+    group.commission += entry.commission;
+    byClient.set(entry.account.client_id, group);
+  }
+
+  return [...byClient.values()].sort((a, b) => b.spend - a.spend);
+}
 
 export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminCampaignsOverview> {
   const supabase = await createClient();
   const configured = hasGoogleAdsEnv();
 
-  const [accountsRes, clientsRes] = await Promise.all([
+  const [accountsRes, clientsRes, adminsRes] = await Promise.all([
     supabase.from("ad_accounts").select(ACCOUNT_COLUMNS).order("created_at", { ascending: true }),
     supabase.from("portal_clients").select("id, full_name, email"),
+    supabase.from("profiles").select("id").eq("role", "admin"),
   ]);
 
-  const accounts = (accountsRes.data as AdAccount[] | null) ?? [];
+  // Staff-admins hold portal accounts too, but theirs are internal/test stores
+  // — the agency doesn't bill itself, and their revenue is purged from the
+  // ledger (lib/admin/commission-sync). They're kept apart here: listed at the
+  // end of the page, never queried, and out of every total.
+  const adminIds = new Set((adminsRes.data ?? []).map((row) => row.id));
+
+  const allAccounts = (accountsRes.data as AdAccount[] | null) ?? [];
+  const accounts = allAccounts.filter((account) => !adminIds.has(account.client_id));
+  const internalAccounts = allAccounts.filter((account) => adminIds.has(account.client_id));
   const owners = new Map(
     (clientsRes.data ?? []).map((client) => [
       client.id,
@@ -99,29 +142,21 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
     }),
   );
 
-  // Group by owner; clients with the most spend first, so the list reads as
-  // "where the money is" rather than insertion order.
-  const byClient = new Map<string, AdminClientCampaigns>();
-  for (const entry of perAccount) {
-    const owner = owners.get(entry.account.client_id);
-    const group = byClient.get(entry.account.client_id) ?? {
-      clientId: entry.account.client_id,
-      clientName: owner?.name ?? "Unknown client",
-      clientEmail: owner?.email ?? "",
-      accounts: [],
-      spend: 0,
-      commission: 0,
-    };
-    group.accounts.push(entry);
-    group.spend += entry.spend;
-    group.commission += entry.commission;
-    byClient.set(entry.account.client_id, group);
-  }
-
-  const clients = [...byClient.values()].sort((a, b) => b.spend - a.spend);
+  // Admin-owned stores get an entry with no campaigns: they're shown as a
+  // roster, and the page says outright that their campaigns aren't listed.
+  const internalEntries: AdminAccountCampaigns[] = internalAccounts.map((account) => ({
+    account,
+    campaigns: [],
+    connected:
+      configured && account.google_ads_connected && Boolean(account.google_ads_customer_id),
+    failed: false,
+    spend: 0,
+    commission: 0,
+  }));
 
   return {
-    clients,
+    clients: groupByOwner(perAccount, owners),
+    internal: groupByOwner(internalEntries, owners),
     configured,
     totals: {
       spend: perAccount.reduce((sum, entry) => sum + entry.spend, 0),

@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Unplug } from "lucide-react";
+import { ChevronRight, ShieldAlert, Unplug } from "lucide-react";
 
 import { PageContainer } from "@/components/ui/page-container";
 import { Avatar } from "@/components/ui/avatar";
@@ -78,9 +78,12 @@ export default async function AdminCampaignsPage({
       ) : (
         <div className="space-y-6">
           {overview.clients.map((client) => (
-            <section key={client.clientId} className="panel overflow-hidden">
-              {/* Client header */}
-              <header className="flex flex-wrap items-center gap-3 border-b border-[var(--border-subtle)] px-5 py-4">
+            /* Collapsed by default: a client can run a dozen stores, and an
+               always-open list buries the next client. Plain <details>, so the
+               page stays a Server Component and works without hydration. */
+            <details key={client.clientId} className="panel group/client overflow-hidden">
+              <summary className="transition-smooth flex cursor-pointer list-none flex-wrap items-center gap-3 px-5 py-4 hover:bg-[var(--bg-panel-hover)] [&::-webkit-details-marker]:hidden">
+                <ChevronRight className="size-4 shrink-0 text-[var(--text-muted)] transition-transform group-open/client:rotate-90" />
                 <Avatar name={client.clientName} seed={client.clientId} size="sm" />
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-[14px] font-semibold text-[var(--text-primary)]">
@@ -90,6 +93,9 @@ export default async function AdminCampaignsPage({
                     {client.clientEmail}
                   </p>
                 </div>
+                <Badge variant="neutral">
+                  {client.accounts.length} {client.accounts.length === 1 ? "store" : "stores"}
+                </Badge>
                 <div className="text-right">
                   <p className="text-[13.5px] font-semibold text-[var(--text-primary)]">
                     {money(client.spend, intl)}
@@ -98,15 +104,17 @@ export default async function AdminCampaignsPage({
                     {money(client.commission, intl)} commission
                   </p>
                 </div>
-              </header>
+              </summary>
 
-              {/* Accounts */}
+              {/* Accounts — each one its own drop-down, so ten stores read as
+                  ten lines until you ask for one. */}
               {client.accounts.map((entry) => (
-                <div
+                <details
                   key={entry.account.id}
-                  className="border-b border-[var(--border-subtle)] last:border-b-0"
+                  className="group/store border-t border-[var(--border-subtle)]"
                 >
-                  <div className="flex flex-wrap items-center gap-2.5 px-5 pt-4 pb-2">
+                  <summary className="transition-smooth flex cursor-pointer list-none flex-wrap items-center gap-2.5 px-5 py-3 hover:bg-[var(--bg-panel-hover)] [&::-webkit-details-marker]:hidden">
+                    <ChevronRight className="size-3.5 shrink-0 text-[var(--text-muted)] transition-transform group-open/store:rotate-90" />
                     <span
                       className="size-2 shrink-0 rounded-full"
                       style={{ backgroundColor: entry.account.color_dot }}
@@ -115,11 +123,6 @@ export default async function AdminCampaignsPage({
                     <p className="min-w-0 flex-1 truncate text-[13px] font-medium text-[var(--text-primary)]">
                       {entry.account.store_name}
                     </p>
-                    <CommissionRate
-                      accountId={entry.account.id}
-                      rate={Number(entry.account.commission_rate)}
-                      revenueShareEnabled={entry.account.revenue_share_enabled}
-                    />
                     {!entry.connected && (
                       <Badge variant="warning">
                         <Unplug className="size-3" aria-hidden />
@@ -127,6 +130,22 @@ export default async function AdminCampaignsPage({
                       </Badge>
                     )}
                     {entry.failed && <Badge variant="danger">Query failed</Badge>}
+                    <span className="text-[12.5px] text-[var(--text-secondary)]">
+                      {money(entry.spend, intl, entry.account.currency)}
+                    </span>
+                    <span className="text-[12.5px] text-[var(--accent-gold)]">
+                      {money(entry.commission, intl, entry.account.currency)}
+                    </span>
+                  </summary>
+
+                  {/* The rate control lives here, not in the summary: a click on
+                      it inside <summary> would toggle the panel shut. */}
+                  <div className="px-5 pt-1 pb-2">
+                    <CommissionRate
+                      accountId={entry.account.id}
+                      rate={Number(entry.account.commission_rate)}
+                      revenueShareEnabled={entry.account.revenue_share_enabled}
+                    />
                   </div>
 
                   {entry.campaigns.length > 0 && (
@@ -184,11 +203,60 @@ export default async function AdminCampaignsPage({
                       No campaigns with activity in this period.
                     </p>
                   )}
-                </div>
+                </details>
               ))}
-            </section>
+            </details>
           ))}
         </div>
+      )}
+
+      {/* Internal stores, last and deliberately colourless: they belong to the
+          team, not to a client, so they must never read as agency revenue. */}
+      {overview.internal.length > 0 && (
+        <section className="mt-8 space-y-3 opacity-70">
+          <div className="flex items-center gap-2.5 rounded-[var(--radius-card)] border border-dashed border-[var(--border-strong)] bg-[var(--bg-base)] px-4 py-3">
+            <ShieldAlert className="size-4 shrink-0 text-[var(--text-muted)]" aria-hidden />
+            <p className="text-[12.5px] leading-relaxed text-[var(--text-muted)]">
+              Admin stores — campaigns for admin accounts aren’t shown here, and their spend
+              never counts towards agency totals.
+            </p>
+          </div>
+
+          {overview.internal.map((client) => (
+            <details
+              key={client.clientId}
+              className="group/internal overflow-hidden rounded-[var(--radius-card)] border border-dashed border-[var(--border-subtle)] bg-[var(--bg-base)]"
+            >
+              <summary className="transition-smooth flex cursor-pointer list-none flex-wrap items-center gap-3 px-5 py-3.5 hover:bg-[var(--bg-panel-hover)] [&::-webkit-details-marker]:hidden">
+                <ChevronRight className="size-4 shrink-0 text-[var(--text-muted)] transition-transform group-open/internal:rotate-90" />
+                <p className="min-w-0 flex-1 truncate text-[13.5px] font-medium text-[var(--text-secondary)]">
+                  {client.clientName}
+                </p>
+                <Badge variant="neutral">Admin</Badge>
+                <Badge variant="neutral">
+                  {client.accounts.length} {client.accounts.length === 1 ? "store" : "stores"}
+                </Badge>
+              </summary>
+
+              <ul className="border-t border-dashed border-[var(--border-subtle)]">
+                {client.accounts.map((entry) => (
+                  <li
+                    key={entry.account.id}
+                    className="flex items-center gap-2.5 px-5 py-2.5 text-[12.5px] text-[var(--text-muted)]"
+                  >
+                    <span
+                      className="size-2 shrink-0 rounded-full opacity-60"
+                      style={{ backgroundColor: entry.account.color_dot }}
+                      aria-hidden
+                    />
+                    <span className="min-w-0 flex-1 truncate">{entry.account.store_name}</span>
+                    <span>{entry.connected ? "Google Ads connected" : "Not connected"}</span>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          ))}
+        </section>
       )}
     </PageContainer>
   );

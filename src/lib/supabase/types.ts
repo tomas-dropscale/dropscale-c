@@ -284,6 +284,21 @@ export type HstIntegration = {
   updated_at: string;
 };
 
+/**
+ * One payment RECEIVED from HST (migration 0012). The commission ledger is
+ * republished on every sync, so settlement lives here: `covers_through` marks
+ * which commission days a payment settles.
+ */
+export type HstPayment = {
+  id: string;
+  paid_on: string;
+  amount: number;
+  covers_through: string;
+  notes: string | null;
+  created_by: string | null;
+  created_at: string;
+};
+
 export type CreativeDelivery = {
   id: string;
   ad_account_id: string;
@@ -800,6 +815,15 @@ export type Database = {
           | "updated_at"
         >;
         Update: Partial<HstIntegration>;
+        Relationships: [];
+      };
+      hst_payments: {
+        Row: Row<HstPayment>;
+        Insert: Insert<
+          HstPayment,
+          "id" | "paid_on" | "notes" | "created_by" | "created_at"
+        >;
+        Update: Partial<HstPayment>;
         Relationships: [];
       };
       creative_deliveries: {

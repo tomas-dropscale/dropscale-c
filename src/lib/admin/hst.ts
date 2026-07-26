@@ -14,8 +14,8 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 import { decryptToken, encryptToken } from "@/lib/google-ads/crypto";
-import { HST_NOTE_PREFIX } from "@/lib/finance/config";
-import type { Database } from "@/lib/supabase/types";
+import { HST_NOTE_PREFIX, noteClientName } from "@/lib/finance/config";
+import type { Database, HstPayment } from "@/lib/supabase/types";
 
 type Supabase = SupabaseClient<Database>;
 
@@ -223,6 +223,26 @@ export async function getHstStatus(): Promise<{
     lastSyncedAt: data?.last_synced_at ?? null,
     tokenExpiresAt: data?.token_expires_at ?? null,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Settlement — what HST has actually paid us
+// ---------------------------------------------------------------------------
+
+/**
+ * The latest commission day covered by a payment, or null when nothing is
+ * settled yet. Missing table (migration 0012 not run) reads as "nothing paid"
+ * rather than taking the sync down.
+ */
+async function hstSettledThrough(supabase: Supabase): Promise<string | null> {
+  const { data, error } = await supabase
+    .from("hst_payments")
+    .select("covers_through")
+    .order("covers_through", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) return null;
+  return data?.covers_through ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -468,6 +488,10 @@ export async function syncHstCommission(opts?: { force?: boolean }): Promise<Hst
     (crmClients ?? []).map((row) => [row.name.trim().toLowerCase(), row.id]),
   );
 
+  // Settlement is re-derived, never carried: these rows are about to be
+  // rewritten, so "paid" has to come from the payments table each time.
+  const settledThrough = await hstSettledThrough(supabase);
+
   // The set to retire, captured BEFORE anything new is written.
   const { data: previousRows, error: previousError } = await supabase
     .from("commissions")
@@ -486,7 +510,9 @@ export async function syncHstCommission(opts?: { force?: boolean }): Promise<Hst
     rate: 100,
     amount: entry.amount,
     currency: HST_CURRENCY,
-    status: "confirmed" as const,
+    // Days HST has already settled show as paid everywhere the ledger is read.
+    status:
+      settledThrough && entry.day <= settledThrough ? ("paid" as const) : ("confirmed" as const),
     // The name from the HST shop string — the finance tables read it back from
     // here whenever there's no CRM client to link to.
     notes: `${HST_NOTE_PREFIX}${entry.client}`,
@@ -532,5 +558,125 @@ export async function syncHstCommission(opts?: { force?: boolean }): Promise<Hst
     days: new Set(entries.map((entry) => entry.day)).size,
     booked: written.length,
     ignoredRows: droppedRows,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// The HST page's read model
+// ---------------------------------------------------------------------------
+
+export type HstClientTotal = { name: string; amount: number; count: number; share: number };
+export type HstDayTotal = { day: string; amount: number; clients: number };
+
+export type HstOverview = {
+  currency: string;
+  /** Everything HST has reported, as booked in the ledger. */
+  total: number;
+  /** Sum of the payments we've received. */
+  paid: number;
+  /** total − paid: what HST still owes us. */
+  outstanding: number;
+  /** Latest commission day a payment covers — the settlement watermark. */
+  settledThrough: string | null;
+  clients: HstClientTotal[];
+  days: HstDayTotal[];
+  payments: HstPayment[];
+  entryCount: number;
+  firstDay: string | null;
+  lastDay: string | null;
+  lastSyncedAt: string | null;
+  /** migration 0012 hasn't been run — the page says so instead of half-working. */
+  paymentsUnavailable: boolean;
+};
+
+/**
+ * Everything the HST page shows, in one pass over the source's ledger rows.
+ *
+ * All-time on purpose: "what are they still to pay us" is meaningless inside a
+ * 30-day window, and the ledger only ever holds what HST currently reports.
+ */
+export async function fetchHstOverview(): Promise<HstOverview> {
+  const supabase = await createClient();
+
+  const [{ data: source }, { data: config }, payments] = await Promise.all([
+    supabase.from("revenue_sources").select("id").eq("name", HST_SOURCE).maybeSingle(),
+    supabase.from("hst_integration").select("last_synced_at").maybeSingle(),
+    supabase.from("hst_payments").select("*").order("paid_on", { ascending: false }),
+  ]);
+
+  const empty: HstOverview = {
+    currency: HST_CURRENCY,
+    total: 0,
+    paid: 0,
+    outstanding: 0,
+    settledThrough: null,
+    clients: [],
+    days: [],
+    payments: (payments.data ?? []) as HstPayment[],
+    entryCount: 0,
+    firstDay: null,
+    lastDay: null,
+    lastSyncedAt: config?.last_synced_at ?? null,
+    paymentsUnavailable: Boolean(payments.error),
+  };
+  if (!source) return empty;
+
+  const { data: rows } = await supabase
+    .from("commissions")
+    .select("occurred_on, amount, notes")
+    .eq("source_id", source.id)
+    .order("occurred_on", { ascending: false });
+  if (!rows || rows.length === 0) return empty;
+
+  const byClient = new Map<string, { amount: number; count: number }>();
+  const byDay = new Map<string, { amount: number; clients: Set<string> }>();
+  let total = 0;
+
+  for (const row of rows) {
+    const amount = Number(row.amount);
+    const client = noteClientName(row.notes) ?? "Unknown";
+    total += amount;
+
+    const clientBucket = byClient.get(client) ?? { amount: 0, count: 0 };
+    clientBucket.amount += amount;
+    clientBucket.count += 1;
+    byClient.set(client, clientBucket);
+
+    const dayBucket = byDay.get(row.occurred_on) ?? { amount: 0, clients: new Set<string>() };
+    dayBucket.amount += amount;
+    dayBucket.clients.add(client);
+    byDay.set(row.occurred_on, dayBucket);
+  }
+
+  const paidRows = (payments.data ?? []) as HstPayment[];
+  const paid = paidRows.reduce((sum, payment) => sum + Number(payment.amount), 0);
+  const days = [...byDay.entries()]
+    .map(([day, bucket]) => ({ day, amount: bucket.amount, clients: bucket.clients.size }))
+    .sort((a, b) => b.day.localeCompare(a.day));
+
+  return {
+    currency: HST_CURRENCY,
+    total,
+    paid,
+    outstanding: total - paid,
+    settledThrough: paidRows.reduce<string | null>(
+      (max, payment) => (max === null || payment.covers_through > max ? payment.covers_through : max),
+      null,
+    ),
+    clients: [...byClient.entries()]
+      .map(([name, bucket]) => ({
+        name,
+        amount: bucket.amount,
+        count: bucket.count,
+        share: total > 0 ? bucket.amount / total : 0,
+      }))
+      .sort((a, b) => b.amount - a.amount),
+    days,
+    payments: paidRows,
+    entryCount: rows.length,
+    firstDay: days.length > 0 ? days[days.length - 1].day : null,
+    lastDay: days.length > 0 ? days[0].day : null,
+    lastSyncedAt: config?.last_synced_at ?? null,
+    paymentsUnavailable: Boolean(payments.error),
   };
 }
