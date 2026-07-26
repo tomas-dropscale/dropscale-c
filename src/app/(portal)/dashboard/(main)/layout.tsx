@@ -1,5 +1,3 @@
-import { cookies } from "next/headers";
-
 import { createClient, getSessionClient, getSessionProfile } from "@/lib/supabase/server";
 import { fetchAccounts } from "@/lib/portal/data";
 import { fetchPendingCounts } from "@/lib/admin/approvals";
@@ -25,14 +23,19 @@ export default async function MainLayout({ children }: { children: React.ReactNo
   const pending = isAdmin ? await fetchPendingCounts() : null;
 
   // Onboarding state for the notification bell: the store's setup steps stay in
-  // the bell until every one is done. Costs count once a cost exists OR the
-  // Costs page has been opened (VisitMarker's cookie).
+  // the bell until every one is done.
+  //
+  // Costs count ONLY when this client has actually saved one. It used to also
+  // count a "visited the Costs page" cookie, which lives in the browser and
+  // knows nothing about which account is signed in — so opening Costs on one
+  // Dropscale account marked the step done on every other account in that
+  // browser. RLS scopes this query to the signed-in client; the answer is the
+  // account's, not the browser's.
   const supabase = await createClient();
   const { data: costRows } = await supabase.from("product_costs").select("id").limit(1);
-  const cogsVisited = (await cookies()).get("cogs_visited")?.value === "1";
   const setup = {
     needsGoogle: hasGoogleAdsEnv(),
-    costsDone: (costRows?.length ?? 0) > 0 || cogsVisited,
+    costsDone: (costRows?.length ?? 0) > 0,
   };
 
   return (

@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { cookies } from "next/headers";
 import { ArrowRight, Info, PackageOpen, Database } from "lucide-react";
 import {
   BadgeDollarSign,
@@ -82,8 +81,8 @@ export default async function DashboardPage({
 
   // Setup state drives the first-run guide. It does NOT vanish after the first
   // connection: it stays, ticking each step off, until EVERY applicable step is
-  // done. Costs count as set once any manual product cost exists (RLS scopes
-  // the check to this client's own products).
+  // done. Every check below reads THIS client's own rows (RLS scopes them), so
+  // the guide can only ever describe the account you're signed into.
   const googleConnected = visible.some((account) => account.google_ads_connected);
   const shopifyConnected = visible.some((account) => account.shopify_connected);
 
@@ -112,11 +111,13 @@ export default async function DashboardPage({
     uncostedCount = products.filter((product) => !costed.has(product.id)).length;
   }
 
-  // The costs step counts as done once a cost is set OR the client has simply
-  // opened the Costs page (cookie set by VisitMarker there) — so the guide can
-  // complete even if they keep the default percentage.
-  const cogsVisited = (await cookies()).get("cogs_visited")?.value === "1";
-  const costsDone = hasAnyCost || cogsVisited;
+  // The costs step is done when THIS client has real costs: either a saved
+  // product cost, or every synced product covered by a bundle. It used to also
+  // accept a "visited the Costs page" cookie, but a cookie belongs to the
+  // browser, not to the account — visiting Costs on one Dropscale account
+  // ticked the step off on every other account signed in from that browser,
+  // and reported costs that were never set.
+  const costsDone = hasAnyCost || (products.length > 0 && uncostedCount === 0);
 
   const needsGoogle = hasGoogleAdsEnv();
   const setupComplete =
@@ -174,15 +175,24 @@ export default async function DashboardPage({
       }
     >
       {accounts.length === 0 ? (
-        <div className="panel flex flex-col items-center gap-3 px-6 py-16 text-center">
-          <PackageOpen className="size-8 text-[var(--text-muted)]" />
-          <p className="text-[15px] font-medium text-[var(--text-primary)]">{d.portal.noStores}</p>
-          <p className="max-w-[380px] text-[13px] leading-relaxed text-[var(--text-secondary)]">
-            {fmt(d.portal.noStoresHelp, {
-              add: d.portal.addAccount,
-              request: d.portal.requestAccount,
-            })}
-          </p>
+        /* No stores yet is the FIRST onboarding state, not an empty page: the
+           guide is what someone landing here needs, and it already knows how
+           to walk them from "no store" to Shopify, ads and costs. */
+        <div className="space-y-4">
+          <GettingStartedGuide accounts={[]} costsSet={costsDone} showGoogle={needsGoogle} />
+
+          <div className="panel flex flex-col items-center gap-3 px-6 py-10 text-center">
+            <PackageOpen className="size-7 text-[var(--text-muted)]" />
+            <p className="text-[14px] font-medium text-[var(--text-primary)]">
+              {d.portal.noStores}
+            </p>
+            <p className="max-w-[380px] text-[13px] leading-relaxed text-[var(--text-secondary)]">
+              {fmt(d.portal.noStoresHelp, {
+                add: d.portal.addAccount,
+                request: d.portal.requestAccount,
+              })}
+            </p>
+          </div>
         </div>
       ) : (
         <div className="space-y-4">

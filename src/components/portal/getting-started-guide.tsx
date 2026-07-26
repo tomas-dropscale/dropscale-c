@@ -2,11 +2,12 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { ArrowRight, Check, Lock, PlugZap, ShoppingBag, Store, Boxes } from "lucide-react";
+import { ArrowRight, Boxes, Check, ChevronRight, Lock, PlugZap, ShoppingBag, Store } from "lucide-react";
 
 import type { AdAccount } from "@/lib/supabase/types";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { ShopifyLinkForm } from "@/components/portal/shopify-link-form";
+import { ShopifySetupSteps } from "@/components/portal/shopify-setup-steps";
 import { cn } from "@/lib/utils";
 
 /**
@@ -32,8 +33,15 @@ type Step = {
   cta: string;
   done: boolean;
   action: StepAction;
-  /** Why this step can't be started yet — shown instead of its button. */
-  locked?: string;
+  /**
+   * Why this step can't be started yet — replaces its button. It still links
+   * somewhere: a locked step must never be a dead end, and everything a client
+   * can do while waiting (build the Shopify app, read the scopes) lives one
+   * click away.
+   */
+  locked?: { reason: string; href: string };
+  /** Rendered under the step, inside its own row — never as a sibling block. */
+  extra?: React.ReactNode;
 };
 
 export function GettingStartedGuide({
@@ -62,9 +70,11 @@ export function GettingStartedGuide({
   const unlinkedShopify = approved.filter((account) => !account.shopify_connected);
 
   const shopifyLock = !hasAccounts
-    ? "Add your store first"
+    ? { reason: "Add your store first", href: "/dashboard/settings/accounts" }
     : approved.length === 0
-      ? "Waiting for our approval"
+      ? // Approval gates connecting, not preparing: Connections explains the
+        // wait AND lists the scopes the Shopify app needs.
+        { reason: "Waiting for our approval", href: "/dashboard/settings/connections" }
       : undefined;
 
   const steps: Step[] = [
@@ -72,7 +82,7 @@ export function GettingStartedGuide({
       icon: Store,
       title: "Add your store",
       body: "Create an account for your store so we have somewhere to bring the numbers into.",
-      cta: "Manage accounts",
+      cta: "Add your store",
       done: hasAccounts,
       action: { kind: "link", href: "/dashboard/settings/accounts" },
     },
@@ -103,6 +113,20 @@ export function GettingStartedGuide({
         unlinkedShopify.length > 0
           ? { kind: "shopify" }
           : { kind: "link", href: "/dashboard/settings/connections" },
+      // The app-and-scopes guide belongs to THIS step: it's what the step is
+      // asking you to go and do. Readable even while the step is locked —
+      // building the app is the long pole, and waiting is the time for it.
+      extra: (
+        <details className="group/setup rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-panel)]">
+          <summary className="transition-smooth flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-[12px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] [&::-webkit-details-marker]:hidden">
+            <ChevronRight className="size-3.5 shrink-0 text-[var(--text-muted)] transition-transform group-open/setup:rotate-90" />
+            How to create your Shopify app — and the exact permissions it needs
+          </summary>
+          <div className="px-3 pb-3">
+            <ShopifySetupSteps />
+          </div>
+        </details>
+      ),
     },
     {
       icon: Boxes,
@@ -140,60 +164,68 @@ export function GettingStartedGuide({
           <li
             key={step.title}
             className={cn(
-              "flex items-center gap-3 rounded-[10px] border px-3.5 py-3",
+              "rounded-[10px] border px-3.5 py-3",
               step.done
                 ? "border-[var(--success-green)]/25 bg-[var(--success-green)]/8"
                 : "border-[var(--border-subtle)] bg-[var(--bg-base)]",
             )}
           >
-            <span
-              className={cn(
-                "flex size-7 shrink-0 items-center justify-center rounded-full text-[12px] font-semibold",
-                step.done
-                  ? "bg-[var(--success-green)]/15 text-[var(--success-green)]"
-                  : "bg-[var(--bg-panel)] text-[var(--text-secondary)]",
-              )}
-            >
-              {step.done ? <Check className="size-4" aria-hidden /> : index + 1}
-            </span>
+            <div className="flex items-center gap-3">
+              <span
+                className={cn(
+                  "flex size-7 shrink-0 items-center justify-center rounded-full text-[12px] font-semibold",
+                  step.done
+                    ? "bg-[var(--success-green)]/15 text-[var(--success-green)]"
+                    : "bg-[var(--bg-panel)] text-[var(--text-secondary)]",
+                )}
+              >
+                {step.done ? <Check className="size-4" aria-hidden /> : index + 1}
+              </span>
 
-            <span className="min-w-0 flex-1">
-              <span className="flex items-center gap-1.5">
-                <step.icon className="size-3.5 shrink-0 text-[var(--text-muted)]" aria-hidden />
-                <span className="text-[13.5px] font-medium text-[var(--text-primary)]">
-                  {step.title}
+              <span className="min-w-0 flex-1">
+                <span className="flex items-center gap-1.5">
+                  <step.icon className="size-3.5 shrink-0 text-[var(--text-muted)]" aria-hidden />
+                  <span className="text-[13.5px] font-medium text-[var(--text-primary)]">
+                    {step.title}
+                  </span>
+                </span>
+                <span className="mt-0.5 block text-[12px] leading-relaxed text-[var(--text-muted)]">
+                  {step.body}
                 </span>
               </span>
-              <span className="mt-0.5 block text-[12px] leading-relaxed text-[var(--text-muted)]">
-                {step.body}
-              </span>
-            </span>
 
-            {!step.done && step.locked ? (
-              <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-[var(--border-subtle)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-muted)]">
-                <Lock className="size-3.5" aria-hidden />
-                {step.locked}
-              </span>
-            ) : null}
-
-            {!step.done &&
-              !step.locked &&
-              (step.action.kind === "shopify" ? (
-                <button type="button" onClick={() => setShopifyOpen(true)} className={ctaClass}>
-                  {step.cta}
-                  <ArrowRight className="size-3.5" aria-hidden />
-                </button>
-              ) : step.action.kind === "external" ? (
-                <a href={step.action.href} className={ctaClass}>
-                  {step.cta}
-                  <ArrowRight className="size-3.5" aria-hidden />
-                </a>
-              ) : (
-                <Link href={step.action.href} className={ctaClass}>
-                  {step.cta}
-                  <ArrowRight className="size-3.5" aria-hidden />
+              {!step.done && step.locked ? (
+                <Link
+                  href={step.locked.href}
+                  className="transition-smooth inline-flex shrink-0 items-center gap-1.5 rounded-full border border-[var(--border-subtle)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-muted)] hover:border-[var(--border-strong)] hover:text-[var(--text-secondary)]"
+                >
+                  <Lock className="size-3.5" aria-hidden />
+                  {step.locked.reason}
                 </Link>
-              ))}
+              ) : null}
+
+              {!step.done &&
+                !step.locked &&
+                (step.action.kind === "shopify" ? (
+                  <button type="button" onClick={() => setShopifyOpen(true)} className={ctaClass}>
+                    {step.cta}
+                    <ArrowRight className="size-3.5" aria-hidden />
+                  </button>
+                ) : step.action.kind === "external" ? (
+                  <a href={step.action.href} className={ctaClass}>
+                    {step.cta}
+                    <ArrowRight className="size-3.5" aria-hidden />
+                  </a>
+                ) : (
+                  <Link href={step.action.href} className={ctaClass}>
+                    {step.cta}
+                    <ArrowRight className="size-3.5" aria-hidden />
+                  </Link>
+                ))}
+            </div>
+
+            {/* Step-owned detail, indented under its own row. */}
+            {!step.done && step.extra && <div className="mt-2.5 pl-10">{step.extra}</div>}
           </li>
         ))}
       </ol>

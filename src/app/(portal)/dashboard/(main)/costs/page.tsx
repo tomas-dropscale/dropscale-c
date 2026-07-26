@@ -5,7 +5,6 @@ import { fetchAccounts } from "@/lib/portal/data";
 import { createClient } from "@/lib/supabase/server";
 import { CostsManager } from "@/components/portal/costs-manager";
 import { StoreSelector } from "@/components/portal/store-selector";
-import { VisitMarker } from "@/components/portal/visit-marker";
 import { PageContainer } from "@/components/ui/page-container";
 import { fmt } from "@/lib/i18n";
 import { getServerDictionary } from "@/lib/i18n/server";
@@ -87,8 +86,6 @@ export default async function CostsPage({
       description={d.portal.cogsSubtitle}
       actions={<StoreSelector accounts={accounts} current={selected.id} />}
     >
-      {/* Opening this page marks the onboarding "set your costs" step done. */}
-      <VisitMarker cookie="cogs_visited" />
       <CostsManager
         account={selected}
         products={products}

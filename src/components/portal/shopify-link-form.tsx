@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
 import { PasswordInput } from "@/components/auth/password-input";
 import { FormAlert } from "@/components/auth/auth-card";
+import { ShopifySetupSteps } from "@/components/portal/shopify-setup-steps";
 import {
   Select,
   SelectContent,
@@ -89,11 +90,13 @@ export function ShopifyLinkForm({
       {notice && <FormAlert tone="success">{notice}</FormAlert>}
 
       <p className="text-[12.5px] leading-relaxed text-[var(--text-muted)]">
-        Pick which ad account this store belongs to, then paste the credentials from
-        your Shopify admin: Settings → Apps and sales channels → Develop apps → your
-        app → API credentials. Copy Client ID and API secret key together, as a pair.
-        The secret is validated against Shopify and encrypted — never shown again.
+        Pick which ad account this store belongs to, then follow the steps below. Copy the Client
+        ID and API secret key together, as a pair.
       </p>
+
+      {/* The scopes live here, on the onboarding path — a client linking their
+          first store is exactly who needs to know what to tick. */}
+      <ShopifySetupSteps />
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <div className="space-y-1.5">

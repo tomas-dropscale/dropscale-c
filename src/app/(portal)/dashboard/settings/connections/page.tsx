@@ -4,6 +4,7 @@ import { CircleCheck, CircleDashed, Hourglass, Store } from "lucide-react";
 import { fetchAccounts } from "@/lib/portal/data";
 import { ShopifyConnectPanel } from "@/components/portal/shopify-connect-panel";
 import { ShopifyLinkForm } from "@/components/portal/shopify-link-form";
+import { ShopifySetupSteps } from "@/components/portal/shopify-setup-steps";
 import { Badge } from "@/components/ui/badge";
 import { PageContainer } from "@/components/ui/page-container";
 import { getServerDictionary } from "@/lib/i18n/server";
@@ -56,7 +57,7 @@ export default async function ConnectionsPage() {
               </header>
               <p className="text-[12.5px] leading-relaxed text-[var(--text-muted)]">
                 Shopify can be connected once we’ve accepted the store. You’ll be able to link it
-                here the moment that happens — nothing else is needed from you.
+                here the moment that happens.
               </p>
               <ul className="flex flex-col gap-1.5">
                 {awaitingApproval.map((account) => (
@@ -72,6 +73,16 @@ export default async function ConnectionsPage() {
                   </li>
                 ))}
               </ul>
+
+              {/* Waiting is the right time to build the app. Approval gates
+                  CONNECTING, not knowing what the app has to be able to read —
+                  so the scopes belong here too, or the one client who most
+                  needs them is the one who can't see them. */}
+              <p className="pt-1 text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
+                Meanwhile, you can already set the app up in Shopify — it’ll be ready to link
+                straight away:
+              </p>
+              <ShopifySetupSteps />
             </section>
           )}
 
