@@ -6,6 +6,7 @@ import {
   AlertCircle,
   Boxes,
   CreditCard,
+  Table2,
   Gauge,
   LayoutGrid,
   Plus,
@@ -104,6 +105,13 @@ export function Sidebar({
               icon={Boxes}
               label={d.portal.cogs}
               active={pathname === "/dashboard/costs"}
+              onNavigate={onNavigate}
+            />
+            <SideNavItem
+              href="/dashboard/pnl"
+              icon={Table2}
+              label={d.pnl.navLabel}
+              active={pathname === "/dashboard/pnl"}
               onNavigate={onNavigate}
             />
             <SideNavItem
