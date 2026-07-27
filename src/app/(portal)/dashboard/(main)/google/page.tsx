@@ -64,6 +64,9 @@ export default async function GoogleAllStoresPage({
     };
   });
   const totals = combineMetricSets(perAccount.map((entry) => entry.metrics));
+  // Across every store: Shopify revenue over ad spend. One number, used by the
+  // grid and the picker's footer, so the page can't contradict itself.
+  const storeRoas = sumMetrics(rows).mer;
 
   // One fee percentage is only honest when every store bills at the same rate.
   const rates = new Set(accounts.map((account) => Number(account.commission_rate)));
@@ -76,7 +79,9 @@ export default async function GoogleAllStoresPage({
     currency: account.currency,
     spend: metrics.spend,
     share: totals.spend > 0 ? metrics.spend / totals.spend : 0,
-    roas: metrics.roas,
+    // The store's own return, not Google's attributed one — same reason as
+    // the conversions above.
+    roas: store.mer,
     // Real orders in the shop, and the ad spend each one cost — NOT Google's
     // attributed conversions. This is the client's own store performance.
     conversions: store.orders,
@@ -97,7 +102,7 @@ export default async function GoogleAllStoresPage({
       actions={
         <RangePicker
           current={range}
-          footer={`${d.portal.roasTotal}: ${multiplier(totals.roas)}`}
+          footer={`${d.portal.roasTotal}: ${multiplier(storeRoas)}`}
         />
       }
     >
@@ -119,6 +124,7 @@ export default async function GoogleAllStoresPage({
             metrics={totals}
             currency={accounts[0]?.currency ?? "EUR"}
             feeRate={uniformFeeRate}
+            storeRoas={storeRoas}
           />
           <StoreComparisonTable rows={comparisonRows} />
         </div>

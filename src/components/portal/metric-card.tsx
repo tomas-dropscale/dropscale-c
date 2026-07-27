@@ -90,11 +90,23 @@ export function MetricsGrid({
   metrics,
   currency,
   feeRate = null,
+  storeRoas = null,
 }: {
   d: Dictionary;
   metrics: MetricSet;
   currency: string;
   feeRate?: number | null;
+  /**
+   * The STORE's return: net Shopify revenue ÷ ad spend, for whatever scope this
+   * grid was given.
+   *
+   * When present it becomes the ROAS shown, and Google's attributed figure
+   * moves to the hint. Google only counts sales it can attribute, so an account
+   * without conversion tracking reports 0.00x next to a dashboard full of real
+   * revenue — technically true, and useless to the client reading it. Null
+   * falls back to the attributed number (the demo/mock path has no revenue).
+   */
+  storeRoas?: number | null;
 }) {
   const cards: {
     label: string;
@@ -124,7 +136,15 @@ export function MetricsGrid({
       icon: Crosshair,
       value: money(metrics.costPerConversion, currency),
     },
-    { label: d.metrics.roas, icon: TrendingUp, value: multiplier(metrics.roas) },
+    {
+      label: d.metrics.roas,
+      icon: TrendingUp,
+      value: multiplier(storeRoas ?? metrics.roas),
+      hint:
+        storeRoas != null
+          ? fmt(d.metrics.roasHintAttributed, { value: multiplier(metrics.roas) })
+          : undefined,
+    },
     {
       label: d.metrics.conversionValue,
       icon: BadgeDollarSign,

@@ -4,7 +4,12 @@ import { FileBarChart, Hourglass } from "lucide-react";
 
 import { fetchAccount, fetchCampaigns } from "@/lib/portal/data";
 import { ensureDailyCoverage, recomputeDailyMetrics } from "@/lib/metrics/recompute";
-import { fetchDailyMetrics, freshness, metricSetFromRows } from "@/lib/metrics/queries";
+import {
+  fetchDailyMetrics,
+  freshness,
+  metricSetFromRows,
+  sumMetrics,
+} from "@/lib/metrics/queries";
 import { parseRange } from "@/lib/portal/range";
 import { dateTime, multiplier } from "@/lib/format";
 import { Button } from "@/components/ui/button";
@@ -51,6 +56,8 @@ export default async function AccountPage({
   ]);
 
   const metrics = metricSetFromRows(rows, Number(account.commission_rate));
+  // This store's own return: its Shopify revenue over its own ad spend.
+  const storeRoas = sumMetrics(rows).mer;
   const { updatedAt, nextUpdateAt } = freshness(rows);
 
   return (
@@ -109,6 +116,7 @@ export default async function AccountPage({
             metrics={metrics}
             currency={account.currency}
             feeRate={Number(account.commission_rate)}
+            storeRoas={storeRoas}
           />
         </section>
 

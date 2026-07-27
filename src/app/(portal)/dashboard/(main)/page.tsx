@@ -263,12 +263,16 @@ export default async function DashboardPage({
               value={money(totals.adSpend, currency)}
               hint={fmt(d.metrics.impressionsHint, { count: compact(totals.impressions) })}
             />
+            {/* The client's ROAS is what their SHOP returned per euro spent —
+                totals.mer. Google's attributed figure moves to the hint: it
+                counts only sales Google can see, so it reads 0.00x for an
+                account without conversion tracking, beside real revenue. */}
             <MetricCard
               d={d}
               label={d.metrics.roas}
               icon={Crosshair}
-              value={multiplier(totals.roas)}
-              hint={fmt(d.metrics.merHint, { value: multiplier(totals.mer) })}
+              value={multiplier(totals.mer)}
+              hint={fmt(d.metrics.roasHintAttributed, { value: multiplier(totals.roas) })}
             />
           </div>
 
