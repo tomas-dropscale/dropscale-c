@@ -8,6 +8,8 @@ import type { AdAccount } from "@/lib/supabase/types";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { ShopifyLinkForm } from "@/components/portal/shopify-link-form";
 import { ShopifySetupSteps } from "@/components/portal/shopify-setup-steps";
+import { fmt } from "@/lib/i18n";
+import { useI18n } from "@/lib/i18n/provider";
 import { cn } from "@/lib/utils";
 
 /**
@@ -55,6 +57,7 @@ export function GettingStartedGuide({
   /** Hide the Google step where Google Ads isn't configured for the platform. */
   showGoogle: boolean;
 }) {
+  const { d } = useI18n();
   const [shopifyOpen, setShopifyOpen] = React.useState(false);
 
   const hasAccounts = accounts.length > 0;
@@ -70,19 +73,19 @@ export function GettingStartedGuide({
   const unlinkedShopify = approved.filter((account) => !account.shopify_connected);
 
   const shopifyLock = !hasAccounts
-    ? { reason: "Add your store first", href: "/dashboard/settings/accounts" }
+    ? { reason: d.onboarding.lockAddStore, href: "/dashboard/settings/accounts" }
     : approved.length === 0
       ? // Approval gates connecting, not preparing: Connections explains the
         // wait AND lists the scopes the Shopify app needs.
-        { reason: "Waiting for our approval", href: "/dashboard/settings/connections" }
+        { reason: d.onboarding.lockApproval, href: "/dashboard/settings/connections" }
       : undefined;
 
   const steps: Step[] = [
     {
       icon: Store,
-      title: "Add your store",
-      body: "Create an account for your store so we have somewhere to bring the numbers into.",
-      cta: "Add your store",
+      title: d.onboarding.addStoreTitle,
+      body: d.onboarding.addStoreBody,
+      cta: d.onboarding.addStoreCta,
       done: hasAccounts,
       action: { kind: "link", href: "/dashboard/settings/accounts" },
     },
@@ -90,9 +93,9 @@ export function GettingStartedGuide({
       ? [
           {
             icon: PlugZap,
-            title: "Connect Google Ads",
-            body: "Link your Google Ads so spend, ROAS and conversions flow in automatically.",
-            cta: "Connect Google Ads",
+            title: d.onboarding.googleTitle,
+            body: d.onboarding.googleBody,
+            cta: d.onboarding.googleCta,
             done: googleConnected,
             action: googleTarget
               ? ({ kind: "external", href: `/api/google-ads/connect?account=${googleTarget.id}` } as StepAction)
@@ -102,11 +105,9 @@ export function GettingStartedGuide({
       : []),
     {
       icon: ShoppingBag,
-      title: "Connect Shopify",
-      body: shopifyLock
-        ? "Available once we’ve accepted your store — then link Shopify to pull in revenue, orders and refunds."
-        : "Link your store’s Shopify to pull in revenue, orders and refunds. We walk you through the app and scopes.",
-      cta: "Connect Shopify",
+      title: d.onboarding.shopifyTitle,
+      body: shopifyLock ? d.onboarding.shopifyBodyLocked : d.onboarding.shopifyBody,
+      cta: d.onboarding.shopifyCta,
       done: shopifyConnected,
       locked: shopifyLock,
       action:
@@ -120,7 +121,7 @@ export function GettingStartedGuide({
         <details className="group/setup rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-panel)]">
           <summary className="transition-smooth flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-[12px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] [&::-webkit-details-marker]:hidden">
             <ChevronRight className="size-3.5 shrink-0 text-[var(--text-muted)] transition-transform group-open/setup:rotate-90" />
-            How to create your Shopify app — and the exact permissions it needs
+            {d.onboarding.scopesSummary}
           </summary>
           <div className="px-3 pb-3">
             <ShopifySetupSteps />
@@ -130,9 +131,9 @@ export function GettingStartedGuide({
     },
     {
       icon: Boxes,
-      title: "Set your product costs",
-      body: "Add product costs under Finance → Costs so your real profit and margin are exact.",
-      cta: "Open Costs",
+      title: d.onboarding.costsTitle,
+      body: d.onboarding.costsBody,
+      cta: d.onboarding.costsCta,
       done: costsSet,
       action: { kind: "link", href: "/dashboard/costs" },
     },
@@ -148,14 +149,14 @@ export function GettingStartedGuide({
       <div className="mb-4 flex items-start justify-between gap-3">
         <div className="space-y-1">
           <h2 className="text-[15px] font-semibold text-[var(--text-primary)]">
-            Let’s get your dashboard live
+            {d.onboarding.title}
           </h2>
           <p className="text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
-            A few quick steps and your revenue, spend and real profit start flowing in.
+            {d.onboarding.subtitle}
           </p>
         </div>
         <span className="shrink-0 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-base)] px-2.5 py-1 text-[11.5px] text-[var(--text-muted)]">
-          {remaining} left
+          {fmt(d.onboarding.remaining, { count: remaining })}
         </span>
       </div>
 
@@ -234,7 +235,7 @@ export function GettingStartedGuide({
       <Dialog open={shopifyOpen} onOpenChange={setShopifyOpen}>
         <DialogContent className="max-w-[560px]">
           <DialogHeader>
-            <DialogTitle>Connect Shopify</DialogTitle>
+            <DialogTitle>{d.onboarding.shopifyCta}</DialogTitle>
           </DialogHeader>
           {unlinkedShopify.length > 0 && (
             <ShopifyLinkForm accounts={unlinkedShopify} onConnected={() => setShopifyOpen(false)} />

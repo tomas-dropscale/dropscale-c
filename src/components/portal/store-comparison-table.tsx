@@ -5,6 +5,8 @@ import Link from "next/link";
 import { ArrowUpDown } from "lucide-react";
 
 import { compact, money, multiplier, percent } from "@/lib/format";
+import type { Dictionary } from "@/lib/i18n";
+import { useI18n } from "@/lib/i18n/provider";
 import { cn } from "@/lib/utils";
 
 export type StoreComparisonRow = {
@@ -24,19 +26,21 @@ export type StoreComparisonRow = {
 
 type SortKey = keyof Omit<StoreComparisonRow, "accountId" | "colorDot" | "currency">;
 
-const COLUMNS: { key: SortKey; label: string; numeric?: boolean }[] = [
-  { key: "storeName", label: "Store" },
-  { key: "spend", label: "Spend", numeric: true },
-  { key: "share", label: "Share", numeric: true },
-  { key: "roas", label: "ROAS", numeric: true },
-  { key: "conversions", label: "Conv.", numeric: true },
-  { key: "cpa", label: "CPA", numeric: true },
-  { key: "ctr", label: "CTR", numeric: true },
-  { key: "impressions", label: "Impressions", numeric: true },
-  { key: "fee", label: "Fee", numeric: true },
+/** Column order is fixed; only the heading text comes from the dictionary. */
+const COLUMNS: { key: SortKey; dict: keyof Dictionary["stores"]; numeric?: boolean }[] = [
+  { key: "storeName", dict: "store" },
+  { key: "spend", dict: "spend", numeric: true },
+  { key: "share", dict: "share", numeric: true },
+  { key: "roas", dict: "roas", numeric: true },
+  { key: "conversions", dict: "conversions", numeric: true },
+  { key: "cpa", dict: "cpa", numeric: true },
+  { key: "ctr", dict: "ctr", numeric: true },
+  { key: "impressions", dict: "impressions", numeric: true },
+  { key: "fee", dict: "fee", numeric: true },
 ];
 
 export function StoreComparisonTable({ rows }: { rows: StoreComparisonRow[] }) {
+  const { d } = useI18n();
   const [sortKey, setSortKey] = React.useState<SortKey>("spend");
   const [descending, setDescending] = React.useState(true);
 
@@ -67,7 +71,7 @@ export function StoreComparisonTable({ rows }: { rows: StoreComparisonRow[] }) {
     <section className="panel overflow-hidden">
       <header className="border-b border-[var(--border-subtle)] px-5 py-4">
         <h2 className="text-[15px] font-semibold text-[var(--text-primary)]">
-          Store Comparison
+          {d.stores.comparison}
         </h2>
       </header>
 
@@ -91,7 +95,7 @@ export function StoreComparisonTable({ rows }: { rows: StoreComparisonRow[] }) {
                       sortKey === column.key && "text-[var(--accent-gold)]",
                     )}
                   >
-                    {column.label}
+                    {d.stores[column.dict]}
                     <ArrowUpDown className="size-3" aria-hidden />
                   </button>
                 </th>

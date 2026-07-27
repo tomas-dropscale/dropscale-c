@@ -1,8 +1,17 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "dropscale-da",
-  "main": ".open-next/worker.js",
+  // Not .open-next/worker.js directly: custom-worker.ts wraps the generated
+  // fetch handler and adds the weekly billing cron below. OpenNext's worker
+  // exports fetch only, so a scheduled handler has to live in a wrapper.
+  "main": "custom-worker.ts",
   "compatibility_date": "2025-03-25",
+  "triggers": {
+    // Mondays 06:00 UTC — bill the Monday→Sunday week that just closed. Late
+    // enough that Google Ads has settled Sunday's spend, early enough that the
+    // invoice is waiting when the client starts their week.
+    "crons": ["0 6 * * 1"]
+  },
   // populate_process_env: with a compatibility_date before 2025-04-01, Workers
   // do NOT copy bindings into process.env — so every runtime secret (the
   // GOOGLE_ADS_* set) read via process.env comes back undefined even though

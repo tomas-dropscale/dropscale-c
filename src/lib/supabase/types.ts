@@ -183,8 +183,32 @@ export type Client = {
 
 export type InvoiceStatus = "draft" | "open" | "paid" | "void" | "uncollectible";
 
-/** One line of what an invoice is made of — a snapshot, never re-derived. */
-export type InvoiceLine = { label: string; amount: number; accountId: string | null };
+/**
+ * What an invoice line is for. `spend` is the Google Ads money the agency
+ * fronted and is passing through at cost; `fee` and `rev_share` are the two
+ * ways the agency earns on top of it.
+ */
+export type InvoiceLineKind = "spend" | "fee" | "rev_share";
+
+/**
+ * One line of what an invoice is made of — a snapshot, never re-derived.
+ *
+ * `label` is the English text Stripe prints on the invoice, so it is always
+ * present. `kind`/`store`/`rate` are the same line broken into parts, which is
+ * what lets the portal render it in the viewer's language instead of showing
+ * the stored English. They are optional because rows written before this
+ * existed only have the label — the UI falls back to it.
+ */
+export type InvoiceLine = {
+  label: string;
+  amount: number;
+  accountId: string | null;
+  kind?: InvoiceLineKind;
+  /** Store name at billing time; a later rename must not rewrite history. */
+  store?: string;
+  /** Percentage the line was computed at — blended over the week. Spend: null. */
+  rate?: number | null;
+};
 
 /** A week's agency commission, billed to one portal client (migration 0013). */
 export type Invoice = {

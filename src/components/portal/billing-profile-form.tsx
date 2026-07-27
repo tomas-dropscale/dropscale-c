@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/select";
 import { FormAlert } from "@/components/auth/auth-card";
 import { createClient } from "@/lib/supabase/client";
+import { useI18n } from "@/lib/i18n/provider";
 import { cn } from "@/lib/utils";
 
 const CURRENCIES = ["EUR", "USD", "GBP"] as const;
@@ -28,6 +29,7 @@ export function BillingProfileForm({
   profile: BillingProfile | null;
 }) {
   const router = useRouter();
+  const { d } = useI18n();
   const [profileType, setProfileType] = React.useState<BillingProfileType>(
     profile?.profile_type ?? "individual",
   );
@@ -68,20 +70,20 @@ export function BillingProfileForm({
   return (
     <div className="max-w-[560px] space-y-7">
       {error && <FormAlert>{error}</FormAlert>}
-      {saved && <FormAlert tone="success">Settings saved.</FormAlert>}
+      {saved && <FormAlert tone="success">{d.billing.saved}</FormAlert>}
 
       {/* ACCOUNT — read-only, managed by the team */}
       <section className="space-y-3">
-        <p className="label-caps">Account</p>
+        <p className="label-caps">{d.billing.account}</p>
         <div className="panel divide-y divide-[var(--border-subtle)]">
           <div className="flex items-center justify-between px-4 py-3">
-            <span className="text-[13px] text-[var(--text-secondary)]">Name</span>
+            <span className="text-[13px] text-[var(--text-secondary)]">{d.billing.name}</span>
             <span className="text-[13px] font-medium text-[var(--text-primary)]">
               {client.full_name}
             </span>
           </div>
           <div className="flex items-center justify-between px-4 py-3">
-            <span className="text-[13px] text-[var(--text-secondary)]">Email</span>
+            <span className="text-[13px] text-[var(--text-secondary)]">{d.billing.email}</span>
             <span className="text-[13px] font-medium text-[var(--text-primary)]">
               {client.email}
             </span>
@@ -91,7 +93,7 @@ export function BillingProfileForm({
 
       {/* BILLING PROFILE */}
       <section className="space-y-3">
-        <p className="label-caps">Billing Profile</p>
+        <p className="label-caps">{d.billing.profile}</p>
 
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           {(
@@ -99,14 +101,14 @@ export function BillingProfileForm({
               {
                 value: "company",
                 icon: Building2,
-                title: "Company",
-                subtitle: "I have a registered business",
+                title: d.billing.company,
+                subtitle: d.billing.companyHint,
               },
               {
                 value: "individual",
                 icon: User,
-                title: "Individual",
-                subtitle: "I don't have a company",
+                title: d.billing.individual,
+                subtitle: d.billing.individualHint,
               },
             ] as const
           ).map((option) => {
@@ -142,7 +144,7 @@ export function BillingProfileForm({
         </div>
 
         <div className="space-y-1.5 pt-2">
-          <Label htmlFor="budget">Available budget</Label>
+          <Label htmlFor="budget">{d.billing.availableBudget}</Label>
           <div className="flex gap-2">
             <Select value={currency} onValueChange={setCurrency}>
               <SelectTrigger className="w-[96px]">
@@ -161,21 +163,20 @@ export function BillingProfileForm({
               type="number"
               min="0"
               step="100"
-              placeholder="e.g. 5000"
+              placeholder={d.billing.budgetPlaceholder}
               value={budget}
               onChange={(event) => setBudget(event.target.value)}
               className="flex-1"
             />
           </div>
           <p className="text-[12px] leading-relaxed text-[var(--text-muted)]">
-            The monthly budget you have available for ads. Helps the team plan scaling
-            without overshooting your cash flow.
+            {d.billing.budgetHelp}
           </p>
         </div>
       </section>
 
       <Button variant="primary" size="lg" onClick={save} loading={saving}>
-        Save Settings
+        {d.billing.saveSettings}
       </Button>
     </div>
   );

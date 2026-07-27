@@ -6,6 +6,7 @@ import { ExternalLink, Image as ImageIcon, PlayCircle, Search } from "lucide-rea
 import type { CreativeAsset } from "@/lib/google-ads/portal";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { useI18n } from "@/lib/i18n/provider";
 import {
   Select,
   SelectContent,
@@ -15,6 +16,8 @@ import {
 } from "@/components/ui/select";
 
 function AssetCard({ asset }: { asset: CreativeAsset }) {
+  const { d } = useI18n();
+
   const body = (
     <>
       <div className="relative aspect-video bg-[var(--bg-elevated)]">
@@ -45,14 +48,14 @@ function AssetCard({ asset }: { asset: CreativeAsset }) {
           </p>
           <p className="mt-0.5 text-[11.5px] text-[var(--text-muted)]">
             {asset.kind === "video"
-              ? "YouTube video"
+              ? d.creatives.youtubeVideo
               : asset.width && asset.height
                 ? `${asset.width} × ${asset.height}`
-                : "Image"}
+                : d.creatives.image}
           </p>
         </div>
         <Badge variant={asset.kind === "video" ? "gold" : "neutral"}>
-          {asset.kind === "video" ? "Video" : "Image"}
+          {asset.kind === "video" ? d.creatives.video : d.creatives.image}
         </Badge>
         {asset.linkUrl && (
           <ExternalLink className="size-3.5 shrink-0 text-[var(--text-muted)]" aria-hidden />
@@ -75,6 +78,7 @@ function AssetCard({ asset }: { asset: CreativeAsset }) {
 
 /** The account's real Google Ads creative library: images and YouTube videos. */
 export function CreativeAssetsGrid({ assets }: { assets: CreativeAsset[] }) {
+  const { d } = useI18n();
   const [query, setQuery] = React.useState("");
   const [kind, setKind] = React.useState<"all" | "image" | "video">("all");
 
@@ -92,7 +96,7 @@ export function CreativeAssetsGrid({ assets }: { assets: CreativeAsset[] }) {
           <Input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search creatives..."
+            placeholder={d.creatives.searchCreatives}
             className="pl-9"
           />
         </div>
@@ -102,18 +106,16 @@ export function CreativeAssetsGrid({ assets }: { assets: CreativeAsset[] }) {
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="all">All types</SelectItem>
-            <SelectItem value="image">Images</SelectItem>
-            <SelectItem value="video">Videos</SelectItem>
+            <SelectItem value="all">{d.creatives.allTypes}</SelectItem>
+            <SelectItem value="image">{d.creatives.images}</SelectItem>
+            <SelectItem value="video">{d.creatives.videos}</SelectItem>
           </SelectContent>
         </Select>
       </div>
 
       {filtered.length === 0 ? (
         <div className="panel px-6 py-14 text-center text-[13px] text-[var(--text-secondary)]">
-          {assets.length === 0
-            ? "No creatives in this account's library yet."
-            : "No creatives match your filters."}
+          {assets.length === 0 ? d.creatives.emptyLibrary : d.creatives.noMatches}
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">

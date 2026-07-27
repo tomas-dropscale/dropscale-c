@@ -104,6 +104,7 @@ export default async function GoogleAllStoresPage({
       ) : (
         <div className="space-y-6">
           <MetricsGrid
+            d={d}
             metrics={totals}
             currency={accounts[0]?.currency ?? "EUR"}
             feeRate={uniformFeeRate}

@@ -100,11 +100,12 @@ export default async function AccountPage({
         )}
         {account.status !== "pending" &&
           hasGoogleAdsEnv() &&
-          !account.google_ads_connected && <ConnectAdsBanner />}
+          !account.google_ads_connected && <ConnectAdsBanner d={d} />}
 
         <section className="space-y-3">
           <h2 className="text-[15px] font-semibold text-[var(--text-primary)]">Metrics</h2>
           <MetricsGrid
+            d={d}
             metrics={metrics}
             currency={account.currency}
             feeRate={Number(account.commission_rate)}

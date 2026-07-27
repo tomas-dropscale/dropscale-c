@@ -1,3 +1,6 @@
+"use client";
+
+import { useI18n } from "@/lib/i18n/provider";
 import { cn } from "@/lib/utils";
 
 /**
@@ -46,10 +49,12 @@ export function BrowserChrome({
 
 /** "● LIVE" indicator with a pulsing gold dot. */
 export function LiveIndicator() {
+  const { d } = useI18n();
+
   return (
     <span className="flex items-center gap-1.5 text-[10px] font-medium tracking-[0.08em] text-[var(--text-secondary)] uppercase">
       <span className="size-1.5 animate-pulse-gold rounded-full bg-[var(--accent-gold)]" />
-      Live
+      {d.banners.live}
     </span>
   );
 }

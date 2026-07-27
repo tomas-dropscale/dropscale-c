@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { AlertTriangle, ChevronDown } from "lucide-react";
+import { useI18n } from "@/lib/i18n/provider";
 import { cn } from "@/lib/utils";
 
 /**
@@ -9,6 +10,7 @@ import { cn } from "@/lib/utils";
  * the panel background — never a raw red that fights the theme.
  */
 export function SuspendedBanner() {
+  const { d } = useI18n();
   const [expanded, setExpanded] = React.useState(false);
 
   return (
@@ -22,14 +24,14 @@ export function SuspendedBanner() {
         <AlertTriangle className="size-4 shrink-0 text-[var(--warning-orange)]" />
         <span className="min-w-0 flex-1">
           <span className="block text-[13.5px] font-semibold text-[var(--text-primary)]">
-            Account suspended by Google
+            {d.banners.suspendedTitle}
           </span>
           <span className="block text-[12.5px] text-[var(--text-secondary)]">
-            Ads are not running. Review the steps below to start the appeal.
+            {d.banners.suspendedBody}
           </span>
         </span>
         <span className="flex shrink-0 items-center gap-1 text-[12px] font-medium text-[var(--warning-orange)]">
-          View steps
+          {d.banners.suspendedCta}
           <ChevronDown
             className={cn("transition-smooth size-3.5", expanded && "rotate-180")}
           />
@@ -37,19 +39,12 @@ export function SuspendedBanner() {
       </button>
 
       {expanded && (
-        <ol className="space-y-2 border-t border-[var(--warning-orange)]/20 px-4 py-4 pl-11 text-[13px] leading-relaxed text-[var(--text-secondary)]">
-          <li>
-            1. Open the notification in your Google Ads account to see the exact policy
-            Google cited.
-          </li>
-          <li>
-            2. Don&apos;t submit an appeal yourself yet — appeals are limited and a
-            rejected one makes the next harder.
-          </li>
-          <li>
-            3. Contact your Dropscale account manager. We prepare and submit the appeal
-            with you.
-          </li>
+        // Numbered by the list itself, not by the copy: a translator should
+        // never have to carry "1." through five languages.
+        <ol className="list-decimal space-y-2 border-t border-[var(--warning-orange)]/20 px-4 py-4 pl-11 text-[13px] leading-relaxed text-[var(--text-secondary)]">
+          <li>{d.banners.suspendedStep1}</li>
+          <li>{d.banners.suspendedStep2}</li>
+          <li>{d.banners.suspendedStep3}</li>
         </ol>
       )}
     </div>

@@ -4,7 +4,10 @@ import { useRouter } from "next/navigation";
 import { ShieldAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/brand/logo";
+import { Rich } from "@/components/ui/rich-text";
 import { createClient } from "@/lib/supabase/client";
+import { fmt } from "@/lib/i18n";
+import { useI18n } from "@/lib/i18n/provider";
 
 /**
  * Signed in, but no clients row — e.g. a staff account, or an auth user the
@@ -13,6 +16,7 @@ import { createClient } from "@/lib/supabase/client";
  */
 export function NotAClient({ email }: { email: string }) {
   const router = useRouter();
+  const { d } = useI18n();
 
   async function signOut() {
     await createClient().auth.signOut();
@@ -32,18 +36,16 @@ export function NotAClient({ email }: { email: string }) {
         </div>
 
         <h1 className="text-[17px] font-semibold tracking-tight text-[var(--text-primary)]">
-          No client account
+          {d.banners.notAClientTitle}
         </h1>
         <p className="mt-2 text-[13px] leading-relaxed text-[var(--text-secondary)]">
-          {/* Explicit {" "}: a plain space here rides on JSX whitespace rules and
-              renders as "…dropscale.iois signed in" when the line wraps. */}
-          <span className="text-[var(--text-primary)]">{email}</span>{" "}
-          is signed in, but it isn&apos;t linked to a Dropscale client account. If you
-          believe this is a mistake, contact your account manager.
+          {/* The email is emphasised inside the sentence via **{email}**, so each
+              language can place it where its own grammar wants it. */}
+          <Rich text={fmt(d.banners.notAClientBody, { email })} />
         </p>
 
         <Button variant="secondary" size="lg" className="mt-6 w-full" onClick={signOut}>
-          Sign out
+          {d.userMenu.signOut}
         </Button>
       </div>
     </div>

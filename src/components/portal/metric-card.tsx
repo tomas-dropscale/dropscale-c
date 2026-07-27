@@ -14,9 +14,18 @@ import {
 
 import type { MetricSet } from "@/lib/portal/mock";
 import { compact, integer, money, multiplier, percent } from "@/lib/format";
+import { fmt, type Dictionary } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
+/**
+ * These are SERVER components on purpose — `icon` is a Lucide component, and a
+ * function cannot cross the server→client boundary. So the dictionary arrives
+ * as a prop from the page (a plain object, which crosses fine) rather than
+ * through useI18n(), which would force "use client" and break every caller.
+ */
+
 export function MetricCard({
+  d,
   label,
   icon: Icon,
   value,
@@ -25,6 +34,7 @@ export function MetricCard({
   highlight = false,
   valueClassName,
 }: {
+  d: Dictionary;
   label: string;
   icon: LucideIcon;
   value: string;
@@ -58,7 +68,7 @@ export function MetricCard({
         {value}
       </p>
       <p className="text-[11.5px] text-[var(--text-muted)]">
-        {hint ?? "— vs previous period"}
+        {hint ?? d.metrics.vsPrevious}
       </p>
     </div>
   );
@@ -76,10 +86,12 @@ export function MetricCard({
  * percentage would be true.
  */
 export function MetricsGrid({
+  d,
   metrics,
   currency,
   feeRate = null,
 }: {
+  d: Dictionary;
   metrics: MetricSet;
   currency: string;
   feeRate?: number | null;
@@ -92,26 +104,29 @@ export function MetricsGrid({
     glow?: boolean;
     highlight?: boolean;
   }[] = [
-    { label: "Amount Spent", icon: Wallet, value: money(metrics.spend, currency) },
-    { label: "Impressions", icon: Eye, value: compact(metrics.impressions) },
-    { label: "Clicks", icon: MousePointerClick, value: integer(metrics.clicks) },
-    { label: "Conversions", icon: Target, value: integer(metrics.conversions) },
-    { label: "CTR", icon: Percent, value: percent(metrics.ctr) },
+    { label: d.metrics.amountSpent, icon: Wallet, value: money(metrics.spend, currency) },
+    { label: d.metrics.impressions, icon: Eye, value: compact(metrics.impressions) },
+    { label: d.metrics.clicks, icon: MousePointerClick, value: integer(metrics.clicks) },
+    { label: d.metrics.conversions, icon: Target, value: integer(metrics.conversions) },
+    { label: d.metrics.ctr, icon: Percent, value: percent(metrics.ctr) },
     {
-      label: "Dropscale Fee",
+      label: d.metrics.fee,
       icon: HandCoins,
       value: money(metrics.fee, currency),
-      hint: feeRate != null ? `${feeRate}% of ad spend` : "per-store rate of ad spend",
+      hint:
+        feeRate != null
+          ? fmt(d.metrics.feeHintRate, { rate: feeRate })
+          : d.metrics.feeHintMixed,
     },
-    { label: "CPC", icon: Coins, value: money(metrics.cpc, currency) },
+    { label: d.metrics.cpc, icon: Coins, value: money(metrics.cpc, currency) },
     {
-      label: "Cost / Conversion",
+      label: d.metrics.costPerConversion,
       icon: Crosshair,
       value: money(metrics.costPerConversion, currency),
     },
-    { label: "ROAS", icon: TrendingUp, value: multiplier(metrics.roas) },
+    { label: d.metrics.roas, icon: TrendingUp, value: multiplier(metrics.roas) },
     {
-      label: "Conversion Value",
+      label: d.metrics.conversionValue,
       icon: BadgeDollarSign,
       value: money(metrics.conversionValue, currency),
     },
@@ -120,7 +135,7 @@ export function MetricsGrid({
   return (
     <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
       {cards.map((card) => (
-        <MetricCard key={card.label} {...card} />
+        <MetricCard key={card.label} d={d} {...card} />
       ))}
     </div>
   );

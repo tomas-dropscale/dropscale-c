@@ -238,55 +238,74 @@ export default async function DashboardPage({
           {/* Hero — the client's money, RevFlow-style: rev/profit lead. */}
           <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
             <MetricCard
-              label="Revenue"
+              d={d}
+              label={d.metrics.revenue}
               icon={BadgeDollarSign}
               value={money(totals.netRevenue, currency)}
-              hint={`${integer(totals.orders)} orders`}
+              hint={fmt(d.metrics.ordersHint, { count: integer(totals.orders) })}
               glow
               highlight
             />
             <MetricCard
-              label="Net Profit"
+              d={d}
+              label={d.metrics.netProfit}
               icon={TrendingUp}
               value={money(netProfit, currency)}
-              hint={`margin ${totals.netRevenue > 0 ? percent(netProfit / totals.netRevenue) : "—"}`}
+              hint={fmt(d.metrics.marginHint, {
+                value: totals.netRevenue > 0 ? percent(netProfit / totals.netRevenue) : "—",
+              })}
               valueClassName={netProfit >= 0 ? "text-neon-green" : "text-[var(--danger-red)]"}
             />
             <MetricCard
-              label="Ad Spend"
+              d={d}
+              label={d.metrics.adSpend}
               icon={Wallet}
               value={money(totals.adSpend, currency)}
-              hint={`${compact(totals.impressions)} impressions`}
+              hint={fmt(d.metrics.impressionsHint, { count: compact(totals.impressions) })}
             />
             <MetricCard
-              label="ROAS"
+              d={d}
+              label={d.metrics.roas}
               icon={Crosshair}
               value={multiplier(totals.roas)}
-              hint={`MER ${multiplier(totals.mer)}`}
+              hint={fmt(d.metrics.merHint, { value: multiplier(totals.mer) })}
             />
           </div>
 
           {/* Efficiency row */}
           <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
-            <MetricCard label="MER" icon={Percent} value={multiplier(totals.mer)} />
-            <MetricCard label="AOV" icon={ShoppingBag} value={money(totals.aov, currency)} />
+            <MetricCard d={d} label={d.metrics.mer} icon={Percent} value={multiplier(totals.mer)} />
+            <MetricCard
+              d={d}
+              label={d.metrics.aov}
+              icon={ShoppingBag}
+              value={money(totals.aov, currency)}
+            />
             {/* Conversions here are the STORE's orders, not Google's attributed
                 conversions — the Google numbers live in the Google section. */}
             <MetricCard
-              label="Cost / Conversion"
+              d={d}
+              label={d.metrics.costPerConversion}
               icon={Coins}
               value={money(totals.costPerOrder, currency)}
-              hint="ad spend per store order"
+              hint={d.metrics.costPerOrderHint}
             />
             <MetricCard
-              label="Conversion Rate"
+              d={d}
+              label={d.metrics.conversionRate}
               icon={MousePointerClick}
               value={percent(totals.orderConversionRate)}
-              hint="store orders per ad click"
+              hint={d.metrics.conversionRateHint}
             />
-            <MetricCard label="Orders" icon={ShoppingBag} value={integer(totals.orders)} />
             <MetricCard
-              label="Refunds"
+              d={d}
+              label={d.metrics.orders}
+              icon={ShoppingBag}
+              value={integer(totals.orders)}
+            />
+            <MetricCard
+              d={d}
+              label={d.metrics.refunds}
               icon={Undo2}
               value={money(totals.refunds, currency)}
             />

@@ -11,6 +11,7 @@ import { Input, Label } from "@/components/ui/input";
 import { PasswordInput } from "@/components/auth/password-input";
 import { FormAlert } from "@/components/auth/auth-card";
 import { ShopifySetupSteps } from "@/components/portal/shopify-setup-steps";
+import { useI18n } from "@/lib/i18n/provider";
 
 /**
  * Shopify custom-app connection for one store.
@@ -21,6 +22,7 @@ import { ShopifySetupSteps } from "@/components/portal/shopify-setup-steps";
  */
 export function ShopifyConnectPanel({ account }: { account: AdAccount }) {
   const router = useRouter();
+  const { d } = useI18n();
   const [editing, setEditing] = React.useState(false);
   const [shopDomain, setShopDomain] = React.useState(account.shopify_url ?? "");
   const [clientId, setClientId] = React.useState(account.shopify_client_id ?? "");
@@ -55,7 +57,7 @@ export function ShopifyConnectPanel({ account }: { account: AdAccount }) {
     } | null;
 
     if (!res.ok) {
-      setError(body?.error ?? "Something went wrong. Try again.");
+      setError(body?.error ?? d.shopify.genericError);
       return;
     }
 
@@ -80,7 +82,7 @@ export function ShopifyConnectPanel({ account }: { account: AdAccount }) {
 
     if (!res.ok) {
       const body = (await res.json().catch(() => null)) as { error?: string } | null;
-      setError(body?.error ?? "Something went wrong. Try again.");
+      setError(body?.error ?? d.shopify.genericError);
       return;
     }
 
@@ -91,9 +93,9 @@ export function ShopifyConnectPanel({ account }: { account: AdAccount }) {
     <div className="space-y-3 rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-4">
       <div className="flex items-center gap-2">
         <Lock className="size-3.5 text-[var(--text-muted)]" />
-        <span className="label-caps">Shopify connection</span>
+        <span className="label-caps">{d.shopify.connectionLabel}</span>
         <Badge variant={connected ? "success" : "neutral"}>
-          {connected ? "Connected" : "Disconnected"}
+          {connected ? d.shopify.connected : d.shopify.disconnected}
         </Badge>
       </div>
 
@@ -103,25 +105,25 @@ export function ShopifyConnectPanel({ account }: { account: AdAccount }) {
         <>
           <dl className="grid grid-cols-1 gap-x-6 gap-y-2 text-[12.5px] sm:grid-cols-2">
             <div className="flex justify-between gap-3">
-              <dt className="text-[var(--text-muted)]">Store</dt>
+              <dt className="text-[var(--text-muted)]">{d.shopify.store}</dt>
               <dd className="truncate text-[var(--text-secondary)]">
                 {account.shopify_url ?? "—"}
               </dd>
             </div>
             <div className="flex justify-between gap-3">
-              <dt className="text-[var(--text-muted)]">Admin token</dt>
+              <dt className="text-[var(--text-muted)]">{d.shopify.adminToken}</dt>
               <dd className="text-[var(--text-secondary)]">
                 {account.shopify_token_last4 ? `••••••••${account.shopify_token_last4}` : "—"}
               </dd>
             </div>
             <div className="flex justify-between gap-3">
-              <dt className="text-[var(--text-muted)]">Client ID</dt>
+              <dt className="text-[var(--text-muted)]">{d.shopify.clientId}</dt>
               <dd className="truncate text-[var(--text-secondary)]">
                 {account.shopify_client_id ?? "—"}
               </dd>
             </div>
             <div className="flex justify-between gap-3">
-              <dt className="text-[var(--text-muted)]">Scopes</dt>
+              <dt className="text-[var(--text-muted)]">{d.shopify.scopes}</dt>
               <dd className="truncate text-[var(--text-secondary)]">
                 {account.shopify_scopes ?? "—"}
               </dd>
@@ -136,11 +138,11 @@ export function ShopifyConnectPanel({ account }: { account: AdAccount }) {
               onClick={disconnect}
             >
               <Link2Off />
-              Disconnect
+              {d.shopify.disconnect}
             </Button>
             <Button variant="outline" size="sm" onClick={() => setEditing(true)}>
               <KeyRound />
-              Update credentials
+              {d.shopify.updateCredentials}
             </Button>
           </div>
         </>
@@ -152,37 +154,37 @@ export function ShopifyConnectPanel({ account }: { account: AdAccount }) {
 
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div className="space-y-1.5">
-              <Label htmlFor={`shop-domain-${account.id}`}>Store URL</Label>
+              <Label htmlFor={`shop-domain-${account.id}`}>{d.shopify.storeUrl}</Label>
               <Input
                 id={`shop-domain-${account.id}`}
-                placeholder="my-store.myshopify.com"
+                placeholder={d.shopify.storeUrlPlaceholder}
                 value={shopDomain}
                 onChange={(event) => setShopDomain(event.target.value)}
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor={`shop-client-${account.id}`}>Client ID (API key)</Label>
+              <Label htmlFor={`shop-client-${account.id}`}>{d.shopify.clientIdLabel}</Label>
               <Input
                 id={`shop-client-${account.id}`}
-                placeholder="32-character API key"
+                placeholder={d.shopify.clientIdPlaceholder}
                 value={clientId}
                 onChange={(event) => setClientId(event.target.value)}
               />
             </div>
             <div className="space-y-1.5 sm:col-span-2">
               <Label htmlFor={`shop-token-${account.id}`}>
-                API secret key — or Admin API access token
+                {d.shopify.tokenLabel}
               </Label>
               <PasswordInput
                 id={`shop-token-${account.id}`}
-                placeholder="shpss_… (with Client ID) or shpat_…"
+                placeholder={d.shopify.tokenPlaceholder}
                 autoComplete="off"
                 value={accessToken}
                 onChange={(event) => setAccessToken(event.target.value)}
               />
               {needsClientId && (
                 <p className="text-[11.5px] text-[var(--warning-orange)]">
-                  A secret key (shpss_…) needs the Client ID above to pair with.
+                  {d.shopify.needsClientId}
                 </p>
               )}
             </div>
@@ -196,11 +198,11 @@ export function ShopifyConnectPanel({ account }: { account: AdAccount }) {
               loading={busy === "connect"}
               onClick={connect}
             >
-              {connected ? "Save new credentials" : "Connect Shopify"}
+              {connected ? d.shopify.saveNewCredentials : d.shopify.connect}
             </Button>
             {editing && (
               <Button variant="ghost" size="sm" onClick={() => setEditing(false)}>
-                Cancel
+                {d.shopify.cancel}
               </Button>
             )}
           </div>

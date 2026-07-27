@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
 import { FormAlert } from "@/components/auth/auth-card";
 import { createClient } from "@/lib/supabase/client";
+import { useI18n } from "@/lib/i18n/provider";
 import { cn } from "@/lib/utils";
 
 /**
@@ -18,6 +19,7 @@ import { cn } from "@/lib/utils";
  */
 export function RequestAccountPanel({ clientId }: { clientId: string }) {
   const router = useRouter();
+  const { d } = useI18n();
   const [mode, setMode] = React.useState<RequestType>("google_ads");
   const [serverError, setServerError] = React.useState<string | null>(null);
   const [submitted, setSubmitted] = React.useState(false);
@@ -73,11 +75,10 @@ export function RequestAccountPanel({ clientId }: { clientId: string }) {
           <CheckCircle2 className="size-5 text-[var(--success-green)]" />
         </div>
         <h2 className="text-[16px] font-semibold text-[var(--text-primary)]">
-          Request submitted
+          {d.accounts.requestSubmitted}
         </h2>
         <p className="mt-2 text-[13px] leading-relaxed text-[var(--text-secondary)]">
-          The team will review it and set the account up for you. You&apos;ll see it appear
-          in your sidebar once it&apos;s approved.
+          {d.accounts.requestSubmittedBody}
         </p>
         <Button
           variant="secondary"
@@ -90,7 +91,7 @@ export function RequestAccountPanel({ clientId }: { clientId: string }) {
             setShopifyUrl("");
           }}
         >
-          Submit another request
+          {d.accounts.submitAnother}
         </Button>
       </div>
     );
@@ -102,8 +103,8 @@ export function RequestAccountPanel({ clientId }: { clientId: string }) {
       <div className="flex items-center gap-1 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-panel)] p-1">
         {(
           [
-            ["google_ads", "Google Ads"],
-            ["shopify", "Shopify"],
+            ["google_ads", d.accounts.googleAds],
+            ["shopify", d.accounts.shopify],
           ] as const
         ).map(([value, label]) => (
           <button
@@ -127,22 +128,15 @@ export function RequestAccountPanel({ clientId }: { clientId: string }) {
         <Info className="mt-0.5 size-4 shrink-0 text-[var(--accent-gold)]" />
         <div className="text-[13px] leading-relaxed text-[var(--text-secondary)]">
           {mode === "google_ads" ? (
-            <>
-              Send us your Google Ads Customer ID and we&apos;ll link the account to your
-              portal. You can find the ID in the top-right corner of your Google Ads
-              interface.
-            </>
+            <>{d.accounts.requestGoogleHelp}</>
           ) : (
-            <>
-              Generate a collaborator code in your Shopify admin (Settings → Users and
-              permissions) and paste it below together with your store URL.
-            </>
+            <>{d.accounts.requestShopifyHelp}</>
           )}{" "}
           <a
             href="#"
             className="transition-smooth inline-flex items-center gap-1 text-[var(--accent-gold)] hover:text-[var(--accent-gold-strong)]"
           >
-            Watch tutorial
+            {d.accounts.watchTutorial}
             <ExternalLink className="size-3" />
           </a>
         </div>
@@ -155,19 +149,19 @@ export function RequestAccountPanel({ clientId }: { clientId: string }) {
         {mode === "google_ads" ? (
           <>
             <div className="space-y-1.5">
-              <Label htmlFor="customerId">Google Ads Customer ID</Label>
+              <Label htmlFor="customerId">{d.accounts.googleCustomerId}</Label>
               <Input
                 id="customerId"
-                placeholder="e.g. 123-456-7890"
+                placeholder={d.accounts.customerIdPlaceholder}
                 value={customerId}
                 onChange={(event) => setCustomerId(event.target.value)}
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="storeName">Store Name</Label>
+              <Label htmlFor="storeName">{d.accounts.storeName}</Label>
               <Input
                 id="storeName"
-                placeholder="e.g. My Store"
+                placeholder={d.accounts.storeNamePlaceholder}
                 value={storeName}
                 onChange={(event) => setStoreName(event.target.value)}
               />
@@ -175,21 +169,21 @@ export function RequestAccountPanel({ clientId }: { clientId: string }) {
           </>
         ) : (
           <>
-            <p className="label-caps">Shopify</p>
+            <p className="label-caps">{d.accounts.shopify}</p>
             <div className="space-y-1.5">
-              <Label htmlFor="collabCode">Shopify Collaborator Code</Label>
+              <Label htmlFor="collabCode">{d.accounts.collabCode}</Label>
               <Input
                 id="collabCode"
-                placeholder="e.g. 1234"
+                placeholder={d.accounts.collabCodePlaceholder}
                 value={collabCode}
                 onChange={(event) => setCollabCode(event.target.value)}
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="shopifyUrl">.myshopify.com URL</Label>
+              <Label htmlFor="shopifyUrl">{d.accounts.myshopifyUrl}</Label>
               <Input
                 id="shopifyUrl"
-                placeholder="e.g. my-store.myshopify.com"
+                placeholder={d.accounts.myshopifyUrlPlaceholder}
                 value={shopifyUrl}
                 onChange={(event) => setShopifyUrl(event.target.value)}
               />
@@ -206,7 +200,7 @@ export function RequestAccountPanel({ clientId }: { clientId: string }) {
         loading={submitting}
         onClick={submit}
       >
-        Submit Request
+        {d.accounts.submitRequest}
       </Button>
     </div>
   );

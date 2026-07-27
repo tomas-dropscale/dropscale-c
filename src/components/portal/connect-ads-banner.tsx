@@ -1,12 +1,17 @@
 import Link from "next/link";
 import { BarChart3, ArrowRight } from "lucide-react";
 
+import type { Dictionary } from "@/lib/i18n";
+
 /**
  * Shown on a store view when Google Ads is configured but this store hasn't
  * been connected yet. It replaces what used to be silent demo data — the
  * numbers below it are real zeroes, and this explains why.
+ *
+ * A server component: it has no interactivity, so the dictionary comes in as a
+ * prop rather than dragging the whole banner into the client bundle.
  */
-export function ConnectAdsBanner() {
+export function ConnectAdsBanner({ d }: { d: Dictionary }) {
   return (
     <Link
       href="/dashboard/settings/accounts"
@@ -15,14 +20,14 @@ export function ConnectAdsBanner() {
       <BarChart3 className="size-4 shrink-0 text-[var(--accent-gold)]" />
       <span className="min-w-0 flex-1">
         <span className="block text-[13.5px] font-semibold text-[var(--text-primary)]">
-          This store isn&apos;t connected to Google Ads yet
+          {d.banners.connectAdsTitle}
         </span>
         <span className="block text-[12.5px] text-[var(--text-secondary)]">
-          Connect it to see live campaigns and metrics. Until then, figures show zero.
+          {d.banners.connectAdsBody}
         </span>
       </span>
       <span className="flex shrink-0 items-center gap-1 text-[12px] font-medium text-[var(--accent-gold-strong)]">
-        Connect
+        {d.banners.connectAdsCta}
         <ArrowRight className="size-3.5" />
       </span>
     </Link>

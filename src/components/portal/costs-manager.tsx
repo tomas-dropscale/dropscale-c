@@ -35,6 +35,9 @@ import {
 } from "@/components/ui/select";
 import { createClient } from "@/lib/supabase/client";
 import { money } from "@/lib/format";
+import { fmt, type Dictionary } from "@/lib/i18n";
+import { useI18n } from "@/lib/i18n/provider";
+import { Rich } from "@/components/ui/rich-text";
 import { cn } from "@/lib/utils";
 
 /**
@@ -71,6 +74,7 @@ export function CostsManager({
   collectionTiers,
 }: Props) {
   const router = useRouter();
+  const { d } = useI18n();
   const supabase = () => createClient();
   const [error, setError] = React.useState<string | null>(null);
   const [syncing, setSyncing] = React.useState(false);
@@ -179,7 +183,7 @@ export function CostsManager({
     setSyncing(false);
     if (!res.ok) {
       const body = (await res.json().catch(() => null)) as { error?: string } | null;
-      setError(body?.error ?? "Sync failed. Try again.");
+      setError(body?.error ?? d.costs.syncFailed);
       return;
     }
     router.refresh();
@@ -190,22 +194,21 @@ export function CostsManager({
       {error && <FormAlert>{error}</FormAlert>}
 
       {/* ---- store cost settings ------------------------------------------ */}
-      <CostSettings account={account} onSaved={resync} onError={setError} />
+      <CostSettings account={account} d={d} onSaved={resync} onError={setError} />
 
       {/* ---- products ------------------------------------------------------ */}
       <section className="space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <h2 className="label-caps">Products ({products.length})</h2>
+          <h2 className="label-caps">{fmt(d.costs.products, { count: products.length })}</h2>
           <Button variant="secondary" size="sm" loading={syncing} onClick={syncProducts}>
             <RefreshCw />
-            Sync products
+            {d.costs.syncProducts}
           </Button>
         </div>
 
         {products.length === 0 ? (
           <p className="panel px-5 py-10 text-center text-[13px] text-[var(--text-secondary)]">
-            No products yet. They appear automatically as orders sync — or press “Sync
-            products” to pull the last 90 days now.
+            {d.costs.noProducts}
           </p>
         ) : (
           <div className="panel overflow-hidden">
@@ -213,11 +216,11 @@ export function CostsManager({
               <table className="w-full min-w-[680px] border-collapse text-[13px]">
                 <thead>
                   <tr className="border-b border-[var(--border-subtle)]">
-                    <th className="label-caps px-4 py-2.5 text-left">Product</th>
-                    <th className="label-caps px-4 py-2.5 text-right">Price</th>
-                    <th className="label-caps px-4 py-2.5 text-right">Cost</th>
-                    <th className="label-caps px-4 py-2.5 text-left">Source</th>
-                    <th className="label-caps px-4 py-2.5 text-right">Tiers</th>
+                    <th className="label-caps px-4 py-2.5 text-left">{d.costs.product}</th>
+                    <th className="label-caps px-4 py-2.5 text-right">{d.costs.price}</th>
+                    <th className="label-caps px-4 py-2.5 text-right">{d.costs.cost}</th>
+                    <th className="label-caps px-4 py-2.5 text-left">{d.costs.source}</th>
+                    <th className="label-caps px-4 py-2.5 text-right">{d.costs.tiers}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -269,17 +272,19 @@ export function CostsManager({
                               placeholder={fallback.toFixed(2)}
                               inputMode="decimal"
                               className="ml-auto h-8 w-24 text-right"
-                              aria-label={`Cost of ${product.title}`}
+                              aria-label={fmt(d.costs.costOf, { product: product.title })}
                             />
                           </td>
                           <td className="px-4 py-2.5">
                             {inCollection ? (
-                              <Badge variant="gold">bundle</Badge>
+                              <Badge variant="gold">{d.costs.sourceBundle}</Badge>
                             ) : record ? (
-                              <Badge variant="success">manual</Badge>
+                              <Badge variant="success">{d.costs.sourceManual}</Badge>
                             ) : (
                               <Badge variant="neutral">
-                                {Number(account.default_product_cost_pct)}% of price
+                                {fmt(d.costs.sourceDefault, {
+                                  pct: Number(account.default_product_cost_pct),
+                                })}
                               </Badge>
                             )}
                           </td>
@@ -293,6 +298,7 @@ export function CostsManager({
                             <td colSpan={5} className="px-4 py-4 pl-10">
                               <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
                                 <CostHistory
+                                  d={d}
                                   history={costsByProduct.get(product.id) ?? []}
                                   onDelete={(id) =>
                                     run(async () =>
@@ -301,15 +307,16 @@ export function CostsManager({
                                   }
                                 />
                                 <TierEditor
-                                  title="Quantity tiers"
-                                  hint="Total cost for min. quantity — units above pay the unit cost."
+                                  d={d}
+                                  title={d.costs.quantityTiers}
+                                  hint={d.costs.quantityTiersHint}
                                   tiers={productTiers.map((tier) => ({
                                     id: tier.id,
                                     minQty: tier.min_qty,
                                     totalCost: Number(tier.total_cost),
                                   }))}
                                   disabled={inCollection}
-                                  disabledHint="This product is in a bundle — the bundle's tiers apply."
+                                  disabledHint={d.costs.inBundleHint}
                                   onAdd={(minQty, totalCost) =>
                                     run(async () =>
                                       supabase().from("product_cost_tiers").insert({
@@ -341,6 +348,7 @@ export function CostsManager({
 
       {/* ---- collections (bundles) ---------------------------------------- */}
       <CollectionsManager
+        d={d}
         accountId={account.id}
         products={products}
         collections={collections}
@@ -357,10 +365,13 @@ export function CostsManager({
 
 function CostSettings({
   account,
+  d,
   onSaved,
   onError,
 }: {
   account: AdAccount;
+  /** Passed down rather than re-read: these all render inside one client tree. */
+  d: Dictionary;
   onSaved: () => Promise<void>;
   onError: (message: string) => void;
 }) {
@@ -391,15 +402,25 @@ function CostSettings({
   }
 
   const fields: [string, string, string, (v: string) => void][] = [
-    ["Default cost (% of price)", "used when a product has no cost", pct, setPct],
-    ["Payment fee (%)", "per order, of the order total", feePct, setFeePct],
-    [`Payment fee fixed (${account.currency})`, "added per order", feeFixed, setFeeFixed],
-    [`Shipping cost / order (${account.currency})`, "what YOU pay, not what you charge", shipping, setShipping],
+    [d.costs.defaultCostPct, d.costs.defaultCostPctHint, pct, setPct],
+    [d.costs.paymentFeePct, d.costs.paymentFeePctHint, feePct, setFeePct],
+    [
+      fmt(d.costs.paymentFeeFixed, { currency: account.currency }),
+      d.costs.paymentFeeFixedHint,
+      feeFixed,
+      setFeeFixed,
+    ],
+    [
+      fmt(d.costs.shippingPerOrder, { currency: account.currency }),
+      d.costs.shippingPerOrderHint,
+      shipping,
+      setShipping,
+    ],
   ];
 
   return (
     <section className="panel space-y-4 p-5">
-      <h2 className="label-caps">Cost settings</h2>
+      <h2 className="label-caps">{d.costs.settings}</h2>
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         {fields.map(([label, hint, value, set]) => (
           <div key={label} className="space-y-1.5">
@@ -410,7 +431,7 @@ function CostSettings({
         ))}
       </div>
       <Button variant="primary" size="sm" loading={saving} onClick={save}>
-        Save settings
+        {d.costs.saveSettings}
       </Button>
     </section>
   );
@@ -419,9 +440,11 @@ function CostSettings({
 // ---------------------------------------------------------------------------
 
 function CostHistory({
+  d,
   history,
   onDelete,
 }: {
+  d: Dictionary;
   history: ProductCost[];
   onDelete: (id: string) => void;
 }) {
@@ -429,12 +452,10 @@ function CostHistory({
     <div className="space-y-2">
       <p className="label-caps flex items-center gap-1.5">
         <History className="size-3.5" />
-        Cost history
+        {d.costs.history}
       </p>
       {history.length === 0 ? (
-        <p className="text-[12.5px] text-[var(--text-muted)]">
-          No manual costs yet — the default percentage applies.
-        </p>
+        <p className="text-[12.5px] text-[var(--text-muted)]">{d.costs.noHistory}</p>
       ) : (
         <ul className="space-y-1">
           {history.map((record, index) => (
@@ -443,9 +464,12 @@ function CostHistory({
               className="flex items-center justify-between gap-3 rounded-[8px] bg-[var(--bg-panel)] px-3 py-1.5 text-[12.5px]"
             >
               <span className="text-[var(--text-secondary)]">
-                from <span className="text-[var(--text-primary)]">{record.effective_from}</span>
+                {d.costs.from}{" "}
+                <span className="text-[var(--text-primary)]">{record.effective_from}</span>
                 {index === 0 && (
-                  <span className="ml-2 text-[10.5px] text-[var(--accent-gold)]">current</span>
+                  <span className="ml-2 text-[10.5px] text-[var(--accent-gold)]">
+                    {d.costs.current}
+                  </span>
                 )}
               </span>
               <span className="flex items-center gap-2">
@@ -456,7 +480,7 @@ function CostHistory({
                   type="button"
                   onClick={() => onDelete(record.id)}
                   className="transition-smooth text-[var(--text-muted)] hover:text-[var(--danger-red)]"
-                  aria-label="Delete cost record"
+                  aria-label={d.costs.deleteCostRecord}
                 >
                   <Trash2 className="size-3.5" />
                 </button>
@@ -472,6 +496,7 @@ function CostHistory({
 // ---------------------------------------------------------------------------
 
 function TierEditor({
+  d,
   title,
   hint,
   tiers,
@@ -480,6 +505,7 @@ function TierEditor({
   onAdd,
   onDelete,
 }: {
+  d: Dictionary;
   title: string;
   hint: string;
   tiers: { id: string; minQty: number; totalCost: number }[];
@@ -508,17 +534,18 @@ function TierEditor({
                 className="flex items-center justify-between gap-3 rounded-[8px] bg-[var(--bg-panel)] px-3 py-1.5 text-[12.5px]"
               >
                 <span className="text-[var(--text-secondary)]">
-                  {tier.minQty}+ units →{" "}
-                  <span className="font-medium text-[var(--text-primary)]">
-                    {tier.totalCost.toFixed(2)}
-                  </span>{" "}
-                  total
+                  <Rich
+                    text={fmt(d.costs.tierRow, {
+                      qty: tier.minQty,
+                      cost: tier.totalCost.toFixed(2),
+                    })}
+                  />
                 </span>
                 <button
                   type="button"
                   onClick={() => onDelete(tier.id)}
                   className="transition-smooth text-[var(--text-muted)] hover:text-[var(--danger-red)]"
-                  aria-label="Delete tier"
+                  aria-label={d.costs.deleteTier}
                 >
                   <Trash2 className="size-3.5" />
                 </button>
@@ -530,14 +557,14 @@ function TierEditor({
             <Input
               value={minQty}
               onChange={(event) => setMinQty(event.target.value)}
-              placeholder="min qty"
+              placeholder={d.costs.minQty}
               inputMode="numeric"
               className="h-8 w-20"
             />
             <Input
               value={totalCost}
               onChange={(event) => setTotalCost(event.target.value)}
-              placeholder="total cost"
+              placeholder={d.costs.totalCost}
               inputMode="decimal"
               className="h-8 w-24"
             />
@@ -552,7 +579,7 @@ function TierEditor({
               }}
             >
               <Plus />
-              Add
+              {d.costs.add}
             </Button>
           </div>
         </>
@@ -564,6 +591,7 @@ function TierEditor({
 // ---------------------------------------------------------------------------
 
 function CollectionsManager({
+  d,
   accountId,
   products,
   collections,
@@ -572,6 +600,7 @@ function CollectionsManager({
   memberProductIds,
   run,
 }: {
+  d: Dictionary;
   accountId: string;
   products: StoreProduct[];
   collections: CogsCollectionRow[];
@@ -587,17 +616,14 @@ function CollectionsManager({
 
   return (
     <section className="space-y-3">
-      <h2 className="label-caps">Bundles / collections ({collections.length})</h2>
-      <p className="text-[12px] text-[var(--text-muted)]">
-        Members share one tier table, applied to their COMBINED quantity within the same
-        order — individual costs and tiers are ignored while a product is in a bundle.
-      </p>
+      <h2 className="label-caps">{fmt(d.costs.bundles, { count: collections.length })}</h2>
+      <p className="text-[12px] text-[var(--text-muted)]">{d.costs.bundlesHint}</p>
 
       <div className="flex items-center gap-2">
         <Input
           value={name}
           onChange={(event) => setName(event.target.value)}
-          placeholder="New bundle name"
+          placeholder={d.costs.newBundleName}
           className="h-9 w-56"
         />
         <Button
@@ -612,7 +638,7 @@ function CollectionsManager({
           }}
         >
           <FolderPlus />
-          Create
+          {d.costs.create}
         </Button>
       </div>
 
@@ -638,7 +664,7 @@ function CollectionsManager({
                 }
               >
                 <Trash2 />
-                Delete
+                {d.costs.delete}
               </Button>
             </header>
 
@@ -661,7 +687,7 @@ function CollectionsManager({
                       )
                     }
                     className="transition-smooth text-[var(--text-muted)] hover:text-[var(--danger-red)]"
-                    aria-label="Remove member"
+                    aria-label={d.costs.removeMember}
                   >
                     <X className="size-3" />
                   </button>
@@ -680,7 +706,7 @@ function CollectionsManager({
                   }
                 >
                   <SelectTrigger className="h-8 w-44 text-[12px]">
-                    <SelectValue placeholder="+ Add product" />
+                    <SelectValue placeholder={d.costs.addProduct} />
                   </SelectTrigger>
                   <SelectContent>
                     {free.map((product) => (
@@ -694,8 +720,9 @@ function CollectionsManager({
             </div>
 
             <TierEditor
-              title="Bundle tiers"
-              hint="Total cost for the combined min. quantity across members."
+              d={d}
+              title={d.costs.bundleTiers}
+              hint={d.costs.bundleTiersHint}
               tiers={tiers.map((tier) => ({
                 id: tier.id,
                 minQty: tier.min_qty,

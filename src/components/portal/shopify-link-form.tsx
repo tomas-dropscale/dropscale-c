@@ -10,6 +10,7 @@ import { Input, Label } from "@/components/ui/input";
 import { PasswordInput } from "@/components/auth/password-input";
 import { FormAlert } from "@/components/auth/auth-card";
 import { ShopifySetupSteps } from "@/components/portal/shopify-setup-steps";
+import { useI18n } from "@/lib/i18n/provider";
 import {
   Select,
   SelectContent,
@@ -34,6 +35,7 @@ export function ShopifyLinkForm({
   onConnected?: () => void;
 }) {
   const router = useRouter();
+  const { d } = useI18n();
   const [accountId, setAccountId] = React.useState(accounts[0]?.id ?? "");
   const [shopDomain, setShopDomain] = React.useState("");
   const [clientId, setClientId] = React.useState("");
@@ -64,7 +66,7 @@ export function ShopifyLinkForm({
     setBusy(false);
 
     if (!res.ok) {
-      setError(body?.error ?? "Something went wrong. Try again.");
+      setError(body?.error ?? d.shopify.genericError);
       return;
     }
 
@@ -82,7 +84,7 @@ export function ShopifyLinkForm({
       <header className="flex items-center gap-2.5">
         <Link2 className="size-4 text-[var(--accent-gold)]" />
         <h2 className="text-[15px] font-semibold text-[var(--text-primary)]">
-          Link a Shopify store
+          {d.shopify.linkTitle}
         </h2>
       </header>
 
@@ -90,8 +92,7 @@ export function ShopifyLinkForm({
       {notice && <FormAlert tone="success">{notice}</FormAlert>}
 
       <p className="text-[12.5px] leading-relaxed text-[var(--text-muted)]">
-        Pick which ad account this store belongs to, then follow the steps below. Copy the Client
-        ID and API secret key together, as a pair.
+        {d.shopify.linkIntro}
       </p>
 
       {/* The scopes live here, on the onboarding path — a client linking their
@@ -100,7 +101,7 @@ export function ShopifyLinkForm({
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <div className="space-y-1.5">
-          <Label htmlFor="link-account">Ad account</Label>
+          <Label htmlFor="link-account">{d.shopify.adAccount}</Label>
           <Select value={accountId} onValueChange={setAccountId}>
             <SelectTrigger id="link-account" className="w-full">
               <span className="flex min-w-0 items-center gap-2">
@@ -121,37 +122,37 @@ export function ShopifyLinkForm({
         </div>
 
         <div className="space-y-1.5">
-          <Label htmlFor="link-domain">Store URL</Label>
+          <Label htmlFor="link-domain">{d.shopify.storeUrl}</Label>
           <Input
             id="link-domain"
-            placeholder="my-store.myshopify.com"
+            placeholder={d.shopify.storeUrlPlaceholder}
             value={shopDomain}
             onChange={(event) => setShopDomain(event.target.value)}
           />
         </div>
 
         <div className="space-y-1.5">
-          <Label htmlFor="link-client">Client ID (API key)</Label>
+          <Label htmlFor="link-client">{d.shopify.clientIdLabel}</Label>
           <Input
             id="link-client"
-            placeholder="32-character API key"
+            placeholder={d.shopify.clientIdPlaceholder}
             value={clientId}
             onChange={(event) => setClientId(event.target.value)}
           />
         </div>
 
         <div className="space-y-1.5">
-          <Label htmlFor="link-token">API secret key — or Admin token</Label>
+          <Label htmlFor="link-token">{d.shopify.tokenLabelShort}</Label>
           <PasswordInput
             id="link-token"
-            placeholder="shpss_… (with Client ID) or shpat_…"
+            placeholder={d.shopify.tokenPlaceholder}
             autoComplete="off"
             value={accessToken}
             onChange={(event) => setAccessToken(event.target.value)}
           />
           {needsClientId && (
             <p className="text-[11.5px] text-[var(--warning-orange)]">
-              A secret key (shpss_…) needs the Client ID to pair with.
+              {d.shopify.needsClientIdShort}
             </p>
           )}
         </div>
@@ -164,7 +165,7 @@ export function ShopifyLinkForm({
         loading={busy}
         onClick={connect}
       >
-        Connect store
+        {d.shopify.connectStore}
       </Button>
     </section>
   );

@@ -10,18 +10,17 @@ import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
 import { FormAlert } from "@/components/auth/auth-card";
 import { createClient } from "@/lib/supabase/client";
+import { useI18n } from "@/lib/i18n/provider";
 
-const STATUS_BADGE: Record<
-  AdAccount["status"],
-  { label: string; variant: "success" | "warning" }
-> = {
-  active: { label: "Active", variant: "success" },
-  suspended: { label: "Suspended", variant: "warning" },
-  pending: { label: "Pending", variant: "warning" },
+const STATUS_VARIANT: Record<AdAccount["status"], "success" | "warning"> = {
+  active: "success",
+  suspended: "warning",
+  pending: "warning",
 };
 
 export function AdAccountSettingsCard({ account }: { account: AdAccount }) {
   const router = useRouter();
+  const { d } = useI18n();
   const searchParams = useSearchParams();
   const [customerId, setCustomerId] = React.useState(account.google_ads_customer_id ?? "");
   const [breakevenRoas, setBreakevenRoas] = React.useState(
@@ -35,7 +34,11 @@ export function AdAccountSettingsCard({ account }: { account: AdAccount }) {
   const [error, setError] = React.useState<string | null>(null);
   const [saved, setSaved] = React.useState(false);
 
-  const status = STATUS_BADGE[account.status];
+  const statusLabel: Record<AdAccount["status"], string> = {
+    active: d.accounts.statusActive,
+    suspended: d.accounts.statusSuspended,
+    pending: d.accounts.statusPending,
+  };
 
   // Feedback from the OAuth round-trip (?gads=connected|denied|error|…).
   const gads = searchParams.get("gads");
@@ -105,18 +108,18 @@ export function AdAccountSettingsCard({ account }: { account: AdAccount }) {
         <h2 className="min-w-0 flex-1 truncate text-[15px] font-semibold text-[var(--text-primary)]">
           {account.store_name}
         </h2>
-        <Badge variant={status.variant}>{status.label}</Badge>
+        <Badge variant={STATUS_VARIANT[account.status]}>{statusLabel[account.status]}</Badge>
       </header>
 
       {error && <FormAlert>{error}</FormAlert>}
-      {saved && <FormAlert tone="success">Account settings saved.</FormAlert>}
-      {gads === "connected" && <FormAlert tone="success">Google Ads connected.</FormAlert>}
-      {gads === "denied" && <FormAlert>Google Ads connection was cancelled.</FormAlert>}
+      {saved && <FormAlert tone="success">{d.accounts.saved}</FormAlert>}
+      {gads === "connected" && <FormAlert tone="success">{d.accounts.gadsConnected}</FormAlert>}
+      {gads === "denied" && <FormAlert>{d.accounts.gadsDenied}</FormAlert>}
       {gads === "error" && (
-        <FormAlert>Could not connect Google Ads. Please try again.</FormAlert>
+        <FormAlert>{d.accounts.gadsError}</FormAlert>
       )}
       {gads === "unconfigured" && (
-        <FormAlert>Google Ads isn&apos;t available yet. Contact the team.</FormAlert>
+        <FormAlert>{d.accounts.gadsUnconfigured}</FormAlert>
       )}
 
       {/* Google Ads connection */}
@@ -125,15 +128,15 @@ export function AdAccountSettingsCard({ account }: { account: AdAccount }) {
           <BarChart3 className="size-3.5 text-[var(--text-muted)]" />
           <span className="label-caps">Google Ads</span>
           <Badge variant={account.google_ads_connected ? "success" : "neutral"}>
-            {account.google_ads_connected ? "Connected" : "Not connected"}
+            {account.google_ads_connected ? d.accounts.connected : d.accounts.notConnected}
           </Badge>
         </div>
 
         <div className="space-y-1.5">
-          <Label htmlFor={`gads-cid-${account.id}`}>Customer ID</Label>
+          <Label htmlFor={`gads-cid-${account.id}`}>{d.accounts.customerId}</Label>
           <Input
             id={`gads-cid-${account.id}`}
-            placeholder="e.g. 123-456-7890"
+            placeholder={d.accounts.customerIdPlaceholder}
             inputMode="numeric"
             value={customerId}
             onChange={(event) => setCustomerId(event.target.value)}
@@ -154,22 +157,22 @@ export function AdAccountSettingsCard({ account }: { account: AdAccount }) {
               loading={disconnecting}
             >
               <Unplug />
-              Disconnect
+              {d.accounts.disconnect}
             </Button>
           </div>
         ) : savedCustomerId === "" ? (
           <p className="text-[12px] text-[var(--text-muted)]">
-            Enter your Customer ID and save, then connect your Google account.
+            {d.accounts.saveThenConnect}
           </p>
         ) : customerIdDirty ? (
           <p className="text-[12px] text-[var(--text-muted)]">
-            Save the Customer ID before connecting.
+            {d.accounts.saveCustomerIdFirst}
           </p>
         ) : (
           <Button variant="primary" size="sm" asChild>
             <a href={`/api/google-ads/connect?account=${account.id}`}>
               <BarChart3 />
-              Connect Google Ads
+              {d.accounts.connectGoogleAds}
             </a>
           </Button>
         )}
@@ -177,7 +180,7 @@ export function AdAccountSettingsCard({ account }: { account: AdAccount }) {
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div className="space-y-1.5">
-          <Label htmlFor={`roas-${account.id}`}>Breakeven ROAS</Label>
+          <Label htmlFor={`roas-${account.id}`}>{d.accounts.breakevenRoas}</Label>
           <Input
             id={`roas-${account.id}`}
             type="number"
@@ -194,8 +197,8 @@ export function AdAccountSettingsCard({ account }: { account: AdAccount }) {
             htmlFor={`budget-${account.id}`}
             className="flex items-center gap-1.5"
           >
-            Lifetime ads budget (USD)
-            <span title="Total budget available for this account across its lifetime. Used for pacing.">
+            {d.accounts.lifetimeBudget}
+            <span title={d.accounts.lifetimeBudgetHelp}>
               <Info className="size-3.5 text-[var(--text-muted)]" />
             </span>
           </Label>
@@ -213,7 +216,7 @@ export function AdAccountSettingsCard({ account }: { account: AdAccount }) {
       </div>
 
       <Button variant="primary" onClick={save} loading={saving}>
-        Save changes
+        {d.accounts.saveChanges}
       </Button>
     </section>
   );

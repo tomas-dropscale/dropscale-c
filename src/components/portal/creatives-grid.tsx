@@ -28,11 +28,14 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ageDays, shortDate } from "@/lib/format";
+import { fmt } from "@/lib/i18n";
+import { useI18n } from "@/lib/i18n/provider";
 import { thumbTint } from "@/lib/portal/mock";
 
 const THUMBS_SHOWN = 6; // 2 rows × 3 columns
 
 function DeliveryCard({ delivery }: { delivery: CreativeDelivery }) {
+  const { d } = useI18n();
   const hiddenCount = Math.max(0, delivery.file_count - THUMBS_SHOWN);
 
   return (
@@ -71,20 +74,21 @@ function DeliveryCard({ delivery }: { delivery: CreativeDelivery }) {
             {delivery.name}
           </p>
           <p className="mt-0.5 text-[11.5px] text-[var(--text-muted)]">
-            {shortDate(delivery.created_at)} · {delivery.file_count} files ·{" "}
+            {shortDate(delivery.created_at)} ·{" "}
+            {fmt(d.creatives.files, { count: delivery.file_count })} ·{" "}
             {Number(delivery.size_mb).toFixed(1)} MB
           </p>
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
           <Badge variant={delivery.status === "published" ? "gold" : "neutral"}>
-            {delivery.status === "published" ? "Published" : "Draft"}
+            {delivery.status === "published" ? d.creatives.published : d.creatives.draft}
           </Badge>
 
           <DropdownMenu>
             <DropdownMenuTrigger
               className="transition-smooth rounded-md p-1 text-[var(--text-muted)] outline-none hover:bg-[var(--bg-panel-hover)] hover:text-[var(--text-primary)]"
-              aria-label="Delivery actions"
+              aria-label={d.creatives.deliveryActions}
             >
               <MoreHorizontal className="size-4" />
             </DropdownMenuTrigger>
@@ -92,16 +96,16 @@ function DeliveryCard({ delivery }: { delivery: CreativeDelivery }) {
               {/* Placeholder actions — wire up when file storage exists */}
               <DropdownMenuItem>
                 <Download />
-                Download
+                {d.creatives.download}
               </DropdownMenuItem>
               <DropdownMenuItem>
                 <Pencil />
-                Rename
+                {d.creatives.rename}
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem variant="danger">
                 <Trash2 />
-                Delete
+                {d.creatives.delete}
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -112,6 +116,7 @@ function DeliveryCard({ delivery }: { delivery: CreativeDelivery }) {
 }
 
 export function CreativesGrid({ deliveries }: { deliveries: CreativeDelivery[] }) {
+  const { d } = useI18n();
   const [query, setQuery] = React.useState("");
   const [status, setStatus] = React.useState<"all" | "published" | "draft">("all");
   const [period, setPeriod] = React.useState<"all" | "d30" | "d90">("all");
@@ -135,7 +140,7 @@ export function CreativesGrid({ deliveries }: { deliveries: CreativeDelivery[] }
           <Input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search deliveries..."
+            placeholder={d.creatives.searchDeliveries}
             className="pl-9"
           />
         </div>
@@ -148,9 +153,9 @@ export function CreativesGrid({ deliveries }: { deliveries: CreativeDelivery[] }
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="all">All statuses</SelectItem>
-            <SelectItem value="published">Published</SelectItem>
-            <SelectItem value="draft">Draft</SelectItem>
+            <SelectItem value="all">{d.creatives.allStatuses}</SelectItem>
+            <SelectItem value="published">{d.creatives.published}</SelectItem>
+            <SelectItem value="draft">{d.creatives.draft}</SelectItem>
           </SelectContent>
         </Select>
 
@@ -162,16 +167,16 @@ export function CreativesGrid({ deliveries }: { deliveries: CreativeDelivery[] }
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="all">All time</SelectItem>
-            <SelectItem value="d30">Last 30 days</SelectItem>
-            <SelectItem value="d90">Last 90 days</SelectItem>
+            <SelectItem value="all">{d.creatives.allTime}</SelectItem>
+            <SelectItem value="d30">{d.creatives.last30}</SelectItem>
+            <SelectItem value="d90">{d.creatives.last90}</SelectItem>
           </SelectContent>
         </Select>
       </div>
 
       {filtered.length === 0 ? (
         <div className="panel px-6 py-14 text-center text-[13px] text-[var(--text-secondary)]">
-          No deliveries match your filters.
+          {d.creatives.noMatches}
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { RefreshCw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { useI18n } from "@/lib/i18n/provider";
 
 /**
  * Forces the dashboard's data current on demand, bypassing the 15-minute
@@ -13,6 +14,7 @@ import { Button } from "@/components/ui/button";
  */
 export function RefreshButton({ accountIds }: { accountIds: string[] }) {
   const router = useRouter();
+  const { d } = useI18n();
   const [busy, setBusy] = React.useState(false);
 
   async function refresh() {
@@ -31,9 +33,15 @@ export function RefreshButton({ accountIds }: { accountIds: string[] }) {
   }
 
   return (
-    <Button variant="secondary" size="sm" onClick={refresh} loading={busy} aria-label="Refresh data">
+    <Button
+      variant="secondary"
+      size="sm"
+      onClick={refresh}
+      loading={busy}
+      aria-label={d.banners.refreshData}
+    >
       <RefreshCw />
-      Refresh
+      {d.banners.refresh}
     </Button>
   );
 }

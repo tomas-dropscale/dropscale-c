@@ -42,7 +42,7 @@ export default async function CreativesPage({
       ) : (
         // Configured but this store not connected → say so, show nothing fake.
         <div className="space-y-6">
-          <ConnectAdsBanner />
+          <ConnectAdsBanner d={d} />
           <div className="panel px-6 py-14 text-center text-[13px] text-[var(--text-secondary)]">
             Connect Google Ads to see this store&apos;s creatives.
           </div>
