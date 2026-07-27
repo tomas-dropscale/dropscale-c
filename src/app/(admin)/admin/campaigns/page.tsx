@@ -5,6 +5,7 @@ import { PageContainer } from "@/components/ui/page-container";
 import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { CommissionRate } from "@/components/admin/commission-rate";
+import { ClientDashboardDialog } from "@/components/admin/client-dashboard-dialog";
 import { RangePicker } from "@/components/portal/range-picker";
 import { fetchAdminCampaigns } from "@/lib/admin/campaigns";
 import { parseRange } from "@/lib/portal/range";
@@ -122,6 +123,16 @@ export default async function AdminCampaignsPage({
                     {money(client.commission, intl)} commission
                   </p>
                 </div>
+
+                {/* The one interactive island in this row. It stops its own
+                    click so opening the dashboard doesn't also toggle the
+                    <details> it sits inside. */}
+                <ClientDashboardDialog
+                  clientId={client.clientId}
+                  clientName={client.clientName}
+                  clientEmail={client.clientEmail}
+                  range={range}
+                />
               </summary>
 
               {/* Accounts — each one its own drop-down, so ten stores read as
@@ -141,13 +152,25 @@ export default async function AdminCampaignsPage({
                     <p className="min-w-0 flex-1 truncate text-[13px] font-medium text-[var(--text-primary)]">
                       {entry.account.store_name}
                     </p>
-                    {!entry.connected && (
-                      <Badge variant="warning">
+                    {/* Three different states, three different actions: the
+                        client must reconnect, nobody has connected yet, or
+                        Google is simply misbehaving and it will retry. */}
+                    {entry.authRevoked ? (
+                      <Badge variant="danger">
                         <Unplug className="size-3" aria-hidden />
-                        Not connected
+                        Reconnect needed
                       </Badge>
+                    ) : (
+                      !entry.connected && (
+                        <Badge variant="warning">
+                          <Unplug className="size-3" aria-hidden />
+                          Not connected
+                        </Badge>
+                      )
                     )}
-                    {entry.failed && <Badge variant="danger">Query failed</Badge>}
+                    {entry.failed && !entry.authRevoked && (
+                      <Badge variant="danger">Query failed</Badge>
+                    )}
                     <span className="text-[12.5px] text-[var(--text-secondary)]">
                       {money(entry.spend, intl, entry.account.currency)}
                     </span>

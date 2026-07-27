@@ -16,6 +16,24 @@ import { serviceAccountAccessToken } from "@/lib/google-ads/service-account";
 
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 
+/**
+ * The client's Google authorisation is gone for good — Google answered
+ * `invalid_grant`, which it returns for a refresh token that was revoked, that
+ * expired (an OAuth app still in "Testing" expires them after 7 days), or that
+ * was issued by a different OAuth client.
+ *
+ * Worth its own type because it is the one Google failure that RETRYING CANNOT
+ * FIX: a human has to re-authorise. Callers use it to mark the account
+ * disconnected so the portal asks for a reconnect, instead of showing an
+ * unexplained "query failed" until someone reads the logs.
+ */
+export class GoogleAuthRevokedError extends Error {
+  constructor(detail: string) {
+    super(`Google authorisation revoked or expired: ${detail}`);
+    this.name = "GoogleAuthRevokedError";
+  }
+}
+
 // Cached per isolate, keyed by refresh token (one per client account). Access
 // tokens live ~1h; refreshing on every query would add a round-trip and burn
 // OAuth quota. A cold isolate just mints new ones.
@@ -42,6 +60,17 @@ async function accessToken(refreshToken: string): Promise<string> {
 
   if (!res.ok) {
     const detail = await res.text();
+
+    // A dead token must never sit in the cache: without this, one revoked
+    // account would keep re-hitting Google on every render.
+    tokenCache.delete(refreshToken);
+
+    // Google says `invalid_grant` only when re-authorisation is the only fix.
+    // Everything else (5xx, quota, network) is transient and stays a plain
+    // Error so the caller retries it next time.
+    if (detail.includes("invalid_grant")) {
+      throw new GoogleAuthRevokedError(detail);
+    }
     throw new Error(`Google OAuth token refresh failed (${res.status}): ${detail}`);
   }
 

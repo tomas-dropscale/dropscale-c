@@ -2,6 +2,7 @@ import { createClient } from "@/lib/supabase/server";
 import { decryptToken } from "@/lib/google-ads/crypto";
 import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
 import { fetchLiveCampaigns } from "@/lib/google-ads/portal";
+import { markIfAuthRevoked } from "@/lib/google-ads/revoked";
 import { ACCOUNT_COLUMNS } from "@/lib/portal/data";
 import type { AdAccount, Campaign } from "@/lib/supabase/types";
 import type { RangeSelection } from "@/lib/portal/range";
@@ -21,6 +22,12 @@ export type AdminAccountCampaigns = {
   connected: boolean;
   /** Live query attempted but failed — distinguishes "error" from "no spend". */
   failed: boolean;
+  /**
+   * The failure was Google refusing the client's authorisation. Separate from
+   * `failed` because the fix is different and belongs to the CLIENT: nobody can
+   * retry their way out of it, the account has to be reconnected.
+   */
+  authRevoked: boolean;
   spend: number;
   commission: number;
 };
@@ -107,6 +114,7 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
 
       let campaigns: Campaign[] = [];
       let failed = false;
+      let authRevoked = false;
 
       if (connected) {
         try {
@@ -125,8 +133,16 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
             range,
           );
         } catch (error) {
-          console.error(`Admin campaigns failed for ${account.id}:`, error);
           failed = true;
+
+          // A revoked authorisation is permanent, so record it: the account
+          // flips to disconnected and the client's own portal starts asking
+          // them to reconnect. Without this the store just reads "query
+          // failed" forever and only the server logs say why.
+          authRevoked = await markIfAuthRevoked(supabase, account.id, error);
+          if (!authRevoked) {
+            console.error(`Admin campaigns failed for ${account.id}:`, error);
+          }
         }
       }
 
@@ -134,8 +150,10 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
       return {
         account,
         campaigns,
-        connected,
+        // Report what we just learned, not the stale row we read at the top.
+        connected: connected && !authRevoked,
         failed,
+        authRevoked,
         spend,
         commission: (spend * Number(account.commission_rate)) / 100,
       };
@@ -150,6 +168,7 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
     connected:
       configured && account.google_ads_connected && Boolean(account.google_ads_customer_id),
     failed: false,
+    authRevoked: false,
     spend: 0,
     commission: 0,
   }));

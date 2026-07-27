@@ -20,6 +20,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 import { decryptToken } from "@/lib/google-ads/crypto";
 import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
+import { markIfAuthRevoked } from "@/lib/google-ads/revoked";
 import {
   fetchCampaignNames,
   fetchLiveDailyBreakdown,
@@ -47,6 +48,17 @@ const WINDOW_DAYS = 7;
 const BACKFILL_LIMIT_DAYS = 90;
 
 type Supabase = SupabaseClient<Database>;
+
+/** The Google-sourced columns of daily_metrics, carried forward when Google
+ *  can't be reached. Kept as its own type so the carry-forward below can't
+ *  silently fall out of step with the row it feeds. */
+type DailyMetricAdColumns = {
+  ad_spend: number;
+  impressions: number;
+  clicks: number;
+  conversions: number;
+  conversion_value: number;
+};
 
 // Per-isolate memo of the last run per account, so a burst of navigation
 // doesn't even query for freshness.
@@ -104,6 +116,11 @@ async function syncAccountWindow(
   to: string,
 ): Promise<void> {
   let google: DailyBreakdown[] = [];
+  // Whether Google actually answered for this window. Decides, further down,
+  // between "no spend that day" (a real zero) and "we have no idea" (carry the
+  // stored figures forward).
+  let googleSynced = false;
+
   if (
     hasGoogleAdsEnv() &&
     account.google_ads_connected &&
@@ -111,7 +128,16 @@ async function syncAccountWindow(
     secret?.google_ads_refresh_token
   ) {
     const token = await decryptToken(secret.google_ads_refresh_token);
-    google = await fetchLiveDailyBreakdown(account.google_ads_customer_id, token, from, to);
+    try {
+      google = await fetchLiveDailyBreakdown(account.google_ads_customer_id, token, from, to);
+      googleSynced = true;
+    } catch (error) {
+      // A revoked authorisation can't be retried, so stop pretending the
+      // account is connected — the portal then prompts for a reconnect. Any
+      // other Google failure still throws: it may be transient, and swallowing
+      // it would let the carry-forward below quietly stand in for real data.
+      if (!(await markIfAuthRevoked(supabase, account.id, error))) throw error;
+    }
   }
 
   let sales: DailySales[] = [];
@@ -242,19 +268,54 @@ async function syncAccountWindow(
   const googleByDay = new Map(google.map((day) => [day.date, day]));
   const days = [...new Set([...salesByDay.keys(), ...googleByDay.keys()])];
 
+  /**
+   * Ad figures already stored for this window, read ONLY when Google didn't
+   * answer.
+   *
+   * The upsert below replaces whole rows, so a Shopify-only pass would write
+   * ad_spend 0 over spend that was synced correctly last week — and the
+   * commission ledger and the weekly invoice are both built on that number.
+   * A store that is Shopify-connected but not Google-connected legitimately
+   * has zero spend; a store whose authorisation just expired does not, and
+   * from here the two are indistinguishable. So when we didn't ask Google,
+   * we keep what we last knew rather than asserting a zero.
+   */
+  const carried = new Map<string, DailyMetricAdColumns>();
+  if (!googleSynced) {
+    const { data } = await supabase
+      .from("daily_metrics")
+      .select("day, ad_spend, impressions, clicks, conversions, conversion_value")
+      .eq("ad_account_id", account.id)
+      .gte("day", from)
+      .lte("day", to);
+
+    for (const row of data ?? []) {
+      carried.set(row.day, {
+        ad_spend: Number(row.ad_spend),
+        impressions: Number(row.impressions),
+        clicks: Number(row.clicks),
+        conversions: Number(row.conversions),
+        conversion_value: Number(row.conversion_value),
+      });
+    }
+  }
+
   const rows = days.map((day) => {
     const ads = googleByDay.get(day);
     const shop = salesByDay.get(day);
     const costs = costByDay.get(day);
     const rev = revShareByDay.get(day);
+    // Empty whenever Google DID answer, so a genuine no-spend day still
+    // resolves to 0 rather than resurrecting an older figure.
+    const prior = carried.get(day);
     return {
       ad_account_id: account.id,
       day,
-      ad_spend: ads?.spend ?? 0,
-      impressions: ads?.impressions ?? 0,
-      clicks: ads?.clicks ?? 0,
-      conversions: ads?.conversions ?? 0,
-      conversion_value: ads?.conversionValue ?? 0,
+      ad_spend: ads?.spend ?? prior?.ad_spend ?? 0,
+      impressions: ads?.impressions ?? prior?.impressions ?? 0,
+      clicks: ads?.clicks ?? prior?.clicks ?? 0,
+      conversions: ads?.conversions ?? prior?.conversions ?? 0,
+      conversion_value: ads?.conversionValue ?? prior?.conversion_value ?? 0,
       revenue: shop?.revenue ?? 0,
       orders_count: shop?.orders ?? 0,
       refunds_amount: shop?.refunds ?? 0,

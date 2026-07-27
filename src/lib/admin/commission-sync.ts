@@ -2,6 +2,7 @@ import { createClient } from "@/lib/supabase/server";
 import { decryptToken } from "@/lib/google-ads/crypto";
 import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
 import { fetchLiveDailySpend } from "@/lib/google-ads/portal";
+import { markIfAuthRevoked } from "@/lib/google-ads/revoked";
 import type { AdAccount } from "@/lib/supabase/types";
 
 /**
@@ -200,7 +201,12 @@ export async function syncCommissionLedger(): Promise<void> {
             }
           }
         } catch (error) {
-          console.error(`Commission sync failed for ${account.id}:`, error);
+          // A revoked authorisation is permanent: flag it so the client is
+          // asked to reconnect, instead of this failing on every finance page
+          // load forever. Anything else stays a plain log and retries.
+          if (!(await markIfAuthRevoked(supabase, account.id, error))) {
+            console.error(`Commission sync failed for ${account.id}:`, error);
+          }
         }
       }),
     );

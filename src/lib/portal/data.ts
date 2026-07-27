@@ -29,6 +29,7 @@ import {
   fetchLiveMetrics,
   type CreativeAsset,
 } from "@/lib/google-ads/portal";
+import { markIfAuthRevoked } from "@/lib/google-ads/revoked";
 
 // Every column except the encrypted token, which must not leave the server
 // inside an account payload.
@@ -120,8 +121,13 @@ export async function fetchCampaigns(account: AdAccount, range: RangeSelection):
       if (!token) return [];
       return await fetchLiveCampaigns(account.google_ads_customer_id!, token, account.id, range);
     } catch (error) {
-      // Connected but the query failed — surface nothing, never mock.
-      console.error(`Google Ads campaigns failed for ${account.id}:`, error);
+      // Connected but the query failed — surface nothing, never mock. A
+      // revoked authorisation additionally flips the account to disconnected,
+      // which is what puts the "Connect Google Ads" button back in front of
+      // the one person who can fix it.
+      if (!(await markIfAuthRevoked(await createClient(), account.id, error))) {
+        console.error(`Google Ads campaigns failed for ${account.id}:`, error);
+      }
       return [];
     }
   }
@@ -139,7 +145,9 @@ export async function fetchAccountMetrics(account: AdAccount, range: RangeSelect
       if (!token) return aggregateMetrics([]);
       return await fetchLiveMetrics(account.google_ads_customer_id!, token, range);
     } catch (error) {
-      console.error(`Google Ads metrics failed for ${account.id}:`, error);
+      if (!(await markIfAuthRevoked(await createClient(), account.id, error))) {
+        console.error(`Google Ads metrics failed for ${account.id}:`, error);
+      }
       return aggregateMetrics([]); // all-zero MetricSet
     }
   }
@@ -166,7 +174,9 @@ export async function fetchCreativeAssets(account: AdAccount): Promise<CreativeA
     if (!token) return [];
     return await fetchLiveCreatives(account.google_ads_customer_id!, token);
   } catch (error) {
-    console.error(`Google Ads creatives failed for ${account.id}:`, error);
+    if (!(await markIfAuthRevoked(await createClient(), account.id, error))) {
+      console.error(`Google Ads creatives failed for ${account.id}:`, error);
+    }
     return [];
   }
 }
