@@ -44,7 +44,17 @@ export type AdminStoreOverview = {
   conversions: number;
   conversionValue: number;
   costPerConversion: number;
+  /**
+   * The STORE's return: Shopify revenue ÷ ad spend. Matches what the client
+   * sees on their own dashboard — an admin looking at this popup to answer
+   * "why does my client say their ROAS is wrong" must be reading their number.
+   */
   roas: number;
+  /**
+   * What Google attributes. Kept alongside so a broken conversion-tracking
+   * setup stays visible here, which is exactly the diagnosis an admin needs.
+   */
+  googleRoas: number;
   /** Store-side, from Shopify. */
   netRevenue: number;
   orders: number;
@@ -124,7 +134,8 @@ export async function fetchClientOverview(
         conversions: totals.conversions,
         conversionValue: totals.conversionValue,
         costPerConversion: totals.costPerConversion,
-        roas: totals.roas,
+        roas: totals.mer,
+        googleRoas: totals.roas,
         netRevenue: totals.netRevenue,
         orders: totals.orders,
         commissionRate: rate,

@@ -128,7 +128,12 @@ function StoreCard({ store }: { store: AdminStoreOverview }) {
           icon={Crosshair}
           value={money(store.costPerConversion, currency)}
         />
-        <Stat label="ROAS" icon={TrendingUp} value={multiplier(store.roas)} />
+        <Stat
+          label="ROAS"
+          icon={TrendingUp}
+          value={multiplier(store.roas)}
+          hint={`${multiplier(store.googleRoas)} attributed by Google`}
+        />
         <Stat
           label="Conv. value"
           icon={BadgeDollarSign}
@@ -178,8 +183,24 @@ function Body({ data }: { data: AdminClientOverview }) {
             value={money(t.adSpend, currency)}
             hint={`${compact(t.impressions)} impressions`}
           />
-          <Stat label="ROAS" icon={TrendingUp} value={multiplier(t.roas)} />
-          <Stat label="MER" icon={Percent} value={multiplier(t.mer)} />
+          {/* The client's own figure first — this popup exists to see what
+              they see. Google's attributed one sits underneath, because a
+              0.00x there is the tell that their conversion tracking is off. */}
+          <Stat
+            label="ROAS"
+            icon={TrendingUp}
+            value={multiplier(t.mer)}
+            hint={`${multiplier(t.roas)} attributed by Google`}
+          />
+          {/* Was MER, which is the same division as the ROAS beside it now —
+              two cards for one number. Margin is the other half of the story:
+              a 4x return still loses money if the products cost too much. */}
+          <Stat
+            label="Margin"
+            icon={Percent}
+            value={percent(t.netRevenue > 0 ? t.netProfitAfterFee / t.netRevenue : 0)}
+            hint="after COGS, fees and our cut"
+          />
           <Stat label="AOV" icon={ShoppingBag} value={money(t.aov, currency)} />
           <Stat
             label="Their profit"
