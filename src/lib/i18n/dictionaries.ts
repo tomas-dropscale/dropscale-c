@@ -195,6 +195,8 @@ export const en = {
     periodTotal: "Net for period",
     chartPeriod: "Chart period",
     revenueBySource: "Where revenue comes from",
+    syncNow: "Sync now",
+    syncFailed: "Could not sync. Try again.",
     noRevenueYet: "No revenue recorded in this period.",
     addFirstEntry: "Record the first commission",
     topClients: "Top clients",
@@ -633,6 +635,8 @@ export const en = {
     ctr: "CTR",
     impressions: "Impressions",
     fee: "Fee",
+    storeWideNote:
+      "Conversions and CPA are your store's own orders, across every channel — not only the sales Google attributes to the ads.",
   },
 
   onboarding: {
@@ -757,9 +761,9 @@ export const en = {
     scopeOrders: "revenue, orders and refunds — nothing syncs without it",
     scopeAllOrders: "history beyond the last 60 days",
     scopeProducts: "product prices and collections, for COGS and revenue share",
+    scopeAnalytics: "store analytics and reports",
     scopeFulfillments: "shipping status on the orders we read",
     scopeInventory: "stock and unit cost",
-    scopeReports: "store analytics",
   },
 
   costs: {
@@ -1081,6 +1085,8 @@ export const pt: Dictionary = {
     periodTotal: "Líquido no período",
     chartPeriod: "Período do gráfico",
     revenueBySource: "De onde vem a receita",
+    syncNow: "Sincronizar agora",
+    syncFailed: "Não foi possível sincronizar. Tenta novamente.",
     noRevenueYet: "Sem receita registada neste período.",
     addFirstEntry: "Registar a primeira comissão",
     topClients: "Principais clientes",
@@ -1515,6 +1521,8 @@ export const pt: Dictionary = {
     ctr: "CTR",
     impressions: "Impressões",
     fee: "Taxa",
+    storeWideNote:
+      "As conversões e o CPA são as encomendas reais da tua loja, de todos os canais — não apenas as vendas que o Google atribui aos anúncios.",
   },
 
   onboarding: {
@@ -1642,9 +1650,9 @@ export const pt: Dictionary = {
     scopeOrders: "receita, encomendas e reembolsos — sem isto nada sincroniza",
     scopeAllOrders: "histórico anterior aos últimos 60 dias",
     scopeProducts: "preços e coleções de produtos, para COGS e partilha de receita",
+    scopeAnalytics: "análises e relatórios da loja",
     scopeFulfillments: "estado de envio das encomendas que lemos",
     scopeInventory: "stock e custo unitário",
-    scopeReports: "análises da loja",
   },
 
   costs: {
@@ -1951,6 +1959,8 @@ export const ptBR: Dictionary = {
     periodTotal: "Líquido no período",
     chartPeriod: "Período do gráfico",
     revenueBySource: "De onde vem a receita",
+    syncNow: "Sincronizar agora",
+    syncFailed: "Não foi possível sincronizar. Tente novamente.",
     noRevenueYet: "Nenhuma receita registrada neste período.",
     addFirstEntry: "Registrar a primeira comissão",
     topClients: "Principais clientes",
@@ -2384,6 +2394,8 @@ export const ptBR: Dictionary = {
     ctr: "CTR",
     impressions: "Impressões",
     fee: "Taxa",
+    storeWideNote:
+      "As conversões e o CPA são os pedidos reais da sua loja, de todos os canais — não apenas as vendas que o Google atribui aos anúncios.",
   },
 
   onboarding: {
@@ -2509,9 +2521,9 @@ export const ptBR: Dictionary = {
     scopeOrders: "receita, pedidos e reembolsos — sem isso nada sincroniza",
     scopeAllOrders: "histórico anterior aos últimos 60 dias",
     scopeProducts: "preços e coleções de produtos, para CMV e participação na receita",
+    scopeAnalytics: "análises e relatórios da loja",
     scopeFulfillments: "status de envio dos pedidos que lemos",
     scopeInventory: "estoque e custo unitário",
-    scopeReports: "análises da loja",
   },
 
   costs: {
@@ -2818,6 +2830,8 @@ export const es: Dictionary = {
     periodTotal: "Neto del periodo",
     chartPeriod: "Periodo del gráfico",
     revenueBySource: "De dónde vienen los ingresos",
+    syncNow: "Sincronizar ahora",
+    syncFailed: "No se pudo sincronizar. Inténtalo de nuevo.",
     noRevenueYet: "No hay ingresos registrados en este periodo.",
     addFirstEntry: "Registrar la primera comisión",
     topClients: "Principales clientes",
@@ -3253,6 +3267,8 @@ export const es: Dictionary = {
     ctr: "CTR",
     impressions: "Impresiones",
     fee: "Comisión",
+    storeWideNote:
+      "Las conversiones y el CPA son los pedidos reales de tu tienda, de todos los canales — no solo las ventas que Google atribuye a los anuncios.",
   },
 
   onboarding: {
@@ -3378,9 +3394,9 @@ export const es: Dictionary = {
     scopeOrders: "ingresos, pedidos y devoluciones — sin esto nada se sincroniza",
     scopeAllOrders: "histórico anterior a los últimos 60 días",
     scopeProducts: "precios y colecciones de productos, para COGS y participación en ingresos",
+    scopeAnalytics: "analíticas e informes de la tienda",
     scopeFulfillments: "estado de envío de los pedidos que leemos",
     scopeInventory: "stock y coste unitario",
-    scopeReports: "analíticas de la tienda",
   },
 
   costs: {
@@ -3688,6 +3704,8 @@ export const fr: Dictionary = {
     periodTotal: "Net sur la période",
     chartPeriod: "Période du graphique",
     revenueBySource: "D'où viennent les revenus",
+    syncNow: "Synchroniser",
+    syncFailed: "Synchronisation impossible. Réessayez.",
     noRevenueYet: "Aucun revenu enregistré sur cette période.",
     addFirstEntry: "Enregistrer la première commission",
     topClients: "Principaux clients",
@@ -4123,6 +4141,8 @@ export const fr: Dictionary = {
     ctr: "CTR",
     impressions: "Impressions",
     fee: "Honoraires",
+    storeWideNote:
+      "Les conversions et le CPA sont les commandes réelles de votre boutique, tous canaux confondus — pas seulement les ventes que Google attribue aux annonces.",
   },
 
   onboarding: {
@@ -4249,9 +4269,9 @@ export const fr: Dictionary = {
     scopeOrders: "revenus, commandes et remboursements — rien ne se synchronise sans lui",
     scopeAllOrders: "historique au-delà des 60 derniers jours",
     scopeProducts: "prix et collections de produits, pour le COGS et le partage de revenus",
+    scopeAnalytics: "analyses et rapports de la boutique",
     scopeFulfillments: "statut d’expédition des commandes que nous lisons",
     scopeInventory: "stock et coût unitaire",
-    scopeReports: "analyses de la boutique",
   },
 
   costs: {

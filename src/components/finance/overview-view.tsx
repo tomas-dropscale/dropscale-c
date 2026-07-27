@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { ArrowRight, Plus } from "lucide-react";
+import { ArrowRight, Plus, RefreshCw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { PageContainer } from "@/components/ui/page-container";
@@ -39,6 +39,31 @@ export function OverviewView({
   const { d, intl } = useI18n();
   const { data, range, setRange, refresh, error, setError } = useFinance(initial, initialRange);
   const [target, setTarget] = React.useState<CommissionTarget | null>(null);
+  const [syncing, setSyncing] = React.useState(false);
+
+  /**
+   * Book Google's commission into the ledger right now, then re-read.
+   *
+   * Two steps on purpose: the route writes `commissions`, and `refresh()` is
+   * what pulls the new rows into this view. Skipping the second would leave the
+   * figure unchanged and look like the button did nothing.
+   */
+  async function syncLedgers() {
+    setSyncing(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/admin/sync-ledgers", { method: "POST" });
+      if (!res.ok) {
+        setError(d.overview.syncFailed);
+        return;
+      }
+      refresh();
+    } catch {
+      setError(d.overview.syncFailed);
+    } finally {
+      setSyncing(false);
+    }
+  }
 
   const figures = React.useMemo(
     () => totals(data.commissions, data.expenses),
@@ -151,13 +176,27 @@ export function OverviewView({
             title={d.overview.revenueBySource}
             rows={sourceRows}
             action={
-              <Link
-                href="/admin/revenue"
-                className="flex items-center gap-1 text-[12px] text-[var(--text-secondary)] transition-smooth hover:text-[var(--accent-gold)]"
-              >
-                {d.overview.viewAll}
-                <ArrowRight className="size-3" aria-hidden />
-              </Link>
+              <div className="flex items-center gap-3">
+                {/* Commission here is the ledger; /admin/campaigns computes it
+                    live from Google. This forces the ledger to catch up, so the
+                    two figures agree on demand instead of by luck. */}
+                <button
+                  type="button"
+                  onClick={syncLedgers}
+                  disabled={syncing}
+                  className="flex items-center gap-1 text-[12px] text-[var(--text-secondary)] transition-smooth hover:text-[var(--accent-gold)] disabled:opacity-50"
+                >
+                  <RefreshCw className={cn("size-3", syncing && "animate-spin")} aria-hidden />
+                  {d.overview.syncNow}
+                </button>
+                <Link
+                  href="/admin/revenue"
+                  className="flex items-center gap-1 text-[12px] text-[var(--text-secondary)] transition-smooth hover:text-[var(--accent-gold)]"
+                >
+                  {d.overview.viewAll}
+                  <ArrowRight className="size-3" aria-hidden />
+                </Link>
+              </div>
             }
             empty={
               <div className="space-y-3">

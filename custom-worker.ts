@@ -49,11 +49,18 @@ const worker = {
     return nextHandler.fetch(request, env, ctx);
   },
 
-  async scheduled(_event: { cron: string }, env: Env, ctx: Ctx): Promise<void> {
+  async scheduled(event: { cron: string }, env: Env, ctx: Ctx): Promise<void> {
     if (!env.CRON_SECRET) {
-      console.error("Billing cron skipped: CRON_SECRET is not set on this Worker.");
+      console.error("Cron skipped: CRON_SECRET is not set on this Worker.");
       return;
     }
+
+    // Which schedule fired decides the work. Both routes are idempotent, so a
+    // retried or double-fired trigger costs nothing but a round trip.
+    const job =
+      event.cron === "0 6 * * 1"
+        ? { name: "weekly billing", path: "/api/billing/cron" }
+        : { name: "ledger sync", path: "/api/admin/sync-ledgers" };
 
     // Only the path is ever used for routing; the origin just has to be a valid
     // absolute URL, so a missing site URL must not abort the run.
@@ -61,7 +68,7 @@ const worker = {
 
     try {
       const response = await nextHandler.fetch(
-        new Request(`${origin}/api/billing/cron`, {
+        new Request(`${origin}${job.path}`, {
           method: "POST",
           headers: { Authorization: `Bearer ${env.CRON_SECRET}` },
         }),
@@ -71,12 +78,12 @@ const worker = {
 
       const body = await response.text();
       if (!response.ok) {
-        console.error(`Billing cron failed (${response.status}): ${body}`);
+        console.error(`Cron "${job.name}" failed (${response.status}): ${body}`);
         return;
       }
-      console.log(`Billing cron: ${body}`);
+      console.log(`Cron "${job.name}": ${body}`);
     } catch (error) {
-      console.error("Billing cron threw:", error);
+      console.error(`Cron "${job.name}" threw:`, error);
     }
   },
 };

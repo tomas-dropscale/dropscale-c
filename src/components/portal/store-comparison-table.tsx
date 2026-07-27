@@ -17,7 +17,14 @@ export type StoreComparisonRow = {
   spend: number;
   share: number; // 0..1 of total spend
   roas: number;
+  /**
+   * The STORE's conversions — real orders in the shop, from Shopify. Not
+   * Google's attributed conversions: the shop sells through channels Google
+   * never sees, so the attributed figure understates the store and this table
+   * is meant to show the client what actually happened in each of theirs.
+   */
   conversions: number;
+  /** Ad spend per store order (spend ÷ the conversions above). */
   cpa: number;
   ctr: number;
   impressions: number;
@@ -73,6 +80,12 @@ export function StoreComparisonTable({ rows }: { rows: StoreComparisonRow[] }) {
         <h2 className="text-[15px] font-semibold text-[var(--text-primary)]">
           {d.stores.comparison}
         </h2>
+        {/* Said outright, because the Google cards above this table report
+            Google-attributed conversions and these two columns do not. Without
+            the line the two numbers look like a bug. */}
+        <p className="mt-1 text-[11.5px] leading-relaxed text-[var(--text-muted)]">
+          {d.stores.storeWideNote}
+        </p>
       </header>
 
       <div className="overflow-x-auto">

@@ -7,10 +7,15 @@
   "main": "custom-worker.ts",
   "compatibility_date": "2025-03-25",
   "triggers": {
-    // Mondays 06:00 UTC — bill the Monday→Sunday week that just closed. Late
-    // enough that Google Ads has settled Sunday's spend, early enough that the
-    // invoice is waiting when the client starts their week.
-    "crons": ["0 6 * * 1"]
+    "crons": [
+      // Mondays 06:00 UTC — bill the Monday→Sunday week that just closed. Late
+      // enough that Google Ads has settled Sunday's spend, early enough that the
+      // invoice is waiting when the client starts their week.
+      "0 6 * * 1",
+      // Hourly — book agency commission from Google into the ledger, so the
+      // finance overview is current without anyone having to open a page.
+      "0 * * * *"
+    ]
   },
   // populate_process_env: with a compatibility_date before 2025-04-01, Workers
   // do NOT copy bindings into process.env — so every runtime secret (the

@@ -9,6 +9,7 @@ import {
   freshness,
   groupByAccount,
   metricSetFromRows,
+  sumMetrics,
 } from "@/lib/metrics/queries";
 import { parseRange } from "@/lib/portal/range";
 import { dateTime, multiplier } from "@/lib/format";
@@ -50,17 +51,25 @@ export default async function GoogleAllStoresPage({
   const byAccount = groupByAccount(rows);
   const { updatedAt } = freshness(rows);
 
-  const perAccount = accounts.map((account) => ({
-    account,
-    metrics: metricSetFromRows(byAccount.get(account.id) ?? [], Number(account.commission_rate)),
-  }));
+  const perAccount = accounts.map((account) => {
+    const accountRows = byAccount.get(account.id) ?? [];
+    return {
+      account,
+      metrics: metricSetFromRows(accountRows, Number(account.commission_rate)),
+      // Store-wide totals from Shopify, alongside the Google-attributed ones.
+      // The per-store table below reports the STORE's conversions, not
+      // Google's: the shop sells through channels Google never sees, so the
+      // attributed number understates what actually happened in there.
+      store: sumMetrics(accountRows),
+    };
+  });
   const totals = combineMetricSets(perAccount.map((entry) => entry.metrics));
 
   // One fee percentage is only honest when every store bills at the same rate.
   const rates = new Set(accounts.map((account) => Number(account.commission_rate)));
   const uniformFeeRate = rates.size === 1 ? [...rates][0] : null;
 
-  const comparisonRows: StoreComparisonRow[] = perAccount.map(({ account, metrics }) => ({
+  const comparisonRows: StoreComparisonRow[] = perAccount.map(({ account, metrics, store }) => ({
     accountId: account.id,
     storeName: account.store_name,
     colorDot: account.color_dot,
@@ -68,8 +77,10 @@ export default async function GoogleAllStoresPage({
     spend: metrics.spend,
     share: totals.spend > 0 ? metrics.spend / totals.spend : 0,
     roas: metrics.roas,
-    conversions: metrics.conversions,
-    cpa: metrics.costPerConversion,
+    // Real orders in the shop, and the ad spend each one cost — NOT Google's
+    // attributed conversions. This is the client's own store performance.
+    conversions: store.orders,
+    cpa: store.costPerOrder,
     ctr: metrics.ctr,
     impressions: metrics.impressions,
     fee: metrics.fee,

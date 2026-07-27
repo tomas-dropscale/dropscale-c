@@ -21,16 +21,28 @@ import { useI18n } from "@/lib/i18n/provider";
  */
 
 /**
- * The scopes the sync actually uses, and what each one buys. The handle is a
- * Shopify identifier and never translates; only the explanation does.
+ * The scopes to enable on the custom app, and what each one buys. The handle is
+ * a Shopify identifier and never translates; only the explanation does.
+ *
+ * Ordered by how much the platform depends on them:
+ *   · read_orders     — the sync is built on it, and the connect route REFUSES
+ *                       a token without it. The only one marked required.
+ *   · read_all_orders — widens history past Shopify's 60-day default.
+ *   · read_products   — collection lookups, for revenue share and COGS. Missing
+ *                       it degrades to empty rather than failing.
+ *   · the rest        — granted so the app is provisioned once and covers what
+ *                       is coming (fulfilment state, stock and unit cost,
+ *                       store analytics). No query reads them TODAY, so nothing
+ *                       breaks if a client leaves one off; they are here so a
+ *                       client isn't asked to revisit their app later.
  */
 const SCOPES: { handle: string; dict: keyof Dictionary["shopify"]; required?: boolean }[] = [
   { handle: "read_orders", dict: "scopeOrders", required: true },
   { handle: "read_all_orders", dict: "scopeAllOrders" },
   { handle: "read_products", dict: "scopeProducts" },
+  { handle: "read_analytics", dict: "scopeAnalytics" },
   { handle: "read_fulfillments", dict: "scopeFulfillments" },
   { handle: "read_inventory", dict: "scopeInventory" },
-  { handle: "read_reports", dict: "scopeReports" },
 ];
 
 /** Monospace chip for a Shopify Admin API scope handle. */
