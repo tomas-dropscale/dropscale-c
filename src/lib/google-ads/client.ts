@@ -34,6 +34,17 @@ export class GoogleAuthRevokedError extends Error {
   }
 }
 
+/** A Google Ads query that came back non-2xx, with the status kept. */
+export class GoogleAdsQueryError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "GoogleAdsQueryError";
+  }
+}
+
 // Cached per isolate, keyed by refresh token (one per client account). Access
 // tokens live ~1h; refreshing on every query would add a round-trip and burn
 // OAuth quota. A cold isolate just mints new ones.
@@ -132,7 +143,12 @@ async function gaqlSearch(
 
     if (!res.ok) {
       const detail = await res.text();
-      throw new Error(`Google Ads query failed for ${cid} (${res.status}): ${detail}`);
+      // Status is carried so the per-client caller can tell "this credential is
+      // not accepted at all" (401) from a query that merely failed.
+      throw new GoogleAdsQueryError(
+        `Google Ads query failed for ${cid} (${res.status}): ${detail}`,
+        res.status,
+      );
     }
 
     const json = (await res.json()) as { results?: GaqlRow[]; nextPageToken?: string };
@@ -154,7 +170,31 @@ export async function searchGoogleAds(
   refreshToken: string,
   query: string,
 ): Promise<GaqlRow[]> {
-  return gaqlSearch(customerId, await accessToken(refreshToken), query, null);
+  const token = await accessToken(refreshToken);
+  try {
+    return await gaqlSearch(customerId, token, query, null);
+  } catch (error) {
+    /**
+     * 401 UNAUTHENTICATED here means the refresh SUCCEEDED but the Ads API
+     * refuses the access token it produced. In practice that is a grant made
+     * without the `.../auth/adwords` scope: Google mints a token for the
+     * scopes it was actually given, and this API is not one of them.
+     *
+     * Retrying cannot fix it — the client has to consent again, granting the
+     * Google Ads permission. So it is reported as the same "reconnect needed"
+     * condition as a revoked token, and the readers above mark the account
+     * disconnected instead of failing every render forever.
+     *
+     * Only on this per-client path: a 401 on the AGENCY path means the service
+     * account key is wrong, which is the agency's problem, not a client's.
+     */
+    if (error instanceof GoogleAdsQueryError && error.status === 401) {
+      // A cached access token is useless once the API has rejected it.
+      tokenCache.delete(refreshToken);
+      throw new GoogleAuthRevokedError(error.message);
+    }
+    throw error;
+  }
 }
 
 /**

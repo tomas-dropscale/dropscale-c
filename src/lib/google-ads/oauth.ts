@@ -10,7 +10,10 @@ import { siteUrl } from "@/lib/site";
  * connected Google address from. offline + consent forces a refresh_token
  * every time, even on re-connect.
  */
-const SCOPE = "openid email https://www.googleapis.com/auth/adwords";
+/** The one scope the Ads API actually checks for; without it every query 401s. */
+const ADS_SCOPE = "https://www.googleapis.com/auth/adwords";
+
+const SCOPE = `openid email ${ADS_SCOPE}`;
 
 /** Must exactly match an Authorized redirect URI on the OAuth client. */
 export function googleAdsRedirectUri() {
@@ -56,11 +59,30 @@ export async function exchangeGoogleAdsCode(
     throw new Error(`Google token exchange failed (${res.status}): ${await res.text()}`);
   }
 
-  const json = (await res.json()) as { refresh_token?: string; id_token?: string };
+  const json = (await res.json()) as {
+    refresh_token?: string;
+    id_token?: string;
+    scope?: string;
+  };
   if (!json.refresh_token) {
     // Happens if the user previously consented and Google withheld a new
     // refresh token; prompt=consent above is meant to prevent this.
     throw new Error("Google did not return a refresh token. Try connecting again.");
+  }
+
+  /**
+   * Google grants what the user ticked, not what we asked for. Untick the Ads
+   * permission on the consent screen and the exchange still succeeds, still
+   * returns a refresh token, and every later query dies with
+   * `401 UNAUTHENTICATED` — a failure that looks like a broken integration and
+   * surfaces hours later on a dashboard rather than here, where the person who
+   * can fix it is still looking at the screen.
+   */
+  if (json.scope && !json.scope.split(/\s+/).includes(ADS_SCOPE)) {
+    throw new Error(
+      "The Google Ads permission wasn't granted. Connect again and leave the " +
+        "Google Ads checkbox ticked on Google's consent screen.",
+    );
   }
 
   return { refreshToken: json.refresh_token, email: emailFromIdToken(json.id_token) };

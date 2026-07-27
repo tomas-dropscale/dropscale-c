@@ -143,14 +143,29 @@ export type DailySpend = { date: string; spend: number };
  * seven-day window so a missed day (deploy, outage, weekend) self-heals on
  * the next run instead of leaving a hole in the ledger.
  */
+/**
+ * Per-day spend for an explicit [from, to], inclusive. Feeds the commission
+ * ledger.
+ *
+ * `BETWEEN`, not `DURING LAST_7_DAYS`, and that is the whole point: Google's
+ * `LAST_7_DAYS` literal EXCLUDES today (today is its own `TODAY` literal). With
+ * it, the ledger never booked the current day, so agency commission on the
+ * finance overview sat permanently below what /admin/campaigns computes live —
+ * a gap no amount of re-syncing could close. Callers pass the window they mean.
+ *
+ * Dates come from callers that build them with an ISO day helper, so they are
+ * safe to interpolate — same contract as `dateClause` above.
+ */
 export async function fetchLiveDailySpend(
   customerId: string,
   refreshToken: string,
+  from: string,
+  to: string,
 ): Promise<DailySpend[]> {
   const query = `
     SELECT segments.date, metrics.cost_micros
     FROM customer
-    WHERE segments.date DURING LAST_7_DAYS
+    WHERE segments.date BETWEEN '${from}' AND '${to}'
   `;
 
   const rows = await searchGoogleAds(customerId, refreshToken, query);

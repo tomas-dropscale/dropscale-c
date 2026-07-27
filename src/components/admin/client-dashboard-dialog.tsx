@@ -28,6 +28,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { DailyPerformanceChart } from "@/components/portal/daily-performance-chart";
+import { DateRangePicker } from "@/components/ui/date-range-picker";
 import { compact, integer, money, multiplier, percent } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { AdminClientOverview, AdminStoreOverview } from "@/lib/admin/client-overview";
@@ -238,15 +239,19 @@ function Body({ data }: { data: AdminClientOverview }) {
   );
 }
 
+const rangeKey = (range: RangeSelection) =>
+  range.key === "custom" ? `custom:${range.from}:${range.to}` : range.key;
+
 export function ClientDashboardDialog({
   clientId,
   clientName,
   clientEmail,
-  range,
+  range: pageRange,
 }: {
   clientId: string;
   clientName: string;
   clientEmail: string;
+  /** The campaigns page's period — the starting point, not a binding. */
   range: RangeSelection;
 }) {
   const [open, setOpen] = React.useState(false);
@@ -254,18 +259,22 @@ export function ClientDashboardDialog({
   const [error, setError] = React.useState<string | null>(null);
   const [loading, setLoading] = React.useState(false);
 
-  // Which window the held data is for. The page's range picker changes `range`
-  // without remounting this dialog, so without this a second open would show
-  // the previous period's numbers under the new dates.
-  const loadedFor = React.useRef<string | null>(null);
-  const rangeKey =
-    range.key === "custom" ? `custom:${range.from}:${range.to}` : range.key;
+  /**
+   * The popup keeps its OWN period.
+   *
+   * It opens on whatever the campaigns page is showing, then the picker in the
+   * header takes over. Deliberately not the page's URL-backed RangePicker:
+   * that one routes, which would re-render the page underneath and throw the
+   * dialog away mid-read. Local state, and the numbers reload in place.
+   */
+  const [range, setRange] = React.useState<RangeSelection>(pageRange);
 
-  // Loaded from the click, not an effect: opening IS the event that needs the
-  // data, and an effect would re-run on every unrelated re-render.
-  async function open_() {
-    setOpen(true);
-    if (loading || loadedFor.current === rangeKey) return;
+  // Which window the held data is for, so re-opening or re-picking the same
+  // period doesn't refetch, and a different one always does.
+  const loadedFor = React.useRef<string | null>(null);
+
+  async function load(next: RangeSelection) {
+    if (loadedFor.current === rangeKey(next)) return;
 
     setLoading(true);
     setError(null);
@@ -273,8 +282,8 @@ export function ClientDashboardDialog({
 
     const params = new URLSearchParams({
       clientId,
-      range: range.key,
-      ...(range.key === "custom" ? { from: range.from, to: range.to } : {}),
+      range: next.key,
+      ...(next.key === "custom" ? { from: next.from, to: next.to } : {}),
     });
 
     try {
@@ -288,12 +297,24 @@ export function ClientDashboardDialog({
         return;
       }
       setData(body);
-      loadedFor.current = rangeKey;
+      loadedFor.current = rangeKey(next);
     } catch {
       setError("Could not load this client.");
     } finally {
       setLoading(false);
     }
+  }
+
+  // Loaded from the click, not an effect: opening IS the event that needs the
+  // data, and an effect would re-run on every unrelated re-render.
+  function open_() {
+    setOpen(true);
+    if (!loading) void load(range);
+  }
+
+  function applyRange(next: RangeSelection) {
+    setRange(next);
+    void load(next);
   }
 
   return (
@@ -318,14 +339,28 @@ export function ClientDashboardDialog({
         {/* Wide and scrollable: this is a dashboard, not a form. */}
         <DialogContent className="max-h-[90vh] w-[calc(100vw-2rem)] max-w-[1100px] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle className="flex items-center gap-2.5">
-              <Avatar name={clientName} seed={clientId} size="sm" />
-              <span className="min-w-0 truncate">{clientName}</span>
-            </DialogTitle>
-            <DialogDescription>
-              {clientEmail} · {data ? `${data.range.from} → ${data.range.to}` : `${range.from} → ${range.to}`}
-              {data?.updatedAt && ` · synced ${new Date(data.updatedAt).toLocaleString()}`}
-            </DialogDescription>
+            {/* pr-16 clears the dialog's own close button, which is absolutely
+                positioned in the same corner as the picker. */}
+            <div className="flex flex-wrap items-start justify-between gap-3 pr-16">
+              <div className="min-w-0">
+                <DialogTitle className="flex items-center gap-2.5">
+                  <Avatar name={clientName} seed={clientId} size="sm" />
+                  <span className="min-w-0 truncate">{clientName}</span>
+                </DialogTitle>
+                <DialogDescription className="mt-1">
+                  {clientEmail}
+                  {data && ` · ${data.range.from} → ${data.range.to}`}
+                  {data?.updatedAt && ` · synced ${new Date(data.updatedAt).toLocaleString()}`}
+                </DialogDescription>
+              </div>
+
+              {/* The period belongs to the dashboard, not to the page behind
+                  it. `align="start"` so the panel opens inward and doesn't
+                  spill past the dialog's right edge. */}
+              <div className="shrink-0">
+                <DateRangePicker value={range} onApply={applyRange} align="start" />
+              </div>
+            </div>
           </DialogHeader>
 
           {error && <FormAlert>{error}</FormAlert>}

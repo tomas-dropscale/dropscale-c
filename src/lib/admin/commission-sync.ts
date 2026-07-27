@@ -11,16 +11,53 @@ import type { AdAccount } from "@/lib/supabase/types";
  * commission_rate), tagged with ad_account_id so synced rows never mix with
  * hand-entered ones.
  *
- * Runs when an admin opens a finance page — there is no cron on this stack —
- * and self-throttles to once an hour, so most page loads cost nothing. A
- * 7-day window per run heals gaps from days when nobody opened the panel.
- * Everything rides the admin's own session and RLS; no service key.
+ * Three things run it:
+ *   · an admin opening a finance page — throttled, so navigation stays cheap;
+ *   · the "Sync now" button — forced, for an exact match with what
+ *     /admin/campaigns computes live from Google;
+ *   · the hourly cron — forced, with the service-role client, so the ledger
+ *     stays current even in a week nobody opens the panel.
+ *
+ * A 7-day window per run heals gaps. Page loads ride the admin's own session
+ * and RLS; only the cron uses the service key, because it has no session and
+ * `commissions` is admin-only.
  */
 
 const SOURCE_NAME = "Google Ads Management";
-const THROTTLE_MS = 60 * 60 * 1000;
+
+/**
+ * How many days back each run re-reads from Google, today included.
+ *
+ * It is a healing window, not just a fetch: Google restates recent days (fraud
+ * filtering, late conversions), and the ledger updates any day whose spend has
+ * moved. Widen it and the overview covers more history at the cost of a larger
+ * response per account per sync.
+ */
+const SPEND_WINDOW_DAYS = 7;
+/**
+ * How stale a page load will tolerate the ledger being.
+ *
+ * Was an hour, which is why the overview's commission could sit €0.75 below
+ * what /admin/campaigns computed live: campaigns asks Google on every render,
+ * the ledger was a snapshot up to 60 minutes old. Two minutes keeps ordinary
+ * navigation cheap while making the two figures agree in practice. `force` —
+ * the Sync now button and the cron — skips it entirely for an exact match.
+ */
+const THROTTLE_MS = 2 * 60 * 1000;
 
 type Supa = Awaited<ReturnType<typeof createClient>>;
+
+/** Options every ledger sync takes. */
+type SyncOpts = {
+  /** Ignore both throttles — an explicit "do it now". */
+  force?: boolean;
+  /**
+   * Supabase to work through. Page loads pass nothing and ride the admin's own
+   * session; the cron has no session and passes the service-role client, since
+   * `commissions` is admin-only under RLS.
+   */
+  client?: Supa;
+};
 
 /**
  * Client-login ids that belong to staff-admins. Their OWN ad accounts are
@@ -40,11 +77,11 @@ let lastPurgeAt = 0;
  * so their revenue must not exist in the ledger at all. Throttled; after the
  * first pass there is nothing left to remove (the ledgers stop booking them).
  */
-export async function purgeAdminAccountRevenue(): Promise<void> {
-  if (Date.now() - lastPurgeAt < THROTTLE_MS) return;
+export async function purgeAdminAccountRevenue(opts?: SyncOpts): Promise<void> {
+  if (!opts?.force && Date.now() - lastPurgeAt < THROTTLE_MS) return;
 
   try {
-    const supabase = await createClient();
+    const supabase = opts?.client ?? (await createClient());
     const adminIds = await adminClientIds(supabase);
     if (adminIds.size === 0) {
       lastPurgeAt = Date.now();
@@ -69,12 +106,12 @@ export async function purgeAdminAccountRevenue(): Promise<void> {
 // database to discover it has nothing to do.
 let lastRunAt = 0;
 
-export async function syncCommissionLedger(): Promise<void> {
+export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
   if (!hasGoogleAdsEnv()) return;
-  if (Date.now() - lastRunAt < THROTTLE_MS) return;
+  if (!opts?.force && Date.now() - lastRunAt < THROTTLE_MS) return;
 
   try {
-    const supabase = await createClient();
+    const supabase = opts?.client ?? (await createClient());
 
     // Cross-instance throttle: the newest synced row's updated_at tells us
     // when ANY admin's isolate last ran this.
@@ -147,12 +184,25 @@ export async function syncCommissionLedger(): Promise<void> {
       (portalClients ?? []).map((row) => [row.id, row.crm_client_id]),
     );
 
+    // Seven days INCLUDING today. Today matters most: it is the figure an admin
+    // compares against /admin/campaigns, which reads Google live. The previous
+    // `DURING LAST_7_DAYS` literal excluded it, which is why the overview's
+    // commission was stuck below the campaigns page no matter how often the
+    // ledger re-synced.
+    const to = isoDay(0);
+    const from = isoDay(-(SPEND_WINDOW_DAYS - 1));
+
     await Promise.all(
       billable.map(async (account) => {
         try {
           if (!account.google_ads_refresh_token) return;
           const token = await decryptToken(account.google_ads_refresh_token);
-          const days = await fetchLiveDailySpend(account.google_ads_customer_id!, token);
+          const days = await fetchLiveDailySpend(
+            account.google_ads_customer_id!,
+            token,
+            from,
+            to,
+          );
 
           const withSpend = days.filter((day) => day.spend > 0);
           const { data: existingRows } = await supabase
@@ -237,11 +287,11 @@ function isoDay(offsetDays: number): string {
  * calls — attribution happened at sync time — so this is a cheap DB pass that
  * rides the admin's session, throttled and idempotent like the ad-spend ledger.
  */
-export async function syncRevenueShareLedger(): Promise<void> {
-  if (Date.now() - lastRevShareRunAt < THROTTLE_MS) return;
+export async function syncRevenueShareLedger(opts?: SyncOpts): Promise<void> {
+  if (!opts?.force && Date.now() - lastRevShareRunAt < THROTTLE_MS) return;
 
   try {
-    const supabase = await createClient();
+    const supabase = opts?.client ?? (await createClient());
 
     const { data: source } = await supabase
       .from("revenue_sources")
