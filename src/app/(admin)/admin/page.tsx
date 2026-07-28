@@ -10,6 +10,7 @@ import {
   syncRevenueShareLedger,
 } from "@/lib/admin/commission-sync";
 import { syncHstCommission } from "@/lib/admin/hst";
+import { countActiveClients } from "@/lib/admin/active-clients";
 import { getServerDictionary } from "@/lib/i18n/server";
 import { defaultSelection } from "@/lib/finance/defaults";
 
@@ -32,6 +33,7 @@ export default async function OverviewPage() {
   const supabase = await createClient();
   const range = defaultSelection();
   const snapshot = await fetchFinanceSnapshot(supabase, range.from, range.to);
+  const activeClientCount = await countActiveClients(supabase);
 
   return (
     <OverviewView
@@ -39,6 +41,7 @@ export default async function OverviewPage() {
       initialRange={range}
       firstName={profile.full_name.split(" ")[0]}
       currentUserId={profile.id}
+      activeClientCount={activeClientCount}
     />
   );
 }

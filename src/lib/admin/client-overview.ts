@@ -5,11 +5,15 @@
  * client sees on their own dashboard, plus what the agency earns on them —
  * which is the part a client's view will never show.
  *
- * Reads `daily_metrics` only. That table is the pre-aggregated join of Google
- * spend and Shopify revenue, so this is a handful of cheap row reads with no
- * upstream calls — deliberate, because the popup opens on demand and must not
- * make an admin wait on Google. It follows that the numbers are as fresh as
- * the last recompute; the popup says so rather than implying live data.
+ * Built on `daily_metrics`, the pre-aggregated join of Google spend and Shopify
+ * revenue.
+ *
+ * It REFRESHES that rollup before reading, and has to: the recompute otherwise
+ * runs only from the client's own portal pages, so a client who rarely logs in
+ * has a stale — or empty — table, and this popup would report their revenue as
+ * zero while their shop is plainly selling. The recompute is throttled per
+ * account, so reopening the popup costs nothing; only a genuinely cold client
+ * pays the round trip, which is the case that would otherwise be wrong.
  *
  * Like lib/admin/campaigns, this reads UNSCOPED and lets the admin RLS
  * policies decide. The route above it is what checks the caller is an admin.
@@ -17,6 +21,7 @@
 
 import { createClient } from "@/lib/supabase/server";
 import { ACCOUNT_COLUMNS } from "@/lib/portal/data";
+import { ensureDailyCoverage, recomputeDailyMetrics } from "@/lib/metrics/recompute";
 import {
   fetchDailyMetrics,
   freshness,
@@ -105,6 +110,17 @@ export async function fetchClientOverview(
   if (!client) return null;
 
   const accounts = (accountsRes.data as AdAccount[] | null) ?? [];
+
+  // Bring this client's rollup current before reading it — see the note at the
+  // top. Never let a sync failure take the popup down: a partial view of a
+  // client is far better than an error where their numbers should be.
+  try {
+    await ensureDailyCoverage(accounts, range.from);
+    await recomputeDailyMetrics(accounts);
+  } catch (error) {
+    console.error(`Client overview refresh failed for ${clientId}:`, error);
+  }
+
   const rows = await fetchDailyMetrics(
     accounts.map((account) => account.id),
     range.from,

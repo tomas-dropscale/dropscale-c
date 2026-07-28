@@ -30,11 +30,14 @@ export function OverviewView({
   initialRange,
   firstName,
   currentUserId,
+  activeClientCount,
 }: {
   initial: FinanceSnapshot;
   initialRange: RangeSelection;
   firstName: string;
   currentUserId: string;
+  /** Portal clients with at least one active store, resolved on the server. */
+  activeClientCount: number;
 }) {
   const { d, intl } = useI18n();
   const { data, range, setRange, refresh, error, setError } = useFinance(initial, initialRange);
@@ -86,7 +89,15 @@ export function OverviewView({
     [data.commissions, data.clients, d],
   );
 
-  const activeClients = data.clients.filter((client) => client.status === "active").length;
+  /**
+   * Counted server-side from the PORTAL, not from the CRM `clients` table.
+   *
+   * That table is written by the sibling admin app, never by this one, so it
+   * had no row for the people actually paying the agency — the card read 0
+   * while four clients were live and spending. A client with a running store
+   * is the honest measure of "active" here.
+   */
+  const activeClients = activeClientCount;
 
   const sourceRows: BreakdownRow[] = bySource.map((row, index) => ({
     key: row.source.id,

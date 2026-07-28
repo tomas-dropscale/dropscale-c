@@ -19,11 +19,43 @@ import type { Dictionary } from "@/lib/i18n";
  * the two can never drift apart.
  */
 export const HST_NOTE_PREFIX = "HST · ";
+export const GOOGLE_ADS_NOTE_PREFIX = "Google Ads · ";
+export const REV_SHARE_NOTE_PREFIX = "Revenue share · ";
 
-/** The client name an HST row carries, or null for any other row. */
+/**
+ * Synced rows name their client in the note, because they have nowhere else to
+ * put it: `client_id` points at the CRM `clients` table, and a portal client is
+ * only linked to one if somebody set `crm_client_id` by hand.
+ *
+ * Every prefix below is followed by the client's name, optionally then
+ * " — <detail>" (the store, for the ad sources). HST rows carry the name alone,
+ * which is why the split is on the separator rather than a fixed length.
+ */
+const CLIENT_NOTE_PREFIXES = [
+  HST_NOTE_PREFIX,
+  GOOGLE_ADS_NOTE_PREFIX,
+  REV_SHARE_NOTE_PREFIX,
+] as const;
+
+/** Detail after the client's name in a synced note. */
+export const NOTE_DETAIL_SEPARATOR = " — ";
+
+/** The client name a synced row carries, or null when it names nobody. */
 export function noteClientName(notes: string | null): string | null {
-  if (!notes?.startsWith(HST_NOTE_PREFIX)) return null;
-  return notes.slice(HST_NOTE_PREFIX.length).trim() || null;
+  if (!notes) return null;
+
+  for (const prefix of CLIENT_NOTE_PREFIXES) {
+    if (!notes.startsWith(prefix)) continue;
+
+    const name = notes.slice(prefix.length).split(NOTE_DETAIL_SEPARATOR)[0].trim();
+
+    // A note whose name segment is empty — or which runs straight into the
+    // detail dash — names nobody. Returning it would show the STORE as the
+    // client, which reads as real data and is not.
+    if (!name || name.startsWith("—")) return null;
+    return name;
+  }
+  return null;
 }
 
 /**

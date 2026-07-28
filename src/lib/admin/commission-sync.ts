@@ -3,6 +3,11 @@ import { decryptToken } from "@/lib/google-ads/crypto";
 import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
 import { fetchLiveDailySpend } from "@/lib/google-ads/portal";
 import { markIfAuthRevoked } from "@/lib/google-ads/revoked";
+import {
+  GOOGLE_ADS_NOTE_PREFIX,
+  NOTE_DETAIL_SEPARATOR,
+  REV_SHARE_NOTE_PREFIX,
+} from "@/lib/finance/config";
 import type { AdAccount } from "@/lib/supabase/types";
 
 /**
@@ -58,6 +63,27 @@ type SyncOpts = {
    */
   client?: Supa;
 };
+
+/**
+ * The note a synced row carries: "<source> · <client>" and then the store.
+ *
+ * The client's NAME goes in because the id cannot. `commissions.client_id`
+ * references the CRM `clients` table, and a portal client is linked to one only
+ * through `crm_client_id` — a column nothing in this product ever writes. Until
+ * that link exists, the note is the only place the finance pages can learn who
+ * earned the money, and without it every synced euro reads as "Unattributed".
+ */
+function noteFor(prefix: string, clientName: string | undefined, storeName: string): string {
+  const detail = `${NOTE_DETAIL_SEPARATOR}${storeName}`;
+
+  // With no name, deliberately DROP the attributing prefix rather than writing
+  // it with a hole after it: a note that parses to an empty client would put
+  // the STORE's name where the client's belongs, which is worse than admitting
+  // the row is unattributed.
+  if (!clientName) return `Auto-synced${detail}`;
+
+  return `${prefix}${clientName}${detail}`;
+}
 
 /**
  * Client-login ids that belong to staff-admins. Their OWN ad accounts are
@@ -176,13 +202,19 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
     }
 
     // Portal login → CRM record, for the finance rows' client attribution.
+    //
+    // `crm_client_id` is nearly always null: nothing in the product writes it,
+    // so a synced row usually has no client_id at all and the finance pages
+    // showed every euro of it as "Unattributed". The NAME is carried in the
+    // note as well, which is what the finance reader falls back to.
     const { data: portalClients } = await supabase
       .from("portal_clients")
-      .select("id, crm_client_id")
+      .select("id, crm_client_id, full_name")
       .in("id", [...new Set(billable.map((account) => account.client_id))]);
     const crmByLogin = new Map(
       (portalClients ?? []).map((row) => [row.id, row.crm_client_id]),
     );
+    const nameByLogin = new Map((portalClients ?? []).map((row) => [row.id, row.full_name]));
 
     // Seven days INCLUDING today. Today matters most: it is the figure an admin
     // compares against /admin/campaigns, which reads Google live. The previous
@@ -235,7 +267,7 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
                 amount,
                 currency: account.currency,
                 status: "confirmed",
-                notes: `Auto-synced from Google Ads · ${account.store_name}`,
+                notes: noteFor(GOOGLE_ADS_NOTE_PREFIX, nameByLogin.get(account.client_id), account.store_name),
               });
             } else if (Math.abs(Number(current.gross_amount) - day.spend) > 0.01) {
               // Google restates recent days (fraud filtering, late clicks).
@@ -245,6 +277,13 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
                   gross_amount: day.spend,
                   rate,
                   amount,
+                  // Rewritten so rows booked before the note carried a client
+                  // name stop reading as "Unattributed" once they refresh.
+                  notes: noteFor(
+                    GOOGLE_ADS_NOTE_PREFIX,
+                    nameByLogin.get(account.client_id),
+                    account.store_name,
+                  ),
                   updated_at: new Date().toISOString(),
                 })
                 .eq("id", current.id);
@@ -327,9 +366,11 @@ export async function syncRevenueShareLedger(opts?: SyncOpts): Promise<void> {
 
     const { data: portalClients } = await supabase
       .from("portal_clients")
-      .select("id, crm_client_id")
+      .select("id, crm_client_id, full_name")
       .in("id", [...new Set(billable.map((account) => account.client_id))]);
     const crmByLogin = new Map((portalClients ?? []).map((row) => [row.id, row.crm_client_id]));
+    // Same reason as the ad-spend ledger: the note is where attribution lives.
+    const nameByLogin = new Map((portalClients ?? []).map((row) => [row.id, row.full_name]));
 
     const from = isoDay(-REV_SHARE_WINDOW_DAYS);
     const accountIds = billable.map((account) => account.id);
@@ -381,7 +422,7 @@ export async function syncRevenueShareLedger(opts?: SyncOpts): Promise<void> {
               amount,
               currency: account.currency,
               status: "confirmed",
-              notes: `Auto-synced revenue share · ${account.store_name}`,
+              notes: noteFor(REV_SHARE_NOTE_PREFIX, nameByLogin.get(account.client_id), account.store_name),
             });
           } else if (Math.abs(Number(current.amount) - amount) > 0.01) {
             await supabase
