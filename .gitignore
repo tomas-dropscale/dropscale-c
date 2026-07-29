@@ -36,6 +36,10 @@ yarn-error.log*
 # to copy it. Without this it never reaches the repo.
 !.env.local.example
 
+# A pasted HST login response — a live ERP session, dropped here for
+# scripts/hst-test.mjs. Same class of secret as anything in .env.
+/scripts/hst-login.json
+
 # vercel
 .vercel
 

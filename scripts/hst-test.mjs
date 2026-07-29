@@ -16,10 +16,16 @@
  *      not answer, the session dies after about a day and every sync since then
  *      has been failing.
  *
- * Reads from .env.local (never printed):
- *   HST_LOGIN_JSON     the whole pasted login response, on one line
- *   HST_ACCESS_TOKEN   just the access token   (alternative to the above)
- *   HST_REFRESH_TOKEN  just the refresh token  (alternative to the above)
+ * Where it looks for the login response, in order:
+ *   1. a path given as an argument   node scripts/hst-test.mjs my-login.json
+ *   2. scripts/hst-login.json        (gitignored — paste it there, formatted or not)
+ *   3. HST_LOGIN_JSON in .env.local  (must be on ONE line: .env is read per line)
+ *
+ * A file is the easy path: DevTools gives you pretty-printed JSON, and pasting
+ * that into .env.local breaks it in a way that only shows up as "no token".
+ *
+ * Also accepted in .env.local, when you only have the bare tokens:
+ *   HST_ACCESS_TOKEN, HST_REFRESH_TOKEN
  *
  * Prints commission TOTALS and DATES — your own figures, on your own machine.
  * Never prints a token: only its length and whether it can travel in a header.
@@ -47,26 +53,61 @@ function env() {
 
 const vars = env();
 
+/** The login response as raw text, from wherever it happens to live. */
+function loginText() {
+  const fromArg = process.argv[2];
+  if (fromArg) {
+    try {
+      return { text: readFileSync(fromArg, "utf8"), origin: fromArg };
+    } catch {
+      console.error(`Could not read ${fromArg}`);
+      process.exit(1);
+    }
+  }
+
+  try {
+    const path = new URL("./hst-login.json", import.meta.url);
+    return { text: readFileSync(path, "utf8"), origin: "scripts/hst-login.json" };
+  } catch {
+    // Not there — fall through to the env var.
+  }
+
+  if (vars.HST_LOGIN_JSON) return { text: vars.HST_LOGIN_JSON, origin: ".env.local" };
+  return { text: null, origin: null };
+}
+
 let accessToken = vars.HST_ACCESS_TOKEN || null;
 let refreshToken = vars.HST_REFRESH_TOKEN || null;
 let expires = null;
 
-if (vars.HST_LOGIN_JSON) {
+const login = loginText();
+if (login.text) {
+  let parsed;
   try {
-    const parsed = JSON.parse(vars.HST_LOGIN_JSON);
-    const data = parsed.data ?? parsed;
-    accessToken = accessToken ?? data.accessToken ?? data.token ?? null;
-    refreshToken = refreshToken ?? data.refreshToken ?? null;
-    expires = data.expires ?? null;
+    parsed = JSON.parse(login.text);
   } catch {
-    console.error("HST_LOGIN_JSON is not valid JSON — it must be the whole response, on one line.");
+    console.error(`The login response in ${login.origin} is not valid JSON.`);
+    // The overwhelmingly likely cause when it came from .env.local: DevTools
+    // hands you formatted JSON, and .env is parsed one line at a time, so
+    // everything after the first line was silently dropped.
+    if (login.origin === ".env.local") {
+      console.error(
+        "It has to be on ONE line there. Easier: save it as scripts/hst-login.json (gitignored) — formatting doesn't matter in a file.",
+      );
+    }
     process.exit(1);
   }
+
+  const data = parsed.data ?? parsed;
+  accessToken = accessToken ?? data.accessToken ?? data.token ?? null;
+  refreshToken = refreshToken ?? data.refreshToken ?? null;
+  expires = data.expires ?? null;
+  console.log(`login response: ${login.origin}`);
 }
 
 if (!accessToken && !refreshToken) {
   console.error(
-    "Set HST_LOGIN_JSON (the pasted login response) or HST_ACCESS_TOKEN in .env.local.",
+    "No token found. Save the login response as scripts/hst-login.json, or set HST_ACCESS_TOKEN in .env.local.",
   );
   process.exit(1);
 }
