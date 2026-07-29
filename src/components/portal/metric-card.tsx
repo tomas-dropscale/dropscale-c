@@ -75,7 +75,7 @@ export function MetricCard({
 }
 
 /**
- * The 10-card grid shared by the Google views, in the Infinite Scaling
+ * The metrics grid shared by the Google views, in the Infinite Scaling
  * "Lorena Taller" order: Amount Spent leads, row 2 runs Fee → CPC →
  * Cost/Conv → ROAS → Conversion Value.
  *
@@ -91,6 +91,7 @@ export function MetricsGrid({
   currency,
   feeRate = null,
   storeRoas = null,
+  showFee = true,
 }: {
   d: Dictionary;
   metrics: MetricSet;
@@ -107,44 +108,57 @@ export function MetricsGrid({
    * falls back to the attributed number (the demo/mock path has no revenue).
    */
   storeRoas?: number | null;
+  /**
+   * Whether the agency fee gets a card.
+   *
+   * Off on a single store, where ROAS takes that slot instead: the fee is one
+   * number for the whole client and it is already on the dashboard and the
+   * invoice, whereas ROAS is what you actually open a store to read.
+   */
+  showFee?: boolean;
 }) {
-  const cards: {
+  type Card = {
     label: string;
     icon: LucideIcon;
     value: string;
     hint?: string;
     glow?: boolean;
     highlight?: boolean;
-  }[] = [
+  };
+
+  const fee: Card = {
+    label: d.metrics.fee,
+    icon: HandCoins,
+    value: money(metrics.fee, currency),
+    hint: feeRate != null ? fmt(d.metrics.feeHintRate, { rate: feeRate }) : d.metrics.feeHintMixed,
+  };
+
+  const roas: Card = {
+    label: d.metrics.roas,
+    icon: TrendingUp,
+    value: multiplier(storeRoas ?? metrics.roas),
+    hint:
+      storeRoas != null
+        ? fmt(d.metrics.roasHintAttributed, { value: multiplier(metrics.roas) })
+        : undefined,
+  };
+
+  const cpc: Card = { label: d.metrics.cpc, icon: Coins, value: money(metrics.cpc, currency) };
+  const costPerConversion: Card = {
+    label: d.metrics.costPerConversion,
+    icon: Crosshair,
+    value: money(metrics.costPerConversion, currency),
+  };
+
+  const cards: Card[] = [
     { label: d.metrics.amountSpent, icon: Wallet, value: money(metrics.spend, currency) },
     { label: d.metrics.impressions, icon: Eye, value: compact(metrics.impressions) },
     { label: d.metrics.clicks, icon: MousePointerClick, value: integer(metrics.clicks) },
     { label: d.metrics.conversions, icon: Target, value: integer(metrics.conversions) },
     { label: d.metrics.ctr, icon: Percent, value: percent(metrics.ctr) },
-    {
-      label: d.metrics.fee,
-      icon: HandCoins,
-      value: money(metrics.fee, currency),
-      hint:
-        feeRate != null
-          ? fmt(d.metrics.feeHintRate, { rate: feeRate })
-          : d.metrics.feeHintMixed,
-    },
-    { label: d.metrics.cpc, icon: Coins, value: money(metrics.cpc, currency) },
-    {
-      label: d.metrics.costPerConversion,
-      icon: Crosshair,
-      value: money(metrics.costPerConversion, currency),
-    },
-    {
-      label: d.metrics.roas,
-      icon: TrendingUp,
-      value: multiplier(storeRoas ?? metrics.roas),
-      hint:
-        storeRoas != null
-          ? fmt(d.metrics.roasHintAttributed, { value: multiplier(metrics.roas) })
-          : undefined,
-    },
+    // Row 2 leads with the fee, or with ROAS when there is no fee card — ROAS
+    // moves INTO that position rather than staying at the end of the row.
+    ...(showFee ? [fee, cpc, costPerConversion, roas] : [roas, cpc, costPerConversion]),
     {
       label: d.metrics.conversionValue,
       icon: BadgeDollarSign,
