@@ -456,21 +456,99 @@ export async function refreshAccountsNow(accountIds: string[]): Promise<void> {
   );
 }
 
+// Accounts whose historical units_sold this isolate has already tried to heal.
+const unitsHealAttempted = new Set<string>();
+
+/**
+ * Re-sync days that were written BEFORE migration 0016, whose units_sold is 0
+ * only because the column did not exist yet.
+ *
+ * Every pre-aggregated table needs this the moment it gains a column, and
+ * neither existing path covers it: the rolling 7-day window heals only recent
+ * days, and the coverage backfill fills only days EARLIER than the first row.
+ * Every day in between keeps its default forever — so the card read "0 sold"
+ * over months that plainly had orders.
+ *
+ * "Orders but no units" is the marker, because an order always carries at least
+ * one line item: that combination cannot be a real day. Attempted at most once
+ * per account per isolate, so a store that somehow does have orders with no
+ * line items can't turn this into a re-sync on every page load.
+ */
+async function healMissingUnits(
+  supabase: Supabase,
+  accounts: AdAccount[],
+  from: string,
+): Promise<void> {
+  const candidates = accounts.filter(
+    (account) => account.shopify_connected && !unitsHealAttempted.has(account.id),
+  );
+  if (candidates.length === 0) return;
+
+  const { data, error: queryError } = await supabase
+    .from("daily_metrics")
+    .select("ad_account_id, day")
+    .in("ad_account_id", candidates.map((account) => account.id))
+    .gte("day", from)
+    .lte("day", isoDay(0))
+    .gt("orders_count", 0)
+    .eq("units_sold", 0);
+
+  // An error here is almost always "column units_sold does not exist", i.e.
+  // migration 0016 has not been applied. Nothing to heal either way.
+  if (queryError || !data || data.length === 0) return;
+
+  // One window per account — first to last stale day, so a month of gaps costs
+  // one Shopify pass instead of thirty.
+  const spans = new Map<string, { from: string; to: string }>();
+  for (const row of data) {
+    const span = spans.get(row.ad_account_id);
+    if (!span) {
+      spans.set(row.ad_account_id, { from: row.day, to: row.day });
+      continue;
+    }
+    if (row.day < span.from) span.from = row.day;
+    if (row.day > span.to) span.to = row.day;
+  }
+
+  const byId = new Map(candidates.map((account) => [account.id, account]));
+  const secrets = await fetchSecrets(supabase, [...spans.keys()]);
+
+  await Promise.all(
+    [...spans.entries()].map(async ([accountId, span]) => {
+      const account = byId.get(accountId);
+      if (!account) return;
+      // Marked before the attempt, not after: a store whose sync keeps failing
+      // must not re-run a 90-day Shopify pass on every page load.
+      unitsHealAttempted.add(accountId);
+      try {
+        await syncAccountWindow(supabase, account, secrets.get(accountId), span.from, span.to);
+      } catch (error) {
+        console.error(`units_sold backfill failed for ${accountId}:`, error);
+      }
+    }),
+  );
+}
+
 /**
  * Backfill so the selected range has history to show. Runs once per gap: the
  * next call finds coverage already reaching `from` and does nothing. Ranges
  * older than BACKFILL_LIMIT_DAYS are served from whatever exists.
  */
 export async function ensureDailyCoverage(accounts: AdAccount[], from: string): Promise<void> {
-  const floor = isoDay(-BACKFILL_LIMIT_DAYS);
-  const start = from < floor ? floor : from;
-  if (start >= isoDay(0)) return; // today is the recompute window's job
-
   const candidates = accounts.filter(syncable);
   if (candidates.length === 0) return;
 
+  const floor = isoDay(-BACKFILL_LIMIT_DAYS);
+  const start = from < floor ? floor : from;
+
   try {
     const supabase = await createClient();
+
+    // Days that exist but predate a column — a different problem from days that
+    // are missing, so it runs whatever the range is, today-only included.
+    await healMissingUnits(supabase, candidates, start);
+
+    if (start >= isoDay(0)) return; // today is the recompute window's job
 
     // Earliest covered day per account, one query.
     const { data: earliestRows } = await supabase
