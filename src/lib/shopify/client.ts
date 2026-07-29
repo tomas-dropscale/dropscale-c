@@ -190,6 +190,10 @@ export type DailySales = {
   revenue: number;
   orders: number;
   refunds: number;
+  /** Line-item quantities summed — how many things were sold, not how many
+   *  orders. Not netted against refunds: that needs per-line refund
+   *  quantities, which this query does not ask for. */
+  units: number;
 };
 
 /** One synced order line, ready for the COGS engine. */
@@ -248,7 +252,10 @@ export async function fetchDailySales(
   from: string,
   to: string,
 ): Promise<{ currency: string | null; days: DailySales[]; orders: SyncedOrder[] }> {
-  const byDay = new Map<string, { revenue: number; orders: number; refunds: number }>();
+  const byDay = new Map<
+    string,
+    { revenue: number; orders: number; refunds: number; units: number }
+  >();
   const syncedOrders: SyncedOrder[] = [];
   let currency: string | null = null;
 
@@ -326,10 +333,18 @@ export async function fetchDailySales(
       // totalRefundedSet below — using currentTotalPriceSet here (already net of
       // refunds) would double-count them and understate net revenue.
       const total = Number(order.totalPriceSet?.shopMoney.amount ?? 0);
-      const entry = byDay.get(day) ?? { revenue: 0, orders: 0, refunds: 0 };
+      const lines = order.lineItems.nodes.map((line) => ({
+        productKey: line.sku?.trim() || line.title,
+        title: line.title,
+        quantity: line.quantity,
+        unitPrice: Number(line.originalUnitPriceSet?.shopMoney.amount ?? 0),
+      }));
+
+      const entry = byDay.get(day) ?? { revenue: 0, orders: 0, refunds: 0, units: 0 };
       entry.revenue += total;
       entry.refunds += Number(order.totalRefundedSet?.shopMoney.amount ?? 0);
       entry.orders += 1;
+      entry.units += lines.reduce((sum, line) => sum + line.quantity, 0);
       byDay.set(day, entry);
 
       syncedOrders.push({
@@ -337,12 +352,7 @@ export async function fetchDailySales(
         total,
         paid,
         landingPath: order.customerJourneySummary?.firstVisit?.landingPage ?? null,
-        lines: order.lineItems.nodes.map((line) => ({
-          productKey: line.sku?.trim() || line.title,
-          title: line.title,
-          quantity: line.quantity,
-          unitPrice: Number(line.originalUnitPriceSet?.shopMoney.amount ?? 0),
-        })),
+        lines,
       });
     }
 

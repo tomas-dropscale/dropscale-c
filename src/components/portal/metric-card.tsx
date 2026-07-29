@@ -6,6 +6,7 @@ import {
   Eye,
   HandCoins,
   MousePointerClick,
+  Package,
   Percent,
   Target,
   TrendingUp,
@@ -92,6 +93,8 @@ export function MetricsGrid({
   feeRate = null,
   storeRoas = null,
   showFee = true,
+  unitsSold = null,
+  orders = null,
 }: {
   d: Dictionary;
   metrics: MetricSet;
@@ -116,6 +119,14 @@ export function MetricsGrid({
    * invoice, whereas ROAS is what you actually open a store to read.
    */
   showFee?: boolean;
+  /**
+   * Units sold in the shop (line-item quantities), with the order count as its
+   * hint. Shopify's number, like storeRoas — not a Google one, which is why it
+   * arrives as its own prop instead of joining MetricSet. Null hides the card,
+   * for the mock/demo path that has no store behind it.
+   */
+  unitsSold?: number | null;
+  orders?: number | null;
 }) {
   type Card = {
     label: string;
@@ -164,6 +175,19 @@ export function MetricsGrid({
       icon: BadgeDollarSign,
       value: money(metrics.conversionValue, currency),
     },
+    ...(unitsSold != null
+      ? [
+          {
+            label: d.metrics.unitsSold,
+            icon: Package,
+            value: integer(unitsSold),
+            hint:
+              orders != null
+                ? fmt(d.metrics.unitsSoldHint, { orders: integer(orders) })
+                : undefined,
+          } satisfies Card,
+        ]
+      : []),
   ];
 
   return (

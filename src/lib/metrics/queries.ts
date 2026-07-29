@@ -17,6 +17,7 @@ export type DailyMetricRow = {
   conversion_value: number;
   revenue: number;
   orders_count: number;
+  units_sold: number;
   refunds_amount: number;
   product_cost: number;
   payment_fees: number;
@@ -50,6 +51,8 @@ export type MetricTotals = {
   refunds: number;
   netRevenue: number;
   orders: number;
+  /** Line-item quantities sold — one order can be five units. */
+  units: number;
   adSpend: number;
   impressions: number;
   clicks: number;
@@ -93,6 +96,7 @@ export function sumMetrics(rows: DailyMetricRow[]): MetricTotals {
       revenue: sum.revenue + Number(row.revenue),
       refunds: sum.refunds + Number(row.refunds_amount),
       orders: sum.orders + row.orders_count,
+      units: sum.units + (row.units_sold ?? 0),
       adSpend: sum.adSpend + Number(row.ad_spend),
       impressions: sum.impressions + row.impressions,
       clicks: sum.clicks + row.clicks,
@@ -106,6 +110,7 @@ export function sumMetrics(rows: DailyMetricRow[]): MetricTotals {
       revenue: 0,
       refunds: 0,
       orders: 0,
+      units: 0,
       adSpend: 0,
       impressions: 0,
       clicks: 0,
@@ -140,7 +145,7 @@ export function sumMetrics(rows: DailyMetricRow[]): MetricTotals {
 }
 
 // ---------------------------------------------------------------------------
-// Bridges to the existing 10-card MetricsGrid (MetricSet shape)
+// Bridges to the MetricsGrid cards (MetricSet shape)
 // ---------------------------------------------------------------------------
 
 import type { MetricSet } from "@/lib/portal/mock";

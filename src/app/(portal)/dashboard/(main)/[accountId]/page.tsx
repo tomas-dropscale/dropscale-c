@@ -56,8 +56,9 @@ export default async function AccountPage({
   ]);
 
   const metrics = metricSetFromRows(rows, Number(account.commission_rate));
+  const totals = sumMetrics(rows);
   // This store's own return: its Shopify revenue over its own ad spend.
-  const storeRoas = sumMetrics(rows).mer;
+  const storeRoas = totals.mer;
   const { updatedAt, nextUpdateAt } = freshness(rows);
 
   return (
@@ -120,6 +121,10 @@ export default async function AccountPage({
             // One store: ROAS in the fee's place. The fee is a whole-client
             // figure and lives on the dashboard and the invoice.
             showFee={false}
+            // Units sold closes the grid back to ten — how much left the shelf,
+            // with the order count under it (one order can be five units).
+            unitsSold={totals.units}
+            orders={totals.orders}
           />
         </section>
 

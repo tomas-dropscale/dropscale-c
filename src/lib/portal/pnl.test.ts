@@ -18,6 +18,7 @@ function row(over: Partial<DailyMetricRow> & { day: string }): DailyMetricRow {
     conversion_value: 0,
     revenue: 0,
     orders_count: 0,
+    units_sold: 0,
     refunds_amount: 0,
     product_cost: 0,
     payment_fees: 0,

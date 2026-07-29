@@ -343,6 +343,10 @@ export type DailyMetric = {
   conversion_value: number;
   revenue: number;
   orders_count: number;
+  /** Line-item quantities sold that day (migration 0016). Not netted against
+   *  refunds — refunds_amount is money, and per-line refund quantities are not
+   *  fetched. */
+  units_sold: number;
   refunds_amount: number;
   // Cost side of the profit chain (migration 0009), reporting currency.
   product_cost: number;
@@ -931,6 +935,7 @@ export type Database = {
           | "conversion_value"
           | "revenue"
           | "orders_count"
+          | "units_sold"
           | "refunds_amount"
           | "product_cost"
           | "payment_fees"

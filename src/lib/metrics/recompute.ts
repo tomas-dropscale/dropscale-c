@@ -318,6 +318,8 @@ async function syncAccountWindow(
       conversion_value: ads?.conversionValue ?? prior?.conversion_value ?? 0,
       revenue: shop?.revenue ?? 0,
       orders_count: shop?.orders ?? 0,
+      // Units, not money — the FX pass above leaves it alone on purpose.
+      units_sold: shop?.units ?? 0,
       refunds_amount: shop?.refunds ?? 0,
       product_cost: costs?.product ?? 0,
       payment_fees: costs?.fees ?? 0,
