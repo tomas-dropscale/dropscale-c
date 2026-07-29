@@ -169,7 +169,11 @@ export default async function DashboardPage({
           <StoreSelector accounts={accounts} current={selectedStore} />
           <RangePicker
             current={range}
-            footer={`${d.portal.roasTotal}: ${multiplier(totals.roas)}`}
+            // The SHOP's return per euro spent (totals.mer), the same number as
+            // the ROAS card below. Google's attributed figure only ever appears
+            // as that card's hint — it counts what Google can see, which is not
+            // what the store sold.
+            footer={`${d.portal.roasTotal}: ${multiplier(totals.mer)}`}
           />
         </>
       }

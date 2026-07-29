@@ -85,7 +85,10 @@ export default async function AccountPage({
           </Button>
           <RangePicker
             current={range}
-            footer={`${d.portal.roasTotal}: ${multiplier(metrics.roas)}`}
+            // This store's own return (Shopify revenue ÷ its ad spend), so the
+            // footer agrees with the ROAS card instead of quoting Google's
+            // attributed number next to it.
+            footer={`${d.portal.roasTotal}: ${multiplier(storeRoas)}`}
           />
         </>
       }
