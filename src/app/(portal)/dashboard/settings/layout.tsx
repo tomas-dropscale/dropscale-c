@@ -1,4 +1,5 @@
-import { getSessionClient, getSessionProfile } from "@/lib/supabase/server";
+import { getSessionProfile } from "@/lib/supabase/server";
+import { getWorkspaceContext } from "@/lib/portal/workspace";
 import { fetchPendingCounts } from "@/lib/admin/approvals";
 import { BrowserChrome, LiveIndicator } from "@/components/portal/browser-chrome";
 import { NotificationsMenu } from "@/components/admin/notifications-menu";
@@ -10,8 +11,8 @@ import { UserBadge } from "@/components/portal/user-menu";
  * the section's own nav — mirroring the reference product.
  */
 export default async function SettingsLayout({ children }: { children: React.ReactNode }) {
-  const { client } = await getSessionClient();
-  if (!client) return null; // gate already handled this
+  const { viewer, active, workspaces } = await getWorkspaceContext();
+  if (!viewer || !active) return null; // gate already handled this
 
   // Same rule as the main shell: admins keep the approval bell in every zone.
   const { profile } = await getSessionProfile();
@@ -26,7 +27,7 @@ export default async function SettingsLayout({ children }: { children: React.Rea
             <LiveIndicator />
             <span className="h-4 w-px bg-[var(--border-subtle)]" aria-hidden />
             {pending && <NotificationsMenu counts={pending} />}
-            <UserBadge client={client} />
+            <UserBadge viewer={viewer} workspaces={workspaces} activeWorkspaceId={active.id} />
           </>
         }
       >

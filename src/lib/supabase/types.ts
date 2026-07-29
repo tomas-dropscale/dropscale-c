@@ -181,6 +181,34 @@ export type Client = {
   stripe_customer_id: string | null;
 };
 
+/**
+ * A sócio: another portal login that may open this client's workspace
+ * (migration 0015). The OWNER is never a row here — which is what makes
+ * removing them structurally impossible.
+ */
+export type ClientMember = {
+  /** The workspace: the owner's portal_clients id. */
+  client_id: string;
+  /** The partner's own portal login. */
+  member_id: string;
+  invited_by: string | null;
+  created_at: string;
+};
+
+export type ClientInviteStatus = "pending" | "accepted";
+
+/** An invitation by email, turned into a membership by accept_client_invites(). */
+export type ClientInvite = {
+  id: string;
+  client_id: string;
+  email: string;
+  invited_by: string | null;
+  status: ClientInviteStatus;
+  created_at: string;
+  accepted_at: string | null;
+  accepted_by: string | null;
+};
+
 export type InvoiceStatus = "draft" | "open" | "paid" | "void" | "uncollectible";
 
 /**
@@ -225,6 +253,8 @@ export type Invoice = {
   stripe_hosted_url: string | null;
   issued_at: string | null;
   paid_at: string | null;
+  /** Set when Stripe reported a failed charge; cleared once it is paid (0014). */
+  payment_failed_at: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -621,6 +651,7 @@ export type Database = {
           | "stripe_hosted_url"
           | "issued_at"
           | "paid_at"
+          | "payment_failed_at"
           | "created_at"
           | "updated_at"
         >;
@@ -654,6 +685,44 @@ export type Database = {
             columns: ["crm_client_id"];
             isOneToOne: false;
             referencedRelation: "clients";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      client_members: {
+        Row: Row<ClientMember>;
+        Insert: Insert<ClientMember, "invited_by" | "created_at">;
+        Update: Partial<ClientMember>;
+        Relationships: [
+          {
+            foreignKeyName: "client_members_client_id_fkey";
+            columns: ["client_id"];
+            isOneToOne: false;
+            referencedRelation: "portal_clients";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "client_members_member_id_fkey";
+            columns: ["member_id"];
+            isOneToOne: false;
+            referencedRelation: "portal_clients";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      client_invites: {
+        Row: Row<ClientInvite>;
+        Insert: Insert<
+          ClientInvite,
+          "id" | "invited_by" | "status" | "created_at" | "accepted_at" | "accepted_by"
+        >;
+        Update: Partial<ClientInvite>;
+        Relationships: [
+          {
+            foreignKeyName: "client_invites_client_id_fkey";
+            columns: ["client_id"];
+            isOneToOne: false;
+            referencedRelation: "portal_clients";
             referencedColumns: ["id"];
           },
         ];
@@ -948,6 +1017,22 @@ export type Database = {
       claim_portal_client: {
         Args: Record<string, never>;
         Returns: string;
+      };
+      /** Owner or sócio of that workspace (migration 0015). */
+      is_client_member: {
+        Args: { p_client_id: string };
+        Returns: boolean;
+      };
+      /** Turns every pending invite for the caller's confirmed email into a
+       *  membership. Idempotent; returns how many it accepted (migration 0015). */
+      accept_client_invites: {
+        Args: Record<string, never>;
+        Returns: number;
+      };
+      /** The one portal_clients column a sócio may set on the owner's row (0015). */
+      set_workspace_stripe_customer: {
+        Args: { p_client_id: string; p_customer_id: string };
+        Returns: undefined;
       };
     };
     Enums: Record<never, never>;

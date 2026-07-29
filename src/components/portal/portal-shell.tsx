@@ -6,6 +6,7 @@ import { Menu } from "lucide-react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 
 import type { AdAccount, Client } from "@/lib/supabase/types";
+import type { Workspace } from "@/lib/portal/workspace";
 import type { PendingCounts } from "@/lib/admin/approvals";
 import { BrowserChrome, LiveIndicator } from "@/components/portal/browser-chrome";
 import { NotificationsMenu } from "@/components/admin/notifications-menu";
@@ -24,14 +25,21 @@ import { useI18n } from "@/lib/i18n/provider";
  * breakpoints, same mobile drawer — so the two areas feel like one product.
  */
 export function PortalShell({
-  client,
+  viewer,
+  workspace,
+  workspaces,
   accounts,
   isAdmin = false,
   pending = null,
   setup,
   children,
 }: {
-  client: Client;
+  /** Who is signed in — the avatar and the sign-out menu. */
+  viewer: Client;
+  /** Whose data is on screen. The same as the viewer unless they are a sócio. */
+  workspace: Workspace;
+  /** Every workspace the viewer may open; a switcher appears past the first. */
+  workspaces: Workspace[];
   accounts: AdAccount[];
   isAdmin?: boolean;
   /** Approval counts — only supplied when the viewer is staff-admin. */
@@ -55,7 +63,7 @@ export function PortalShell({
 
   const sidebar = (onNavigate?: () => void) => (
     <Sidebar
-      client={client}
+      workspaceId={workspace.id}
       accounts={accounts}
       activeAccountId={activeAccountId}
       isAdmin={isAdmin}
@@ -77,7 +85,7 @@ export function PortalShell({
             {/* The client's own bell: setup steps still open + accounts
                 awaiting approval. */}
             <ClientNotifications accounts={accounts} setup={setup} />
-            <UserBadge client={client} />
+            <UserBadge viewer={viewer} workspaces={workspaces} activeWorkspaceId={workspace.id} />
 
             <DialogPrimitive.Root open={mobileNavOpen} onOpenChange={setMobileNavOpen}>
               <DialogPrimitive.Trigger

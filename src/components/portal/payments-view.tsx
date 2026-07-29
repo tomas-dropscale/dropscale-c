@@ -76,10 +76,13 @@ export function PaymentsView({
   invoices,
   hasCardOnFile,
   stripeReady,
+  setupOutcome = null,
 }: {
   invoices: Invoice[];
   hasCardOnFile: boolean;
   stripeReady: boolean;
+  /** How the client came back from Stripe Checkout, if they just did. */
+  setupOutcome?: "done" | "cancelled" | null;
 }) {
   const { d, intl } = useI18n();
   const [busy, setBusy] = React.useState(false);
@@ -88,6 +91,7 @@ export function PaymentsView({
   const today = new Date().toISOString().slice(0, 10);
   const outstanding = invoices.filter((invoice) => invoice.status === "open");
   const late = outstanding.filter((invoice) => isLate(invoice, today));
+  const failed = outstanding.filter((invoice) => invoice.payment_failed_at);
   const owed = outstanding.reduce((sum, invoice) => sum + Number(invoice.amount), 0);
   const paidTotal = invoices
     .filter((invoice) => invoice.status === "paid")
@@ -124,6 +128,30 @@ export function PaymentsView({
   return (
     <div className="space-y-4">
       {error && <FormAlert>{error}</FormAlert>}
+
+      {/* The answer to "did that work?", which the return from Stripe cannot
+          give on its own — the client is simply dropped back on this page. */}
+      {setupOutcome === "done" && (
+        <FormAlert tone="success">{d.payments.setupDone}</FormAlert>
+      )}
+      {setupOutcome === "cancelled" && <FormAlert>{d.payments.setupCancelled}</FormAlert>}
+
+      {/* A refused charge is not the same as an unpaid invoice, and only the
+          client can clear it. Shown above everything, because if this is
+          happening nothing else on the page matters. */}
+      {failed.length > 0 && (
+        <div className="flex items-start gap-3 rounded-[var(--radius-card)] border border-[var(--warning-orange)]/30 bg-[var(--warning-orange)]/10 px-4 py-3.5">
+          <TriangleAlert className="mt-0.5 size-4 shrink-0 text-[var(--warning-orange)]" />
+          <div className="min-w-0 flex-1">
+            <p className="text-[13.5px] font-semibold text-[var(--text-primary)]">
+              {d.payments.chargeFailed}
+            </p>
+            <p className="text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
+              {d.payments.chargeFailedHelp}
+            </p>
+          </div>
+        </div>
+      )}
 
       {late.length > 0 && (
         <div className="flex items-start gap-3 rounded-[var(--radius-card)] border border-[var(--danger-red)]/30 bg-[var(--danger-red)]/10 px-4 py-3.5">
@@ -166,6 +194,15 @@ export function PaymentsView({
                 d.payments.noCard
               )}
             </p>
+            {/* Without this the client assumes they must enter a card here to
+                be billed automatically. They don't: paying the first invoice
+                on Stripe's page is enough, and the button below is a shortcut,
+                not a requirement. */}
+            {!hasCardOnFile && (
+              <p className="mt-1.5 text-[11.5px] leading-relaxed text-[var(--text-muted)]">
+                {d.payments.noCardHelp}
+              </p>
+            )}
           </div>
           {stripeReady && (
             <Button variant="secondary" size="sm" loading={busy} onClick={setUpCard}>

@@ -40,6 +40,7 @@ import {
   billingCurrency,
   closedWeeks,
   DAYS_UNTIL_DUE,
+  isAutoBillable,
   emptyTotals,
   isoDay,
   round2,
@@ -242,6 +243,8 @@ async function pushToStripe(supabase: Supabase, invoice: Invoice): Promise<Invoi
 export type GenerateResult = {
   created: number;
   pushed: number;
+  /** Rows created for weeks too old to bill without being asked. */
+  heldBack: number;
   errors: string[];
 };
 
@@ -260,8 +263,13 @@ export type GenerateResult = {
 export async function ensureWeeklyInvoices(opts?: {
   force?: boolean;
   client?: Supabase;
+  /**
+   * Also send weeks older than AUTO_BILL_WEEKS. An admin asking for it in so
+   * many words is the only thing that releases back-invoices.
+   */
+  billBacklog?: boolean;
 }): Promise<GenerateResult> {
-  const result: GenerateResult = { created: 0, pushed: 0, errors: [] };
+  const result: GenerateResult = { created: 0, pushed: 0, heldBack: 0, errors: [] };
   if (!opts?.force && Date.now() - lastRunAt < THROTTLE_MS) return result;
   lastRunAt = Date.now();
 
@@ -294,7 +302,9 @@ export async function ensureWeeklyInvoices(opts?: {
     return result;
   }
 
-  for (const week of weeks) {
+  for (const [weekIndex, week] of weeks.entries()) {
+    // Old weeks are recorded but not sent. See AUTO_BILL_WEEKS.
+    const mayBill = opts?.billBacklog || isAutoBillable(weekIndex);
     const billable = await billableForWeek(supabase, week, context);
 
     for (const entry of billable) {
@@ -321,6 +331,11 @@ export async function ensureWeeklyInvoices(opts?: {
       }
       result.created += 1;
 
+      if (!mayBill) {
+        result.heldBack += 1;
+        continue;
+      }
+
       if (inserted && stripeConfigured()) {
         try {
           await pushToStripe(supabase, inserted as Invoice);
@@ -338,9 +353,15 @@ export async function ensureWeeklyInvoices(opts?: {
     }
   }
 
-  // Drafts left behind by an earlier Stripe outage — pick them up.
+  // Drafts left behind by an earlier Stripe outage — pick them up. Held-back
+  // backlog rows are drafts too, so this is bounded by the same window;
+  // otherwise the next run would send exactly what we just declined to send.
+  const billableStarts = new Set(
+    weeks.filter((_, index) => opts?.billBacklog || isAutoBillable(index)).map((w) => w.start),
+  );
   const stale = (existingRows ?? []).filter(
-    (row) => row.status === "draft" && !row.stripe_invoice_id,
+    (row) =>
+      row.status === "draft" && !row.stripe_invoice_id && billableStarts.has(row.period_start),
   );
   if (stripeConfigured() && stale.length > 0) {
     const { data: rows } = await supabase

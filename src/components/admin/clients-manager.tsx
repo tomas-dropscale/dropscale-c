@@ -32,16 +32,33 @@ export function ClientsManager({
   candidates,
   pendingAccounts,
   pendingRequests,
+  partnerOf,
   adminId,
+  stripeReady,
 }: {
-  clients: (Client & { accounts: number; billing: ClientBillingSummary | null })[];
+  clients: (Client & {
+    accounts: number;
+    billing: ClientBillingSummary | null;
+    /** A saved card on the Stripe customer — i.e. Monday charges itself. */
+    hasCard: boolean;
+  })[];
   /** self-registered clients waiting on approval_status (migration 0002) */
   pendingClients: Client[];
   /** profiles with no portal_clients row — can be promoted to clients */
   candidates: Profile[];
   pendingAccounts: (AdAccount & { owner: string })[];
   pendingRequests: (AccountRequest & { owner: string })[];
+  /**
+   * portal_clients id → the clients they are a sócio of (migration 0015).
+   *
+   * Shown in the approval queue because rejecting is not only about this
+   * person's own account: a rejection also cuts them out of every workspace
+   * that invited them, and that is not something to click blind.
+   */
+  partnerOf: Record<string, string[]>;
   adminId: string;
+  /** Stripe configured at all — without it the badge means nothing. */
+  stripeReady: boolean;
 }) {
   const router = useRouter();
   const [error, setError] = React.useState<string | null>(null);
@@ -90,6 +107,12 @@ export function ClientsManager({
                   <p className="truncate text-[12px] text-[var(--text-muted)]">
                     {client.email} · registered {new Date(client.created_at).toLocaleDateString()}
                   </p>
+                  {(partnerOf[client.id]?.length ?? 0) > 0 && (
+                    <p className="mt-1 truncate text-[12px] text-[var(--accent-gold-strong)]">
+                      Partner of {partnerOf[client.id].join(", ")} — rejecting also removes that
+                      access.
+                    </p>
+                  )}
                 </div>
                 <div className="flex items-center gap-2">
                   <Button
@@ -308,6 +331,14 @@ export function ClientsManager({
                   </p>
                   <p className="truncate text-[12px] text-[var(--text-muted)]">{client.email}</p>
                 </div>
+                {/* Whether Monday charges them or merely emails a link. Worth
+                    a badge of its own: an agency going live needs to know how
+                    many clients will actually settle without being chased. */}
+                {stripeReady && (
+                  <Badge variant={client.hasCard ? "success" : "neutral"}>
+                    {client.hasCard ? "auto-charge" : "pays by link"}
+                  </Badge>
+                )}
                 {client.billing && client.billing.overdue > 0 && (
                   <Badge variant="danger">
                     {client.billing.overdue} overdue · {money(client.billing.overdueAmount, "EUR")}

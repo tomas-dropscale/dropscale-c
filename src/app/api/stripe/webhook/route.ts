@@ -1,6 +1,10 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createServiceClient } from "@/lib/supabase/service";
-import { setDefaultPaymentMethod, verifyWebhookSignature } from "@/lib/stripe/client";
+import {
+  adoptDefaultPaymentMethod,
+  setDefaultPaymentMethod,
+  verifyWebhookSignature,
+} from "@/lib/stripe/client";
 
 /**
  * Stripe → us. The ONLY writer of payment state.
@@ -48,21 +52,38 @@ export async function POST(request: NextRequest) {
       if (stripeInvoiceId) {
         await supabase
           .from("invoices")
-          .update({ status: "paid", paid_at: now, updated_at: now })
+          // payment_failed_at cleared: a healed invoice must stop warning.
+          .update({ status: "paid", paid_at: now, payment_failed_at: null, updated_at: now })
           .eq("stripe_invoice_id", stripeInvoiceId);
       }
+
+      // The first invoice a client pays is what turns the rest automatic.
+      // They pay it on Stripe's hosted page — no card ever entered in this app
+      // — and if they let Stripe keep it, we adopt it as their default so next
+      // Monday charges itself. No-ops when they already have a default, or when
+      // they declined to save anything.
+      const customer = typeof object.customer === "string" ? object.customer : null;
+      if (customer) await adoptDefaultPaymentMethod(customer);
       break;
     }
 
     case "invoice.finalized":
     case "invoice.payment_failed": {
       if (stripeInvoiceId) {
+        // Both leave the invoice open and owed, but they are not the same
+        // event: finalising is an invoice going out, while a failed payment is
+        // a charge that was ATTEMPTED and refused — an expired card, no funds,
+        // or a bank demanding 3-D Secure off-session. Only the second is
+        // something the client has to act on, so only it is recorded.
+        const failed = event.type === "invoice.payment_failed";
+
         await supabase
           .from("invoices")
           .update({
             status: "open",
             stripe_hosted_url:
               typeof object.hosted_invoice_url === "string" ? object.hosted_invoice_url : null,
+            ...(failed ? { payment_failed_at: now } : {}),
             updated_at: now,
           })
           .eq("stripe_invoice_id", stripeInvoiceId);

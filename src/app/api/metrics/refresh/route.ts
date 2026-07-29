@@ -1,19 +1,18 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { activeWorkspaceId } from "@/lib/portal/workspace";
 import { refreshAccountsNow } from "@/lib/metrics/recompute";
 
 /**
  * POST { accountIds?: string[] } — force-refresh the caller's dashboard now,
  * bypassing the 15-minute throttle. The account list is ALWAYS re-scoped to the
- * caller's own accounts server-side; a client-supplied list only narrows it,
- * never widens it.
+ * active workspace's accounts server-side; a client-supplied list only narrows
+ * it, never widens it.
  */
 export async function POST(request: NextRequest) {
   const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) return NextResponse.json({ error: "Not signed in." }, { status: 401 });
+  const clientId = await activeWorkspaceId();
+  if (!clientId) return NextResponse.json({ error: "Not signed in." }, { status: 401 });
 
   let body: { accountIds?: string[] } = {};
   try {
@@ -22,7 +21,7 @@ export async function POST(request: NextRequest) {
     // No body is fine — refresh all of the caller's accounts.
   }
 
-  const { data: owned } = await supabase.from("ad_accounts").select("id").eq("client_id", user.id);
+  const { data: owned } = await supabase.from("ad_accounts").select("id").eq("client_id", clientId);
   let ids = (owned ?? []).map((row) => row.id);
   if (Array.isArray(body.accountIds) && body.accountIds.length > 0) {
     const requested = new Set(body.accountIds);

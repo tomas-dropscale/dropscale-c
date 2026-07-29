@@ -106,6 +106,47 @@ export async function customerHasCard(customerId: string): Promise<boolean> {
   }
 }
 
+/**
+ * Adopt the card a customer just paid with, so the NEXT invoice settles itself.
+ *
+ * This is what makes automatic payment possible without ever asking a client to
+ * enter a card in our app. They pay their first invoice on Stripe's own hosted
+ * page and tick "save my details"; Stripe attaches the card to the customer but
+ * does NOT make it the default for future invoices — that part is ours.
+ *
+ * Does nothing when a default is already set (we must never silently switch a
+ * client's card) or when nothing was saved (the checkbox is theirs to refuse).
+ * Returns whether a default was adopted.
+ *
+ * Requires Stripe → Settings → Invoices → "Save customer payment information"
+ * to be enabled; with it off, no card is ever saved and nothing here can fire.
+ */
+export async function adoptDefaultPaymentMethod(customerId: string): Promise<boolean> {
+  try {
+    const customer = await stripeFetch<{
+      invoice_settings?: { default_payment_method?: string | null };
+    }>(`/customers/${customerId}`, { method: "GET" });
+
+    if (customer.invoice_settings?.default_payment_method) return false;
+
+    const methods = await stripeFetch<{ data?: { id: string }[] }>("/payment_methods", {
+      method: "GET",
+      params: { customer: customerId, type: "card", limit: 1 },
+    });
+
+    const card = methods.data?.[0]?.id;
+    if (!card) return false;
+
+    await setDefaultPaymentMethod(customerId, card);
+    return true;
+  } catch (error) {
+    // Never fail the webhook over this: the invoice IS paid, and the worst case
+    // is that the next one goes out as a link again.
+    console.error(`Could not adopt a default card for ${customerId}:`, error);
+    return false;
+  }
+}
+
 export async function createCustomer(input: {
   email: string;
   name: string;
@@ -198,12 +239,15 @@ export async function createSetupSession(input: {
   customerId: string;
   returnUrl: string;
 }): Promise<{ url: string }> {
+  // Distinct return URLs, because Stripe tells us nothing else: with one URL
+  // for both, a client who cancelled and a client who saved a card come back to
+  // an identical page and neither learns what happened.
   const session = await stripeFetch<{ url: string }>("/checkout/sessions", {
     params: {
       mode: "setup",
       customer: input.customerId,
-      success_url: input.returnUrl,
-      cancel_url: input.returnUrl,
+      success_url: `${input.returnUrl}?setup=done`,
+      cancel_url: `${input.returnUrl}?setup=cancelled`,
       // Makes the saved card the default for future invoices.
       "setup_intent_data[metadata][dropscale]": "default_payment_method",
     },

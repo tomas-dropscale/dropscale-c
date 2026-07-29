@@ -15,20 +15,21 @@ import {
   UserPlus,
 } from "lucide-react";
 
-import type { AdAccount, Client } from "@/lib/supabase/types";
+import type { AdAccount } from "@/lib/supabase/types";
 import { AddAccountModal } from "@/components/portal/add-account-modal";
 import { Logo } from "@/components/brand/logo";
 import { SideNav, SideNavAction, SideNavItem, SideNavLabel } from "@/components/ui/side-nav";
 import { useI18n } from "@/lib/i18n/provider";
 
 export function Sidebar({
-  client,
+  workspaceId,
   accounts,
   activeAccountId,
   isAdmin = false,
   onNavigate,
 }: {
-  client: Client;
+  /** The workspace new stores belong to — the owner's id, not the viewer's. */
+  workspaceId: string;
   accounts: AdAccount[];
   activeAccountId: string | null;
   isAdmin?: boolean;
@@ -146,7 +147,7 @@ export function Sidebar({
         </ul>
       )}
 
-      <AddAccountModal open={addOpen} onOpenChange={setAddOpen} clientId={client.id} />
+      <AddAccountModal open={addOpen} onOpenChange={setAddOpen} clientId={workspaceId} />
     </SideNav>
   );
 }

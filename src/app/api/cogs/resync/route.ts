@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { activeWorkspaceId } from "@/lib/portal/workspace";
 import { resyncAccountNow } from "@/lib/metrics/recompute";
 
 /**
@@ -24,16 +25,14 @@ export async function POST(request: NextRequest) {
   }
 
   const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) return NextResponse.json({ error: "Not signed in." }, { status: 401 });
+  const clientId = await activeWorkspaceId();
+  if (!clientId) return NextResponse.json({ error: "Not signed in." }, { status: 401 });
 
   const { data: account } = await supabase
     .from("ad_accounts")
     .select("id")
     .eq("id", accountId)
-    .eq("client_id", user.id)
+    .eq("client_id", clientId)
     .maybeSingle();
   if (!account) return NextResponse.json({ error: "Account not found." }, { status: 404 });
 

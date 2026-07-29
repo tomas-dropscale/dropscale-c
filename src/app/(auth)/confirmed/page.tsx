@@ -4,7 +4,8 @@ import { CheckCircle2 } from "lucide-react";
 
 import { AuthCard } from "@/components/auth/auth-card";
 import { ConfirmedActions } from "@/components/auth/confirmed-actions";
-import { getSessionClient, getSessionProfile } from "@/lib/supabase/server";
+import { getSessionProfile } from "@/lib/supabase/server";
+import { acceptPendingInvites, getWorkspaceContext } from "@/lib/portal/workspace";
 import { getServerDictionary } from "@/lib/i18n/server";
 import { hasSupabaseEnv } from "@/lib/supabase/env";
 
@@ -27,15 +28,20 @@ export default async function ConfirmedPage() {
   if (!hasSupabaseEnv()) redirect("/login");
 
   const { d } = await getServerDictionary();
-  const { user, client } = await getSessionClient();
+
+  // Confirming the address is exactly the proof an invite waits for, so turn
+  // any invitation into access before deciding what to tell this person —
+  // otherwise a sócio is sent to wait for an approval nobody owes them.
+  await acceptPendingInvites();
+  const { user, viewer: client, workspaces } = await getWorkspaceContext();
 
   // The link is what creates the session. No session means it was already
   // used or has expired — signing in is the only way forward.
   if (!user) redirect("/login");
 
-  // Approved already (including staff, who hold an approved row): send them
-  // where they actually want to go.
-  if (client?.approval_status === "approved") redirect("/dashboard");
+  // Anywhere to go — their own approved account, or a workspace that invited
+  // them — beats being told to wait.
+  if (workspaces.length > 0) redirect("/dashboard");
 
   // Staff without a portal identity belong in the admin area.
   if (!client) {

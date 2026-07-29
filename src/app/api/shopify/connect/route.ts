@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { activeWorkspaceId } from "@/lib/portal/workspace";
 import { encryptToken } from "@/lib/google-ads/crypto";
 import { resyncAccountNow } from "@/lib/metrics/recompute";
 import {
@@ -31,19 +32,17 @@ import {
 
 async function ownAccount(accountId: string) {
   const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) return { supabase, account: null };
+  const clientId = await activeWorkspaceId();
+  if (!clientId) return { supabase, account: null };
 
-  // Pinned to the session's client_id explicitly — same zone rule as
-  // lib/portal/data.ts, so an admin cannot connect someone else's store from
-  // the portal by accident.
+  // Pinned to the active workspace's client_id explicitly — same zone rule as
+  // lib/portal/data.ts, so neither an admin nor a sócio with another workspace
+  // open can connect the wrong store by accident.
   const { data: account } = await supabase
     .from("ad_accounts")
     .select("id, client_id, status")
     .eq("id", accountId)
-    .eq("client_id", user.id)
+    .eq("client_id", clientId)
     .maybeSingle();
 
   return { supabase, account };

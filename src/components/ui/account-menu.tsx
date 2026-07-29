@@ -26,6 +26,7 @@ export function AccountMenu({
   seed,
   settingsHref,
   badge,
+  extraItems,
   onSignOut,
   signingOut = false,
 }: {
@@ -35,6 +36,8 @@ export function AccountMenu({
   seed?: string;
   settingsHref: string;
   badge?: React.ReactNode;
+  /** Menu items above Settings — the portal puts the workspace switcher here. */
+  extraItems?: React.ReactNode;
   onSignOut: () => void;
   signingOut?: boolean;
 }) {
@@ -65,6 +68,8 @@ export function AccountMenu({
         {badge && <div className="px-2.5 pb-2">{badge}</div>}
 
         <DropdownMenuSeparator />
+
+        {extraItems}
 
         <DropdownMenuItem asChild>
           <Link href={settingsHref}>

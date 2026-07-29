@@ -17,6 +17,7 @@
  */
 
 import { createClient } from "@/lib/supabase/server";
+import { activeWorkspaceId } from "@/lib/portal/workspace";
 import type { AdAccount, Campaign, CreativeDelivery } from "@/lib/supabase/types";
 import { aggregateMetrics, mockCampaigns, mockDeliveries, mockMetrics } from "@/lib/portal/mock";
 import type { MetricSet } from "@/lib/portal/mock";
@@ -42,44 +43,41 @@ export const ACCOUNT_COLUMNS =
   "revenue_share_enabled";
 
 /**
- * The portal is the CLIENT's zone, so every read here is pinned to the
- * signed-in user's own client_id — explicitly, not via RLS alone. RLS carries
- * an `or is_admin()` escape hatch for the admin area, which means an admin
- * browsing the portal would otherwise see every account in the system. Which
- * data you see is decided by the zone you are in, never by your role.
+ * The portal is the CLIENT's zone, so every read here is pinned to the ACTIVE
+ * workspace's client_id — explicitly, not via RLS alone. RLS is deliberately
+ * wider than one workspace: it carries an `or is_admin()` escape hatch for the
+ * admin area, and since migration 0015 it also allows every workspace a sócio
+ * belongs to. Which data you see is decided by the zone you are in and the
+ * workspace you picked, never by your role.
  */
-async function sessionUserId(): Promise<string | null> {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  return user?.id ?? null;
-}
 
 export async function fetchAccounts(): Promise<AdAccount[]> {
-  const userId = await sessionUserId();
-  if (!userId) return [];
+  const clientId = await activeWorkspaceId();
+  if (!clientId) return [];
 
   const supabase = await createClient();
   const { data } = await supabase
     .from("ad_accounts")
     .select(ACCOUNT_COLUMNS)
-    .eq("client_id", userId)
+    .eq("client_id", clientId)
     .order("created_at", { ascending: true });
   return (data as AdAccount[] | null) ?? [];
 }
 
-/** One OWN account; someone else's id (even for an admin) comes back null → 404. */
+/**
+ * One account of the ACTIVE workspace; an id from another workspace (even one
+ * the viewer could switch to, and even for an admin) comes back null → 404.
+ */
 export async function fetchAccount(accountId: string): Promise<AdAccount | null> {
-  const userId = await sessionUserId();
-  if (!userId) return null;
+  const clientId = await activeWorkspaceId();
+  if (!clientId) return null;
 
   const supabase = await createClient();
   const { data } = await supabase
     .from("ad_accounts")
     .select(ACCOUNT_COLUMNS)
     .eq("id", accountId)
-    .eq("client_id", userId)
+    .eq("client_id", clientId)
     .maybeSingle();
   return (data as AdAccount | null) ?? null;
 }

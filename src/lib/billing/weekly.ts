@@ -15,6 +15,31 @@ export const DAYS_UNTIL_DUE = 7;
 /** How many closed weeks back the generator will heal on a run. */
 export const BACKFILL_WEEKS = 8;
 
+/**
+ * How many closed weeks back may be BILLED without someone asking for it.
+ *
+ * Separate from BACKFILL_WEEKS on purpose. Creating rows for old weeks is
+ * harmless bookkeeping — the ledger should be complete. Sending them to Stripe
+ * is not: with ad spend now on the invoice, a first run against a live key
+ * would have emailed (or charged) up to eight weeks of back-invoices at once,
+ * per client. Nobody wants to discover that from a client's reply.
+ *
+ * Anything older is created as a draft and waits for an admin to release it
+ * (POST /api/billing/generate with billBacklog). Two weeks covers a cron that
+ * missed a Monday without ever reaching back into history on its own.
+ */
+export const AUTO_BILL_WEEKS = 2;
+
+/**
+ * Whether a closed week may be invoiced automatically.
+ *
+ * `weeks` is the newest-first list from closedWeeks(), so an index below the
+ * limit is one of the most recent weeks.
+ */
+export function isAutoBillable(weekIndex: number): boolean {
+  return weekIndex < AUTO_BILL_WEEKS;
+}
+
 export const round2 = (value: number) => Math.round(value * 100) / 100;
 
 // ---------------------------------------------------------------------------

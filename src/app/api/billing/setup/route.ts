@@ -1,16 +1,18 @@
 import { NextResponse } from "next/server";
-import { createClient, getSessionClient } from "@/lib/supabase/server";
+import { createClient } from "@/lib/supabase/server";
+import { getWorkspaceContext } from "@/lib/portal/workspace";
 import { createCustomer, createSetupSession, stripeConfigured } from "@/lib/stripe/client";
 
 /**
  * POST — start Stripe Checkout in `setup` mode so this client can save a card.
  * With one on file, later invoices settle without anyone clicking a link.
  *
- * Rides the client's own session: a client can only ever set up their own
- * billing, and the customer id is looked up from their row, never posted in.
+ * Rides the caller's own session and targets the ACTIVE workspace: a sócio may
+ * put the business's card on file, but the customer id is looked up from that
+ * workspace's row, never posted in.
  */
 export async function POST() {
-  const { client } = await getSessionClient();
+  const { owner: client } = await getWorkspaceContext();
   if (!client) return NextResponse.json({ error: "Not signed in." }, { status: 401 });
 
   if (!stripeConfigured()) {
@@ -36,10 +38,13 @@ export async function POST() {
         { status: 502 },
       );
     }
-    await supabase
-      .from("portal_clients")
-      .update({ stripe_customer_id: customerId })
-      .eq("id", client.id);
+    // Via the RPC, not a direct UPDATE: portal_clients writes stay "your own
+    // row only", and this is the single column a sócio is allowed to set on the
+    // owner's (migration 0015).
+    await supabase.rpc("set_workspace_stripe_customer", {
+      p_client_id: client.id,
+      p_customer_id: customerId,
+    });
   }
 
   const origin = process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3001";

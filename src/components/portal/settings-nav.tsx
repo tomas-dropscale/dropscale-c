@@ -1,7 +1,7 @@
 "use client";
 
 import { usePathname } from "next/navigation";
-import { ArrowLeft, Plug, Store, UserCog } from "lucide-react";
+import { ArrowLeft, Plug, Store, UserCog, Users } from "lucide-react";
 
 import { SideNav, SideNavItem } from "@/components/ui/side-nav";
 import { useI18n } from "@/lib/i18n/provider";
@@ -35,6 +35,12 @@ export function SettingsNav() {
           icon={Plug}
           label={d.portal.connections}
           active={pathname === "/dashboard/settings/connections"}
+        />
+        <SideNavItem
+          href="/dashboard/settings/team"
+          icon={Users}
+          label={d.team.title}
+          active={pathname === "/dashboard/settings/team"}
         />
       </ul>
     </SideNav>

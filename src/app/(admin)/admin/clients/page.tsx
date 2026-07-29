@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { PageContainer } from "@/components/ui/page-container";
 import { ClientsManager } from "@/components/admin/clients-manager";
 import { createClient, getSessionProfile } from "@/lib/supabase/server";
+import { customerHasCard, stripeConfigured } from "@/lib/stripe/client";
 import {
   ensureWeeklyInvoices,
   fetchBillingSummaries,
@@ -47,6 +48,20 @@ export default async function ClientsPage() {
   const clientIds = new Set(allClients.map((client) => client.id));
   const nameById = new Map(allClients.map((client) => [client.id, client.full_name]));
 
+  // Who is a sócio of whom (migration 0015). Only used to warn in the approval
+  // queue: a self-registration that is really somebody's partner looks like an
+  // unknown stranger otherwise, and rejecting it quietly revokes their access
+  // to the workspace that invited them.
+  const { data: memberships } = await supabase
+    .from("client_members")
+    .select("client_id, member_id");
+  const partnerOf: Record<string, string[]> = {};
+  for (const row of memberships ?? []) {
+    const ownerName = nameById.get(row.client_id);
+    if (!ownerName) continue;
+    (partnerOf[row.member_id] ??= []).push(ownerName);
+  }
+
   // Count stores per client for the list badges.
   const { data: allAccounts } = await supabase.from("ad_accounts").select("client_id");
   const accountCount = new Map<string, number>();
@@ -60,6 +75,26 @@ export default async function ClientsPage() {
   await reconcileInvoices();
   const billing = await fetchBillingSummaries();
 
+  /**
+   * Who will be charged on Monday, and who will merely be emailed a link.
+   *
+   * Asked of Stripe directly rather than cached in a column: a card can be
+   * added or removed on Stripe's side at any moment, and a stale "will auto
+   * charge" here is the kind of wrong that only shows up as an unpaid invoice
+   * a week later. One GET per client with a Stripe customer, in parallel —
+   * fine at agency scale, worth revisiting past a few hundred clients.
+   */
+  const withCustomer = clients.filter((client) => client.stripe_customer_id);
+  const cardChecks = stripeConfigured()
+    ? await Promise.all(
+        withCustomer.map(async (client) => [
+          client.id,
+          await customerHasCard(client.stripe_customer_id!),
+        ] as const),
+      )
+    : [];
+  const hasCard = new Map(cardChecks);
+
   return (
     <PageContainer
       title="Clients"
@@ -70,7 +105,9 @@ export default async function ClientsPage() {
           ...client,
           accounts: accountCount.get(client.id) ?? 0,
           billing: billing.get(client.id) ?? null,
+          hasCard: hasCard.get(client.id) ?? false,
         }))}
+        stripeReady={stripeConfigured()}
         pendingClients={pendingClients}
         candidates={profiles.filter((profile) => !clientIds.has(profile.id))}
         pendingAccounts={pendingAccounts.map((account) => ({
@@ -81,6 +118,7 @@ export default async function ClientsPage() {
           ...request,
           owner: nameById.get(request.client_id) ?? "Unknown client",
         }))}
+        partnerOf={partnerOf}
         adminId={profile?.id ?? ""}
       />
     </PageContainer>

@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { closedWeeks, mondayOf, storeLines, type StoreTotals } from "./weekly";
+import {
+  AUTO_BILL_WEEKS,
+  BACKFILL_WEEKS,
+  closedWeeks,
+  isAutoBillable,
+  mondayOf,
+  storeLines,
+  type StoreTotals,
+} from "./weekly";
 
 /**
  * The weekly invoice is the ad spend the agency fronted PLUS the fee on it, so
@@ -37,6 +45,30 @@ describe("closedWeeks", () => {
       { start: "2026-07-06", end: "2026-07-12" },
       { start: "2026-06-29", end: "2026-07-05" },
     ]);
+  });
+});
+
+describe("isAutoBillable", () => {
+  it("bills only the most recent weeks", () => {
+    // closedWeeks() is newest-first, so index 0 is the week that just closed.
+    expect(isAutoBillable(0)).toBe(true);
+    expect(isAutoBillable(AUTO_BILL_WEEKS - 1)).toBe(true);
+  });
+
+  it("refuses to send anything older on its own", () => {
+    expect(isAutoBillable(AUTO_BILL_WEEKS)).toBe(false);
+    expect(isAutoBillable(BACKFILL_WEEKS - 1)).toBe(false);
+  });
+
+  it("holds back most of the backfill window", () => {
+    // The guard exists because a first run against a live key would otherwise
+    // send every healed week at once, ad spend included.
+    const weeks = closedWeeks(new Date(2026, 6, 27));
+    const sendable = weeks.filter((_, index) => isAutoBillable(index));
+
+    expect(weeks).toHaveLength(BACKFILL_WEEKS);
+    expect(sendable).toHaveLength(AUTO_BILL_WEEKS);
+    expect(weeks.length - sendable.length).toBeGreaterThan(0);
   });
 });
 
