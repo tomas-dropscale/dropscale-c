@@ -3,7 +3,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Bell, Store, Ticket, UserPlus, type LucideIcon } from "lucide-react";
+import { Bell, Clapperboard, Store, Ticket, UserPlus, type LucideIcon } from "lucide-react";
 
 import {
   DropdownMenu,
@@ -36,7 +36,7 @@ export function NotificationsMenu({ counts }: { counts: PendingCounts }) {
 
   const recount = React.useCallback(async () => {
     const supabase = createClient();
-    const [clients, accounts, requests] = await Promise.all([
+    const [clients, accounts, requests, creatives] = await Promise.all([
       supabase
         .from("portal_clients")
         .select("id", { count: "exact", head: true })
@@ -49,14 +49,22 @@ export function NotificationsMenu({ counts }: { counts: PendingCounts }) {
         .from("account_requests")
         .select("id", { count: "exact", head: true })
         .eq("status", "pending"),
+      supabase
+        .from("creative_submissions")
+        .select("id", { count: "exact", head: true })
+        .eq("status", "new"),
     ]);
 
     const next = {
       clients: clients.count ?? 0,
       accounts: accounts.count ?? 0,
       requests: requests.count ?? 0,
+      creatives: creatives.count ?? 0,
     };
-    setLive({ ...next, total: next.clients + next.accounts + next.requests });
+    setLive({
+      ...next,
+      total: next.clients + next.accounts + next.requests + next.creatives,
+    });
   }, []);
 
   React.useEffect(() => {
@@ -76,6 +84,11 @@ export function NotificationsMenu({ counts }: { counts: PendingCounts }) {
       .on("postgres_changes", { event: "*", schema: "public", table: "portal_clients" }, onEvent)
       .on("postgres_changes", { event: "*", schema: "public", table: "ad_accounts" }, onEvent)
       .on("postgres_changes", { event: "*", schema: "public", table: "account_requests" }, onEvent)
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "creative_submissions" },
+        onEvent,
+      )
       .subscribe();
 
     // Poll fallback: badge only (no page refresh), cheap head-count queries.
@@ -88,24 +101,42 @@ export function NotificationsMenu({ counts }: { counts: PendingCounts }) {
     };
   }, [router, recount]);
 
-  const rows: { icon: LucideIcon; label: string; help: string; count: number }[] = [
+  // Each row carries its own destination: the first three are cleared on
+  // Clients, submitted creatives on their own screen.
+  const rows: {
+    icon: LucideIcon;
+    label: string;
+    help: string;
+    count: number;
+    href: string;
+  }[] = [
     {
       icon: UserPlus,
       label: d.notifications.newClients,
       help: d.notifications.newClientsHelp,
       count: current.clients,
+      href: "/admin/clients",
     },
     {
       icon: Store,
       label: d.notifications.pendingAccounts,
       help: d.notifications.pendingAccountsHelp,
       count: current.accounts,
+      href: "/admin/clients",
     },
     {
       icon: Ticket,
       label: d.notifications.pendingRequests,
       help: d.notifications.pendingRequestsHelp,
       count: current.requests,
+      href: "/admin/clients",
+    },
+    {
+      icon: Clapperboard,
+      label: d.notifications.newCreatives,
+      help: d.notifications.newCreativesHelp,
+      count: current.creatives,
+      href: "/admin/creatives?status=new",
     },
   ].filter((row) => row.count > 0);
 
@@ -147,7 +178,7 @@ export function NotificationsMenu({ counts }: { counts: PendingCounts }) {
         ) : (
           rows.map((row) => (
             <DropdownMenuItem key={row.label} asChild>
-              <Link href="/admin/clients" className="items-start gap-2.5">
+              <Link href={row.href} className="items-start gap-2.5">
                 <row.icon className="mt-0.5 size-4 shrink-0 text-[var(--accent-gold)]" aria-hidden />
                 <span className="min-w-0 flex-1">
                   <span className="block text-[13px] text-[var(--text-primary)]">

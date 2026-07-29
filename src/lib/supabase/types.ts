@@ -318,6 +318,27 @@ export type AccountRequest = {
   created_at: string;
 };
 
+export type CreativeSubmissionStatus = "new" | "in_use" | "rejected";
+
+/**
+ * Creatives the CLIENT handed in (migration 0018) — the opposite direction to
+ * CreativeDelivery. A link to their own Drive/Dropbox, not a stored file.
+ * `status` and the review fields are the team's; a guard trigger enforces that.
+ */
+export type CreativeSubmission = {
+  id: string;
+  ad_account_id: string;
+  submitted_by: string | null;
+  title: string;
+  url: string;
+  notes: string | null;
+  status: CreativeSubmissionStatus;
+  review_notes: string | null;
+  reviewed_at: string | null;
+  reviewed_by: string | null;
+  created_at: string;
+};
+
 export type Campaign = {
   id: string;
   ad_account_id: string;
@@ -985,6 +1006,37 @@ export type Database = {
         >;
         Update: Partial<HstPayment>;
         Relationships: [];
+      };
+      creative_submissions: {
+        Row: Row<CreativeSubmission>;
+        Insert: Insert<
+          CreativeSubmission,
+          | "id"
+          | "submitted_by"
+          | "notes"
+          | "status"
+          | "review_notes"
+          | "reviewed_at"
+          | "reviewed_by"
+          | "created_at"
+        >;
+        Update: Partial<CreativeSubmission>;
+        Relationships: [
+          {
+            foreignKeyName: "creative_submissions_ad_account_id_fkey";
+            columns: ["ad_account_id"];
+            isOneToOne: false;
+            referencedRelation: "ad_accounts";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "creative_submissions_submitted_by_fkey";
+            columns: ["submitted_by"];
+            isOneToOne: false;
+            referencedRelation: "portal_clients";
+            referencedColumns: ["id"];
+          },
+        ];
       };
       creative_deliveries: {
         Row: Row<CreativeDelivery>;

@@ -58,6 +58,7 @@ export function DashboardShell({
                   </DialogPrimitive.Title>
                   <Sidebar
                     pendingClients={pending.clients}
+                    newCreatives={pending.creatives}
                     onNavigate={() => setMobileNavOpen(false)}
                   />
                 </DialogPrimitive.Content>
@@ -68,7 +69,7 @@ export function DashboardShell({
       >
         <div className="flex min-h-0 flex-1">
           <aside className="hidden w-[228px] shrink-0 md:block">
-            <Sidebar pendingClients={pending.clients} />
+            <Sidebar pendingClients={pending.clients} newCreatives={pending.creatives} />
           </aside>
 
           <main className="flex min-h-0 min-w-0 flex-1 flex-col">{children}</main>

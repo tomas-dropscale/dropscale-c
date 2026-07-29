@@ -27,6 +27,15 @@
  * Also accepted in .env.local, when you only have the bare tokens:
  *   HST_ACCESS_TOKEN, HST_REFRESH_TOKEN
  *
+ * And, to answer "do I have to keep pasting this forever?":
+ *   HST_USERNAME, HST_PASSWORD   → tests whether the ERP will issue a session
+ *                                  from credentials alone. If it does, the app
+ *                                  can log itself in and nobody pastes anything
+ *                                  again. If it demands a captcha code, it
+ *                                  can't, and this says so — no attempt is made
+ *                                  to get around one.
+ *   HST_LOGIN_URL                → override if /login isn't the endpoint.
+ *
  * Prints commission TOTALS and DATES — your own figures, on your own machine.
  * Never prints a token: only its length and whether it can travel in a header.
  */
@@ -34,6 +43,7 @@ import { readFileSync } from "node:fs";
 
 const COMMISSION_URL = "https://hsterp.com/commission-salesman-mingxi";
 const REFRESH_URL = "https://hsterp.com/refresh-token";
+const DEFAULT_LOGIN_URL = "https://hsterp.com/login";
 const PAGE_LIMIT = 1000;
 
 function env() {
@@ -267,6 +277,52 @@ if (!refreshToken) {
       console.log("→ No accessToken in the response. Self-renewal is NOT working.");
       console.log("   Find the request the ERP makes when its own session refreshes (F12 →");
       console.log("   Network, leave the tab open past the expiry) and give me that URL.");
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 3 — can the app log itself in? The difference between "paste it every two
+//     days" and "never paste it again", for when refresh alone isn't enough.
+// ---------------------------------------------------------------------------
+console.log("\n--- login from credentials ---");
+
+const loginUrl = vars.HST_LOGIN_URL || DEFAULT_LOGIN_URL;
+
+if (!vars.HST_USERNAME || !vars.HST_PASSWORD) {
+  console.log("skipped: set HST_USERNAME + HST_PASSWORD in .env.local to test this.");
+} else {
+  const res = await fetch(loginUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ username: vars.HST_USERNAME, password: vars.HST_PASSWORD }),
+  });
+  const contentType = res.headers.get("content-type") ?? "none";
+  const body = await readBody(res);
+  console.log(`POST ${loginUrl} → HTTP ${res.status}, content-type ${contentType}`);
+
+  if (body.html) {
+    console.log(`→ answered with HTML, not JSON. First 300 chars:\n${body.html}`);
+    console.log("→ Wrong URL. Grab the real one from F12 while you log in, and set HST_LOGIN_URL.");
+  } else {
+    const data = body.json?.data ?? {};
+    const issued = data.accessToken ?? data.token ?? null;
+    console.log(`message: ${body.json?.message ?? "(none)"}`);
+    console.log(`response keys: [${Object.keys(body.json ?? {}).join(", ")}]`);
+
+    if (issued) {
+      tokenReport("issued access token", issued);
+      console.log(`expires: ${data.expires ?? "absent"}`);
+      console.log("→ The ERP issues a session from username + password alone.");
+      console.log("   That is the permanent fix: the app stores the credentials");
+      console.log("   encrypted and logs itself in whenever the token dies.");
+    } else {
+      // Almost always a required verify/captcha field. Reporting it is the end
+      // of the road on purpose: a captcha is a deliberate "a human must do
+      // this", and the answer then is an API key from HST, not a way around it.
+      console.log("→ No token issued. If the message mentions a verify/captcha code, then a");
+      console.log("   human has to paste the session and the only permanent fix is asking HST");
+      console.log("   for an API key or a long-lived token.");
     }
   }
 }

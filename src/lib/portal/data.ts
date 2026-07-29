@@ -18,7 +18,12 @@
 
 import { createClient } from "@/lib/supabase/server";
 import { activeWorkspaceId } from "@/lib/portal/workspace";
-import type { AdAccount, Campaign, CreativeDelivery } from "@/lib/supabase/types";
+import type {
+  AdAccount,
+  Campaign,
+  CreativeDelivery,
+  CreativeSubmission,
+} from "@/lib/supabase/types";
 import { aggregateMetrics, mockCampaigns, mockDeliveries, mockMetrics } from "@/lib/portal/mock";
 import type { MetricSet } from "@/lib/portal/mock";
 import type { RangeSelection } from "@/lib/portal/range";
@@ -177,6 +182,22 @@ export async function fetchCreativeAssets(account: AdAccount): Promise<CreativeA
     }
     return [];
   }
+}
+
+/**
+ * Creatives this store's people have handed in (migration 0018).
+ *
+ * No mock fallback and no Google involvement: these are the client's own rows,
+ * so an empty list is the truth and always has been.
+ */
+export async function fetchCreativeSubmissions(accountId: string): Promise<CreativeSubmission[]> {
+  const supabase = await createClient();
+  const { data } = await supabase
+    .from("creative_submissions")
+    .select("*")
+    .eq("ad_account_id", accountId)
+    .order("created_at", { ascending: false });
+  return (data as CreativeSubmission[] | null) ?? [];
 }
 
 export async function fetchDeliveries(accountId: string): Promise<CreativeDelivery[]> {

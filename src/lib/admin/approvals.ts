@@ -4,6 +4,8 @@ export type PendingCounts = {
   clients: number;
   accounts: number;
   requests: number;
+  /** Creatives clients handed in that nobody has reviewed (migration 0018). */
+  creatives: number;
   total: number;
 };
 
@@ -17,7 +19,7 @@ export type PendingCounts = {
 export async function fetchPendingCounts(): Promise<PendingCounts> {
   const supabase = await createClient();
 
-  const [clients, accounts, requests] = await Promise.all([
+  const [clients, accounts, requests, creatives] = await Promise.all([
     supabase
       .from("portal_clients")
       .select("id", { count: "exact", head: true })
@@ -30,13 +32,21 @@ export async function fetchPendingCounts(): Promise<PendingCounts> {
       .from("account_requests")
       .select("id", { count: "exact", head: true })
       .eq("status", "pending"),
+    supabase
+      .from("creative_submissions")
+      .select("id", { count: "exact", head: true })
+      .eq("status", "new"),
   ]);
 
   const counts = {
     clients: clients.count ?? 0,
     accounts: accounts.count ?? 0,
     requests: requests.count ?? 0,
+    creatives: creatives.count ?? 0,
   };
 
-  return { ...counts, total: counts.clients + counts.accounts + counts.requests };
+  return {
+    ...counts,
+    total: counts.clients + counts.accounts + counts.requests + counts.creatives,
+  };
 }

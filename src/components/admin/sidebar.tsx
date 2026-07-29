@@ -3,6 +3,7 @@
 import { usePathname } from "next/navigation";
 import {
   BarChart3,
+  Clapperboard,
   LayoutGrid,
   Receipt,
   Settings,
@@ -49,6 +50,9 @@ const NAV_GROUPS: Group[] = [
     label: (d) => d.nav.groupGrowth,
     items: [
       { href: "/admin/clients", icon: UserCheck, label: (d) => d.nav.clients },
+      // Next to Campaigns on purpose: the creatives clients hand in are the raw
+      // material for the screen right below it.
+      { href: "/admin/creatives", icon: Clapperboard, label: (d) => d.nav.creatives },
       { href: "/admin/campaigns", icon: Target, label: (d) => d.nav.campaigns },
       { href: "/admin/leads", icon: Users, label: (d) => d.nav.leads },
       { href: "/admin/analytics", icon: BarChart3, label: (d) => d.nav.analytics },
@@ -67,9 +71,12 @@ const FOOTER_ITEMS: Item[] = [
 
 export function Sidebar({
   pendingClients = 0,
+  newCreatives = 0,
   onNavigate,
 }: {
   pendingClients?: number;
+  /** Client submissions nobody has reviewed yet (migration 0018). */
+  newCreatives?: number;
   onNavigate?: () => void;
 }) {
   const pathname = usePathname();
@@ -80,24 +87,32 @@ export function Sidebar({
   const isActive = (href: string) =>
     href === "/admin" ? pathname === href : pathname.startsWith(href);
 
-  const renderItem = ({ href, label, icon }: Item) => (
-    <SideNavItem
-      key={href}
-      href={href}
-      icon={icon}
-      label={label(d)}
-      active={isActive(href)}
-      onNavigate={onNavigate}
-      // Clients is where approvals are handled, so it carries the count.
-      trailing={
-        href === "/admin/clients" && pendingClients > 0 ? (
-          <span className="flex min-w-[18px] items-center justify-center rounded-full bg-[var(--accent-gold)] px-1 text-[10px] font-semibold text-[var(--bg-base)]">
-            {pendingClients > 9 ? "9+" : pendingClients}
-          </span>
-        ) : undefined
-      }
-    />
-  );
+  // Counts live on the screen that clears them: approvals on Clients, unreviewed
+  // submissions on Creatives.
+  const count = (href: string) =>
+    href === "/admin/clients" ? pendingClients : href === "/admin/creatives" ? newCreatives : 0;
+
+  const renderItem = ({ href, label, icon }: Item) => {
+    const badge = count(href);
+
+    return (
+      <SideNavItem
+        key={href}
+        href={href}
+        icon={icon}
+        label={label(d)}
+        active={isActive(href)}
+        onNavigate={onNavigate}
+        trailing={
+          badge > 0 ? (
+            <span className="flex min-w-[18px] items-center justify-center rounded-full bg-[var(--accent-gold)] px-1 text-[10px] font-semibold text-[var(--bg-base)]">
+              {badge > 9 ? "9+" : badge}
+            </span>
+          ) : undefined
+        }
+      />
+    );
+  };
 
   return (
     <SideNav label={d.nav.mainNav}>
