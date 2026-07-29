@@ -133,6 +133,18 @@ export function HstView({ overview }: { overview: HstOverview }) {
 
   const settled = overview.total > 0 ? overview.paid / overview.total : 0;
 
+  /**
+   * The sync has stopped landing.
+   *
+   * The hourly cron re-books HST every hour, so anything past a day means it is
+   * failing — almost always an ERP session that could not renew itself. A stale
+   * timestamp in the subtitle was technically already saying this, and it went
+   * unnoticed for weeks, because a commission figure that stopped growing looks
+   * exactly like a commission figure that grew by nothing.
+   */
+  const stale = overview.hoursSinceSync !== null && overview.hoursSinceSync > 26;
+  const staleDays = Math.floor((overview.hoursSinceSync ?? 0) / 24);
+
   return (
     <PageContainer
       title="HST"
@@ -158,6 +170,15 @@ export function HstView({ overview }: { overview: HstOverview }) {
 
       <div className="space-y-4">
         {notice && <FormAlert tone="success">{notice}</FormAlert>}
+
+        {stale && (
+          <FormAlert>
+            {staleDays >= 1
+              ? `No HST commission has been booked for ${staleDays} day${staleDays === 1 ? "" : "s"} — the ERP session has most likely expired.`
+              : "The last HST sync is over a day old — the ERP session has most likely expired."}{" "}
+            Hit “Sync now” to see the exact error, and paste a fresh login below if it asks for one.
+          </FormAlert>
+        )}
 
         {overview.paymentsUnavailable && (
           <FormAlert>

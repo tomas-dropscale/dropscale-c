@@ -34,6 +34,20 @@ const DELETE_CHUNK = 200;
 
 let lastRunAt = 0;
 
+/**
+ * How a sync gets at the database.
+ *
+ * A page load passes nothing and rides the admin's own session. The hourly cron
+ * has no session at all, so it passes the service-role client — `commissions`,
+ * `hst_integration` and `revenue_sources` are admin-only under RLS, and without
+ * it every read would come back empty and the sync would "succeed" over nothing.
+ */
+export type HstSyncOpts = {
+  /** Ignore both throttles — an explicit "do it now". */
+  force?: boolean;
+  client?: Supabase;
+};
+
 export class HstError extends Error {
   constructor(message: string) {
     super(message);
@@ -413,10 +427,10 @@ async function deleteRowsById(
  * swallowed: every write here is checked, because a sync that says "ok" over an
  * empty ledger is worse than one that says why it stopped.
  */
-export async function syncHstCommission(opts?: { force?: boolean }): Promise<HstSyncResult> {
+export async function syncHstCommission(opts?: HstSyncOpts): Promise<HstSyncResult> {
   if (!opts?.force && Date.now() - lastRunAt < THROTTLE_MS) return { ok: true, skipped: true };
 
-  const supabase = await createClient();
+  const supabase = opts?.client ?? (await createClient());
 
   // Cross-instance throttle. The per-isolate memo above is useless on a
   // serverless runtime, where a fresh isolate starts with lastRunAt = 0 and
@@ -585,6 +599,13 @@ export type HstOverview = {
   firstDay: string | null;
   lastDay: string | null;
   lastSyncedAt: string | null;
+  /**
+   * Whole hours since the last successful sync, or null if there has never been
+   * one. Derived here rather than in the view because the view is a client
+   * component: `Date.now()` during render is impure, and a "is this stale"
+   * answer that changes on every re-render is not one to build a warning on.
+   */
+  hoursSinceSync: number | null;
   /** migration 0012 hasn't been run — the page says so instead of half-working. */
   paymentsUnavailable: boolean;
 };
@@ -604,6 +625,11 @@ export async function fetchHstOverview(): Promise<HstOverview> {
     supabase.from("hst_payments").select("*").order("paid_on", { ascending: false }),
   ]);
 
+  const lastSyncedAt = config?.last_synced_at ?? null;
+  const hoursSinceSync = lastSyncedAt
+    ? Math.floor((Date.now() - new Date(lastSyncedAt).getTime()) / (60 * 60 * 1000))
+    : null;
+
   const empty: HstOverview = {
     currency: HST_CURRENCY,
     total: 0,
@@ -616,7 +642,8 @@ export async function fetchHstOverview(): Promise<HstOverview> {
     entryCount: 0,
     firstDay: null,
     lastDay: null,
-    lastSyncedAt: config?.last_synced_at ?? null,
+    lastSyncedAt,
+    hoursSinceSync,
     paymentsUnavailable: Boolean(payments.error),
   };
   if (!source) return empty;
@@ -676,7 +703,8 @@ export async function fetchHstOverview(): Promise<HstOverview> {
     entryCount: rows.length,
     firstDay: days.length > 0 ? days[days.length - 1].day : null,
     lastDay: days.length > 0 ? days[0].day : null,
-    lastSyncedAt: config?.last_synced_at ?? null,
+    lastSyncedAt,
+    hoursSinceSync,
     paymentsUnavailable: Boolean(payments.error),
   };
 }

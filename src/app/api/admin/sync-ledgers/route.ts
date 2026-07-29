@@ -7,9 +7,10 @@ import {
   syncCommissionLedger,
   syncRevenueShareLedger,
 } from "@/lib/admin/commission-sync";
+import { syncHstCommission, type HstSyncResult } from "@/lib/admin/hst";
 
 /**
- * POST — book agency commission from Google NOW, ignoring the page-load throttle.
+ * POST — book every ledger NOW, ignoring the page-load throttles.
  *
  * One route, two callers, because they want exactly the same work done:
  *   · the "Sync now" button on the overview — an admin session, so the sync
@@ -20,6 +21,11 @@ import {
  * The point of forcing is agreement: /admin/campaigns computes commission live
  * from Google on every render, while the overview reads the ledger. Without a
  * way to say "now", the two figures can only agree by luck.
+ *
+ * HST rides along here rather than having a cron of its own. It used to run ONLY
+ * when a human opened /admin/hst, which meant the supplier's commission stopped
+ * at whatever day the last visit happened to be — for weeks, silently, since
+ * nothing about a stale figure looks any different from a correct one.
  */
 export async function POST(request: NextRequest) {
   const secret = process.env.CRON_SECRET;
@@ -53,7 +59,20 @@ async function run(opts: Parameters<typeof syncCommissionLedger>[0]) {
     await syncCommissionLedger(opts);
     await syncRevenueShareLedger(opts);
 
-    return NextResponse.json({ ok: true, syncedAt: new Date().toISOString() });
+    // HST last, and never fatal: it hangs off a third-party ERP session that
+    // expires, and a dead HST token must not stop Google's commission from
+    // being booked. The outcome travels in the response instead, so the cron
+    // log says WHY the supplier's number stopped moving — the previous failure
+    // mode was that nobody found out at all.
+    let hst: HstSyncResult;
+    try {
+      hst = await syncHstCommission({ ...opts, force: true });
+    } catch (error) {
+      hst = { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+    if (!hst.ok) console.error("HST sync failed during ledger sync:", hst.error);
+
+    return NextResponse.json({ ok: true, syncedAt: new Date().toISOString(), hst });
   } catch (error) {
     console.error("Ledger sync failed:", error);
     return NextResponse.json({ error: "Could not sync the ledgers." }, { status: 500 });
