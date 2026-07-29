@@ -47,8 +47,10 @@ export function CreativeSubmissions({
 
   const [title, setTitle] = React.useState("");
   const [url, setUrl] = React.useState("");
+  const [collectionUrl, setCollectionUrl] = React.useState("");
   const [notes, setNotes] = React.useState("");
   const [urlError, setUrlError] = React.useState<string | null>(null);
+  const [collectionError, setCollectionError] = React.useState<string | null>(null);
   const [saving, setSaving] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [sent, setSent] = React.useState(false);
@@ -63,11 +65,16 @@ export function CreativeSubmissions({
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     setUrlError(null);
+    setCollectionError(null);
     setError(null);
     setSent(false);
 
     if (!LINK.test(url.trim())) {
       setUrlError(d.submissions.urlInvalid);
+      return;
+    }
+    if (!LINK.test(collectionUrl.trim())) {
+      setCollectionError(d.submissions.urlInvalid);
       return;
     }
 
@@ -77,6 +84,7 @@ export function CreativeSubmissions({
       submitted_by: submittedBy,
       title: title.trim(),
       url: url.trim(),
+      collection_url: collectionUrl.trim(),
       notes: notes.trim() || null,
     });
     setSaving(false);
@@ -88,6 +96,7 @@ export function CreativeSubmissions({
 
     setTitle("");
     setUrl("");
+    setCollectionUrl("");
     setNotes("");
     setSent(true);
     router.refresh();
@@ -159,6 +168,23 @@ export function CreativeSubmissions({
           </div>
 
           <div className="space-y-1.5">
+            <Label htmlFor="creative-collection">{d.submissions.collectionLabel}</Label>
+            <Input
+              id="creative-collection"
+              type="url"
+              inputMode="url"
+              placeholder={d.submissions.collectionPlaceholder}
+              aria-invalid={Boolean(collectionError)}
+              value={collectionUrl}
+              onChange={(event) => setCollectionUrl(event.target.value)}
+            />
+            <FieldError>{collectionError}</FieldError>
+            <p className="text-[11.5px] leading-relaxed text-[var(--text-muted)]">
+              {d.submissions.collectionHelp}
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
             <Label htmlFor="creative-notes">{d.submissions.notesLabel}</Label>
             <textarea
               id="creative-notes"
@@ -180,7 +206,7 @@ export function CreativeSubmissions({
             variant="primary"
             size="lg"
             loading={saving}
-            disabled={!title.trim() || !url.trim()}
+            disabled={!title.trim() || !url.trim() || !collectionUrl.trim()}
           >
             {d.submissions.send}
           </Button>
@@ -205,6 +231,16 @@ export function CreativeSubmissions({
                   <p className="text-[11.5px] text-[var(--text-muted)]">
                     {day(submission.created_at)}
                   </p>
+                  {submission.collection_url && (
+                    <a
+                      href={submission.collection_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="transition-smooth mt-0.5 block truncate text-[11.5px] text-[var(--text-secondary)] hover:text-[var(--accent-gold-strong)]"
+                    >
+                      {submission.collection_url}
+                    </a>
+                  )}
                   {submission.notes && (
                     <p className="mt-1 text-[12px] leading-relaxed text-[var(--text-secondary)]">
                       {submission.notes}

@@ -3,7 +3,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Check, ExternalLink, Store, X } from "lucide-react";
+import { AlertTriangle, Check, Copy, ExternalLink, Store, X } from "lucide-react";
 
 import type { CreativeInbox } from "@/lib/admin/creatives";
 import type { CreativeSubmission, CreativeSubmissionStatus } from "@/lib/supabase/types";
@@ -12,6 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ErrorBanner } from "@/components/finance/finance-ui";
 import { createClient } from "@/lib/supabase/client";
+import { collectionHandleFromUrl } from "@/lib/finance/rev-share";
 import { cn } from "@/lib/utils";
 
 type Filter = CreativeSubmissionStatus | "all";
@@ -44,6 +45,60 @@ const STATUS_TONE: Record<CreativeSubmissionStatus, "neutral" | "gold" | "danger
  * longer belong in the list at all, and guessing that in the client would be
  * more code than re-reading the truth.
  */
+/**
+ * The collection this batch advertises, and whether it will actually bill.
+ *
+ * The handle is read with the SAME function the campaign-name parser uses
+ * (rev-share.ts), so a link that shows a warning here is exactly a link that
+ * would attribute nothing later — and a rev-share collection billing zero looks
+ * identical to a collection that sold nothing, which is why it is worth saying
+ * now rather than discovering at invoice time.
+ */
+function CollectionLine({ url }: { url: string }) {
+  const handle = collectionHandleFromUrl(url);
+  const [copied, setCopied] = React.useState(false);
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard denied (insecure context, permissions) — the link is right
+      // there to select by hand, so this needs no error of its own.
+    }
+  }
+
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-1.5">
+      <a
+        href={url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="transition-smooth max-w-full truncate text-[12px] text-[var(--text-secondary)] hover:text-[var(--accent-gold-strong)]"
+      >
+        {handle ? `/collections/${handle}` : url}
+      </a>
+
+      <button
+        type="button"
+        onClick={() => void copy()}
+        aria-label="Copy collection link"
+        className="transition-smooth rounded p-1 text-[var(--text-muted)] hover:bg-[var(--bg-panel-hover)] hover:text-[var(--text-primary)]"
+      >
+        {copied ? <Check className="size-3.5" aria-hidden /> : <Copy className="size-3.5" aria-hidden />}
+      </button>
+
+      {!handle && (
+        <span className="inline-flex items-center gap-1 text-[11.5px] text-[var(--warning-orange)]">
+          <AlertTriangle className="size-3.5" aria-hidden />
+          no /collections/ handle — rev share would bill nothing
+        </span>
+      )}
+    </div>
+  );
+}
+
 export function CreativeInboxView({
   inbox,
   status,
@@ -160,6 +215,13 @@ export function CreativeInboxView({
                               inbox.submitterNames[submission.submitted_by] &&
                               ` · ${inbox.submitterNames[submission.submitted_by]}`}
                           </p>
+                          {/* The collection the campaign has to name. Copyable
+                              because it gets pasted straight into the campaign
+                              name, where rev-share reads the handle back out. */}
+                          {submission.collection_url && (
+                            <CollectionLine url={submission.collection_url} />
+                          )}
+
                           {submission.notes && (
                             <p className="mt-1 text-[12px] leading-relaxed text-[var(--text-secondary)]">
                               {submission.notes}

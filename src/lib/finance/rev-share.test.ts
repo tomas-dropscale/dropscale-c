@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  collectionHandleFromUrl,
   dealsFromCampaigns,
   normalizePath,
   orderRevShare,
@@ -12,6 +13,36 @@ import {
  * "<free text> <.../collections/HANDLE...> N%". These tests pin the parse and
  * the "only when it clearly encodes a deal" rule.
  */
+
+/**
+ * The same read, applied to a bare collection link a client typed into a
+ * creative submission (migration 0018). It has to agree with the campaign-name
+ * parse above, or the agency validates one thing and bills on another.
+ */
+describe("collectionHandleFromUrl", () => {
+  it("reads the handle, ignoring case, trailing slash and query", () => {
+    expect(collectionHandleFromUrl("https://shop.myshopify.com/collections/velas")).toBe("velas");
+    expect(collectionHandleFromUrl("https://loja.com/Collections/Summer-Sale/?page=2")).toBe(
+      "summer-sale",
+    );
+  });
+
+  it("decodes percent-escapes, like the campaign-name parse", () => {
+    expect(collectionHandleFromUrl("https://l.com/collections/v%C3%A9las")).toBe("vélas");
+  });
+
+  it("agrees with the campaign-name parse on the same URL", () => {
+    const url = "https://shop.myshopify.com/collections/velas";
+    expect(collectionHandleFromUrl(url)).toBe(parseRevShareCampaign(`Ad ${url} 5%`)?.handle);
+  });
+
+  it("null when there is no /collections/ segment — a link that bills nothing", () => {
+    expect(collectionHandleFromUrl("https://loja.com/products/vela-grande")).toBeNull();
+    expect(collectionHandleFromUrl("https://loja.com")).toBeNull();
+    expect(collectionHandleFromUrl("")).toBeNull();
+    expect(collectionHandleFromUrl(null)).toBeNull();
+  });
+});
 
 describe("parseRevShareCampaign", () => {
   it("reads the handle from the /collections/ URL and the trailing rate", () => {

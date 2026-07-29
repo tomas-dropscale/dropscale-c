@@ -28,6 +28,14 @@ create table if not exists public.creative_submissions (
   title text not null,
   -- Where it is. http/https only, enforced by the guard below.
   url text not null,
+  -- The Shopify collection these creatives advertise.
+  --
+  -- Not decoration: the campaign built from this batch carries the collection
+  -- URL in its NAME, which is how revenue share is attributed (migration 0010,
+  -- parsed by lib/finance/rev-share.ts). Asking the client for it here is what
+  -- stops somebody having to guess the handle later — a wrong handle bills
+  -- nothing and looks exactly like a collection that sold nothing.
+  collection_url text,
   -- Anything the team needs to know: which product, which angle, what to avoid.
   notes text,
 
@@ -41,6 +49,13 @@ create table if not exists public.creative_submissions (
 
   created_at timestamptz not null default now()
 );
+
+-- Added via alter as well as in the create above, so this migration is safe to
+-- re-run over a database that already has the earlier version of the table
+-- (`create table if not exists` would not add a column to it). Same reasoning
+-- as migration 0011.
+alter table public.creative_submissions
+  add column if not exists collection_url text;
 
 create index if not exists creative_submissions_account_idx
   on public.creative_submissions (ad_account_id, created_at desc);
@@ -108,12 +123,21 @@ as $$
 begin
   new.title := trim(new.title);
   new.url := trim(new.url);
+  new.collection_url := nullif(trim(coalesce(new.collection_url, '')), '');
 
   if new.title = '' then
     raise exception 'A submission needs a name.';
   end if;
   if new.url !~* '^https?://[^\s]+$' then
     raise exception 'The link has to start with http:// or https://';
+  end if;
+
+  -- Scheme-checked but NOT required to contain /collections/. A link that can't
+  -- be parsed into a handle is flagged in the admin inbox instead: the agency is
+  -- who needs to notice, and a client should never be blocked from handing work
+  -- in over the shape of a URL.
+  if new.collection_url is not null and new.collection_url !~* '^https?://[^\s]+$' then
+    raise exception 'The collection link has to start with http:// or https://';
   end if;
 
   -- Trusted contexts (SQL editor, migrations, service role) have no uid.

@@ -61,6 +61,30 @@ export function parseRevShareCampaign(name: string | null | undefined): RevShare
 }
 
 /**
+ * The collection handle in a bare URL — no rate involved.
+ *
+ * Same regex the campaign-name parser uses, so a collection link a client typed
+ * into a creative submission (migration 0018) is read exactly the way it will be
+ * read later out of the campaign name. Null when there is no /collections/
+ * segment, which is what lets the admin inbox flag a link that would attribute
+ * nothing.
+ */
+export function collectionHandleFromUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+
+  const match = COLLECTION_RE.exec(url);
+  if (!match) return null;
+
+  let handle = match[1].replace(/\/+$/, "").toLowerCase();
+  try {
+    handle = decodeURIComponent(handle);
+  } catch {
+    // Leave the raw handle if it isn't valid percent-encoding.
+  }
+  return handle || null;
+}
+
+/**
  * Parse a set of campaign names into the deals they encode, keyed by handle.
  * When two campaigns name the same collection, the higher rate wins — the
  * safest reading when a deal was renamed and both names briefly coexist.

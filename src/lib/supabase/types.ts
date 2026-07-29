@@ -331,6 +331,12 @@ export type CreativeSubmission = {
   submitted_by: string | null;
   title: string;
   url: string;
+  /**
+   * The Shopify collection these creatives advertise, as the client typed it.
+   * The campaign built from the batch carries this URL in its name, which is
+   * what attributes revenue share (migration 0010).
+   */
+  collection_url: string | null;
   notes: string | null;
   status: CreativeSubmissionStatus;
   review_notes: string | null;
@@ -1013,6 +1019,7 @@ export type Database = {
           CreativeSubmission,
           | "id"
           | "submitted_by"
+          | "collection_url"
           | "notes"
           | "status"
           | "review_notes"

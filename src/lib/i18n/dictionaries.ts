@@ -961,6 +961,10 @@ export const en = {
     namePlaceholder: "e.g. July — 5 UGC hooks",
     urlLabel: "Link to the folder",
     urlPlaceholder: "https://drive.google.com/…",
+    collectionLabel: "Collection these are for",
+    collectionPlaceholder: "https://yourstore.com/collections/…",
+    collectionHelp:
+      "The store page these creatives advertise. Copy it from your shop — it is what the campaign gets named after.",
     notesLabel: "Notes for the team",
     notesPlaceholder: "Which product, which angle, anything to avoid…",
     accessHint:
@@ -1949,6 +1953,10 @@ export const pt: Dictionary = {
     namePlaceholder: "ex. Julho — 5 hooks UGC",
     urlLabel: "Link da pasta",
     urlPlaceholder: "https://drive.google.com/…",
+    collectionLabel: "Collection a que se destinam",
+    collectionPlaceholder: "https://tualoja.com/collections/…",
+    collectionHelp:
+      "A página da loja que estes criativos anunciam. Copia-a da tua loja — é com base nela que a campanha é nomeada.",
     notesLabel: "Notas para a equipa",
     notesPlaceholder: "Que produto, que ângulo, o que evitar…",
     accessHint:
@@ -2918,6 +2926,10 @@ export const ptBR: Dictionary = {
     namePlaceholder: "ex. Julho — 5 hooks UGC",
     urlLabel: "Link da pasta",
     urlPlaceholder: "https://drive.google.com/…",
+    collectionLabel: "Collection a que se destinam",
+    collectionPlaceholder: "https://sualoja.com/collections/…",
+    collectionHelp:
+      "A página da loja que estes criativos anunciam. Copie da sua loja — é com base nela que a campanha é nomeada.",
     notesLabel: "Observações para a equipe",
     notesPlaceholder: "Qual produto, qual ângulo, o que evitar…",
     accessHint:
@@ -3889,6 +3901,10 @@ export const es: Dictionary = {
     namePlaceholder: "p. ej. Julio — 5 hooks UGC",
     urlLabel: "Enlace a la carpeta",
     urlPlaceholder: "https://drive.google.com/…",
+    collectionLabel: "Colección a la que van",
+    collectionPlaceholder: "https://tutienda.com/collections/…",
+    collectionHelp:
+      "La página de la tienda que anuncian estos creativos. Cópiala de tu tienda — es la base del nombre de la campaña.",
     notesLabel: "Notas para el equipo",
     notesPlaceholder: "Qué producto, qué ángulo, qué evitar…",
     accessHint:
@@ -4863,6 +4879,10 @@ export const fr: Dictionary = {
     namePlaceholder: "ex. Juillet — 5 hooks UGC",
     urlLabel: "Lien vers le dossier",
     urlPlaceholder: "https://drive.google.com/…",
+    collectionLabel: "Collection concernée",
+    collectionPlaceholder: "https://votreboutique.com/collections/…",
+    collectionHelp:
+      "La page boutique que ces créatifs mettent en avant. Copiez-la depuis votre boutique — c’est d’après elle que la campagne est nommée.",
     notesLabel: "Notes pour l’équipe",
     notesPlaceholder: "Quel produit, quel angle, ce qu’il faut éviter…",
     accessHint:
