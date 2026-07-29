@@ -451,6 +451,49 @@ export async function syncHstCommission(opts?: HstSyncOpts): Promise<HstSyncResu
   // broken upstream can't mean an HST fetch on every single page load.
   lastRunAt = Date.now();
 
+  const result = await runSync(supabase);
+  await recordAttempt(supabase, result);
+  return result;
+}
+
+/**
+ * Write down that an attempt happened, and what came of it (migration 0017).
+ *
+ * The whole reason this exists: an expired ERP session made every sync fail
+ * silently for weeks. The error was returned to the caller, and on a page load
+ * the caller is nobody. An attempt that leaves no trace is indistinguishable
+ * from a supplier who reported no commission.
+ */
+async function recordAttempt(supabase: Supabase, result: HstSyncResult): Promise<void> {
+  if (result.skipped) return;
+
+  const now = new Date().toISOString();
+  const { error } = await supabase
+    .from("hst_integration")
+    .update({
+      last_attempt_at: now,
+      last_error: result.ok ? null : (result.error ?? "Unknown failure."),
+      ...(result.ok ? { last_synced_at: now } : {}),
+    })
+    .eq("id", true);
+  if (!error) return;
+
+  // The health columns may not be there yet (0017 not applied). The success
+  // stamp still has to land — it is what the cross-instance throttle reads, and
+  // losing it would mean re-running the whole republish on every page view.
+  if (result.ok) {
+    const { error: stampError } = await supabase
+      .from("hst_integration")
+      .update({ last_synced_at: now })
+      .eq("id", true);
+    if (stampError) console.error("HST sync: last_synced_at not updated:", stampError.message);
+    return;
+  }
+  console.error("HST sync: attempt not recorded:", error.message);
+}
+
+/** The sync itself. Every exit is a result the caller records — never a throw. */
+async function runSync(supabase: Supabase): Promise<HstSyncResult> {
   let token: string;
   try {
     token = await ensureFreshToken(supabase);
@@ -560,12 +603,6 @@ export async function syncHstCommission(opts?: HstSyncOpts): Promise<HstSyncResu
     };
   }
 
-  const { error: stampError } = await supabase
-    .from("hst_integration")
-    .update({ last_synced_at: new Date().toISOString() })
-    .eq("id", true);
-  if (stampError) console.error("HST sync: last_synced_at not updated:", stampError.message);
-
   return {
     ok: true,
     total: grandTotal,
@@ -606,9 +643,48 @@ export type HstOverview = {
    * answer that changes on every re-render is not one to build a warning on.
    */
   hoursSinceSync: number | null;
+  /** When a sync was last ATTEMPTED, successful or not (migration 0017). */
+  lastAttemptAt: string | null;
+  /** Why the last attempt failed, or null when the last one worked. */
+  lastError: string | null;
   /** migration 0012 hasn't been run — the page says so instead of half-working. */
   paymentsUnavailable: boolean;
 };
+
+/**
+ * The config row's sync health, tolerating a database without migration 0017:
+ * the health columns are read in the same round trip when they exist, and the
+ * timestamp alone is re-read when they don't. Selecting them blindly would fail
+ * the whole query and lose last_synced_at with it.
+ */
+async function fetchSyncHealth(supabase: Supabase): Promise<{
+  lastSyncedAt: string | null;
+  lastAttemptAt: string | null;
+  lastError: string | null;
+}> {
+  const { data, error } = await supabase
+    .from("hst_integration")
+    .select("last_synced_at, last_attempt_at, last_error")
+    .maybeSingle();
+
+  if (!error) {
+    return {
+      lastSyncedAt: data?.last_synced_at ?? null,
+      lastAttemptAt: data?.last_attempt_at ?? null,
+      lastError: data?.last_error ?? null,
+    };
+  }
+
+  const { data: fallback } = await supabase
+    .from("hst_integration")
+    .select("last_synced_at")
+    .maybeSingle();
+  return {
+    lastSyncedAt: fallback?.last_synced_at ?? null,
+    lastAttemptAt: null,
+    lastError: null,
+  };
+}
 
 /**
  * Everything the HST page shows, in one pass over the source's ledger rows.
@@ -619,13 +695,13 @@ export type HstOverview = {
 export async function fetchHstOverview(): Promise<HstOverview> {
   const supabase = await createClient();
 
-  const [{ data: source }, { data: config }, payments] = await Promise.all([
+  const [{ data: source }, health, payments] = await Promise.all([
     supabase.from("revenue_sources").select("id").eq("name", HST_SOURCE).maybeSingle(),
-    supabase.from("hst_integration").select("last_synced_at").maybeSingle(),
+    fetchSyncHealth(supabase),
     supabase.from("hst_payments").select("*").order("paid_on", { ascending: false }),
   ]);
 
-  const lastSyncedAt = config?.last_synced_at ?? null;
+  const { lastSyncedAt, lastAttemptAt, lastError } = health;
   const hoursSinceSync = lastSyncedAt
     ? Math.floor((Date.now() - new Date(lastSyncedAt).getTime()) / (60 * 60 * 1000))
     : null;
@@ -644,6 +720,8 @@ export async function fetchHstOverview(): Promise<HstOverview> {
     lastDay: null,
     lastSyncedAt,
     hoursSinceSync,
+    lastAttemptAt,
+    lastError,
     paymentsUnavailable: Boolean(payments.error),
   };
   if (!source) return empty;
@@ -705,6 +783,8 @@ export async function fetchHstOverview(): Promise<HstOverview> {
     lastDay: days.length > 0 ? days[0].day : null,
     lastSyncedAt,
     hoursSinceSync,
+    lastAttemptAt,
+    lastError,
     paymentsUnavailable: Boolean(payments.error),
   };
 }

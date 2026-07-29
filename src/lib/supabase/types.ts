@@ -364,7 +364,13 @@ export type HstIntegration = {
   access_token: string | null;
   refresh_token: string | null;
   token_expires_at: string | null;
+  /** Last sync that actually landed rows. Drives the cross-instance throttle. */
   last_synced_at: string | null;
+  // Sync health (migration 0017). last_attempt_at moves on every attempt, so
+  // "the cron never ran" and "the cron ran and HST refused" stop looking alike;
+  // last_error is the reason, cleared on success, and is shown on the HST page.
+  last_attempt_at: string | null;
+  last_error: string | null;
   updated_at: string;
 };
 
@@ -964,6 +970,8 @@ export type Database = {
           | "refresh_token"
           | "token_expires_at"
           | "last_synced_at"
+          | "last_attempt_at"
+          | "last_error"
           | "updated_at"
         >;
         Update: Partial<HstIntegration>;

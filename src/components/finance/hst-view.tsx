@@ -171,7 +171,20 @@ export function HstView({ overview }: { overview: HstOverview }) {
       <div className="space-y-4">
         {notice && <FormAlert tone="success">{notice}</FormAlert>}
 
-        {stale && (
+        {/* The reason, when the database has one (migration 0017). Nothing else
+            on this page could tell you a sync had been REFUSED rather than
+            simply having nothing to report. */}
+        {overview.lastError && (
+          <FormAlert>
+            The last HST sync failed: {overview.lastError}
+            {overview.lastAttemptAt &&
+              ` (tried ${new Date(overview.lastAttemptAt).toLocaleString(intl)})`}
+          </FormAlert>
+        )}
+
+        {/* Stale with no recorded reason — either 0017 isn't applied, or nothing
+            is triggering a sync at all. Both need a human, so say so either way. */}
+        {stale && !overview.lastError && (
           <FormAlert>
             {staleDays >= 1
               ? `No HST commission has been booked for ${staleDays} day${staleDays === 1 ? "" : "s"} — the ERP session has most likely expired.`
