@@ -5,6 +5,7 @@ import { PageContainer } from "@/components/ui/page-container";
 import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { CommissionRate } from "@/components/admin/commission-rate";
+import { StoreName } from "@/components/admin/store-name";
 import { ClientDashboardDialog } from "@/components/admin/client-dashboard-dialog";
 import { RangePicker } from "@/components/portal/range-picker";
 import { fetchAdminCampaigns } from "@/lib/admin/campaigns";
@@ -179,13 +180,17 @@ export default async function AdminCampaignsPage({
                     </span>
                   </summary>
 
-                  {/* The rate control lives here, not in the summary: a click on
-                      it inside <summary> would toggle the panel shut. */}
-                  <div className="px-5 pt-1 pb-2">
+                  {/* These controls live here, not in the summary: a click on
+                      one inside <summary> would toggle the panel shut. */}
+                  <div className="flex flex-wrap items-start gap-2 px-5 pt-1 pb-2">
                     <CommissionRate
                       accountId={entry.account.id}
                       rate={Number(entry.account.commission_rate)}
                       revenueShareEnabled={entry.account.revenue_share_enabled}
+                    />
+                    <StoreName
+                      accountId={entry.account.id}
+                      name={entry.account.store_name}
                     />
                   </div>
 
