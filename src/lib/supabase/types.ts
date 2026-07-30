@@ -264,6 +264,18 @@ export type BillingProfile = {
   profile_type: BillingProfileType;
   currency: string;
   available_budget: number | null;
+  // What the invoice has to show (migration 0020). Separate from the portal
+  // login's name: the person signing in is often not the entity being billed.
+  billing_name: string | null;
+  /** VAT / company number, printed as an invoice custom field. */
+  tax_id: string | null;
+  address_line1: string | null;
+  address_line2: string | null;
+  address_city: string | null;
+  address_postal_code: string | null;
+  address_state: string | null;
+  /** ISO 3166-1 alpha-2, upper-case — the shape Stripe requires. */
+  address_country: string | null;
   updated_at: string;
 };
 
@@ -780,7 +792,21 @@ export type Database = {
       };
       billing_profiles: {
         Row: Row<BillingProfile>;
-        Insert: Insert<BillingProfile, "profile_type" | "currency" | "available_budget" | "updated_at">;
+        Insert: Insert<
+          BillingProfile,
+          | "profile_type"
+          | "currency"
+          | "available_budget"
+          | "billing_name"
+          | "tax_id"
+          | "address_line1"
+          | "address_line2"
+          | "address_city"
+          | "address_postal_code"
+          | "address_state"
+          | "address_country"
+          | "updated_at"
+        >;
         Update: Partial<BillingProfile>;
         Relationships: [
           {

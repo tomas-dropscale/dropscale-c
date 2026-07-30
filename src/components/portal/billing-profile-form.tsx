@@ -47,6 +47,23 @@ export function BillingProfileForm({
   );
   const [fullName, setFullName] = React.useState(viewer.full_name);
   const [nameError, setNameError] = React.useState<string | null>(null);
+
+  // Invoice identity (migration 0020). One state object rather than eight
+  // useStates — every field is the same kind of thing and they all save together.
+  const [invoice, setInvoice] = React.useState({
+    billingName: profile?.billing_name ?? "",
+    taxId: profile?.tax_id ?? "",
+    line1: profile?.address_line1 ?? "",
+    line2: profile?.address_line2 ?? "",
+    city: profile?.address_city ?? "",
+    postalCode: profile?.address_postal_code ?? "",
+    state: profile?.address_state ?? "",
+    country: profile?.address_country ?? "",
+  });
+  const [countryError, setCountryError] = React.useState<string | null>(null);
+
+  const setInvoiceField = (key: keyof typeof invoice) => (value: string) =>
+    setInvoice((current) => ({ ...current, [key]: value }));
   const [saving, setSaving] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [saved, setSaved] = React.useState(false);
@@ -66,7 +83,16 @@ export function BillingProfileForm({
       return;
     }
 
+    // Two letters or nothing: Stripe rejects anything else, and it does so at
+    // invoice time — days later, in a cron, where nobody would see it.
+    const country = invoice.country.trim().toUpperCase();
+    if (country !== "" && !/^[A-Z]{2}$/.test(country)) {
+      setCountryError(d.billing.countryInvalid);
+      return;
+    }
+
     setNameError(null);
+    setCountryError(null);
     setSaving(true);
     setError(null);
     setSaved(false);
@@ -88,11 +114,23 @@ export function BillingProfileForm({
       }
     }
 
+    // Empty strings go in as null so a half-filled profile does not put blank
+    // lines on an invoice.
+    const orNull = (value: string) => value.trim() || null;
+
     const { error: upsertError } = await supabase.from("billing_profiles").upsert({
       client_id: workspaceId,
       profile_type: profileType,
       currency,
       available_budget: budget.trim() === "" ? null : Number(budget),
+      billing_name: orNull(invoice.billingName),
+      tax_id: orNull(invoice.taxId),
+      address_line1: orNull(invoice.line1),
+      address_line2: orNull(invoice.line2),
+      address_city: orNull(invoice.city),
+      address_postal_code: orNull(invoice.postalCode),
+      address_state: orNull(invoice.state),
+      address_country: country || null,
       updated_at: new Date().toISOString(),
     });
 
@@ -233,6 +271,109 @@ export function BillingProfileForm({
           <p className="text-[12px] leading-relaxed text-[var(--text-muted)]">
             {d.billing.budgetHelp}
           </p>
+        </div>
+      </section>
+
+      {/* INVOICE DETAILS — what the PDF has to show. Empty is allowed: the
+          invoice still goes out, just with the portal name and no address. */}
+      <section className="space-y-3">
+        <p className="label-caps">{d.billing.invoiceDetails}</p>
+        <p className="text-[12px] leading-relaxed text-[var(--text-secondary)]">
+          {d.billing.invoiceDetailsHelp}
+        </p>
+
+        <div className="space-y-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div className="space-y-1.5">
+              <Label htmlFor="billing-name">{d.billing.billingName}</Label>
+              <Input
+                id="billing-name"
+                value={invoice.billingName}
+                onChange={(event) => setInvoiceField("billingName")(event.target.value)}
+                placeholder={d.billing.billingNamePlaceholder}
+                maxLength={120}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="billing-tax">{d.billing.taxId}</Label>
+              <Input
+                id="billing-tax"
+                value={invoice.taxId}
+                onChange={(event) => setInvoiceField("taxId")(event.target.value)}
+                placeholder={d.billing.taxIdPlaceholder}
+                maxLength={30}
+              />
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="billing-line1">{d.billing.addressLine1}</Label>
+            <Input
+              id="billing-line1"
+              value={invoice.line1}
+              onChange={(event) => setInvoiceField("line1")(event.target.value)}
+              placeholder={d.billing.addressLine1Placeholder}
+              autoComplete="address-line1"
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="billing-line2">{d.billing.addressLine2}</Label>
+            <Input
+              id="billing-line2"
+              value={invoice.line2}
+              onChange={(event) => setInvoiceField("line2")(event.target.value)}
+              placeholder={d.billing.addressLine2Placeholder}
+              autoComplete="address-line2"
+            />
+          </div>
+
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div className="space-y-1.5">
+              <Label htmlFor="billing-postal">{d.billing.postalCode}</Label>
+              <Input
+                id="billing-postal"
+                value={invoice.postalCode}
+                onChange={(event) => setInvoiceField("postalCode")(event.target.value)}
+                autoComplete="postal-code"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="billing-city">{d.billing.city}</Label>
+              <Input
+                id="billing-city"
+                value={invoice.city}
+                onChange={(event) => setInvoiceField("city")(event.target.value)}
+                autoComplete="address-level2"
+              />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div className="space-y-1.5">
+              <Label htmlFor="billing-state">{d.billing.state}</Label>
+              <Input
+                id="billing-state"
+                value={invoice.state}
+                onChange={(event) => setInvoiceField("state")(event.target.value)}
+                autoComplete="address-level1"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="billing-country">{d.billing.country}</Label>
+              <Input
+                id="billing-country"
+                value={invoice.country}
+                onChange={(event) => setInvoiceField("country")(event.target.value.toUpperCase())}
+                placeholder="PT"
+                maxLength={2}
+                aria-invalid={Boolean(countryError)}
+                autoComplete="country"
+                className="uppercase"
+              />
+              <FieldError>{countryError}</FieldError>
+            </div>
+          </div>
         </div>
       </section>
 

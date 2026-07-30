@@ -33,6 +33,7 @@ import {
   getInvoice,
   stripeConfigured,
   StripeError,
+  updateCustomerBilling,
 } from "@/lib/stripe/client";
 import type { AdAccount, Database, Invoice, InvoiceLine } from "@/lib/supabase/types";
 import {
@@ -194,17 +195,45 @@ async function pushToStripe(supabase: Supabase, invoice: Invoice): Promise<Invoi
     .maybeSingle();
   if (!client) return invoice;
 
+  // What the client asked their invoice to say (migration 0020). Read at issue
+  // time, so details entered today reach Monday's invoice — and so a customer
+  // created before any of this existed still gets them.
+  const { data: profile } = await supabase
+    .from("billing_profiles")
+    // One unbroken literal: postgrest-js infers the row type from this string,
+    // and a concatenation defeats that and lands you with GenericStringError.
+    .select("billing_name, tax_id, address_line1, address_line2, address_city, address_postal_code, address_state, address_country")
+    .eq("client_id", invoice.client_id)
+    .maybeSingle();
+
+  const identity = {
+    name: profile?.billing_name ?? null,
+    address: {
+      line1: profile?.address_line1 ?? null,
+      line2: profile?.address_line2 ?? null,
+      city: profile?.address_city ?? null,
+      postal_code: profile?.address_postal_code ?? null,
+      state: profile?.address_state ?? null,
+      country: profile?.address_country ?? null,
+    },
+  };
+
   let customerId = client.stripe_customer_id;
   if (!customerId) {
     customerId = await createCustomer({
       email: client.email,
       name: client.full_name,
       clientId: client.id,
+      identity,
     });
     await supabase
       .from("portal_clients")
       .update({ stripe_customer_id: customerId })
       .eq("id", client.id);
+  } else {
+    // Re-asserted every time rather than only on save: this is the one moment
+    // we know the invoice is about to be printed.
+    await updateCustomerBilling(customerId, identity);
   }
 
   // A saved card means the week settles itself; without one the invoice goes
@@ -219,6 +248,7 @@ async function pushToStripe(supabase: Supabase, invoice: Invoice): Promise<Invoi
     description: `Dropscale — ad spend and management, week of ${invoice.period_start} to ${invoice.period_end}`,
     invoiceId: invoice.id,
     autoCharge,
+    taxId: profile?.tax_id ?? null,
   });
 
   const { data: updated } = await supabase

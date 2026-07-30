@@ -13,22 +13,13 @@ import { Button } from "@/components/ui/button";
 import { ErrorBanner } from "@/components/finance/finance-ui";
 import { createClient } from "@/lib/supabase/client";
 import { collectionHandleFromUrl } from "@/lib/finance/rev-share";
+import { fmt } from "@/lib/i18n";
+import { useI18n } from "@/lib/i18n/provider";
 import { cn } from "@/lib/utils";
 
 type Filter = CreativeSubmissionStatus | "all";
 
-const FILTERS: { value: Filter; label: string }[] = [
-  { value: "all", label: "All" },
-  { value: "new", label: "New" },
-  { value: "in_use", label: "In use" },
-  { value: "rejected", label: "Rejected" },
-];
-
-const STATUS_LABEL: Record<CreativeSubmissionStatus, string> = {
-  new: "New",
-  in_use: "In use",
-  rejected: "Rejected",
-};
+const FILTER_ORDER: Filter[] = ["all", "new", "in_use", "rejected"];
 
 const STATUS_TONE: Record<CreativeSubmissionStatus, "neutral" | "gold" | "danger"> = {
   new: "neutral",
@@ -55,6 +46,7 @@ const STATUS_TONE: Record<CreativeSubmissionStatus, "neutral" | "gold" | "danger
  * now rather than discovering at invoice time.
  */
 function CollectionLine({ url }: { url: string }) {
+  const { d } = useI18n();
   const handle = collectionHandleFromUrl(url);
   const [copied, setCopied] = React.useState(false);
 
@@ -83,7 +75,7 @@ function CollectionLine({ url }: { url: string }) {
       <button
         type="button"
         onClick={() => void copy()}
-        aria-label="Copy collection link"
+        aria-label={d.creativeInbox.copyCollection}
         className="transition-smooth rounded p-1 text-[var(--text-muted)] hover:bg-[var(--bg-panel-hover)] hover:text-[var(--text-primary)]"
       >
         {copied ? <Check className="size-3.5" aria-hidden /> : <Copy className="size-3.5" aria-hidden />}
@@ -92,7 +84,7 @@ function CollectionLine({ url }: { url: string }) {
       {!handle && (
         <span className="inline-flex items-center gap-1 text-[11.5px] text-[var(--warning-orange)]">
           <AlertTriangle className="size-3.5" aria-hidden />
-          no /collections/ handle — rev share would bill nothing
+          {d.creativeInbox.noHandle}
         </span>
       )}
     </div>
@@ -109,14 +101,28 @@ export function CreativeInboxView({
   adminId: string;
 }) {
   const router = useRouter();
+  const { d } = useI18n();
   const [error, setError] = React.useState<string | null>(null);
   const [busyId, setBusyId] = React.useState<string | null>(null);
+
+  const statusLabel: Record<CreativeSubmissionStatus, string> = {
+    new: d.creativeInbox.statusNew,
+    in_use: d.creativeInbox.statusInUse,
+    rejected: d.creativeInbox.statusRejected,
+  };
+
+  const filterLabel: Record<Filter, string> = {
+    all: d.creativeInbox.filterAll,
+    new: d.creativeInbox.filterNew,
+    in_use: d.creativeInbox.filterInUse,
+    rejected: d.creativeInbox.filterRejected,
+  };
 
   async function mark(submission: CreativeSubmission, next: CreativeSubmissionStatus) {
     // Rejecting without a reason just turns into a message asking why.
     let reviewNotes: string | null = submission.review_notes;
     if (next === "rejected") {
-      const reason = window.prompt("Why is this not usable? The client sees this.", reviewNotes ?? "");
+      const reason = window.prompt(d.creativeInbox.rejectPrompt, reviewNotes ?? "");
       if (reason === null) return;
       reviewNotes = reason.trim() || null;
     }
@@ -146,12 +152,12 @@ export function CreativeInboxView({
       {error && <ErrorBanner message={error} onDismiss={() => setError(null)} />}
 
       <div className="flex flex-wrap items-center gap-2">
-        {FILTERS.map((filter) => {
-          const active = filter.value === status;
+        {FILTER_ORDER.map((filter) => {
+          const active = filter === status;
           return (
             <Link
-              key={filter.value}
-              href={filter.value === "all" ? "/admin/creatives" : `/admin/creatives?status=${filter.value}`}
+              key={filter}
+              href={filter === "all" ? "/admin/creatives" : `/admin/creatives?status=${filter}`}
               aria-current={active ? "page" : undefined}
               className={cn(
                 "transition-smooth rounded-full border px-3.5 py-1.5 text-[12.5px]",
@@ -160,22 +166,20 @@ export function CreativeInboxView({
                   : "border-[var(--border-subtle)] text-[var(--text-secondary)] hover:border-[var(--border-strong)] hover:text-[var(--text-primary)]",
               )}
             >
-              {filter.label}
+              {filterLabel[filter]}
             </Link>
           );
         })}
 
         <span className="ml-auto text-[12px] text-[var(--text-muted)]">
-          {inbox.total} submission{inbox.total === 1 ? "" : "s"}
-          {inbox.newCount > 0 && ` · ${inbox.newCount} new`}
+          {fmt(d.creativeInbox.countSubmissions, { count: inbox.total })}
+          {inbox.newCount > 0 && ` · ${fmt(d.creativeInbox.countNew, { count: inbox.newCount })}`}
         </span>
       </div>
 
       {inbox.clients.length === 0 ? (
         <div className="panel px-6 py-14 text-center text-[13px] text-[var(--text-secondary)]">
-          {status === "all"
-            ? "No client has submitted creatives yet."
-            : `Nothing ${status === "in_use" ? "in use" : status}.`}
+          {status === "all" ? d.creativeInbox.emptyAll : d.creativeInbox.emptyFiltered}
         </div>
       ) : (
         inbox.clients.map((client) => (
@@ -188,7 +192,9 @@ export function CreativeInboxView({
                 </p>
                 <p className="truncate text-[12px] text-[var(--text-muted)]">{client.clientEmail}</p>
               </div>
-              {client.newCount > 0 && <Badge variant="gold">{client.newCount} new</Badge>}
+              {client.newCount > 0 && (
+                <Badge variant="gold">{fmt(d.creativeInbox.countNew, { count: client.newCount })}</Badge>
+              )}
             </header>
 
             <div className="divide-y divide-[var(--border-subtle)]">
@@ -236,7 +242,7 @@ export function CreativeInboxView({
 
                         <div className="flex shrink-0 flex-wrap items-center gap-2">
                           <Badge variant={STATUS_TONE[submission.status]}>
-                            {STATUS_LABEL[submission.status]}
+                            {statusLabel[submission.status]}
                           </Badge>
 
                           {/* noreferrer as well as noopener: the href is a URL a
@@ -249,7 +255,7 @@ export function CreativeInboxView({
                             className="transition-smooth inline-flex items-center gap-1.5 rounded-md border border-[var(--border-subtle)] px-2.5 py-1.5 text-[12px] text-[var(--text-secondary)] hover:border-[var(--border-strong)] hover:text-[var(--text-primary)]"
                           >
                             <ExternalLink className="size-3.5" aria-hidden />
-                            Open
+                            {d.creativeInbox.open}
                           </a>
 
                           {submission.status !== "in_use" && (
@@ -260,7 +266,7 @@ export function CreativeInboxView({
                               onClick={() => void mark(submission, "in_use")}
                             >
                               <Check />
-                              In use
+                              {d.creativeInbox.markInUse}
                             </Button>
                           )}
                           {submission.status !== "rejected" && (
@@ -271,7 +277,7 @@ export function CreativeInboxView({
                               onClick={() => void mark(submission, "rejected")}
                             >
                               <X />
-                              Reject
+                              {d.creativeInbox.markRejected}
                             </Button>
                           )}
                         </div>

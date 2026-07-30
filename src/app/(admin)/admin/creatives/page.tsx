@@ -4,10 +4,14 @@ import { redirect } from "next/navigation";
 import { PageContainer } from "@/components/ui/page-container";
 import { CreativeInboxView } from "@/components/admin/creative-inbox";
 import { getSessionProfile } from "@/lib/supabase/server";
+import { getServerDictionary } from "@/lib/i18n/server";
 import { fetchCreativeInbox } from "@/lib/admin/creatives";
 import type { CreativeSubmissionStatus } from "@/lib/supabase/types";
 
-export const metadata: Metadata = { title: "Creatives" };
+export async function generateMetadata(): Promise<Metadata> {
+  const { d } = await getServerDictionary();
+  return { title: d.creativeInbox.title };
+}
 
 const STATUSES = new Set<string>(["new", "in_use", "rejected"]);
 
@@ -32,13 +36,10 @@ export default async function CreativesPage({
     ? (params.status as CreativeSubmissionStatus)
     : "all";
 
-  const inbox = await fetchCreativeInbox(status);
+  const [inbox, { d }] = await Promise.all([fetchCreativeInbox(status), getServerDictionary()]);
 
   return (
-    <PageContainer
-      title="Creatives"
-      description="What clients have submitted, by client and store. Mark a batch once it is in a campaign."
-    >
+    <PageContainer title={d.creativeInbox.title} description={d.creativeInbox.subtitle}>
       <CreativeInboxView inbox={inbox} status={status} adminId={profile.id} />
     </PageContainer>
   );

@@ -49,6 +49,7 @@ export function CreativeSubmissions({
   const [url, setUrl] = React.useState("");
   const [collectionUrl, setCollectionUrl] = React.useState("");
   const [notes, setNotes] = React.useState("");
+  const [titleError, setTitleError] = React.useState<string | null>(null);
   const [urlError, setUrlError] = React.useState<string | null>(null);
   const [collectionError, setCollectionError] = React.useState<string | null>(null);
   const [saving, setSaving] = React.useState(false);
@@ -64,19 +65,23 @@ export function CreativeSubmissions({
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
+    setTitleError(null);
     setUrlError(null);
     setCollectionError(null);
     setError(null);
     setSent(false);
 
-    if (!LINK.test(url.trim())) {
-      setUrlError(d.submissions.urlInvalid);
-      return;
-    }
-    if (!LINK.test(collectionUrl.trim())) {
-      setCollectionError(d.submissions.urlInvalid);
-      return;
-    }
+    // Every field checked before returning, so one click surfaces everything
+    // that is wrong. The button is never disabled: a button that does nothing
+    // and says nothing is indistinguishable from a broken page.
+    const missingTitle = title.trim().length === 0;
+    const badUrl = !LINK.test(url.trim());
+    const badCollection = !LINK.test(collectionUrl.trim());
+
+    if (missingTitle) setTitleError(d.submissions.titleRequired);
+    if (badUrl) setUrlError(d.submissions.urlInvalid);
+    if (badCollection) setCollectionError(d.submissions.urlInvalid);
+    if (missingTitle || badUrl || badCollection) return;
 
     setSaving(true);
     const { error: insertError } = await createClient().from("creative_submissions").insert({
@@ -146,10 +151,12 @@ export function CreativeSubmissions({
               <Input
                 id="creative-title"
                 placeholder={d.submissions.namePlaceholder}
+                aria-invalid={Boolean(titleError)}
                 value={title}
                 onChange={(event) => setTitle(event.target.value)}
                 maxLength={120}
               />
+              <FieldError>{titleError}</FieldError>
             </div>
 
             <div className="space-y-1.5">
@@ -201,13 +208,7 @@ export function CreativeSubmissions({
             <span>{d.submissions.accessHint}</span>
           </div>
 
-          <Button
-            type="submit"
-            variant="primary"
-            size="lg"
-            loading={saving}
-            disabled={!title.trim() || !url.trim() || !collectionUrl.trim()}
-          >
+          <Button type="submit" variant="primary" size="lg" loading={saving}>
             {d.submissions.send}
           </Button>
         </form>

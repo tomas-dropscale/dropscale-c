@@ -147,10 +147,42 @@ export async function adoptDefaultPaymentMethod(customerId: string): Promise<boo
   }
 }
 
+/**
+ * The invoice identity a client entered in their settings (migration 0020).
+ * Every field optional: an invoice still goes out without them, it just carries
+ * the portal name and no address.
+ */
+export type BillingIdentity = {
+  name?: string | null;
+  address?: {
+    line1?: string | null;
+    line2?: string | null;
+    city?: string | null;
+    postal_code?: string | null;
+    state?: string | null;
+    country?: string | null;
+  } | null;
+};
+
+/** Drops empty fields so a blank profile never overwrites good data with "". */
+function identityParams(identity?: BillingIdentity): Record<string, unknown> {
+  if (!identity) return {};
+
+  const address = Object.fromEntries(
+    Object.entries(identity.address ?? {}).filter(([, value]) => value),
+  );
+
+  return {
+    ...(identity.name ? { name: identity.name } : {}),
+    ...(Object.keys(address).length > 0 ? { address } : {}),
+  };
+}
+
 export async function createCustomer(input: {
   email: string;
   name: string;
   clientId: string;
+  identity?: BillingIdentity;
 }): Promise<string> {
   const customer = await stripeFetch<{ id: string }>("/customers", {
     params: {
@@ -159,10 +191,37 @@ export async function createCustomer(input: {
       // Lets anyone in the Stripe dashboard trace a customer back to a portal
       // account without guessing from the email.
       metadata: { dropscale_client_id: input.clientId },
+      // The billing profile wins over the login name when it is filled in.
+      ...identityParams(input.identity),
     },
     idempotencyKey: `customer:${input.clientId}`,
   });
   return customer.id;
+}
+
+/**
+ * Push the client's invoice identity onto an EXISTING Stripe customer.
+ *
+ * Called right before each invoice is raised rather than only when the profile
+ * is saved. Customers created before any of this existed carry only a login
+ * name, and an address entered today has to reach the invoice raised on Monday
+ * — re-asserting it at issue time is what guarantees that, whatever order
+ * things happened in.
+ *
+ * Never throws: a billing detail that fails to sync must not stop the invoice.
+ */
+export async function updateCustomerBilling(
+  customerId: string,
+  identity: BillingIdentity,
+): Promise<void> {
+  const params = identityParams(identity);
+  if (Object.keys(params).length === 0) return;
+
+  try {
+    await stripeFetch(`/customers/${customerId}`, { params });
+  } catch (error) {
+    console.error(`Could not sync billing details to ${customerId}:`, error);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -193,6 +252,13 @@ export async function createAndFinalizeInvoice(input: {
   /** Ours, for idempotency and for the webhook to find the row again. */
   invoiceId: string;
   autoCharge: boolean;
+  /**
+   * VAT / company number to print on the invoice. Sent as a custom field rather
+   * than a Stripe tax id: those require a jurisdiction-specific type we cannot
+   * infer from a bare string, and guessing it wrong makes the invoice fail to
+   * finalise. A printed line satisfies what the client needs it for.
+   */
+  taxId?: string | null;
 }): Promise<StripeInvoice> {
   const invoice = await stripeFetch<StripeInvoice>("/invoices", {
     params: {
@@ -203,6 +269,9 @@ export async function createAndFinalizeInvoice(input: {
       description: input.description,
       auto_advance: true,
       metadata: { dropscale_invoice_id: input.invoiceId },
+      ...(input.taxId
+        ? { custom_fields: [{ name: "VAT / Tax ID", value: input.taxId.slice(0, 30) }] }
+        : {}),
     },
     idempotencyKey: `invoice:${input.invoiceId}`,
   });
