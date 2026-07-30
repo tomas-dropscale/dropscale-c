@@ -383,6 +383,11 @@ export type DailyMetric = {
    * for), 0 is "computed, and every order that day came from Meta".
    */
   attributed_orders: number | null;
+  /**
+   * Gross revenue of those orders (migration 0019), reporting currency — the
+   * conversion value shown beside the count. Same NULL semantics.
+   */
+  attributed_revenue: number | null;
   refunds_amount: number;
   // Cost side of the profit chain (migration 0009), reporting currency.
   product_cost: number;
@@ -979,6 +984,7 @@ export type Database = {
           | "orders_count"
           | "units_sold"
           | "attributed_orders"
+          | "attributed_revenue"
           | "refunds_amount"
           | "product_cost"
           | "payment_fees"

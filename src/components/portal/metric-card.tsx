@@ -93,6 +93,7 @@ export function MetricsGrid({
   feeRate = null,
   storeRoas = null,
   storeConversions = null,
+  storeConversionValue = null,
   showFee = true,
   unitsSold = null,
   orders = null,
@@ -124,6 +125,14 @@ export function MetricsGrid({
    * derived from a different figure than the one beside it is just wrong.
    */
   storeConversions?: number | null;
+  /**
+   * What those conversions were worth — gross revenue of the same orders.
+   *
+   * Travels with storeConversions and for the same reason: Google reports a
+   * conversion value of 0 wherever it reports 0 conversions, so the card next to
+   * a working conversions figure was showing €0.00 over real sales.
+   */
+  storeConversionValue?: number | null;
   /**
    * Whether the agency fee gets a card.
    *
@@ -208,7 +217,13 @@ export function MetricsGrid({
     {
       label: d.metrics.conversionValue,
       icon: BadgeDollarSign,
-      value: money(metrics.conversionValue, currency),
+      value: money(storeConversionValue ?? metrics.conversionValue, currency),
+      hint:
+        storeConversionValue != null
+          ? fmt(d.metrics.conversionsHintExcludesMeta, {
+              value: money(metrics.conversionValue, currency),
+            })
+          : undefined,
     },
     ...(unitsSold != null
       ? [

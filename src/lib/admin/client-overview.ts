@@ -58,6 +58,8 @@ export type AdminStoreOverview = {
   storeConversions: number | null;
   /** Ad spend ÷ storeConversions — the CPA matching the figure above. */
   costPerStoreConversion: number;
+  /** What those conversions were worth: gross revenue of the same orders. */
+  storeConversionValue: number | null;
   /**
    * The STORE's return: Shopify revenue ÷ ad spend. Matches what the client
    * sees on their own dashboard — an admin looking at this popup to answer
@@ -161,6 +163,7 @@ export async function fetchClientOverview(
         costPerConversion: totals.costPerConversion,
         storeConversions: totals.attributedOrders,
         costPerStoreConversion: totals.costPerAttributedOrder,
+        storeConversionValue: totals.attributedRevenue,
         roas: totals.mer,
         googleRoas: totals.roas,
         netRevenue: totals.netRevenue,

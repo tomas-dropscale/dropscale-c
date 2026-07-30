@@ -154,7 +154,12 @@ function StoreCard({ store }: { store: AdminStoreOverview }) {
         <Stat
           label="Conv. value"
           icon={BadgeDollarSign}
-          value={money(store.conversionValue, currency)}
+          value={money(store.storeConversionValue ?? store.conversionValue, currency)}
+          hint={
+            store.storeConversionValue != null
+              ? `${money(store.conversionValue, currency)} attributed by Google`
+              : undefined
+          }
         />
         <Stat
           label="We bill"

@@ -69,6 +69,7 @@ export default async function GoogleAllStoresPage({
   const allStores = sumMetrics(rows);
   const storeRoas = allStores.mer;
   const storeConversions = allStores.attributedOrders;
+  const storeConversionValue = allStores.attributedRevenue;
 
   // One fee percentage is only honest when every store bills at the same rate.
   const rates = new Set(accounts.map((account) => Number(account.commission_rate)));
@@ -130,6 +131,7 @@ export default async function GoogleAllStoresPage({
             feeRate={uniformFeeRate}
             storeRoas={storeRoas}
             storeConversions={storeConversions}
+            storeConversionValue={storeConversionValue}
           />
           <StoreComparisonTable rows={comparisonRows} />
         </div>

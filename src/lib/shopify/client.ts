@@ -203,6 +203,15 @@ export type DailySales = {
    * how a visit is classified, and why an unknown referrer stays counted.
    */
   attributedOrders: number;
+  /**
+   * Revenue of exactly those orders — the conversion VALUE that pairs with the
+   * count above, so "N conversions worth €X" is one consistent statement.
+   *
+   * Gross order totals, like `revenue`: an order counted as a conversion has its
+   * value counted too, refunded or not. Netting per order would need per-line
+   * refund data this query does not ask for.
+   */
+  attributedRevenue: number;
 };
 
 /** One synced order line, ready for the COGS engine. */
@@ -263,7 +272,14 @@ export async function fetchDailySales(
 ): Promise<{ currency: string | null; days: DailySales[]; orders: SyncedOrder[] }> {
   const byDay = new Map<
     string,
-    { revenue: number; orders: number; refunds: number; units: number; attributedOrders: number }
+    {
+      revenue: number;
+      orders: number;
+      refunds: number;
+      units: number;
+      attributedOrders: number;
+      attributedRevenue: number;
+    }
   >();
   const syncedOrders: SyncedOrder[] = [];
   let currency: string | null = null;
@@ -374,11 +390,22 @@ export async function fetchDailySales(
       });
 
       const entry =
-        byDay.get(day) ?? { revenue: 0, orders: 0, refunds: 0, units: 0, attributedOrders: 0 };
+        byDay.get(day) ??
+        {
+          revenue: 0,
+          orders: 0,
+          refunds: 0,
+          units: 0,
+          attributedOrders: 0,
+          attributedRevenue: 0,
+        };
       entry.revenue += total;
       entry.refunds += Number(order.totalRefundedSet?.shopMoney.amount ?? 0);
       entry.orders += 1;
-      if (!fromMeta) entry.attributedOrders += 1;
+      if (!fromMeta) {
+        entry.attributedOrders += 1;
+        entry.attributedRevenue += total;
+      }
       entry.units += lines.reduce((sum, line) => sum + line.quantity, 0);
       byDay.set(day, entry);
 

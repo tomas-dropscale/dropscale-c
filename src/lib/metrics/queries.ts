@@ -20,6 +20,8 @@ export type DailyMetricRow = {
   units_sold: number;
   /** Orders minus Meta-referred ones (0019). NULL = never computed for this day. */
   attributed_orders: number | null;
+  /** Gross revenue of those orders, reporting currency (0019). */
+  attributed_revenue: number | null;
   refunds_amount: number;
   product_cost: number;
   payment_fees: number;
@@ -103,6 +105,13 @@ export type MetricTotals = {
   attributedOrders: number | null;
   /** Ad spend / attributedOrders — the CPA that matches the figure above. */
   costPerAttributedOrder: number;
+  /**
+   * What those conversions were worth: gross revenue of the same orders. Google's
+   * conversion_value is 0 wherever its conversion count is, which is what left
+   * the CONV. VALUE card dead beside a working conversions figure. Null follows
+   * attributedOrders — either the window has been computed or it hasn't.
+   */
+  attributedRevenue: number | null;
 };
 
 export function sumMetrics(rows: DailyMetricRow[]): MetricTotals {
@@ -149,10 +158,15 @@ export function sumMetrics(rows: DailyMetricRow[]): MetricTotals {
     computed.length > 0
       ? computed.reduce((sum, row) => sum + Number(row.attributed_orders), 0)
       : null;
+  const attributedRevenue =
+    computed.length > 0
+      ? computed.reduce((sum, row) => sum + Number(row.attributed_revenue ?? 0), 0)
+      : null;
 
   return {
     ...total,
     attributedOrders,
+    attributedRevenue,
     costPerAttributedOrder:
       attributedOrders && attributedOrders > 0 ? total.adSpend / attributedOrders : 0,
     netRevenue,

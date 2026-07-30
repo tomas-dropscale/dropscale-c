@@ -170,7 +170,15 @@ async function syncAccountWindow(
     if (rates) {
       sales = sales.map((day) => {
         const rate = rateOn(rates, day.date);
-        return { ...day, revenue: day.revenue * rate, refunds: day.refunds * rate };
+        // Every MONEY field, attributedRevenue included — miss one and a store
+        // billing in forints reports that column as if it were euros. Counts
+        // (orders, units, attributedOrders) are deliberately untouched.
+        return {
+          ...day,
+          revenue: day.revenue * rate,
+          refunds: day.refunds * rate,
+          attributedRevenue: day.attributedRevenue * rate,
+        };
       });
     }
 
@@ -325,6 +333,7 @@ async function syncAccountWindow(
       // not answer for writes 0, not null — null is reserved for "never
       // computed", which is what the backfill below looks for.
       attributed_orders: shop?.attributedOrders ?? 0,
+      attributed_revenue: shop?.attributedRevenue ?? 0,
       refunds_amount: shop?.refunds ?? 0,
       product_cost: costs?.product ?? 0,
       payment_fees: costs?.fees ?? 0,
