@@ -13,6 +13,7 @@ import type {
 import type { ClientBillingSummary } from "@/lib/billing/invoices";
 import { money } from "@/lib/format";
 import { Avatar } from "@/components/ui/avatar";
+import { InlineRename } from "@/components/admin/inline-rename";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { FormAlert } from "@/components/auth/auth-card";
@@ -326,9 +327,30 @@ export function ClientsManager({
               <li key={client.id} className="panel flex flex-wrap items-center gap-3 p-4">
                 <Avatar name={client.full_name} src={client.avatar_url} seed={client.id} size="sm" />
                 <div className="min-w-0 flex-1">
-                  <p className="truncate text-[13.5px] font-medium text-[var(--text-primary)]">
-                    {client.full_name}
-                  </p>
+                  {/* The name is the trigger: clients sign up with whatever they
+                      type, and this is where the team tidies it. The email is
+                      NOT editable here — it is the login identity, and moving it
+                      means re-verifying an address. */}
+                  <InlineRename
+                    value={client.full_name}
+                    title="Client name"
+                    help="Shown across the admin and in their own portal."
+                    maxLength={80}
+                    emptyMessage="A client needs a name."
+                    onSave={async (next) => {
+                      const { error: renameError } = await supabase()
+                        .from("portal_clients")
+                        .update({ full_name: next })
+                        .eq("id", client.id);
+                      if (renameError) return renameError.message;
+                      router.refresh();
+                      return null;
+                    }}
+                  >
+                    <span className="truncate text-[13.5px] font-medium text-[var(--text-primary)]">
+                      {client.full_name}
+                    </span>
+                  </InlineRename>
                   <p className="truncate text-[12px] text-[var(--text-muted)]">{client.email}</p>
                 </div>
                 {/* Whether Monday charges them or merely emails a link. Worth
