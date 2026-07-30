@@ -66,7 +66,9 @@ export default async function GoogleAllStoresPage({
   const totals = combineMetricSets(perAccount.map((entry) => entry.metrics));
   // Across every store: Shopify revenue over ad spend. One number, used by the
   // grid and the picker's footer, so the page can't contradict itself.
-  const storeRoas = sumMetrics(rows).mer;
+  const allStores = sumMetrics(rows);
+  const storeRoas = allStores.mer;
+  const storeConversions = allStores.attributedOrders;
 
   // One fee percentage is only honest when every store bills at the same rate.
   const rates = new Set(accounts.map((account) => Number(account.commission_rate)));
@@ -82,10 +84,12 @@ export default async function GoogleAllStoresPage({
     // The store's own return, not Google's attributed one — same reason as
     // the conversions above.
     roas: store.mer,
-    // Real orders in the shop, and the ad spend each one cost — NOT Google's
-    // attributed conversions. This is the client's own store performance.
-    conversions: store.orders,
-    cpa: store.costPerOrder,
+    // Store conversions — orders minus the ones Instagram/Facebook referred
+    // (0019) — and the ad spend each one cost. NOT Google's attributed count.
+    // Falls back to all orders on history the sync has not recomputed yet, so
+    // the column matches the grid above it either way.
+    conversions: store.attributedOrders ?? store.orders,
+    cpa: store.attributedOrders != null ? store.costPerAttributedOrder : store.costPerOrder,
     ctr: metrics.ctr,
     impressions: metrics.impressions,
     fee: metrics.fee,
@@ -125,6 +129,7 @@ export default async function GoogleAllStoresPage({
             currency={accounts[0]?.currency ?? "EUR"}
             feeRate={uniformFeeRate}
             storeRoas={storeRoas}
+            storeConversions={storeConversions}
           />
           <StoreComparisonTable rows={comparisonRows} />
         </div>

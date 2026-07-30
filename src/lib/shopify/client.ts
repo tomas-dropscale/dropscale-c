@@ -9,6 +9,8 @@
  * third-party secrets) and it never reaches the browser after saving.
  */
 
+import { isMetaReferral } from "@/lib/shopify/referrer";
+
 const API_VERSION = "2025-01";
 
 export class ShopifyError extends Error {
@@ -194,6 +196,13 @@ export type DailySales = {
    *  orders. Not netted against refunds: that needs per-line refund
    *  quantities, which this query does not ask for. */
   units: number;
+  /**
+   * Orders NOT referred by Instagram or Facebook — the store's conversions
+   * figure. It sits beside Google ad spend, so orders Meta sent are subtracted:
+   * Google spend had nothing to do with them. See lib/shopify/referrer.ts for
+   * how a visit is classified, and why an unknown referrer stays counted.
+   */
+  attributedOrders: number;
 };
 
 /** One synced order line, ready for the COGS engine. */
@@ -254,7 +263,7 @@ export async function fetchDailySales(
 ): Promise<{ currency: string | null; days: DailySales[]; orders: SyncedOrder[] }> {
   const byDay = new Map<
     string,
-    { revenue: number; orders: number; refunds: number; units: number }
+    { revenue: number; orders: number; refunds: number; units: number; attributedOrders: number }
   >();
   const syncedOrders: SyncedOrder[] = [];
   let currency: string | null = null;
@@ -270,7 +279,14 @@ export async function fetchDailySales(
           test: boolean;
           cancelledAt: string | null;
           displayFinancialStatus: string | null;
-          customerJourneySummary: { firstVisit: { landingPage: string | null } | null } | null;
+          customerJourneySummary: {
+            firstVisit: {
+              landingPage: string | null;
+              source: string | null;
+              referrerUrl: string | null;
+              utmParameters: { source: string | null } | null;
+            } | null;
+          } | null;
           totalPriceSet: { shopMoney: { amount: string } } | null;
           totalRefundedSet: { shopMoney: { amount: string } } | null;
           lineItems: {
@@ -295,7 +311,14 @@ export async function fetchDailySales(
             test
             cancelledAt
             displayFinancialStatus
-            customerJourneySummary { firstVisit { landingPage } }
+            customerJourneySummary {
+              firstVisit {
+                landingPage
+                source
+                referrerUrl
+                utmParameters { source }
+              }
+            }
             totalPriceSet { shopMoney { amount } }
             totalRefundedSet { shopMoney { amount } }
             lineItems(first: 100) {
@@ -340,10 +363,22 @@ export async function fetchDailySales(
         unitPrice: Number(line.originalUnitPriceSet?.shopMoney.amount ?? 0),
       }));
 
-      const entry = byDay.get(day) ?? { revenue: 0, orders: 0, refunds: 0, units: 0 };
+      // The store's conversions: every real order except the ones Instagram or
+      // Facebook referred. An order whose journey Shopify does not report at all
+      // stays counted — see referrer.ts on why unknown is not Meta.
+      const visit = order.customerJourneySummary?.firstVisit;
+      const fromMeta = isMetaReferral({
+        source: visit?.source,
+        referrerUrl: visit?.referrerUrl,
+        utmSource: visit?.utmParameters?.source,
+      });
+
+      const entry =
+        byDay.get(day) ?? { revenue: 0, orders: 0, refunds: 0, units: 0, attributedOrders: 0 };
       entry.revenue += total;
       entry.refunds += Number(order.totalRefundedSet?.shopMoney.amount ?? 0);
       entry.orders += 1;
+      if (!fromMeta) entry.attributedOrders += 1;
       entry.units += lines.reduce((sum, line) => sum + line.quantity, 0);
       byDay.set(day, entry);
 
@@ -351,7 +386,7 @@ export async function fetchDailySales(
         date: day,
         total,
         paid,
-        landingPath: order.customerJourneySummary?.firstVisit?.landingPage ?? null,
+        landingPath: visit?.landingPage ?? null,
         lines,
       });
     }

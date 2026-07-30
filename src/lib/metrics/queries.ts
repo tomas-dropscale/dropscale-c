@@ -18,6 +18,8 @@ export type DailyMetricRow = {
   revenue: number;
   orders_count: number;
   units_sold: number;
+  /** Orders minus Meta-referred ones (0019). NULL = never computed for this day. */
+  attributed_orders: number | null;
   refunds_amount: number;
   product_cost: number;
   payment_fees: number;
@@ -88,6 +90,19 @@ export type MetricTotals = {
    */
   costPerOrder: number;
   orderConversionRate: number;
+  /**
+   * The store's CONVERSIONS: real orders minus the ones Instagram or Facebook
+   * referred (migration 0019). This is what belongs beside Google ad spend —
+   * Google's own count is almost always 0 for want of conversion tracking, and
+   * total orders would credit the ads with Meta's sales.
+   *
+   * Null when NO day in the window has been computed yet, so the UI can fall
+   * back to Google's figure instead of asserting zero conversions. Days that
+   * genuinely converted nothing contribute 0 and keep the total non-null.
+   */
+  attributedOrders: number | null;
+  /** Ad spend / attributedOrders — the CPA that matches the figure above. */
+  costPerAttributedOrder: number;
 };
 
 export function sumMetrics(rows: DailyMetricRow[]): MetricTotals {
@@ -126,8 +141,20 @@ export function sumMetrics(rows: DailyMetricRow[]): MetricTotals {
   const profit =
     netRevenue - total.productCost - total.paymentFees - total.shippingCost - total.adSpend;
 
+  // Summed separately from the reduce above because "no day computed yet" has to
+  // survive as null rather than collapsing into 0 — a dashboard asserting zero
+  // conversions over real orders is the failure this column exists to avoid.
+  const computed = rows.filter((row) => row.attributed_orders !== null);
+  const attributedOrders =
+    computed.length > 0
+      ? computed.reduce((sum, row) => sum + Number(row.attributed_orders), 0)
+      : null;
+
   return {
     ...total,
+    attributedOrders,
+    costPerAttributedOrder:
+      attributedOrders && attributedOrders > 0 ? total.adSpend / attributedOrders : 0,
     netRevenue,
     grossProfit: netRevenue - total.adSpend,
     profit,

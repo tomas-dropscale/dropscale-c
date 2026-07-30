@@ -59,6 +59,7 @@ export default async function AccountPage({
   const totals = sumMetrics(rows);
   // This store's own return: its Shopify revenue over its own ad spend.
   const storeRoas = totals.mer;
+  const storeConversions = totals.attributedOrders;
   const { updatedAt, nextUpdateAt } = freshness(rows);
 
   return (
@@ -121,6 +122,7 @@ export default async function AccountPage({
             currency={account.currency}
             feeRate={Number(account.commission_rate)}
             storeRoas={storeRoas}
+            storeConversions={storeConversions}
             // One store: ROAS in the fee's place. The fee is a whole-client
             // figure and lives on the dashboard and the invoice.
             showFee={false}

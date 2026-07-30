@@ -45,10 +45,19 @@ export type AdminStoreOverview = {
   clicks: number;
   ctr: number;
   cpc: number;
-  /** Google-attributed conversions, not store orders. */
+  /** Google-attributed conversions. Kept as the hint, like googleRoas below. */
   conversions: number;
   conversionValue: number;
   costPerConversion: number;
+  /**
+   * The STORE's conversions: real orders minus the ones Instagram or Facebook
+   * referred (migration 0019). This is what belongs next to Google ad spend —
+   * see lib/shopify/referrer.ts. Null on history the sync has not recomputed
+   * yet, so the dialog falls back to Google's count rather than claiming zero.
+   */
+  storeConversions: number | null;
+  /** Ad spend ÷ storeConversions — the CPA matching the figure above. */
+  costPerStoreConversion: number;
   /**
    * The STORE's return: Shopify revenue ÷ ad spend. Matches what the client
    * sees on their own dashboard — an admin looking at this popup to answer
@@ -150,6 +159,8 @@ export async function fetchClientOverview(
         conversions: totals.conversions,
         conversionValue: totals.conversionValue,
         costPerConversion: totals.costPerConversion,
+        storeConversions: totals.attributedOrders,
+        costPerStoreConversion: totals.costPerAttributedOrder,
         roas: totals.mer,
         googleRoas: totals.roas,
         netRevenue: totals.netRevenue,

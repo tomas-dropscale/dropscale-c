@@ -122,11 +122,28 @@ function StoreCard({ store }: { store: AdminStoreOverview }) {
         <Stat label="Clicks" icon={MousePointerClick} value={integer(store.clicks)} />
         <Stat label="CTR" icon={Percent} value={percent(store.ctr)} />
         <Stat label="CPC" icon={Coins} value={money(store.cpc, currency)} />
-        <Stat label="Conversions" icon={Target} value={integer(store.conversions)} />
+        {/* Store conversions — orders minus the ones Instagram/Facebook
+            referred (0019) — with Google's own count as the hint, the same
+            treatment ROAS gets below and for the same reason. */}
+        <Stat
+          label="Conversions"
+          icon={Target}
+          value={integer(store.storeConversions ?? store.conversions)}
+          hint={
+            store.storeConversions != null
+              ? `${integer(store.conversions)} attributed by Google · excl. Meta referrals`
+              : undefined
+          }
+        />
         <Stat
           label="Cost / conv."
           icon={Crosshair}
-          value={money(store.costPerConversion, currency)}
+          value={money(
+            store.storeConversions != null
+              ? store.costPerStoreConversion
+              : store.costPerConversion,
+            currency,
+          )}
         />
         <Stat
           label="ROAS"

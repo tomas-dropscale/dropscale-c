@@ -92,6 +92,7 @@ export function MetricsGrid({
   currency,
   feeRate = null,
   storeRoas = null,
+  storeConversions = null,
   showFee = true,
   unitsSold = null,
   orders = null,
@@ -111,6 +112,18 @@ export function MetricsGrid({
    * falls back to the attributed number (the demo/mock path has no revenue).
    */
   storeRoas?: number | null;
+  /**
+   * The STORE's conversions: real orders minus the ones Instagram or Facebook
+   * referred (migration 0019).
+   *
+   * Same treatment as storeRoas, for the same reason: Google's conversion count
+   * is almost always 0 because tracking is rarely wired up, so it says nothing
+   * next to real revenue. Total orders would be the other error — crediting
+   * Google's spend with Meta's sales. When present it becomes the CONVERSIONS
+   * shown AND the denominator of Cost/Conv, because a cost-per-conversion
+   * derived from a different figure than the one beside it is just wrong.
+   */
+  storeConversions?: number | null;
   /**
    * Whether the agency fee gets a card.
    *
@@ -155,17 +168,39 @@ export function MetricsGrid({
   };
 
   const cpc: Card = { label: d.metrics.cpc, icon: Coins, value: money(metrics.cpc, currency) };
+
+  // Both derived from the same figure, so they can never disagree: the store's
+  // conversions when we have them, Google's when we don't.
+  const conversions: Card = {
+    label: d.metrics.conversions,
+    icon: Target,
+    value: integer(storeConversions ?? metrics.conversions),
+    hint:
+      storeConversions != null
+        ? fmt(d.metrics.conversionsHintExcludesMeta, {
+            value: integer(metrics.conversions),
+          })
+        : undefined,
+  };
+
   const costPerConversion: Card = {
     label: d.metrics.costPerConversion,
     icon: Crosshair,
-    value: money(metrics.costPerConversion, currency),
+    value: money(
+      storeConversions != null
+        ? storeConversions > 0
+          ? metrics.spend / storeConversions
+          : 0
+        : metrics.costPerConversion,
+      currency,
+    ),
   };
 
   const cards: Card[] = [
     { label: d.metrics.amountSpent, icon: Wallet, value: money(metrics.spend, currency) },
     { label: d.metrics.impressions, icon: Eye, value: compact(metrics.impressions) },
     { label: d.metrics.clicks, icon: MousePointerClick, value: integer(metrics.clicks) },
-    { label: d.metrics.conversions, icon: Target, value: integer(metrics.conversions) },
+    conversions,
     { label: d.metrics.ctr, icon: Percent, value: percent(metrics.ctr) },
     // Row 2 leads with the fee, or with ROAS when there is no fee card — ROAS
     // moves INTO that position rather than staying at the end of the row.

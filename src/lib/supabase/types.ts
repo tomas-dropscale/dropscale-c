@@ -374,6 +374,15 @@ export type DailyMetric = {
    *  refunds — refunds_amount is money, and per-line refund quantities are not
    *  fetched. */
   units_sold: number;
+  /**
+   * Real orders minus the ones Instagram/Facebook referred (migration 0019) —
+   * the store's conversions figure, the one shown beside Google ad spend.
+   *
+   * Nullable with no default, and the distinction carries meaning: NULL is "no
+   * sync has ever computed this day" (which the backfill in recompute.ts looks
+   * for), 0 is "computed, and every order that day came from Meta".
+   */
+  attributed_orders: number | null;
   refunds_amount: number;
   // Cost side of the profit chain (migration 0009), reporting currency.
   product_cost: number;
@@ -969,6 +978,7 @@ export type Database = {
           | "revenue"
           | "orders_count"
           | "units_sold"
+          | "attributed_orders"
           | "refunds_amount"
           | "product_cost"
           | "payment_fees"
