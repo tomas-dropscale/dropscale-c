@@ -6,7 +6,7 @@ import { Building2, User } from "lucide-react";
 
 import type { BillingProfile, BillingProfileType, Client } from "@/lib/supabase/types";
 import { Button } from "@/components/ui/button";
-import { Input, Label } from "@/components/ui/input";
+import { Input, Label, FieldError } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -45,24 +45,56 @@ export function BillingProfileForm({
   const [budget, setBudget] = React.useState(
     profile?.available_budget != null ? String(profile.available_budget) : "",
   );
+  const [fullName, setFullName] = React.useState(viewer.full_name);
+  const [nameError, setNameError] = React.useState<string | null>(null);
   const [saving, setSaving] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [saved, setSaved] = React.useState(false);
 
+  /**
+   * Saves both halves of this page in one click, even though they are two
+   * different rows in two different scopes: the name is the VIEWER's own
+   * portal_clients row, the billing profile belongs to the workspace.
+   *
+   * The name write is skipped when nothing changed, so an unrelated save never
+   * touches the identity row.
+   */
   async function save() {
+    const name = fullName.trim();
+    if (name.length < 2) {
+      setNameError(d.billing.nameRequired);
+      return;
+    }
+
+    setNameError(null);
     setSaving(true);
     setError(null);
     setSaved(false);
 
-    const { error: upsertError } = await createClient()
-      .from("billing_profiles")
-      .upsert({
-        client_id: workspaceId,
-        profile_type: profileType,
-        currency,
-        available_budget: budget.trim() === "" ? null : Number(budget),
-        updated_at: new Date().toISOString(),
-      });
+    const supabase = createClient();
+
+    if (name !== viewer.full_name) {
+      // Only ever your OWN row: portal_clients UPDATE is `id = auth.uid()`, so
+      // this cannot rename the workspace owner when a sócio is looking at it.
+      const { error: nameSaveError } = await supabase
+        .from("portal_clients")
+        .update({ full_name: name })
+        .eq("id", viewer.id);
+
+      if (nameSaveError) {
+        setSaving(false);
+        setError(nameSaveError.message);
+        return;
+      }
+    }
+
+    const { error: upsertError } = await supabase.from("billing_profiles").upsert({
+      client_id: workspaceId,
+      profile_type: profileType,
+      currency,
+      available_budget: budget.trim() === "" ? null : Number(budget),
+      updated_at: new Date().toISOString(),
+    });
 
     setSaving(false);
 
@@ -72,6 +104,8 @@ export function BillingProfileForm({
     }
 
     setSaved(true);
+    // Re-renders the server tree, so the topbar avatar and the workspace label
+    // pick the new name up straight away rather than at the next navigation.
     router.refresh();
   }
 
@@ -80,16 +114,28 @@ export function BillingProfileForm({
       {error && <FormAlert>{error}</FormAlert>}
       {saved && <FormAlert tone="success">{d.billing.saved}</FormAlert>}
 
-      {/* ACCOUNT — read-only, managed by the team */}
+      {/* ACCOUNT — the name is theirs to change; the email is the login and
+          is not editable here, since moving it means re-verifying an address. */}
       <section className="space-y-3">
         <p className="label-caps">{d.billing.account}</p>
-        <div className="panel divide-y divide-[var(--border-subtle)]">
-          <div className="flex items-center justify-between px-4 py-3">
-            <span className="text-[13px] text-[var(--text-secondary)]">{d.billing.name}</span>
-            <span className="text-[13px] font-medium text-[var(--text-primary)]">
-              {viewer.full_name}
-            </span>
-          </div>
+
+        <div className="space-y-1.5">
+          <Label htmlFor="full-name">{d.billing.name}</Label>
+          <Input
+            id="full-name"
+            value={fullName}
+            onChange={(event) => setFullName(event.target.value)}
+            aria-invalid={Boolean(nameError)}
+            maxLength={80}
+            autoComplete="name"
+          />
+          <FieldError>{nameError}</FieldError>
+          <p className="text-[11.5px] leading-relaxed text-[var(--text-muted)]">
+            {d.billing.nameHelp}
+          </p>
+        </div>
+
+        <div className="panel">
           <div className="flex items-center justify-between px-4 py-3">
             <span className="text-[13px] text-[var(--text-secondary)]">{d.billing.email}</span>
             <span className="text-[13px] font-medium text-[var(--text-primary)]">
