@@ -30,7 +30,13 @@ export function RegisterForm() {
     formState: { errors, isSubmitting },
   } = useForm<RegisterInput>({
     resolver: zodResolver(schema),
-    defaultValues: { fullName: "", email: "", password: "", confirmPassword: "" },
+    defaultValues: {
+      fullName: "",
+      email: "",
+      password: "",
+      confirmPassword: "",
+      referralCode: "",
+    },
   });
 
   const onSubmit = handleSubmit(async (values) => {
@@ -52,7 +58,15 @@ export function RegisterForm() {
           // Both flags are browser-supplied and neither grants anything: the
           // trigger hard-codes approval_status 'pending', and the role comes
           // from the database.
-          data: { full_name: values.fullName.trim(), portal_signup: "true" },
+          data: {
+            full_name: values.fullName.trim(),
+            portal_signup: "true",
+            // Resolved by the signup trigger once the email is confirmed. A
+            // code that does not exist is ignored there rather than rejected
+            // here: a typo must not cost somebody their account, and telling
+            // the form which codes are real would leak the client list.
+            referral_code: (values.referralCode ?? "").trim().toUpperCase(),
+          },
           // Not /dashboard: that route's gate would show the same waiting
           // screen, but /confirmed can also say the confirmation worked.
           emailRedirectTo: authRedirect("/confirmed"),
@@ -144,6 +158,25 @@ export function RegisterForm() {
           {...register("confirmPassword")}
         />
         <FieldError>{errors.confirmPassword?.message}</FieldError>
+      </div>
+
+      {/* Optional, and last: it belongs to whoever sent them here, and nobody
+          arriving without a code should feel they are missing something. */}
+      <div className="space-y-1.5">
+        <Label htmlFor="referralCode">{d.auth.register.referralLabel}</Label>
+        <Input
+          id="referralCode"
+          autoComplete="off"
+          autoCapitalize="characters"
+          placeholder={d.auth.register.referralPlaceholder}
+          aria-invalid={Boolean(errors.referralCode)}
+          className="uppercase"
+          {...register("referralCode")}
+        />
+        <FieldError>{errors.referralCode?.message}</FieldError>
+        <p className="text-[11.5px] leading-relaxed text-[var(--text-muted)]">
+          {d.auth.register.referralHelp}
+        </p>
       </div>
 
       <Button type="submit" variant="primary" size="lg" className="w-full" loading={isSubmitting}>

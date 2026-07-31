@@ -179,6 +179,10 @@ export type Client = {
   created_at: string;
   /** Stripe customer, created on this client's first invoice (migration 0013). */
   stripe_customer_id: string | null;
+  /** This client's affiliate code — theirs to share (migration 0022). */
+  referral_code: string | null;
+  /** Whose code they used when they signed up. Set once, never edited. */
+  referred_by: string | null;
 };
 
 /**
@@ -300,8 +304,15 @@ export type AdAccount = {
   google_ads_refresh_token: string | null;
   google_ads_connected_email: string | null;
   google_ads_connected: boolean;
-  /** % of ad spend the agency bills; admin-only via guard (migration 0006). */
+  /**
+   * What this store is BILLED at. Derived since migration 0022 — a trigger sets
+   * it to `list_commission_rate` minus the owner's affiliate discount on every
+   * write, so writing to it directly does nothing. Read it everywhere; to
+   * change the price, change the list rate.
+   */
   commission_rate: number;
+  /** The agency's price before any affiliate discount. What the team edits. */
+  list_commission_rate: number;
   // Shopify custom-app credentials (migration 0008). The token is AES-GCM
   // ciphertext, excluded from ACCOUNT_COLUMNS like the Google token; the UI
   // only ever sees shopify_token_last4.
@@ -740,6 +751,8 @@ export type Database = {
           | "approved_by"
           | "created_at"
           | "stripe_customer_id"
+          | "referral_code"
+          | "referred_by"
         >;
         Update: Partial<Client>;
         Relationships: [
@@ -838,6 +851,7 @@ export type Database = {
           | "google_ads_connected_email"
           | "google_ads_connected"
           | "commission_rate"
+          | "list_commission_rate"
           | "shopify_admin_token"
           | "shopify_token_last4"
           | "shopify_connected_at"
@@ -1147,6 +1161,16 @@ export type Database = {
       set_workspace_stripe_customer: {
         Args: { p_client_id: string; p_customer_id: string };
         Returns: undefined;
+      };
+      /**
+       * Links the caller to whoever owns that affiliate code (migration 0022).
+       * Returns a status string — 'ok', 'unknown_code', 'own_code',
+       * 'already_referred', 'not_a_client', 'empty' or 'not_signed_in' — never
+       * the referrer, so a code cannot be used to probe for other clients.
+       */
+      claim_referral_code: {
+        Args: { p_code: string };
+        Returns: string;
       };
     };
     Enums: Record<never, never>;

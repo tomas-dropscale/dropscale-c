@@ -22,21 +22,32 @@ import { cn } from "@/lib/utils";
 export function CommissionRate({
   accountId,
   rate,
+  listRate,
   revenueShareEnabled = false,
 }: {
   accountId: string;
+  /** What the store is billed at — the list rate minus any affiliate discount. */
   rate: number;
+  /**
+   * The agency's price, and the only one that is editable. `commission_rate` is
+   * derived by trigger since migration 0022, so writing to it would be silently
+   * overwritten; the discount comes off it automatically.
+   */
+  listRate: number;
   revenueShareEnabled?: boolean;
 }) {
   const router = useRouter();
   const [editing, setEditing] = React.useState(false);
-  const [spend, setSpend] = React.useState(String(rate));
+  const [spend, setSpend] = React.useState(String(listRate));
   const [revOn, setRevOn] = React.useState(revenueShareEnabled);
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState(false);
 
+  // How much the affiliate programme is taking off this store's price.
+  const discount = Math.max(0, listRate - rate);
+
   function open() {
-    setSpend(String(rate));
+    setSpend(String(listRate));
     setRevOn(revenueShareEnabled);
     setError(false);
     setEditing(true);
@@ -53,7 +64,7 @@ export function CommissionRate({
     setError(false);
     const { error: updateError } = await createClient()
       .from("ad_accounts")
-      .update({ commission_rate: spendNum, revenue_share_enabled: revOn })
+      .update({ list_commission_rate: spendNum, revenue_share_enabled: revOn })
       .eq("id", accountId);
     setBusy(false);
 
@@ -75,6 +86,11 @@ export function CommissionRate({
       >
         <span className="inline-flex items-center gap-1 text-[11.5px] font-medium text-[var(--text-secondary)]">
           <Percent className="size-3 text-[var(--text-muted)]" aria-hidden />
+          {/* The billed rate leads; the list price is struck through beside it,
+              so a discounted store never looks like a mispriced one. */}
+          {discount > 0 && (
+            <span className="text-[var(--text-muted)] line-through">{Number(listRate)}%</span>
+          )}
           {Number(rate)}% ad spend
         </span>
         <span
@@ -105,6 +121,13 @@ export function CommissionRate({
           </p>
           <p className="text-[11.5px] leading-relaxed text-[var(--text-muted)]">
             Billed on ad spend, every day this store spends.
+            {discount > 0 && (
+              <>
+                {" "}
+                This client refers others, so {discount}% comes off automatically —
+                they are billed <strong>{Number(rate)}%</strong>.
+              </>
+            )}
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-1">

@@ -31,6 +31,18 @@ export function registerSchema(d: Dictionary) {
       email: z.email({ message: d.auth.validation.email }),
       password: passwordField(d),
       confirmPassword: z.string(),
+      /**
+       * Optional affiliate code (migration 0022). Only the shape is checked
+       * here — whether it exists is decided in the database, because the form
+       * must never be able to tell a stranger which codes are real.
+       */
+      referralCode: z
+        .string()
+        .trim()
+        .max(16, { message: d.auth.validation.referralCode })
+        .regex(/^[A-Za-z0-9]*$/, { message: d.auth.validation.referralCode })
+        .optional()
+        .or(z.literal("")),
     })
     .refine((data) => data.password === data.confirmPassword, {
       message: d.auth.validation.passwordMismatch,
