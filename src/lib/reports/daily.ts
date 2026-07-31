@@ -44,17 +44,55 @@ export type ReportCampaign = {
   conversoes: number;
 };
 
-export type ReportStore = {
+/**
+ * Everything the client's own Dashboard shows, in the same arithmetic.
+ *
+ * Mirrored field by field on purpose: the report is read next to that screen,
+ * and two numbers for the same thing is the fastest way to lose the client's
+ * trust in both. Anything here can be checked against /dashboard for the same
+ * day and must match exactly.
+ */
+export type ReportMetrics = {
+  /** Gross Shopify revenue, before refunds. */
+  receita_bruta: number;
+  devolucoes: number;
+  /** Gross minus refunds — the "REVENUE" card. */
+  receita: number;
+  encomendas: number;
+  gasto: number;
+  impressoes: number;
+  cliques: number;
+  // Cost breakdown, exactly as the panel lists it.
+  custo_produtos: number;
+  taxas_pagamento: number;
+  envio: number;
+  /** The agency's management fee on ad spend — the panel's "Dropscale fee". */
+  taxa_dropscale: number;
+  /** Revenue share billed on advertised collections. Not in the panel's box. */
+  revenue_share: number;
+  custos_totais: number;
+  lucro_liquido: number;
+  /** lucro_liquido ÷ receita, 0–1. */
+  margem: number;
+  /** Receita ÷ gasto. The panel's ROAS and MER are both this number. */
+  roas: number;
+  mer: number;
+  aov: number;
+  /** Ad spend per store order — the panel's "Cost / conversion". */
+  custo_por_encomenda: number;
+  /** Store orders per ad click — the panel's "Conversion rate", 0–1. */
+  taxa_conversao: number;
+  /** Orders minus those Instagram/Facebook referred. Null = not computed yet. */
+  conversoes: number | null;
+};
+
+export type ReportStore = ReportMetrics & {
   id: string;
   nome: string;
   dominio: string | null;
-  gasto: number;
-  receita: number;
-  encomendas: number;
-  roas: number;
   /** When this store's rollup was last computed. Null = never. */
   atualizado_em: string | null;
-  /** Absent (not empty) when Google could not be queried — see `aviso`. */
+  /** Empty when Google could not be queried — see `aviso`. */
   campanhas: ReportCampaign[];
   /** Set only when something could not be fetched, so zero is never a guess. */
   aviso?: string;
@@ -64,7 +102,10 @@ export type ReportClient = {
   id: string;
   nome: string;
   email: string;
+  /** Management fee + revenue share. What the agency bills for the day. */
   comissao_agencia: number;
+  /** The client's own Dashboard, all stores combined. */
+  totais: ReportMetrics;
   lojas: ReportStore[];
 };
 
@@ -216,38 +257,48 @@ export async function buildDailyReport(
     .filter((client) => !staffIds.has(client.id))
     .map((client) => {
       const owned = byClient.get(client.id) ?? [];
-      let commission = 0;
+
+      // The fee is summed per ACCOUNT, never from the combined spend: stores
+      // bill at their own commission_rate, so one blended rate would be wrong
+      // for every client with more than one. Same reason the panel does it.
+      let clientFee = 0;
+      let clientRevShare = 0;
 
       const lojas: ReportStore[] = owned.map((account) => {
         const row = metricsByAccount.get(account.id);
         const totals = sumMetrics(row ? [row] : []);
-
-        // What the agency bills on this store for the day: the management fee
-        // on ad spend, plus any revenue share already computed into the rollup.
         const fee = (totals.adSpend * Number(account.commission_rate)) / 100;
         const revShare = row ? Number(row.revenue_share_amount ?? 0) : 0;
-        commission += fee + revShare;
+
+        clientFee += fee;
+        clientRevShare += revShare;
 
         const failure = campaignErrors.get(account.id);
         return {
           id: account.id,
           nome: account.store_name,
           dominio: account.shopify_url,
-          gasto: round(totals.adSpend),
-          receita: round(totals.netRevenue),
-          encomendas: totals.orders,
-          roas: round(totals.mer),
+          ...metricsBlock(totals, fee, revShare),
           atualizado_em: row?.computed_at ?? null,
           campanhas: campaignsByAccount.get(account.id) ?? [],
           ...(failure ? { aviso: failure } : {}),
         };
       });
 
+      // All of this client's stores together — the view their Dashboard opens
+      // on. Re-derived from the rows rather than summed from the per-store
+      // blocks, so ratios (margin, ROAS, AOV) are computed once from the totals
+      // instead of being averages of averages.
+      const clientRows = owned
+        .map((account) => metricsByAccount.get(account.id))
+        .filter((row): row is DailyMetricRow => Boolean(row));
+
       return {
         id: client.id,
         nome: client.full_name,
         email: client.email,
-        comissao_agencia: round(commission),
+        comissao_agencia: round(clientFee + clientRevShare),
+        totais: metricsBlock(sumMetrics(clientRows), clientFee, clientRevShare),
         lojas,
       };
     });
@@ -265,4 +316,52 @@ export async function buildDailyReport(
 /** Two decimals, so the consumer never receives 13.350000000000001. */
 function round(value: number): number {
   return Math.round(value * 100) / 100;
+}
+
+/** Ratios keep four decimals — 3.36% would round to 0.03 at two. */
+function ratio(value: number): number {
+  return Math.round(value * 10_000) / 10_000;
+}
+
+/**
+ * The client Dashboard's figures, from one set of totals.
+ *
+ * The three the panel derives rather than stores are reproduced here with its
+ * exact arithmetic (page.tsx): the fee is NOT part of `totals.profit`, so net
+ * profit subtracts it separately and total costs add it back — the fee is what
+ * the agency charges, not a cost the store incurred, and the two are only equal
+ * by coincidence.
+ */
+function metricsBlock(
+  totals: ReturnType<typeof sumMetrics>,
+  fee: number,
+  revShare: number,
+): ReportMetrics {
+  const netProfit = totals.profit - fee;
+  const totalCosts =
+    totals.adSpend + totals.productCost + totals.paymentFees + totals.shippingCost + fee;
+
+  return {
+    receita_bruta: round(totals.revenue),
+    devolucoes: round(totals.refunds),
+    receita: round(totals.netRevenue),
+    encomendas: totals.orders,
+    gasto: round(totals.adSpend),
+    impressoes: totals.impressions,
+    cliques: totals.clicks,
+    custo_produtos: round(totals.productCost),
+    taxas_pagamento: round(totals.paymentFees),
+    envio: round(totals.shippingCost),
+    taxa_dropscale: round(fee),
+    revenue_share: round(revShare),
+    custos_totais: round(totalCosts),
+    lucro_liquido: round(netProfit),
+    margem: totals.netRevenue > 0 ? ratio(netProfit / totals.netRevenue) : 0,
+    roas: round(totals.mer),
+    mer: round(totals.mer),
+    aov: round(totals.aov),
+    custo_por_encomenda: round(totals.costPerOrder),
+    taxa_conversao: ratio(totals.orderConversionRate),
+    conversoes: totals.attributedOrders,
+  };
 }

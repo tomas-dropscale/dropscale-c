@@ -45,27 +45,54 @@ distingue "não gastou" de "faltam dados" é o `atualizado_em` de cada loja.
 
 ### Resposta
 
+Cada cliente traz **`totais`** (todas as lojas somadas — é a vista que o cliente
+vê no Dashboard dele) e a lista de **`lojas`**, cada uma com o mesmo conjunto de
+campos.
+
 ```json
 {
-  "data": "2026-07-30",
+  "data": "2026-07-23",
   "moeda": "EUR",
   "fuso_horario": "conta de anúncios / loja",
   "clientes": [
     {
       "id": "0f1c8f2a-…",
-      "nome": "Luis Faria",
-      "email": "luisfaria027@gmail.com",
-      "comissao_agencia": 1.34,
+      "nome": "Tomás Santos",
+      "email": "tomas@exemplo.com",
+      "comissao_agencia": 0,
+      "totais": {
+        "receita_bruta": 317.84,
+        "devolucoes": 0,
+        "receita": 317.84,
+        "encomendas": 5,
+        "gasto": 61.99,
+        "impressoes": 4231,
+        "cliques": 149,
+        "custo_produtos": 102.47,
+        "taxas_pagamento": 9.45,
+        "envio": 0,
+        "taxa_dropscale": 0,
+        "revenue_share": 0,
+        "custos_totais": 173.90,
+        "lucro_liquido": 143.94,
+        "margem": 0.4529,
+        "roas": 5.13,
+        "mer": 5.13,
+        "aov": 63.57,
+        "custo_por_encomenda": 12.40,
+        "taxa_conversao": 0.0336,
+        "conversoes": 4
+      },
       "lojas": [
         {
           "id": "56a6157d-…",
-          "nome": "Trad Glod",
-          "dominio": "tradglod.com",
-          "gasto": 13.35,
-          "receita": 44.10,
-          "encomendas": 3,
-          "roas": 3.30,
-          "atualizado_em": "2026-07-31T02:14:07.881Z",
+          "nome": "Store teste",
+          "dominio": "storeteste.com",
+          "receita": 317.84,
+          "gasto": 61.99,
+          "encomendas": 5,
+          "lucro_liquido": 143.94,
+          "atualizado_em": "2026-07-24T02:14:07.881Z",
           "campanhas": [
             {
               "id": "gads-56a6157d-…-2213…",
@@ -73,8 +100,8 @@ distingue "não gastou" de "faltam dados" é o `atualizado_em` de cada loja.
               "plataforma": "google",
               "estado": "ativa",
               "inicio": "2026-07-12",
-              "dias_a_rodar": 19,
-              "gasto": 9.10,
+              "dias_a_rodar": 12,
+              "gasto": 61.99,
               "conversoes": 2
             }
           ]
@@ -84,6 +111,38 @@ distingue "não gastou" de "faltam dados" é o `atualizado_em` de cada loja.
   ]
 }
 ```
+
+*(As lojas trazem os mesmos campos de `totais`; abreviado aqui só para o exemplo
+não ficar do tamanho de uma página.)*
+
+### Os campos numéricos, e a que card correspondem
+
+Estes são exactamente os números do Dashboard do cliente. Podem abri-lo para o
+mesmo dia e confrontar — se algum não bater, é um bug nosso e queremos saber.
+
+| Campo                 | Card no painel        | Nota                                       |
+|-----------------------|-----------------------|--------------------------------------------|
+| `receita`             | REVENUE               | Líquida de devoluções.                     |
+| `receita_bruta`       | —                     | Antes de devoluções.                        |
+| `devolucoes`          | REFUNDS               |                                             |
+| `encomendas`          | ORDERS                |                                             |
+| `gasto`               | AD SPEND              |                                             |
+| `impressoes`          | (hint do AD SPEND)    |                                             |
+| `lucro_liquido`       | NET PROFIT            | `receita − custos − gasto − taxa_dropscale` |
+| `margem`              | (hint do NET PROFIT)  | 0–1. `0.4529` = 45,29 %.                    |
+| `roas` / `mer`        | ROAS / MER            | Receita ÷ gasto. **Não** é o ROAS do Google. |
+| `aov`                 | AOV                   |                                             |
+| `custo_por_encomenda` | COST / CONVERSION     | Gasto por encomenda da loja.                |
+| `taxa_conversao`      | CONVERSION RATE       | 0–1. Encomendas por clique.                 |
+| `custo_produtos`      | Cost breakdown → COGS |                                             |
+| `taxas_pagamento`     | Cost breakdown        |                                             |
+| `envio`               | Cost breakdown        |                                             |
+| `taxa_dropscale`      | Cost breakdown        | Comissão de gestão sobre o gasto.           |
+| `custos_totais`       | Cost breakdown        |                                             |
+| `revenue_share`       | —                     | Não aparece no painel do cliente.           |
+| `conversoes`          | —                     | Encomendas **menos** as vindas do Instagram/Facebook. `null` se ainda não foi calculado para esse dia. |
+
+Percentagens vêm como fracção (`0.4529`), não como `45.29` nem como texto.
 
 ---
 
