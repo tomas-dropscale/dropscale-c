@@ -154,14 +154,18 @@ export function ReferralCard({
               ? fmt(d.referrals.discountNow, { value: discount })
               : d.referrals.discountNone}
           </p>
+          {/* With a discount, show the movement; without one, just state the
+              fee. "10% → 10%" is not an arrow, it is a puzzle. */}
           {listRate != null && effectiveRate != null && (
             <p className="mt-0.5 text-[12px] text-[var(--text-secondary)]">
-              {fmt(d.referrals.feeLine, { list: listRate, effective: effectiveRate })}
+              {discount > 0
+                ? fmt(d.referrals.feeLine, { list: listRate, effective: effectiveRate })
+                : fmt(d.referrals.feeCurrent, { rate: listRate })}
             </p>
           )}
           {effectiveRate != null && effectiveRate <= floorRate && (
-            <p className="mt-0.5 text-[11.5px] text-[var(--text-muted)]">
-              {d.referrals.floorReached}
+            <p className="mt-0.5 text-[11.5px] text-[var(--success-green)]">
+              {d.referrals.feeZero}
             </p>
           )}
         </div>

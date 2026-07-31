@@ -15,5 +15,18 @@
 /** Percentage points off the fee per active referral. */
 export const REFERRAL_STEP_PCT = 0.5;
 
-/** The fee never falls below this, however many clients somebody brings. */
-export const REFERRAL_FLOOR_RATE = 5;
+/**
+ * The fee's floor (migration 0024). Zero: bring in enough clients and the
+ * management fee disappears entirely — that is the offer, not a rounding edge.
+ *
+ * A floor limits how far the DISCOUNT goes. It must never be read as a minimum
+ * price: 0022 shipped it that way and pushed every store priced below it UP,
+ * which is the one direction a pricing bug must never take.
+ */
+export const REFERRAL_FLOOR_RATE = 0;
+
+/** The standard fee a client starts on, before any referral. */
+export const DEFAULT_FEE_RATE = 10;
+
+/** How many referrals it takes to wipe the fee out from the standard rate. */
+export const REFERRALS_TO_ZERO = DEFAULT_FEE_RATE / REFERRAL_STEP_PCT;
