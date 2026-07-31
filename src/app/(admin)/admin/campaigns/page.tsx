@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { ChevronRight, ShieldAlert, Unplug } from "lucide-react";
+import { ChevronRight, ShieldAlert, Truck, Unplug } from "lucide-react";
 
 import { PageContainer } from "@/components/ui/page-container";
 import { Avatar } from "@/components/ui/avatar";
@@ -9,7 +9,8 @@ import { StoreName } from "@/components/admin/store-name";
 import { ClientDashboardDialog } from "@/components/admin/client-dashboard-dialog";
 import { RangePicker } from "@/components/portal/range-picker";
 import { fetchAdminCampaigns } from "@/lib/admin/campaigns";
-import { parseRange } from "@/lib/portal/range";
+import { daysRunning, parseRange } from "@/lib/portal/range";
+import { collectionHandleFromUrl } from "@/lib/finance/rev-share";
 import { money, percent } from "@/lib/format-intl";
 import { getServerDictionary } from "@/lib/i18n/server";
 import { intlLocale } from "@/lib/i18n";
@@ -98,6 +99,17 @@ export default async function AdminCampaignsPage({
                 <Badge variant="neutral">
                   {client.accounts.length} {client.accounts.length === 1 ? "store" : "stores"}
                 </Badge>
+
+                {/* Already inside HST — i.e. the supplier books commission for
+                    this client. Shown only on a real link (CRM record or an
+                    exact name match), never on a guess: the whole point is
+                    knowing who still has to be added. */}
+                {client.inHst && (
+                  <Badge variant="gold" title="HST já paga comissão deste cliente">
+                    <Truck className="size-3" aria-hidden />
+                    HST
+                  </Badge>
+                )}
 
                 {/* How this client is billed, readable without expanding: the
                     ad-spend fee always, plus rev share when any store has it. */}
@@ -201,6 +213,7 @@ export default async function AdminCampaignsPage({
                           <tr className="label-caps text-left">
                             <th className="py-2 pr-4 font-medium">Campaign</th>
                             <th className="py-2 pr-4 font-medium">Status</th>
+                            <th className="py-2 pr-4 text-right font-medium">Running</th>
                             <th className="py-2 pr-4 text-right font-medium">Spend</th>
                             <th className="py-2 pr-4 text-right font-medium">Clicks</th>
                             <th className="py-2 pr-4 text-right font-medium">CTR</th>
@@ -213,13 +226,40 @@ export default async function AdminCampaignsPage({
                               key={campaign.id}
                               className="border-t border-[var(--border-subtle)]"
                             >
-                              <td className="max-w-[280px] truncate py-2.5 pr-4 text-[var(--text-primary)]">
-                                {campaign.name}
+                              <td className="max-w-[280px] py-2.5 pr-4 text-[var(--text-primary)]">
+                                <span className="block truncate">{campaign.name}</span>
+                                {/* The collection this campaign advertises, read
+                                    out of its own name — the same parse that
+                                    attributes revenue share. Shown because "how
+                                    long has this been running" is a question
+                                    about the collection, not about the string. */}
+                                {collectionHandleFromUrl(campaign.name) && (
+                                  <span className="block truncate text-[11px] text-[var(--accent-gold)]">
+                                    /collections/{collectionHandleFromUrl(campaign.name)}
+                                  </span>
+                                )}
                               </td>
                               <td className="py-2.5 pr-4">
                                 <Badge variant={STATUS_BADGE[campaign.status].variant}>
                                   {STATUS_BADGE[campaign.status].label}
                                 </Badge>
+                              </td>
+                              <td className="py-2.5 pr-4 text-right whitespace-nowrap text-[var(--text-secondary)]">
+                                {(() => {
+                                  const days = daysRunning(campaign.startDate, range.to);
+                                  // An em dash, never "0 days": Google not
+                                  // reporting a start date is not the same as a
+                                  // campaign that started today.
+                                  if (days === null) return "—";
+                                  return (
+                                    <>
+                                      {days}
+                                      <span className="text-[var(--text-muted)]">
+                                        {days === 1 ? " day" : " days"}
+                                      </span>
+                                    </>
+                                  );
+                                })()}
                               </td>
                               <td className="py-2.5 pr-4 text-right text-[var(--text-secondary)]">
                                 {money(campaign.spend, intl, entry.account.currency)}

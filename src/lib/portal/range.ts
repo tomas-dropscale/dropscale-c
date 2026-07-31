@@ -93,6 +93,25 @@ export function rangeDays(selection: RangeSelection): number {
   return Math.round(ms / 86_400_000) + 1;
 }
 
+/**
+ * Whole days a campaign has been running, counting its start day as day 1.
+ *
+ * Null when there is no start date, or when it is later than the day asked
+ * about. That null must reach the screen as "—", never as 0: Google not
+ * reporting a start date and a campaign that started today are different facts,
+ * and "0 days" would state the second while meaning the first.
+ *
+ * Parsed as UTC on both sides so the subtraction can't be shifted by the
+ * server's own timezone.
+ */
+export function daysRunning(start: string | null | undefined, until: string): number | null {
+  if (!start) return null;
+  const from = Date.parse(`${start}T00:00:00Z`);
+  const to = Date.parse(`${until}T00:00:00Z`);
+  if (!Number.isFinite(from) || !Number.isFinite(to) || to < from) return null;
+  return Math.round((to - from) / 86_400_000) + 1;
+}
+
 /** Spend scale for the seeded mock, so longer windows show bigger numbers. */
 export function rangeScale(selection: RangeSelection): number {
   const days = rangeDays(selection);

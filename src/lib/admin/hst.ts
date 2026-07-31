@@ -612,6 +612,49 @@ async function runSync(supabase: Supabase): Promise<HstSyncResult> {
   };
 }
 
+/**
+ * Which clients HST already pays commission on.
+ *
+ * Two ways a booked HST row names its client, because the two systems disagree
+ * about what a client is called:
+ *
+ *   crmIds  — rows whose `client_id` matched a CRM client by name at sync time.
+ *             The reliable link: a portal login reaches it through crm_client_id.
+ *   names   — the tag HST puts in the shop string ("…-Tomas"), lower-cased.
+ *             Whatever the ERP calls them, which is often not their portal name.
+ *
+ * Both are returned rather than one merged answer: the caller matches on the
+ * strong signal first and only falls back to the name, so a badge is never
+ * shown on a guess.
+ */
+export async function fetchHstClientKeys(): Promise<{
+  crmIds: Set<string>;
+  names: Set<string>;
+}> {
+  const supabase = await createClient();
+
+  const { data: source } = await supabase
+    .from("revenue_sources")
+    .select("id")
+    .eq("name", HST_SOURCE)
+    .maybeSingle();
+  if (!source) return { crmIds: new Set(), names: new Set() };
+
+  const { data: rows } = await supabase
+    .from("commissions")
+    .select("client_id, notes")
+    .eq("source_id", source.id);
+
+  const crmIds = new Set<string>();
+  const names = new Set<string>();
+  for (const row of rows ?? []) {
+    if (row.client_id) crmIds.add(row.client_id);
+    const name = noteClientName(row.notes);
+    if (name) names.add(name.trim().toLowerCase());
+  }
+  return { crmIds, names };
+}
+
 // ---------------------------------------------------------------------------
 // The HST page's read model
 // ---------------------------------------------------------------------------

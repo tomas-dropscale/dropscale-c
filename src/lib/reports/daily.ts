@@ -22,6 +22,7 @@ import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
 import { fetchLiveCampaignsDetailed } from "@/lib/google-ads/portal";
 import { sumMetrics, type DailyMetricRow } from "@/lib/metrics/queries";
 import { refreshAccountsNow } from "@/lib/metrics/recompute";
+import { daysRunning } from "@/lib/portal/range";
 import type { AdAccount, Database } from "@/lib/supabase/types";
 
 type Supabase = SupabaseClient<Database>;
@@ -115,15 +116,6 @@ export type DailyReport = {
   fuso_horario: string;
   clientes: ReportClient[];
 };
-
-/** Whole days between an ISO day and the report day, inclusive of the start. */
-function daysRunning(start: string | null, day: string): number | null {
-  if (!start) return null;
-  const from = Date.parse(`${start}T00:00:00Z`);
-  const to = Date.parse(`${day}T00:00:00Z`);
-  if (!Number.isFinite(from) || !Number.isFinite(to) || to < from) return null;
-  return Math.round((to - from) / 86_400_000) + 1;
-}
 
 /**
  * One day, every client that can be reported on.
