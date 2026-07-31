@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 
-import { getSessionProfile } from "@/lib/supabase/server";
+import { createClient, getSessionProfile } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/service";
 import {
   purgeAdminAccountRevenue,
@@ -72,7 +72,27 @@ async function run(opts: Parameters<typeof syncCommissionLedger>[0]) {
     }
     if (!hst.ok) console.error("HST sync failed during ledger sync:", hst.error);
 
-    return NextResponse.json({ ok: true, syncedAt: new Date().toISOString(), hst });
+    // Affiliate discounts expire with TIME — a referral that stops advertising
+    // for 7 days stops counting (migration 0023). Nothing writes to the
+    // database when days pass, so without this sweep a discount earned once
+    // would never come back off. Rides whichever client this run has.
+    let repriced: number | null = null;
+    try {
+      const { data, error } = await (opts?.client ?? (await createClient())).rpc(
+        "refresh_all_referral_rates",
+      );
+      if (error) throw error;
+      repriced = data ?? 0;
+    } catch (error) {
+      console.error("Referral re-pricing failed:", error);
+    }
+
+    return NextResponse.json({
+      ok: true,
+      syncedAt: new Date().toISOString(),
+      hst,
+      repriced,
+    });
   } catch (error) {
     console.error("Ledger sync failed:", error);
     return NextResponse.json({ error: "Could not sync the ledgers." }, { status: 500 });

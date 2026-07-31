@@ -1172,6 +1172,24 @@ export type Database = {
         Args: { p_code: string };
         Returns: string;
       };
+      /**
+       * Re-prices every account whose billed rate no longer matches the rule
+       * (migration 0023). Returns how many changed. The hourly cron's job: a
+       * referral going dormant is a change nothing else would notice.
+       */
+      refresh_all_referral_rates: {
+        Args: Record<string, never>;
+        Returns: number;
+      };
+      /**
+       * Per-referral status for a workspace — 'counting', 'pending', 'partner'
+       * or 'inactive'. Names and statuses only: the referrer must never be able
+       * to read the referred client's stores or spend.
+       */
+      referral_summary: {
+        Args: { p_client_id: string };
+        Returns: { name: string; status: string }[];
+      };
     };
     Enums: Record<never, never>;
     CompositeTypes: Record<never, never>;

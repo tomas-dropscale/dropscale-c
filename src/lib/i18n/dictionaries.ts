@@ -976,6 +976,7 @@ export const en = {
     billingBelongsTo: "This is {name}’s billing profile — you are a partner in that account.",
   },
   referrals: {
+    navLabel: "Affiliates",
     title: "Refer a client, pay us less",
     subtitle:
       "Share your code. Every client who signs up with it takes 0.5% off the fee you pay us — and it stacks.",
@@ -989,6 +990,14 @@ export const en = {
     feeLine: "Your fee: {list}% → {effective}% of ad spend",
     floorReached: "That is the lowest the fee goes.",
     pendingNote: "{count} waiting for approval — they count once the team approves them.",
+    notCounting: "not counting",
+    notCountingNote: "{count} not earning you anything right now.",
+    reason: {
+      pending: "Waiting for the team to approve them.",
+      partner: "Shares a workspace with you, so it doesn’t count.",
+      inactive: "No ad spend in the last 7 days.",
+      counting: "",
+    },
     referredBy: "You signed up with a code.",
     claimTitle: "Were you referred?",
     claimHelp: "Put the code in here and the client who sent you gets their discount. Once only.",
@@ -2035,6 +2044,7 @@ export const pt: Dictionary = {
     billingBelongsTo: "Este é o perfil de facturação de {name} — és sócio nessa conta.",
   },
   referrals: {
+    navLabel: "Afiliados",
     title: "Indica um cliente, pagas-nos menos",
     subtitle:
       "Partilha o teu código. Cada cliente que se registar com ele tira 0,5% à fee que nos pagas — e acumula.",
@@ -2048,6 +2058,14 @@ export const pt: Dictionary = {
     feeLine: "A tua fee: {list}% → {effective}% do ad spend",
     floorReached: "É o mínimo a que a fee chega.",
     pendingNote: "{count} à espera de aprovação — só contam depois de a equipa os aprovar.",
+    notCounting: "não conta",
+    notCountingNote: "{count} não te estão a dar nada neste momento.",
+    reason: {
+      pending: "À espera de aprovação da equipa.",
+      partner: "Partilha um workspace contigo, por isso não conta.",
+      inactive: "Sem gasto em anúncios nos últimos 7 dias.",
+      counting: "",
+    },
     referredBy: "Registaste-te com um código.",
     claimTitle: "Alguém te indicou?",
     claimHelp: "Mete o código aqui e o cliente que te enviou fica com o desconto. Só uma vez.",
@@ -3075,6 +3093,7 @@ export const ptBR: Dictionary = {
     billingBelongsTo: "Este é o perfil de faturamento de {name} — você é sócio nessa conta.",
   },
   referrals: {
+    navLabel: "Afiliados",
     title: "Indique um cliente, pague menos",
     subtitle:
       "Compartilhe seu código. Cada cliente que se cadastrar com ele tira 0,5% da fee que você nos paga — e acumula.",
@@ -3088,6 +3107,14 @@ export const ptBR: Dictionary = {
     feeLine: "Sua fee: {list}% → {effective}% do ad spend",
     floorReached: "É o mínimo que a fee chega.",
     pendingNote: "{count} aguardando aprovação — só contam depois que a equipe aprovar.",
+    notCounting: "não conta",
+    notCountingNote: "{count} não estão te dando nada no momento.",
+    reason: {
+      pending: "Aguardando aprovação da equipe.",
+      partner: "Divide um workspace com você, então não conta.",
+      inactive: "Sem gasto em anúncios nos últimos 7 dias.",
+      counting: "",
+    },
     referredBy: "Você se cadastrou com um código.",
     claimTitle: "Alguém te indicou?",
     claimHelp: "Coloque o código aqui e o cliente que te indicou fica com o desconto. Só uma vez.",
@@ -4117,6 +4144,7 @@ export const es: Dictionary = {
     billingBelongsTo: "Este es el perfil de facturación de {name}: eres socio en esa cuenta.",
   },
   referrals: {
+    navLabel: "Afiliados",
     title: "Trae un cliente, págranos menos",
     subtitle:
       "Comparte tu código. Cada cliente que se registre con él resta un 0,5% a la fee que nos pagas — y se acumula.",
@@ -4130,6 +4158,14 @@ export const es: Dictionary = {
     feeLine: "Tu fee: {list}% → {effective}% del ad spend",
     floorReached: "Es lo mínimo que baja la fee.",
     pendingNote: "{count} pendientes de aprobación — cuentan cuando el equipo los apruebe.",
+    notCounting: "no cuenta",
+    notCountingNote: "{count} no te están dando nada ahora mismo.",
+    reason: {
+      pending: "Esperando la aprobación del equipo.",
+      partner: "Comparte un workspace contigo, así que no cuenta.",
+      inactive: "Sin gasto en anuncios en los últimos 7 días.",
+      counting: "",
+    },
     referredBy: "Te registraste con un código.",
     claimTitle: "¿Te ha referido alguien?",
     claimHelp: "Pon el código aquí y el cliente que te envió se lleva el descuento. Solo una vez.",
@@ -5162,6 +5198,7 @@ export const fr: Dictionary = {
     billingBelongsTo: "Ceci est le profil de facturation de {name} — vous êtes associé dans ce compte.",
   },
   referrals: {
+    navLabel: "Affiliés",
     title: "Parrainez un client, payez-nous moins",
     subtitle:
       "Partagez votre code. Chaque client qui s’inscrit avec retire 0,5 % aux frais que vous nous payez — et cela cumule.",
@@ -5175,6 +5212,14 @@ export const fr: Dictionary = {
     feeLine: "Vos frais : {list} % → {effective} % de l’ad spend",
     floorReached: "C’est le minimum des frais.",
     pendingNote: "{count} en attente de validation — comptés une fois validés par l’équipe.",
+    notCounting: "ne compte pas",
+    notCountingNote: "{count} ne vous rapportent rien pour l’instant.",
+    reason: {
+      pending: "En attente de validation par l’équipe.",
+      partner: "Partage un espace avec vous, donc ne compte pas.",
+      inactive: "Aucune dépense publicitaire depuis 7 jours.",
+      counting: "",
+    },
     referredBy: "Vous vous êtes inscrit avec un code.",
     claimTitle: "Quelqu’un vous a parrainé ?",
     claimHelp: "Mettez le code ici et le client qui vous a envoyé obtient sa remise. Une seule fois.",

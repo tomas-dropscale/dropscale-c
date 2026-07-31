@@ -8,13 +8,20 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input, Label, FieldError } from "@/components/ui/input";
 import { createClient } from "@/lib/supabase/client";
+import { REFERRAL_STEP_PCT } from "@/lib/billing/referrals";
 import { fmt } from "@/lib/i18n";
 import { useI18n } from "@/lib/i18n/provider";
 
+/**
+ * Why a referral is or is not earning anything, straight from the database
+ * (migration 0023). Anything other than `counting` has a reason the client can
+ * act on, which is the point of showing it.
+ */
+export type ReferralStatus = "counting" | "pending" | "partner" | "inactive";
+
 export type ReferredClient = {
   name: string;
-  /** Approved referrals are the ones earning the discount right now. */
-  approved: boolean;
+  status: ReferralStatus;
 };
 
 /**
@@ -93,8 +100,7 @@ export function ReferralCard({
     router.refresh();
   }
 
-  const approved = referred.filter((client) => client.approved);
-  const pending = referred.length - approved.length;
+  const notCounting = referred.filter((client) => client.status !== "counting").length;
   const discount =
     listRate != null && effectiveRate != null ? Math.max(0, listRate - effectiveRate) : 0;
 
@@ -195,23 +201,35 @@ export function ReferralCard({
           ) : (
             <>
               <ul className="divide-y divide-[var(--border-subtle)] rounded-[10px] border border-[var(--border-subtle)]">
-                {referred.map((client, index) => (
-                  <li
-                    key={`${client.name}-${index}`}
-                    className="flex items-center justify-between gap-3 px-4 py-2.5"
-                  >
-                    <span className="truncate text-[13px] text-[var(--text-primary)]">
-                      {client.name}
-                    </span>
-                    <Badge variant={client.approved ? "gold" : "neutral"}>
-                      {client.approved ? `−${0.5}%` : "…"}
-                    </Badge>
-                  </li>
-                ))}
+                {referred.map((client, index) => {
+                  const counting = client.status === "counting";
+                  return (
+                    <li
+                      key={`${client.name}-${index}`}
+                      className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-[13px] text-[var(--text-primary)]">
+                          {client.name}
+                        </p>
+                        {/* The reason, in the client's own terms. "Not counting"
+                            without a why is what turns into a support message. */}
+                        {!counting && (
+                          <p className="text-[11.5px] text-[var(--text-muted)]">
+                            {d.referrals.reason[client.status]}
+                          </p>
+                        )}
+                      </div>
+                      <Badge variant={counting ? "gold" : "neutral"}>
+                        {counting ? `−${REFERRAL_STEP_PCT}%` : d.referrals.notCounting}
+                      </Badge>
+                    </li>
+                  );
+                })}
               </ul>
-              {pending > 0 && (
+              {notCounting > 0 && (
                 <p className="text-[11.5px] text-[var(--text-muted)]">
-                  {fmt(d.referrals.pendingNote, { count: pending })}
+                  {fmt(d.referrals.notCountingNote, { count: notCounting })}
                 </p>
               )}
             </>
