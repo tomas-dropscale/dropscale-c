@@ -67,6 +67,9 @@ export default async function PersonalSettingsPage() {
           listRate={listRate}
           effectiveRate={effectiveRate}
           floorRate={REFERRAL_FLOOR_RATE}
+          // Only the VIEWER can name who referred them — the RPC writes their
+          // own row — and only while nobody is recorded yet.
+          canClaim={viewer.referred_by === null}
         />
         <LanguageSwitcher />
       </div>

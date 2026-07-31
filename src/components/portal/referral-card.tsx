@@ -1,9 +1,13 @@
 "use client";
 
 import * as React from "react";
+import { useRouter } from "next/navigation";
 import { Check, Copy, Gift } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Input, Label, FieldError } from "@/components/ui/input";
+import { createClient } from "@/lib/supabase/client";
 import { fmt } from "@/lib/i18n";
 import { useI18n } from "@/lib/i18n/provider";
 
@@ -31,6 +35,7 @@ export function ReferralCard({
   listRate,
   effectiveRate,
   floorRate,
+  canClaim = false,
 }: {
   code: string | null;
   referred: ReferredClient[];
@@ -38,9 +43,55 @@ export function ReferralCard({
   listRate: number | null;
   effectiveRate: number | null;
   floorRate: number;
+  /**
+   * This client has no referrer yet, so they can still name one.
+   *
+   * The registration form has the field, but it only reaches the database
+   * through the email/password signup trigger — anyone who used the Google
+   * button, or simply forgot, would otherwise have no way to credit whoever
+   * sent them. Set once and then gone, like the field it stands in for.
+   */
+  canClaim?: boolean;
 }) {
+  const router = useRouter();
   const { d } = useI18n();
   const [copied, setCopied] = React.useState(false);
+  const [claim, setClaim] = React.useState("");
+  const [claiming, setClaiming] = React.useState(false);
+  const [claimError, setClaimError] = React.useState<string | null>(null);
+
+  async function submitClaim(event: React.FormEvent) {
+    event.preventDefault();
+    const value = claim.trim().toUpperCase();
+    if (!value) return;
+
+    setClaiming(true);
+    setClaimError(null);
+    const { data, error } = await createClient().rpc("claim_referral_code", { p_code: value });
+    setClaiming(false);
+
+    if (error) {
+      setClaimError(error.message);
+      return;
+    }
+
+    // The function answers with a status, never with the referrer — a code must
+    // not be usable to probe for who else is a client.
+    const message: Record<string, string | null> = {
+      ok: null,
+      unknown_code: d.referrals.claimUnknown,
+      own_code: d.referrals.claimOwn,
+      already_referred: d.referrals.claimAlready,
+    };
+    const failure = message[String(data)] ?? d.referrals.claimUnknown;
+    if (failure) {
+      setClaimError(failure);
+      return;
+    }
+
+    setClaim("");
+    router.refresh();
+  }
 
   const approved = referred.filter((client) => client.approved);
   const pending = referred.length - approved.length;
@@ -108,6 +159,34 @@ export function ReferralCard({
             </p>
           )}
         </div>
+
+        {canClaim && (
+          <form
+            onSubmit={submitClaim}
+            className="space-y-1.5 rounded-[10px] border border-[var(--border-subtle)] px-4 py-3"
+          >
+            <Label htmlFor="claim-code">{d.referrals.claimTitle}</Label>
+            <p className="pb-1 text-[11.5px] leading-relaxed text-[var(--text-muted)]">
+              {d.referrals.claimHelp}
+            </p>
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <Input
+                id="claim-code"
+                value={claim}
+                onChange={(event) => setClaim(event.target.value.toUpperCase())}
+                placeholder={d.auth.register.referralPlaceholder}
+                aria-invalid={Boolean(claimError)}
+                autoComplete="off"
+                maxLength={16}
+                className="flex-1 uppercase"
+              />
+              <Button type="submit" variant="secondary" loading={claiming} disabled={!claim.trim()}>
+                {d.referrals.claimCta}
+              </Button>
+            </div>
+            <FieldError>{claimError}</FieldError>
+          </form>
+        )}
 
         <div className="space-y-2">
           <p className="label-caps">{d.referrals.referred}</p>
