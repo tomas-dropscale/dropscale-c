@@ -39,24 +39,42 @@ export async function fetchCampaignNames(
     .filter((name) => name.length > 0);
 }
 
-/** Live campaigns for one customer, shaped exactly like the DB/mock rows. */
-export async function fetchLiveCampaigns(
+/**
+ * A live campaign plus the two fields Google has but the `campaigns` TABLE does
+ * not: when it started, and its conversions.
+ *
+ * Kept off the `Campaign` type on purpose — that type mirrors a real table, and
+ * giving it columns the table has no room for would make every DB read look
+ * like it might carry them. These exist only on the live path, which is where
+ * the daily report reads from.
+ */
+export type LiveCampaign = Campaign & {
+  /** ISO day the campaign started, per Google. Null when it does not report one. */
+  startDate: string | null;
+  /** Google-attributed conversions in the queried range. */
+  conversions: number;
+};
+
+/** Live campaigns for one customer, with everything Google will give us. */
+export async function fetchLiveCampaignsDetailed(
   customerId: string,
   refreshToken: string,
   accountId: string,
   range: RangeSelection,
-): Promise<Campaign[]> {
+): Promise<LiveCampaign[]> {
   const query = `
     SELECT
       campaign.id,
       campaign.name,
       campaign.status,
+      campaign.start_date,
       campaign_budget.amount_micros,
       metrics.cost_micros,
       metrics.impressions,
       metrics.clicks,
       metrics.ctr,
-      metrics.average_cpc
+      metrics.average_cpc,
+      metrics.conversions
     FROM campaign
     WHERE ${dateClause(range)}
     ORDER BY metrics.cost_micros DESC
@@ -64,9 +82,9 @@ export async function fetchLiveCampaigns(
 
   const rows = await searchGoogleAds(customerId, refreshToken, query);
 
-  // The REST API serialises fields as camelCase (costMicros), even though the
-  // GAQL query above uses the proto snake_case names.
-  return rows.map((row: GaqlRow): Campaign => {
+  // The REST API serialises fields as camelCase (costMicros, startDate), even
+  // though the GAQL query above uses the proto snake_case names.
+  return rows.map((row: GaqlRow): LiveCampaign => {
     const campaign = row.campaign ?? {};
     const metrics = row.metrics ?? {};
     const budget = row.campaignBudget ?? {};
@@ -85,8 +103,26 @@ export async function fetchLiveCampaigns(
       cpc: micros(metrics.averageCpc),
       daily_budget: budget.amountMicros != null ? micros(budget.amountMicros) : null,
       updated_at: new Date().toISOString(),
+      startDate: campaign.startDate ? String(campaign.startDate) : null,
+      conversions: num(metrics.conversions),
     };
   });
+}
+
+/**
+ * Live campaigns shaped like the DB/mock rows — what the UI consumes.
+ *
+ * Returns the detailed rows as `Campaign[]`: LiveCampaign is a superset, so the
+ * two extra fields simply ride along unread. Stripping them would cost a second
+ * pass to make a distinction only the type system cares about.
+ */
+export async function fetchLiveCampaigns(
+  customerId: string,
+  refreshToken: string,
+  accountId: string,
+  range: RangeSelection,
+): Promise<Campaign[]> {
+  return fetchLiveCampaignsDetailed(customerId, refreshToken, accountId, range);
 }
 
 /**
