@@ -35,6 +35,21 @@ export async function GET(request: NextRequest) {
     // them the "no client account" screen rather than a broken redirect.
     if (searchParams.get("portal_signup") === "1") {
       await supabase.rpc("claim_portal_client");
+
+      // The affiliate code typed on /register, which could not ride through
+      // Google as metadata (lib/site.ts). Applied only here, at sign-up: the
+      // portal offers no way to claim a code afterwards, on purpose, so that
+      // clients cannot go around crediting each other later.
+      //
+      // Never fatal, and the outcome is deliberately not surfaced — a bad code
+      // must not block somebody from reaching their dashboard.
+      const referral = searchParams.get("ref");
+      if (referral) {
+        const { error: referralError } = await supabase.rpc("claim_referral_code", {
+          p_code: referral,
+        });
+        if (referralError) console.error("Referral claim failed:", referralError.message);
+      }
     }
 
     return NextResponse.redirect(new URL(next, origin));

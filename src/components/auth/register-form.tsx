@@ -27,6 +27,7 @@ export function RegisterForm() {
   const {
     register,
     handleSubmit,
+    getValues,
     formState: { errors, isSubmitting },
   } = useForm<RegisterInput>({
     resolver: zodResolver(schema),
@@ -109,7 +110,10 @@ export function RegisterForm() {
     <form onSubmit={onSubmit} className="space-y-4" noValidate>
       {serverError && <FormAlert>{serverError}</FormAlert>}
 
-      <GoogleButton onError={setServerError} />
+      {/* Reads the code field below at click time rather than through state:
+          Google takes the browser away from this page, and the code is only
+          collectable at sign-up. */}
+      <GoogleButton onError={setServerError} referralCode={() => getValues("referralCode") ?? ""} />
 
       <div className="space-y-1.5">
         <Label htmlFor="fullName">{d.auth.register.nameLabel}</Label>

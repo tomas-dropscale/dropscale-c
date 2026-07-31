@@ -30,6 +30,14 @@ export function authRedirect(next: string) {
  * portal and should claim a portal identity. Password-reset links go through
  * the same route without it and are left alone.
  */
-export function oauthRedirect(next = "/dashboard") {
-  return `${authRedirect(next)}&portal_signup=1`;
+export function oauthRedirect(next = "/dashboard", referralCode?: string) {
+  const base = `${authRedirect(next)}&portal_signup=1`;
+
+  // The affiliate code typed on /register, carried through Google and applied
+  // by the callback. It has to travel this way because signInWithOAuth() takes
+  // no metadata, and the code is only ever collected at sign-up — the portal
+  // deliberately offers no way to claim one later, so if it is lost here it is
+  // lost for good. Not a secret: a referral code exists to be shared.
+  const code = referralCode?.trim().toUpperCase();
+  return code ? `${base}&ref=${encodeURIComponent(code)}` : base;
 }

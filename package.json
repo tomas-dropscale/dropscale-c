@@ -39,6 +39,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.4",
     "@emnapi/core": "1.11.2",
     "@emnapi/runtime": "1.11.2",
     "@opennextjs/cloudflare": "^1.20.1",

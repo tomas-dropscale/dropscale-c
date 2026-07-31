@@ -38,7 +38,18 @@ function GoogleMark() {
  * On success the browser leaves for Google, so there is no success path to
  * handle here: everything after consent happens in /auth/callback.
  */
-export function GoogleButton({ onError }: { onError?: (message: string) => void }) {
+export function GoogleButton({
+  onError,
+  referralCode,
+}: {
+  onError?: (message: string) => void;
+  /**
+   * Read from the register form at click time. Sign-up is the only moment a
+   * referral can be claimed, and this button leaves the page — without carrying
+   * the code, everyone who signs up with Google loses whoever sent them.
+   */
+  referralCode?: () => string;
+}) {
   const { d } = useI18n();
   const [busy, setBusy] = React.useState(false);
 
@@ -48,7 +59,7 @@ export function GoogleButton({ onError }: { onError?: (message: string) => void 
     const { error } = await createClient().auth.signInWithOAuth({
       provider: "google",
       options: {
-        redirectTo: oauthRedirect("/dashboard"),
+        redirectTo: oauthRedirect("/dashboard", referralCode?.()),
         // Always show the account chooser: shared machines are common and a
         // silent re-auth into the wrong account is confusing to undo.
         queryParams: { prompt: "select_account" },
