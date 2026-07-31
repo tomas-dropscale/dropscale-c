@@ -1,0 +1,168 @@
+# Dropscale IO — API de leitura para o relatório diário
+
+Versão 2. Muda duas coisas em relação à primeira: existe um parâmetro
+`?ao_vivo=1`, e está explicada a razão de os números não baterem certo com o
+painel — que eram **duas** razões, não uma.
+
+---
+
+## O endpoint
+
+```
+GET https://dropscale.app/api/reports/daily?data=2026-07-30&ao_vivo=1
+Authorization: Bearer <CHAVE>
+```
+
+| Parâmetro   | Obrigatório | Descrição                                                        |
+|-------------|-------------|------------------------------------------------------------------|
+| `data`      | não         | `AAAA-MM-DD`. Sem ele, devolve o **dia anterior** contado em Lisboa. |
+| `cliente`   | não         | Restringe a um cliente (o `id` que vem na resposta).             |
+| `campanhas` | não         | `0` devolve as lojas sem campanhas — bastante mais rápido.        |
+| `ao_vivo`   | não         | `1` recalcula o dia a partir do Google e do Shopify antes de responder. **Uma vez por noite, nunca em polling.** |
+
+Só leitura no que toca aos vossos dados — a chave não permite alterar nada.
+`ao_vivo=1` escreve no nosso agregado interno, o que é justamente o que faz as
+leituras baratas do resto do dia passarem a devolver os mesmos números.
+
+### Custo do `ao_vivo=1`
+
+Uma chamada por loja a cada API externa (Google Ads e Shopify). Com muitas lojas
+demora dezenas de segundos. Se der timeout, dividam por cliente com
+`?cliente=<id>` — a lista de ids vem numa chamada normal com `campanhas=0`.
+
+### Códigos
+
+| Código | Quando                                                           |
+|--------|------------------------------------------------------------------|
+| 200    | Relatório gerado.                                                |
+| 400    | `data` não está em `AAAA-MM-DD`.                                 |
+| 401    | Chave em falta ou errada.                                        |
+| 404    | Não há clientes para o pedido.                                   |
+| 503    | Configuração em falta do nosso lado.                             |
+
+Dias sem actividade não são omitidos: o cliente e as lojas vêm com zeros. O que
+distingue "não gastou" de "faltam dados" é o `atualizado_em` de cada loja.
+
+### Resposta
+
+```json
+{
+  "data": "2026-07-30",
+  "moeda": "EUR",
+  "fuso_horario": "conta de anúncios / loja",
+  "clientes": [
+    {
+      "id": "0f1c8f2a-…",
+      "nome": "Luis Faria",
+      "email": "luisfaria027@gmail.com",
+      "comissao_agencia": 1.34,
+      "lojas": [
+        {
+          "id": "56a6157d-…",
+          "nome": "Trad Glod",
+          "dominio": "tradglod.com",
+          "gasto": 13.35,
+          "receita": 44.10,
+          "encomendas": 3,
+          "roas": 3.30,
+          "atualizado_em": "2026-07-31T02:14:07.881Z",
+          "campanhas": [
+            {
+              "id": "gads-56a6157d-…-2213…",
+              "nome": "PMax - PT",
+              "plataforma": "google",
+              "estado": "ativa",
+              "inicio": "2026-07-12",
+              "dias_a_rodar": 19,
+              "gasto": 9.10,
+              "conversoes": 2
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+---
+
+## Porque é que o painel e a API não davam o mesmo
+
+Duas causas independentes. O `?ao_vivo=1` resolve a primeira e **não** resolve a
+segunda — e isso é deliberado.
+
+### 1. Frescura — resolvida
+
+O caso **Tomas e Tomas**: 11,75 € no painel, 0 € na API.
+
+Não havia linha nenhuma no agregado para aquele dia: a loja nunca tinha sido
+sincronizada. O zero não queria dizer "não gastou", queria dizer "nunca foi
+calculado" — e era o `atualizado_em: null` a assinalá-lo.
+
+A vossa leitura estava certa: abrir o `/admin/campaigns` não actualiza o
+agregado, porque essa página não escreve nada, só consulta o Google ao vivo.
+Com `ao_vivo=1` o dia é recalculado na hora e este caso desaparece.
+
+### 2. Método de cálculo — não resolvida, e não deve ser
+
+O caso **Diogo Barbosa**: 43,71 € no painel, 51,83 € na API — a API *acima*.
+
+Desactualização só explica ficar abaixo, nunca acima. A diferença é outra:
+
+- O painel pergunta ao Google `FROM campaign` e **soma campanha a campanha**.
+- O agregado, e portanto a API, pergunta `FROM customer` — o **total da conta**.
+
+O total da conta inclui gasto que a listagem por campanha não devolve (campanhas
+removidas, sobretudo). Por isso o número da API tende a ser igual ou maior, e é
+o mais próximo do que o Google efectivamente cobrou.
+
+Ou seja: se depois do `ao_vivo=1` ainda virem uma diferença deste tipo, **é o
+painel que está a sub-reportar, não a API**. Não alinhámos os dois escolhendo o
+número mais baixo, que seria a forma fácil de fazer a discrepância desaparecer
+sem a resolver.
+
+---
+
+## As duas ressalvas que se mantêm
+
+### O dia não fecha à meia-noite de Lisboa
+
+O `data=` é interpretado em Lisboa e, sem parâmetro, devolvemos o dia anterior
+contado em Lisboa. Mas os números por dia vêm agregados no fuso da **conta de
+anúncios** (gasto) e no da **loja** (receita e encomendas). Para contas e lojas
+portuguesas coincide; para uma loja noutro fuso, não. O campo `fuso_horario`
+diz-vos isso na própria resposta.
+
+### `conversoes` e o ROAS do Google
+
+`roas` é receita líquida ÷ gasto, calculado da receita real do Shopify — não é o
+ROAS atribuído pelo Google, que é quase sempre 0 porque poucas lojas têm
+conversion tracking configurado. Pela mesma razão, `conversoes` por campanha
+costuma vir 0. **As vendas reais estão em `encomendas`, ao nível da loja.**
+
+---
+
+## Campos
+
+| Campo pedido            | Estado | Nota                                                        |
+|-------------------------|--------|-------------------------------------------------------------|
+| `id` / `email` cliente  | ✅     | `id` é um UUID estável. É por aí que devem ligar às salas.  |
+| loja `nome`             | ✅     |                                                             |
+| loja `dominio`          | ⚠️     | `null` se a loja ainda não foi ligada ao Shopify.           |
+| loja `gasto`            | ✅     | Total da conta Google. Ver secção acima.                    |
+| loja `receita`          | ✅     | Shopify, líquida de devoluções.                             |
+| loja `encomendas`       | ✅     | Encomendas reais (exclui testes e canceladas).              |
+| loja `roas`             | ✅     | Receita líquida ÷ gasto.                                    |
+| campanha `nome`         | ✅     |                                                             |
+| campanha `plataforma`   | ⚠️     | Sempre `"google"` — não há Meta nem TikTok neste produto.   |
+| campanha `estado`       | ✅     | `ativa` / `pausada` / `terminada`.                          |
+| campanha `gasto`        | ✅     |                                                             |
+| campanha `inicio`       | ✅     | Acrescentado para isto; não existia no painel.              |
+| campanha `dias_a_rodar` | ✅     | Do `inicio` até ao dia do relatório, inclusive.             |
+| campanha `conversoes`   | ⚠️     | Atribuídas pelo Google; costuma ser 0.                      |
+| `comissao_agencia`      | ✅     | Por cliente e por dia: taxa sobre o gasto + revenue share.  |
+
+Uma loja cujo Google Ads falhe traz um campo extra `aviso` com o motivo e
+`campanhas: []`. Não inventamos zeros. Lojas de contas internas da agência não
+entram no relatório.

@@ -21,6 +21,7 @@ import { decryptToken } from "@/lib/google-ads/crypto";
 import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
 import { fetchLiveCampaignsDetailed } from "@/lib/google-ads/portal";
 import { sumMetrics, type DailyMetricRow } from "@/lib/metrics/queries";
+import { refreshAccountsNow } from "@/lib/metrics/recompute";
 import type { AdAccount, Database } from "@/lib/supabase/types";
 
 type Supabase = SupabaseClient<Database>;
@@ -93,7 +94,7 @@ function daysRunning(start: string | null, day: string): number | null {
 export async function buildDailyReport(
   supabase: Supabase,
   day: string,
-  options: { clientId?: string; includeCampaigns?: boolean } = {},
+  options: { clientId?: string; includeCampaigns?: boolean; refresh?: boolean } = {},
 ): Promise<DailyReport> {
   const includeCampaigns = options.includeCampaigns !== false;
 
@@ -126,6 +127,20 @@ export async function buildDailyReport(
   const accounts = ((accountRows ?? []) as AdAccount[]).filter(
     (account) => !staffIds.has(account.client_id),
   );
+
+  // Live mode: re-pull the day from Google and Shopify BEFORE reading it, so
+  // the answer is computed now rather than whenever a page last happened to be
+  // opened. Writes the rollup as it goes, which means the cheap reads for the
+  // rest of the day inherit the corrected numbers instead of drifting again.
+  //
+  // One request per account to each upstream, so this is for the once-a-night
+  // call, never for polling.
+  if (options.refresh && accounts.length > 0) {
+    await refreshAccountsNow(
+      accounts.map((account) => account.id),
+      { client: supabase, from: day, to: day },
+    );
+  }
 
   const { data: metricRows } = await supabase
     .from("daily_metrics")

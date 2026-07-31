@@ -438,16 +438,30 @@ export async function resyncAccountNow(accountId: string): Promise<void> {
  * bring today's revenue and spend current on demand. Never throws per account;
  * one store's upstream hiccup mustn't fail the whole refresh.
  */
-export async function refreshAccountsNow(accountIds: string[]): Promise<void> {
+export async function refreshAccountsNow(
+  accountIds: string[],
+  opts?: {
+    /**
+     * Supabase to work through. A page load passes nothing and rides the
+     * viewer's session; a caller with no session at all — the keyed daily
+     * report — passes the service-role client, since without it every write
+     * here is silently refused by RLS and the refresh "succeeds" over nothing.
+     */
+    client?: Supabase;
+    /** Explicit window. Defaults to the rolling incremental one. */
+    from?: string;
+    to?: string;
+  },
+): Promise<void> {
   if (accountIds.length === 0) return;
-  const supabase = await createClient();
+  const supabase = opts?.client ?? (await createClient());
 
   const { data: rows } = await supabase.from("ad_accounts").select("*").in("id", accountIds);
   const accounts = ((rows ?? []) as AdAccount[]).filter(syncable);
   if (accounts.length === 0) return;
 
-  const from = isoDay(-(WINDOW_DAYS - 1));
-  const to = isoDay(0);
+  const from = opts?.from ?? isoDay(-(WINDOW_DAYS - 1));
+  const to = opts?.to ?? isoDay(0);
 
   await Promise.all(
     accounts.map(async (account) => {

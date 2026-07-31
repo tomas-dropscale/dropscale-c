@@ -87,6 +87,12 @@ export async function GET(request: NextRequest) {
       // Campaigns cost one Google round trip per store; ?campanhas=0 skips them
       // for a caller that only wants store totals.
       includeCampaigns: params.get("campanhas") !== "0",
+      // ?ao_vivo=1 re-pulls the day from Google and Shopify before answering,
+      // instead of reading whatever the rollup last happened to hold. Slow and
+      // upstream-heavy by design: it is the once-a-night call, not the polling
+      // one. It also WRITES the refreshed day, so the cheap reads that follow
+      // return the same numbers.
+      refresh: params.get("ao_vivo") === "1",
     });
 
     if (report.clientes.length === 0) {
