@@ -355,6 +355,8 @@ export async function fetchHstCommissions(token: string): Promise<{
    * and it works regardless of how the ERP paginates.
    */
   entriesTotal: number;
+  /** Distinct shop strings seen in the payload, sorted. Diagnostic only. */
+  shops: string[];
   droppedRows: number;
   /** Rows booked without a client name — the shop string had none. */
   unnamedRows: number;
@@ -417,9 +419,17 @@ export async function fetchHstCommissions(token: string): Promise<{
   }
 
   const grouped = new Map<string, HstEntry>();
+  // Every distinct shop string HST actually sent. The only way to answer "why
+  // is that client not in the list": either their shop is here and we parsed it
+  // wrong, or it never arrived and the question belongs to the ERP. Guessing
+  // between those two cost a whole round of wrong explanations.
+  const shops = new Set<string>();
   let droppedRows = 0;
   let unnamedRows = 0;
   for (const row of rows) {
+    const shop = row.shopName?.toString().trim();
+    if (shop) shops.add(shop);
+
     const day = row.express_date ? normalizeDay(row.express_date.toString()) : null;
     if (!day) {
       droppedRows += 1;
@@ -445,6 +455,7 @@ export async function fetchHstCommissions(token: string): Promise<{
     entries,
     grandTotal: Number(first.data?.all?.total ?? 0),
     entriesTotal: entries.reduce((sum, entry) => sum + entry.amount, 0),
+    shops: [...shops].sort((a, b) => a.localeCompare(b)),
     rowCount: rows.length,
     droppedRows,
     unnamedRows,
@@ -477,6 +488,14 @@ export type HstSyncResult = {
    */
   bookedTotal?: number;
   reportedTotal?: number;
+  /**
+   * Every distinct shop string HST sent this run.
+   *
+   * Diagnostic, and the one that settles "why isn't <client> in the list": if
+   * their shop is here, the parse is at fault; if it is absent, HST did not
+   * send it and the answer lies in the ERP, not in this codebase.
+   */
+  shops?: string[];
   /** Distinct clients the sync attributed commission to. */
   clients?: number;
   skipped?: boolean;
@@ -594,13 +613,14 @@ async function runSync(supabase: Supabase): Promise<HstSyncResult> {
   let grandTotal: number;
   let rowCount: number;
   let entriesTotal: number;
+  let shops: string[];
   let droppedRows: number;
   let unnamedRows: number;
   let pages: number;
   let truncated: boolean;
   let shape: string;
   try {
-    ({ entries, grandTotal, entriesTotal, rowCount, droppedRows, unnamedRows, pages, truncated, shape } =
+    ({ entries, grandTotal, entriesTotal, shops, rowCount, droppedRows, unnamedRows, pages, truncated, shape } =
       await fetchHstCommissions(token));
   } catch (error) {
     // A refused token is the one failure worth a second attempt: renew and go
@@ -623,7 +643,7 @@ async function runSync(supabase: Supabase): Promise<HstSyncResult> {
 
     try {
       const renewedToken = await ensureFreshToken(supabase, { forceRenew: true });
-      ({ entries, grandTotal, entriesTotal, rowCount, droppedRows, unnamedRows, pages, truncated, shape } =
+      ({ entries, grandTotal, entriesTotal, shops, rowCount, droppedRows, unnamedRows, pages, truncated, shape } =
         await fetchHstCommissions(renewedToken));
     } catch (retryError) {
       return {
@@ -728,6 +748,7 @@ async function runSync(supabase: Supabase): Promise<HstSyncResult> {
     rowsRead: rowCount,
     bookedTotal: entriesTotal,
     reportedTotal: grandTotal,
+    shops,
     clients: new Set(entries.map((entry) => entry.client)).size,
   };
 }

@@ -38,9 +38,18 @@ export function HstView({ overview }: { overview: HstOverview }) {
   const router = useRouter();
 
   const [payOpen, setPayOpen] = React.useState(false);
+  const [allOpen, setAllOpen] = React.useState(false);
   const [busy, setBusy] = React.useState<"sync" | "pay" | string | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [notice, setNotice] = React.useState<string | null>(null);
+  /**
+   * Shop strings from the last sync in this session.
+   *
+   * Not persisted: it is a diagnostic for "why is that client missing", and the
+   * answer is only meaningful about the run that just happened. Null until a
+   * sync has run here, which the dialog says rather than showing an empty list.
+   */
+  const [shops, setShops] = React.useState<string[] | null>(null);
 
   const { currency } = overview;
 
@@ -80,6 +89,7 @@ export function HstView({ overview }: { overview: HstOverview }) {
           rowsRead?: number;
           bookedTotal?: number;
           reportedTotal?: number;
+          shops?: string[];
         }
       | null;
     setBusy(null);
@@ -114,6 +124,7 @@ export function HstView({ overview }: { overview: HstOverview }) {
       );
     }
 
+    setShops(body.shops ?? null);
     setNotice(`Synced — ${parts.join(" · ")}.`);
     router.refresh();
   }
@@ -273,6 +284,13 @@ export function HstView({ overview }: { overview: HstOverview }) {
           <Breakdown
             title="Top clients"
             rows={clientRows}
+            action={
+              clientRows.length > 0 ? (
+                <Button size="sm" variant="ghost" onClick={() => setAllOpen(true)}>
+                  All clients ({clientRows.length})
+                </Button>
+              ) : undefined
+            }
             empty={
               <p className="text-[13px] text-[var(--text-muted)]">
                 Nothing synced from HST yet.
@@ -379,6 +397,83 @@ export function HstView({ overview }: { overview: HstOverview }) {
           </DataTable>
         </section>
       </div>
+
+      {/* Every client HST reports, not just the leaders. The Breakdown above is
+          a shape-of-the-business view; this is the roll call, and it is what
+          gets checked when someone asks "where is <client>?". */}
+      <Dialog open={allOpen} onOpenChange={setAllOpen}>
+        <DialogContent className="max-h-[85vh] w-[calc(100vw-2rem)] max-w-[640px] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>All clients ({overview.clients.length})</DialogTitle>
+          </DialogHeader>
+
+          <DataTable
+            head={
+              <>
+                <Th>Client</Th>
+                <Th align="right">Entries</Th>
+                <Th align="right">Share</Th>
+                <Th align="right">Commission</Th>
+              </>
+            }
+          >
+            {overview.clients.map((client, index) => (
+              <Tr key={client.name}>
+                <Td align="left">
+                  <span className="flex min-w-0 items-center gap-2">
+                    <span
+                      className="size-2 shrink-0 rounded-full"
+                      style={{ backgroundColor: sourceTint(index) }}
+                      aria-hidden
+                    />
+                    <span className="truncate">{client.name}</span>
+                  </span>
+                </Td>
+                <Td align="right" className="text-[var(--text-muted)]">
+                  {client.count}
+                </Td>
+                <Td align="right" className="text-[var(--text-muted)]">
+                  {percent(client.share, intl)}
+                </Td>
+                <Td align="right" className="font-semibold">
+                  {money(client.amount, intl, currency)}
+                </Td>
+              </Tr>
+            ))}
+          </DataTable>
+
+          {/* The diagnostic. A client absent from the table above but present
+              here means we parsed their shop string wrong; absent from BOTH
+              means HST never sent them, and no amount of code changes here
+              will conjure them up. */}
+          <div className="mt-4 border-t border-[var(--border-subtle)] pt-4">
+            <h3 className="text-[13px] font-semibold text-[var(--text-primary)]">
+              Shops HST returned {shops ? `(${shops.length})` : ""}
+            </h3>
+            {shops === null ? (
+              <p className="mt-1 text-[12px] text-[var(--text-muted)]">
+                Press <strong>Sync now</strong> to list the shop strings HST sent — that is
+                what says whether a missing client was never sent or was read wrong.
+              </p>
+            ) : shops.length === 0 ? (
+              <p className="mt-1 text-[12px] text-[var(--text-muted)]">
+                HST sent no shop names at all.
+              </p>
+            ) : (
+              <ul className="mt-2 flex flex-col gap-1">
+                {shops.map((shop) => (
+                  <li
+                    key={shop}
+                    className="truncate font-mono text-[11.5px] text-[var(--text-secondary)]"
+                  >
+                    {shop}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={payOpen} onOpenChange={setPayOpen}>
         <DialogContent className="max-w-[460px]">
