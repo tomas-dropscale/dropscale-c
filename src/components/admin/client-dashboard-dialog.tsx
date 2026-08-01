@@ -72,6 +72,7 @@ function Stat({
   hint,
   accent,
   hero,
+  negative,
 }: {
   label: string;
   icon: typeof Wallet;
@@ -81,14 +82,21 @@ function Stat({
   accent?: boolean;
   /** The one figure the report opens on — bigger, and spans two columns. */
   hero?: boolean;
+  /**
+   * The value is a loss. Red, and it overrides gold: a losing month rendered in
+   * the same celebratory colour as a winning one reads as good news at a
+   * glance, and the minus sign alone is easy to skim past.
+   */
+  negative?: boolean;
 }) {
-  const gold = accent || hero;
+  const gold = (accent || hero) && !negative;
 
   return (
     <div
       className={cn(
         "rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3",
         gold && "border-[var(--accent-gold)]/30 bg-[var(--accent-gold-dim)]",
+        negative && "border-[var(--danger-red)]/40",
         hero && "sm:col-span-2 sm:p-4",
       )}
     >
@@ -97,7 +105,11 @@ function Stat({
         <Icon
           className={cn(
             "size-3.5 shrink-0",
-            gold ? "text-[var(--accent-gold)]" : "text-[var(--text-muted)]",
+            negative
+              ? "text-[var(--danger-red)]"
+              : gold
+                ? "text-[var(--accent-gold)]"
+                : "text-[var(--text-muted)]",
           )}
           aria-hidden
         />
@@ -106,7 +118,11 @@ function Stat({
         className={cn(
           "mt-1 truncate font-semibold tabular-nums",
           hero ? "text-[26px]" : "text-[18px]",
-          gold ? "text-[var(--accent-gold-strong)]" : "text-[var(--text-primary)]",
+          negative
+            ? "text-[var(--danger-red)]"
+            : gold
+              ? "text-[var(--accent-gold-strong)]"
+              : "text-[var(--text-primary)]",
         )}
       >
         {value}
@@ -250,23 +266,27 @@ function Body({ data }: { data: AdminClientOverview }) {
             label="Margin"
             icon={Percent}
             value={t.margin === null ? "—" : percent(t.margin)}
-            hint="costs apportioned · after our cut"
+            hint="before our fee"
+            negative={t.margin !== null && t.margin < 0}
           />
           {/* AOV moved into the revenue hint — it is a property of revenue,
               not a figure that earns its own card next to it. */}
           <Stat
             label="Their profit"
             icon={Coins}
-            value={maybeMoney(t.netProfitAfterFee, currency)}
-            hint="costs apportioned · after our cut"
+            value={maybeMoney(t.profit, currency)}
+            hint="before our fee"
+            negative={t.profit !== null && t.profit < 0}
           />
         </div>
-        {/* COGS, payment fees and shipping are recorded per DAY, not per order,
-            so the Google slice of them can only be estimated by revenue share.
-            Saying so is cheaper than having someone discover it later. */}
+        {/* Two things a reader would otherwise have to guess at. The fee note
+            matters most: this figure deliberately disagrees with "what they owe
+            us minus what they made", and someone WILL check that subtraction. */}
         <p className="text-[11px] text-[var(--text-muted)]">
-          Profit and margin apportion COGS, payment fees and shipping by revenue
-          share — Shopify does not record them per referrer.
+          Profit and margin are the client&apos;s trading result — COGS, payment
+          fees, shipping and ad spend deducted, our management fee not. COGS and
+          fees are apportioned by revenue share; Shopify does not record them per
+          referrer.
         </p>
       </section>
 

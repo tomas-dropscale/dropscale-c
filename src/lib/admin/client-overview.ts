@@ -119,12 +119,22 @@ export type AdminClientOverview = {
     /** commission + revShare — the agency's total take for the period. */
     agencyRevenue: number;
     /**
-     * The client's profit on the Google slice AFTER our fee. Costs are
-     * apportioned, not measured — see google-attribution.ts. Null when the
-     * window's attribution has never been computed.
+     * The client's profit on the Google slice: revenue less COGS, payment fees,
+     * shipping and ad spend.
+     *
+     * Our management fee is NOT deducted, by explicit instruction. It is the
+     * client's trading result, and what they owe us afterwards is a separate
+     * line — a client with €50 of profit and a €10 fee has made €50, not €40.
+     * The fee has its own card in the Agency section, so nothing is hidden by
+     * leaving it out here; putting it in would make this figure disagree with
+     * what the client sees on their own dashboard.
+     *
+     * Goes NEGATIVE and is rendered as such — a losing period has to be legible
+     * as a loss, not floored at zero. Costs are apportioned, not measured; see
+     * google-attribution.ts. Null when attribution has never been computed.
      */
-    netProfitAfterFee: number | null;
-    /** netProfitAfterFee ÷ googleRevenue. Null for the same reason. */
+    profit: number | null;
+    /** profit ÷ googleRevenue, likewise before our fee. */
     margin: number | null;
   };
   stores: AdminStoreOverview[];
@@ -233,8 +243,8 @@ export async function fetchClientOverview(
     shippingCost: totals.shippingCost,
     adSpend: totals.adSpend,
   };
+  // Before our fee — see the note on `profit` in the type above.
   const profit = googleProfit(revenue, costs);
-  const netProfitAfterFee = profit === null ? null : profit - commission - revShare;
 
   const days = [...groupByDay(rows)]
     // A day nobody has attributed yet is not a day of zero sales, and plotting
@@ -242,12 +252,6 @@ export async function fetchClientOverview(
     .filter(([, dayRows]) => dayRows.some((row) => row.attributed_orders !== null))
     .map(([day, dayRows]) => {
       const daySums = sumMetrics(dayRows);
-      // The fee respects each store's own rate, so it has to be summed per
-      // account rather than applied to the day's total spend.
-      const dayFee = dayRows.reduce(
-        (sum, row) => sum + (Number(row.ad_spend) * (rateById.get(row.ad_account_id) ?? 0)) / 100,
-        0,
-      );
       const dayProfit = googleProfit(daySums.attributedRevenue, {
         revenue: daySums.revenue,
         refunds: daySums.refunds,
@@ -257,11 +261,13 @@ export async function fetchClientOverview(
         adSpend: daySums.adSpend,
       });
 
+      // The chart plots the client's trading result, fee excluded, so its line
+      // and the "Their profit" card above it are the same measure.
       return {
         day,
         revenue: daySums.attributedRevenue ?? 0,
         adSpend: daySums.adSpend,
-        profit: (dayProfit ?? 0) - dayFee,
+        profit: dayProfit ?? 0,
       };
     })
     .sort((a, b) => a.day.localeCompare(b.day));
@@ -289,11 +295,8 @@ export async function fetchClientOverview(
       commission,
       revShare,
       agencyRevenue: commission + revShare,
-      netProfitAfterFee,
-      margin:
-        netProfitAfterFee !== null && revenue !== null && revenue > 0
-          ? netProfitAfterFee / revenue
-          : null,
+      profit,
+      margin: profit !== null && revenue !== null && revenue > 0 ? profit / revenue : null,
     },
     stores,
     days,

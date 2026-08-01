@@ -66,7 +66,17 @@ describe("googleProfit", () => {
   });
 
   it("goes negative when the ads cost more than the slice earned", () => {
+    // A loss has to survive to the UI as a loss — never floored at zero.
     expect(googleProfit(100, costs({ revenue: 100, adSpend: 300 }))).toBe(-200);
+  });
+
+  it("does not know about the agency fee, so it cannot deduct one", () => {
+    // The agreed rule, in the client's own words: a client with 50 of profit
+    // who owes us a 10 fee has still made 50. The fee is billed separately and
+    // must never be netted off here — this signature has no way to pass one in,
+    // which is the guard.
+    const profit = googleProfit(150, costs({ revenue: 150, productCost: 60, adSpend: 40 }));
+    expect(profit).toBe(50);
   });
 
   it("charges no variable cost when the shop is all Meta", () => {

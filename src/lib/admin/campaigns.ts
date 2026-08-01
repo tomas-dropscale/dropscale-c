@@ -4,6 +4,8 @@ import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
 import { fetchLiveCampaignsDetailed, type LiveCampaign } from "@/lib/google-ads/portal";
 import { markIfAuthRevoked } from "@/lib/google-ads/revoked";
 import { fetchHstClientKeys } from "@/lib/admin/hst";
+import { googleProfit, googleRoas } from "@/lib/admin/google-attribution";
+import { fetchDailyMetrics, sumMetrics } from "@/lib/metrics/queries";
 import { ACCOUNT_COLUMNS } from "@/lib/portal/data";
 import type { AdAccount } from "@/lib/supabase/types";
 import type { RangeSelection } from "@/lib/portal/range";
@@ -65,7 +67,38 @@ export type AdminCampaignsOverview = {
    */
   internal: AdminClientCampaigns[];
   configured: boolean;
-  totals: { spend: number; commission: number; activeCampaigns: number; connectedAccounts: number };
+  totals: {
+    spend: number;
+    commission: number;
+    activeCampaigns: number;
+    connectedAccounts: number;
+    /**
+     * Portfolio revenue: every client store in the period, narrowed to orders
+     * Instagram and Facebook did not refer (0019). Same rule as the client
+     * report, so the strip and the sum of the reports agree — a headline that
+     * quietly counted Meta's sales would be larger than every report under it
+     * and there would be no way to see why.
+     *
+     * Null when no day in the window has had its attribution computed.
+     */
+    revenue: number | null;
+    /**
+     * The clients' combined trading profit on that revenue: less COGS, payment
+     * fees, shipping and ad spend — but NOT our management fee, which is a
+     * separate line and has its own card in this strip. Negative when the book
+     * lost money, and shown that way.
+     */
+    profit: number | null;
+    /**
+     * Portfolio ROAS — total revenue ÷ total ad spend, NOT the mean of each
+     * store's ROAS. Averaging the ratios would let a store that spent €5 and
+     * got lucky count for as much as one spending €5,000, which is how a book
+     * of business ends up reporting a return nobody actually earned.
+     */
+    roas: number;
+    /** Rollup ad spend — the denominator above. See the note in fetchAdminCampaigns. */
+    rollupSpend: number;
+  };
 };
 
 type Owner = { name: string; email: string; crmClientId: string | null; inHst: boolean };
@@ -202,18 +235,63 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
     commission: 0,
   }));
 
+  /**
+   * Revenue for the strip, from the rollup rather than from Google.
+   *
+   * Everything above this line is a LIVE Google Ads query, but Google knows
+   * nothing about what the shops sold — revenue only exists in daily_metrics,
+   * joined there from Shopify. So the portfolio figures are read, not fetched.
+   *
+   * Deliberately no recompute first, unlike the client report: this page holds
+   * every client at once, and refreshing them all would turn one page load into
+   * dozens of Google and Shopify round trips. The hourly cron already keeps the
+   * rollup current, and opening a client's own report refreshes that client.
+   *
+   * The consequence is that ROAS and profit divide by the ROLLUP's ad spend,
+   * not the live figure in the "Ad spend" card beside them. Both come from the
+   * same Google account and converge once the rollup runs; using the live spend
+   * as the denominator for rollup revenue would be worse — two sources, one
+   * ratio, and a number that moves when neither the revenue nor the spend did.
+   */
+  const metricRows = await fetchDailyMetrics(
+    accounts.map((account) => account.id),
+    range.from,
+    range.to,
+  );
+  const rollup = sumMetrics(metricRows);
+  const revenue = rollup.attributedRevenue;
+
+  const spend = perAccount.reduce((sum, entry) => sum + entry.spend, 0);
+  const commission = perAccount.reduce((sum, entry) => sum + entry.commission, 0);
+
+  // Costs are recorded per day for the whole shop, so only the Google share of
+  // them is charged here — see lib/admin/google-attribution.ts. Our own fee is
+  // not among them: see the note on `profit` in the type above.
+  const profit = googleProfit(revenue, {
+    revenue: rollup.revenue,
+    refunds: rollup.refunds,
+    productCost: rollup.productCost,
+    paymentFees: rollup.paymentFees,
+    shippingCost: rollup.shippingCost,
+    adSpend: rollup.adSpend,
+  });
+
   return {
     clients: groupByOwner(perAccount, owners),
     internal: groupByOwner(internalEntries, owners),
     configured,
     totals: {
-      spend: perAccount.reduce((sum, entry) => sum + entry.spend, 0),
-      commission: perAccount.reduce((sum, entry) => sum + entry.commission, 0),
+      spend,
+      commission,
       activeCampaigns: perAccount.reduce(
         (sum, entry) => sum + entry.campaigns.filter((c) => c.status === "active").length,
         0,
       ),
       connectedAccounts: perAccount.filter((entry) => entry.connected).length,
+      revenue,
+      profit,
+      roas: googleRoas(revenue, rollup.adSpend),
+      rollupSpend: rollup.adSpend,
     },
   };
 }

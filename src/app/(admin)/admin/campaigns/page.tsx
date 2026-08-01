@@ -12,6 +12,7 @@ import { fetchAdminCampaigns } from "@/lib/admin/campaigns";
 import { daysRunning, parseRange } from "@/lib/portal/range";
 import { collectionHandleFromUrl } from "@/lib/finance/rev-share";
 import { money, percent } from "@/lib/format-intl";
+import { multiplier } from "@/lib/format";
 import { getServerDictionary } from "@/lib/i18n/server";
 import { intlLocale } from "@/lib/i18n";
 import type { CampaignStatus } from "@/lib/supabase/types";
@@ -50,6 +51,68 @@ export default async function AdminCampaignsPage({
       description={`All client campaigns and agency commissions · ${range.from} → ${range.to}`}
       actions={<RangePicker current={range} />}
     >
+      {/* ---- what the book of business did ----
+          Above the operational counters on purpose: revenue, profit and return
+          are the questions this page gets opened with, and ad spend only means
+          something once you know what it bought. Gold marks them as the
+          business line, the same treatment the client report gives revenue.
+
+          Google only, like every revenue figure in the admin zone — so this
+          strip and the sum of the individual reports agree. */}
+      <div className="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-3">
+        {[
+          {
+            label: "Revenue",
+            value:
+              overview.totals.revenue === null
+                ? "—"
+                : money(overview.totals.revenue, intl),
+            hint: "all stores · excludes Meta referrals",
+            negative: false,
+          },
+          {
+            label: "Client profit",
+            value:
+              overview.totals.profit === null ? "—" : money(overview.totals.profit, intl),
+            // Our fee is excluded on purpose — it is the clients' trading
+            // result, and the commission has its own card below.
+            hint: "after COGS, shipping and ad spend · before our fee",
+            negative: overview.totals.profit !== null && overview.totals.profit < 0,
+          },
+          {
+            label: "Average ROAS",
+            value: multiplier(overview.totals.roas),
+            // Named so nobody reads it as the mean of the per-store ratios:
+            // it is the portfolio's own return, weighted by spend.
+            hint: `${money(overview.totals.revenue ?? 0, intl)} ÷ ${money(overview.totals.rollupSpend, intl)}`,
+            negative: false,
+          },
+        ].map((item) => (
+          <div
+            key={item.label}
+            className={
+              // Red wins over gold: a book of business that lost money must not
+              // be dressed in the same colour as one that made money.
+              item.negative
+                ? "panel border-[var(--danger-red)]/40 p-4"
+                : "panel border-[var(--accent-gold)]/30 bg-[var(--accent-gold-dim)] p-4"
+            }
+          >
+            <p className="label-caps">{item.label}</p>
+            <p
+              className={
+                item.negative
+                  ? "metric-value mt-1 !text-[24px] !text-[var(--danger-red)]"
+                  : "metric-value mt-1 !text-[24px] !text-[var(--accent-gold-strong)]"
+              }
+            >
+              {item.value}
+            </p>
+            <p className="mt-0.5 truncate text-[11px] text-[var(--text-muted)]">{item.hint}</p>
+          </div>
+        ))}
+      </div>
+
       {/* Totals strip */}
       <div className="mb-6 grid grid-cols-2 gap-4 lg:grid-cols-4">
         {[

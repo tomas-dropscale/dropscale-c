@@ -133,24 +133,31 @@ export default async function DashboardPage({
     const spend = accountRows.reduce((sum, row) => sum + Number(row.ad_spend), 0);
     fee += (spend * (rateById.get(accountId) ?? 0)) / 100;
   }
-  // The full chain (spec: COGS moves PROFIT, never revenue):
-  // net − COGS − payment fees − shipping − ad spend − Dropscale fee.
-  const netProfit = totals.profit - fee;
+  /**
+   * The full chain (spec: COGS moves PROFIT, never revenue):
+   * net − COGS − payment fees − shipping − ad spend.
+   *
+   * Our management fee is NOT in it. It used to be, and that made this figure
+   * answer a question the client never asked: a shop that traded to €50 of
+   * profit made €50, whether or not it owes us €10 afterwards. The fee is still
+   * shown — below, as its own line, billed separately — so nothing is hidden;
+   * it simply stops being netted off the client's own trading result.
+   *
+   * Negative is a real outcome here and rendered in red rather than floored.
+   */
+  const netProfit = totals.profit;
   const totalCosts =
-    totals.adSpend + totals.productCost + totals.paymentFees + totals.shippingCost + fee;
+    totals.adSpend + totals.productCost + totals.paymentFees + totals.shippingCost;
 
   const chartDays: ChartDay[] = [...groupByDay(rows)]
     .map(([day, dayRows]) => {
       const daySums = sumMetrics(dayRows);
-      const dayFee = dayRows.reduce(
-        (sum, row) => sum + (Number(row.ad_spend) * (rateById.get(row.ad_account_id) ?? 0)) / 100,
-        0,
-      );
+      // Fee-free too, so the curve and the Net profit figure are one measure.
       return {
         day,
         revenue: daySums.netRevenue,
         adSpend: daySums.adSpend,
-        profit: daySums.profit - dayFee,
+        profit: daySums.profit,
       };
     })
     .sort((a, b) => a.day.localeCompare(b.day));
@@ -327,6 +334,10 @@ export default async function DashboardPage({
               <h2 className="mb-4 text-[15px] font-semibold text-[var(--text-primary)]">
                 Cost breakdown
               </h2>
+              {/* The Dropscale fee is deliberately NOT in this list: every line
+                  here is subtracted to reach Net profit, and the fee no longer
+                  is. It moves below the total, where it can be read without
+                  making the arithmetic above it wrong. */}
               <dl className="space-y-3 text-[13px]">
                 {(
                   [
@@ -334,7 +345,6 @@ export default async function DashboardPage({
                     ["Product costs (COGS)", totals.productCost],
                     ["Payment fees", totals.paymentFees],
                     ["Shipping", totals.shippingCost],
-                    ["Dropscale fee", fee],
                   ] as const
                 ).map(([label, value]) => (
                   <div key={label} className="flex items-center justify-between gap-3">
@@ -370,6 +380,23 @@ export default async function DashboardPage({
                   net revenue.
                 </p>
               </div>
+
+              {/* Still shown, still exact — just outside the profit chain, so a
+                  client can see what they owe without it eating the result they
+                  earned. Hidden entirely when there is nothing to bill. */}
+              {fee > 0 && (
+                <div className="mt-3 border-t border-[var(--border-subtle)] pt-3 text-[13px]">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-[var(--text-secondary)]">Dropscale fee</span>
+                    <span className="font-medium whitespace-nowrap text-[var(--text-primary)]">
+                      {money(fee, currency)}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[11.5px] leading-relaxed text-[var(--text-muted)]">
+                    Billed separately — not deducted from the profit above.
+                  </p>
+                </div>
+              )}
             </section>
           </div>
         </div>
