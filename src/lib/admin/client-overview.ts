@@ -1,9 +1,21 @@
 /**
  * One client's dashboard, as the AGENCY sees it.
  *
- * Backs the campaigns page's "Open dashboard" popup: the same figures the
- * client sees on their own dashboard, plus what the agency earns on them —
- * which is the part a client's view will never show.
+ * Backs the campaigns page's "Report" popup: what the agency earns on a client,
+ * and what the client earned from the work we actually do for them.
+ *
+ * GOOGLE ONLY. Every revenue figure here is narrowed to orders that Instagram
+ * and Facebook did not refer (migration 0019, lib/shopify/referrer.ts). The
+ * agency sells Google ads; a report that answered "what did we make you" with
+ * the shop's total revenue would be crediting our spend with Meta's sales, and
+ * a client comparing that against their Shopify admin would rightly stop
+ * trusting the whole page. Ad spend, impressions and clicks come from Google
+ * Ads directly, so they need no narrowing.
+ *
+ * The blended figures are not merely unused here — `netRevenue` and `orders`
+ * are deliberately absent from the exported types, so the report cannot render
+ * them by accident. Where costs cannot be split by referrer they are
+ * apportioned; see lib/admin/google-attribution.ts for that reasoning.
  *
  * Built on `daily_metrics`, the pre-aggregated join of Google spend and Shopify
  * revenue.
@@ -23,12 +35,16 @@ import { createClient } from "@/lib/supabase/server";
 import { ACCOUNT_COLUMNS } from "@/lib/portal/data";
 import { ensureDailyCoverage, recomputeDailyMetrics } from "@/lib/metrics/recompute";
 import {
+  googleProfit,
+  googleRoas,
+  type DayCosts,
+} from "@/lib/admin/google-attribution";
+import {
   fetchDailyMetrics,
   freshness,
   groupByAccount,
   groupByDay,
   sumMetrics,
-  type MetricTotals,
 } from "@/lib/metrics/queries";
 import type { AdAccount } from "@/lib/supabase/types";
 import type { RangeSelection } from "@/lib/portal/range";
@@ -45,35 +61,29 @@ export type AdminStoreOverview = {
   clicks: number;
   ctr: number;
   cpc: number;
-  /** Google-attributed conversions. Kept as the hint, like googleRoas below. */
+  /**
+   * Shopify revenue on orders Instagram and Facebook did NOT refer — the
+   * store's real return on our ads. Null when no day in the window has had its
+   * attribution computed yet, so the report shows a dash rather than asserting
+   * a number it cannot stand behind.
+   */
+  googleRevenue: number | null;
+  /** How many orders that revenue came from. Null follows googleRevenue. */
+  googleOrders: number | null;
+  /** Ad spend ÷ googleOrders — the CPA that matches the figures above. */
+  costPerGoogleOrder: number;
+  /** googleRevenue ÷ ad spend. The store's headline return. */
+  roas: number;
+  /**
+   * What Google's OWN conversion tracking claims, from the Ads API. Kept beside
+   * the real figure because a 0.00x here over healthy revenue is the signature
+   * of a broken conversion tag — exactly the diagnosis an admin opens this for.
+   */
+  trackedRoas: number;
+  /** Google-attributed conversions, same provenance and same caveat. */
   conversions: number;
   conversionValue: number;
   costPerConversion: number;
-  /**
-   * The STORE's conversions: real orders minus the ones Instagram or Facebook
-   * referred (migration 0019). This is what belongs next to Google ad spend —
-   * see lib/shopify/referrer.ts. Null on history the sync has not recomputed
-   * yet, so the dialog falls back to Google's count rather than claiming zero.
-   */
-  storeConversions: number | null;
-  /** Ad spend ÷ storeConversions — the CPA matching the figure above. */
-  costPerStoreConversion: number;
-  /** What those conversions were worth: gross revenue of the same orders. */
-  storeConversionValue: number | null;
-  /**
-   * The STORE's return: Shopify revenue ÷ ad spend. Matches what the client
-   * sees on their own dashboard — an admin looking at this popup to answer
-   * "why does my client say their ROAS is wrong" must be reading their number.
-   */
-  roas: number;
-  /**
-   * What Google attributes. Kept alongside so a broken conversion-tracking
-   * setup stays visible here, which is exactly the diagnosis an admin needs.
-   */
-  googleRoas: number;
-  /** Store-side, from Shopify. */
-  netRevenue: number;
-  orders: number;
   /** What the agency bills on this store for the period. */
   commissionRate: number;
   commission: number;
@@ -87,16 +97,39 @@ export type AdminClientOverview = {
   clientEmail: string;
   currency: string;
   range: { from: string; to: string };
-  totals: MetricTotals & {
+  totals: {
+    /** Non-Meta Shopify revenue across the client's stores. Null = uncomputed. */
+    googleRevenue: number | null;
+    googleOrders: number | null;
+    /** googleRevenue ÷ googleOrders. */
+    aov: number;
+    adSpend: number;
+    impressions: number;
+    clicks: number;
+    ctr: number;
+    cpc: number;
+    conversions: number;
+    /** googleRevenue ÷ ad spend. */
+    roas: number;
+    /** Google's own attributed return — the tracking-health hint. */
+    trackedRoas: number;
     /** Ad-spend commission across the client's stores, at each store's rate. */
     commission: number;
     revShare: number;
     /** commission + revShare — the agency's total take for the period. */
     agencyRevenue: number;
-    /** The client's profit AFTER our fee — what they actually keep. */
-    netProfitAfterFee: number;
+    /**
+     * The client's profit on the Google slice AFTER our fee. Costs are
+     * apportioned, not measured — see google-attribution.ts. Null when the
+     * window's attribution has never been computed.
+     */
+    netProfitAfterFee: number | null;
+    /** netProfitAfterFee ÷ googleRevenue. Null for the same reason. */
+    margin: number | null;
   };
   stores: AdminStoreOverview[];
+  /** Only days whose attribution has been computed — a false zero would read
+   *  on the chart as a day the shop sold nothing. */
   days: { day: string; revenue: number; adSpend: number; profit: number }[];
   /** When the underlying rollup last ran; null when there is nothing yet. */
   updatedAt: string | null;
@@ -145,8 +178,11 @@ export async function fetchClientOverview(
 
   const stores: AdminStoreOverview[] = accounts
     .map((account) => {
-      const totals = sumMetrics(byAccount.get(account.id) ?? []);
+      const accountRows = byAccount.get(account.id) ?? [];
+      const totals = sumMetrics(accountRows);
       const rate = rateById.get(account.id) ?? 0;
+      const revenue = totals.attributedRevenue;
+
       return {
         accountId: account.id,
         storeName: account.store_name,
@@ -158,20 +194,18 @@ export async function fetchClientOverview(
         clicks: totals.clicks,
         ctr: totals.ctr,
         cpc: totals.cpc,
+        googleRevenue: revenue,
+        googleOrders: totals.attributedOrders,
+        costPerGoogleOrder: totals.costPerAttributedOrder,
+        roas: googleRoas(revenue, totals.adSpend),
+        trackedRoas: totals.roas,
         conversions: totals.conversions,
         conversionValue: totals.conversionValue,
         costPerConversion: totals.costPerConversion,
-        storeConversions: totals.attributedOrders,
-        costPerStoreConversion: totals.costPerAttributedOrder,
-        storeConversionValue: totals.attributedRevenue,
-        roas: totals.mer,
-        googleRoas: totals.roas,
-        netRevenue: totals.netRevenue,
-        orders: totals.orders,
         commissionRate: rate,
         commission: (totals.adSpend * rate) / 100,
         revShareEnabled: account.revenue_share_enabled,
-        revShare: (byAccount.get(account.id) ?? []).reduce(
+        revShare: accountRows.reduce(
           (sum, row) => sum + Number(row.revenue_share_amount),
           0,
         ),
@@ -185,7 +219,27 @@ export async function fetchClientOverview(
   const commission = stores.reduce((sum, store) => sum + store.commission, 0);
   const revShare = stores.reduce((sum, store) => sum + store.revShare, 0);
 
+  const revenue = totals.attributedRevenue;
+  const orders = totals.attributedOrders;
+
+  // Costs belong to the whole shop; only the Google slice of them is charged
+  // against the Google slice of revenue. The blended `revenue` is the
+  // denominator of that split and never a figure the report displays.
+  const costs: DayCosts = {
+    revenue: totals.revenue,
+    refunds: totals.refunds,
+    productCost: totals.productCost,
+    paymentFees: totals.paymentFees,
+    shippingCost: totals.shippingCost,
+    adSpend: totals.adSpend,
+  };
+  const profit = googleProfit(revenue, costs);
+  const netProfitAfterFee = profit === null ? null : profit - commission - revShare;
+
   const days = [...groupByDay(rows)]
+    // A day nobody has attributed yet is not a day of zero sales, and plotting
+    // it as one would draw a trough in the chart that never happened.
+    .filter(([, dayRows]) => dayRows.some((row) => row.attributed_orders !== null))
     .map(([day, dayRows]) => {
       const daySums = sumMetrics(dayRows);
       // The fee respects each store's own rate, so it has to be summed per
@@ -194,11 +248,20 @@ export async function fetchClientOverview(
         (sum, row) => sum + (Number(row.ad_spend) * (rateById.get(row.ad_account_id) ?? 0)) / 100,
         0,
       );
+      const dayProfit = googleProfit(daySums.attributedRevenue, {
+        revenue: daySums.revenue,
+        refunds: daySums.refunds,
+        productCost: daySums.productCost,
+        paymentFees: daySums.paymentFees,
+        shippingCost: daySums.shippingCost,
+        adSpend: daySums.adSpend,
+      });
+
       return {
         day,
-        revenue: daySums.netRevenue,
+        revenue: daySums.attributedRevenue ?? 0,
         adSpend: daySums.adSpend,
-        profit: daySums.profit - dayFee,
+        profit: (dayProfit ?? 0) - dayFee,
       };
     })
     .sort((a, b) => a.day.localeCompare(b.day));
@@ -212,11 +275,25 @@ export async function fetchClientOverview(
     currency: accounts[0]?.currency ?? "EUR",
     range: { from: range.from, to: range.to },
     totals: {
-      ...totals,
+      googleRevenue: revenue,
+      googleOrders: orders,
+      aov: revenue !== null && orders && orders > 0 ? revenue / orders : 0,
+      adSpend: totals.adSpend,
+      impressions: totals.impressions,
+      clicks: totals.clicks,
+      ctr: totals.ctr,
+      cpc: totals.cpc,
+      conversions: totals.conversions,
+      roas: googleRoas(revenue, totals.adSpend),
+      trackedRoas: totals.roas,
       commission,
       revShare,
       agencyRevenue: commission + revShare,
-      netProfitAfterFee: totals.profit - commission - revShare,
+      netProfitAfterFee,
+      margin:
+        netProfitAfterFee !== null && revenue !== null && revenue > 0
+          ? netProfitAfterFee / revenue
+          : null,
     },
     stores,
     days,

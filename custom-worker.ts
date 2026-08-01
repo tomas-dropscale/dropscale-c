@@ -55,35 +55,52 @@ const worker = {
       return;
     }
 
-    // Which schedule fired decides the work. Both routes are idempotent, so a
-    // retried or double-fired trigger costs nothing but a round trip.
-    const job =
+    /**
+     * Which schedule fired decides the work. Every route is idempotent, so a
+     * retried or double-fired trigger costs nothing but a round trip.
+     *
+     * The hourly tick runs BOTH syncs, in order: the metrics rollup is what
+     * the client reports read, and the ledger is what the finance pages read.
+     * Refreshing only the ledger — as this used to — left the reports showing
+     * whatever the last page view happened to capture, which is exactly the
+     * staleness the countdown in the report now promises is bounded.
+     */
+    const job: { name: string; paths: string[] } =
       event.cron === "0 6 * * 1"
-        ? { name: "weekly billing", path: "/api/billing/cron" }
-        : { name: "ledger sync", path: "/api/admin/sync-ledgers" };
+        ? { name: "weekly billing", paths: ["/api/billing/cron"] }
+        : event.cron === "55 23 * * *"
+          ? { name: "daily close", paths: ["/api/admin/sync-metrics"] }
+          : {
+              name: "hourly refresh",
+              paths: ["/api/admin/sync-metrics", "/api/admin/sync-ledgers"],
+            };
 
     // Only the path is ever used for routing; the origin just has to be a valid
     // absolute URL, so a missing site URL must not abort the run.
     const origin = env.NEXT_PUBLIC_SITE_URL ?? "https://dropscale.app";
 
-    try {
-      const response = await nextHandler.fetch(
-        new Request(`${origin}${job.path}`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${env.CRON_SECRET}` },
-        }),
-        env,
-        ctx,
-      );
+    // Sequential, not parallel: the ledger reads Google, the rollup writes it,
+    // and two concurrent syncs would only race each other for the same quota.
+    for (const path of job.paths) {
+      try {
+        const response = await nextHandler.fetch(
+          new Request(`${origin}${path}`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${env.CRON_SECRET}` },
+          }),
+          env,
+          ctx,
+        );
 
-      const body = await response.text();
-      if (!response.ok) {
-        console.error(`Cron "${job.name}" failed (${response.status}): ${body}`);
-        return;
+        const body = await response.text();
+        if (!response.ok) {
+          console.error(`Cron "${job.name}" ${path} failed (${response.status}): ${body}`);
+          continue; // One failing leg must not skip the other.
+        }
+        console.log(`Cron "${job.name}" ${path}: ${body}`);
+      } catch (error) {
+        console.error(`Cron "${job.name}" ${path} threw:`, error);
       }
-      console.log(`Cron "${job.name}": ${body}`);
-    } catch (error) {
-      console.error(`Cron "${job.name}" threw:`, error);
     }
   },
 };

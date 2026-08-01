@@ -12,9 +12,16 @@
       // enough that Google Ads has settled Sunday's spend, early enough that the
       // invoice is waiting when the client starts their week.
       "0 6 * * 1",
-      // Hourly — book agency commission from Google into the ledger, so the
-      // finance overview is current without anyone having to open a page.
-      "0 * * * *"
+      // Hourly on the hour, from midnight UTC — rebuild the metrics rollup the
+      // client reports read, then the commission ledger the finance pages read.
+      // The countdown in the report is derived from this same schedule, so if
+      // this expression changes, change PERIOD_MINUTES in next-refresh.tsx too.
+      "0 * * * *",
+      // 23:55 — close the day. Pulls every account's Google spend and Shopify
+      // revenue into daily_metrics before the date rolls over, so the client
+      // reports show a complete day rather than whatever the last page view
+      // happened to capture.
+      "55 23 * * *"
     ]
   },
   // populate_process_env: with a compatibility_date before 2025-04-01, Workers

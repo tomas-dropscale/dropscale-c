@@ -354,22 +354,40 @@ async function syncAccountWindow(
  * Refresh the recent window for these accounts. Never throws: a dashboard
  * must render with yesterday's numbers rather than die on an upstream error.
  */
-export async function recomputeDailyMetrics(accounts: AdAccount[]): Promise<void> {
+export async function recomputeDailyMetrics(
+  accounts: AdAccount[],
+  opts?: {
+    /** Ignore both freshness checks — the nightly close wants today final. */
+    force?: boolean;
+    /**
+     * Supabase to work through. Page loads pass nothing and ride the viewer's
+     * session; the cron has none and passes the service-role client, because
+     * writing daily_metrics requires owning the account or being an admin, and
+     * a request with no session is neither.
+     */
+    client?: Supabase;
+  },
+): Promise<void> {
   const now = Date.now();
   const stale = accounts
     .filter(syncable)
-    .filter((account) => now - (lastRunByAccount.get(account.id) ?? 0) >= RECOMPUTE_INTERVAL_MS);
+    .filter(
+      (account) =>
+        opts?.force || now - (lastRunByAccount.get(account.id) ?? 0) >= RECOMPUTE_INTERVAL_MS,
+    );
   if (stale.length === 0) return;
 
   try {
-    const supabase = await createClient();
+    const supabase = opts?.client ?? (await createClient());
 
     // Cross-isolate freshness: newest computed_at per account decides.
-    const { data: freshRows } = await supabase
-      .from("daily_metrics")
-      .select("ad_account_id, computed_at")
-      .in("ad_account_id", stale.map((account) => account.id))
-      .gte("computed_at", new Date(now - RECOMPUTE_INTERVAL_MS).toISOString());
+    const { data: freshRows } = opts?.force
+      ? { data: [] }
+      : await supabase
+          .from("daily_metrics")
+          .select("ad_account_id, computed_at")
+          .in("ad_account_id", stale.map((account) => account.id))
+          .gte("computed_at", new Date(now - RECOMPUTE_INTERVAL_MS).toISOString());
     const fresh = new Set((freshRows ?? []).map((row) => row.ad_account_id));
 
     const toRun = stale.filter((account) => !fresh.has(account.id));

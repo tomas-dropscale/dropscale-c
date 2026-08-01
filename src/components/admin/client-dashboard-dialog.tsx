@@ -10,7 +10,6 @@ import {
   LayoutDashboard,
   MousePointerClick,
   Percent,
-  ShoppingBag,
   Target,
   TrendingUp,
   Unplug,
@@ -27,6 +26,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { NextRefresh } from "@/components/admin/next-refresh";
 import { DailyPerformanceChart } from "@/components/portal/daily-performance-chart";
 import { DateRangePicker } from "@/components/ui/date-range-picker";
 import { compact, integer, money, multiplier, percent } from "@/lib/format";
@@ -39,13 +39,31 @@ import type { RangeSelection } from "@/lib/portal/range";
  *
  * Two levels, because that is how the agency actually reads a client: the
  * whole book of business at the top, then each store's ad spend on its own.
- * It shows what the client's own dashboard shows PLUS the agency's take,
- * which is the half a client is never shown.
+ * It shows the client's own numbers PLUS the agency's take, which is the half
+ * a client is never shown.
+ *
+ * GOOGLE ONLY. Every revenue figure is narrowed to orders Instagram and
+ * Facebook did not refer — see lib/admin/client-overview.ts. The blended totals
+ * are not available on the props at all, so nothing here can print them by
+ * mistake; the labelling below exists so a reader knows which question these
+ * numbers answer before comparing them against a Shopify admin screen.
  *
  * Fetched on open, not with the page: the campaigns list can hold dozens of
  * clients, and loading every one of these up front would cost a table scan per
  * client to render something nobody asked to see yet.
  */
+
+/**
+ * Money that may not exist yet.
+ *
+ * Attribution is computed per day (0019); a window predating that has no
+ * honest Google-only figure. A dash says so. Falling back to total revenue
+ * would put Meta's sales back on the page under a Google heading — the precise
+ * thing this report must not do.
+ */
+function maybeMoney(value: number | null, currency: string): string {
+  return value === null ? "—" : money(value, currency);
+}
 
 function Stat({
   label,
@@ -53,19 +71,25 @@ function Stat({
   value,
   hint,
   accent,
+  hero,
 }: {
   label: string;
   icon: typeof Wallet;
   value: string;
   hint?: string;
-  /** Gold — reserved for the agency's own money. */
+  /** Gold. The agency's own money, and the client's revenue headline. */
   accent?: boolean;
+  /** The one figure the report opens on — bigger, and spans two columns. */
+  hero?: boolean;
 }) {
+  const gold = accent || hero;
+
   return (
     <div
       className={cn(
         "rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3",
-        accent && "border-[var(--accent-gold)]/30 bg-[var(--accent-gold-dim)]",
+        gold && "border-[var(--accent-gold)]/30 bg-[var(--accent-gold-dim)]",
+        hero && "sm:col-span-2 sm:p-4",
       )}
     >
       <div className="flex items-start justify-between gap-2">
@@ -73,15 +97,16 @@ function Stat({
         <Icon
           className={cn(
             "size-3.5 shrink-0",
-            accent ? "text-[var(--accent-gold)]" : "text-[var(--text-muted)]",
+            gold ? "text-[var(--accent-gold)]" : "text-[var(--text-muted)]",
           )}
           aria-hidden
         />
       </div>
       <p
         className={cn(
-          "mt-1 truncate text-[18px] font-semibold tabular-nums",
-          accent ? "text-[var(--accent-gold-strong)]" : "text-[var(--text-primary)]",
+          "mt-1 truncate font-semibold tabular-nums",
+          hero ? "text-[26px]" : "text-[18px]",
+          gold ? "text-[var(--accent-gold-strong)]" : "text-[var(--text-primary)]",
         )}
       >
         {value}
@@ -117,31 +142,39 @@ function StoreCard({ store }: { store: AdminStoreOverview }) {
       </header>
 
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-5">
+        {/* What this shop made THROUGH US, first and in gold — the question the
+            per-store section exists to answer. Meta-referred orders are out:
+            they are revenue the client earned without our ads. */}
+        <Stat
+          hero
+          label="Google revenue"
+          icon={BadgeDollarSign}
+          value={maybeMoney(store.googleRevenue, currency)}
+          hint={
+            store.googleOrders === null
+              ? "awaiting attribution sync"
+              : `${integer(store.googleOrders)} orders · excl. Meta referrals`
+          }
+        />
         <Stat label="Ad spend" icon={Wallet} value={money(store.adSpend, currency)} />
         <Stat label="Impressions" icon={Eye} value={compact(store.impressions)} />
         <Stat label="Clicks" icon={MousePointerClick} value={integer(store.clicks)} />
         <Stat label="CTR" icon={Percent} value={percent(store.ctr)} />
         <Stat label="CPC" icon={Coins} value={money(store.cpc, currency)} />
-        {/* Store conversions — orders minus the ones Instagram/Facebook
-            referred (0019) — with Google's own count as the hint, the same
-            treatment ROAS gets below and for the same reason. */}
+        {/* Orders minus the ones Instagram/Facebook referred (0019), with
+            Google's own count as the hint — the same treatment ROAS gets below
+            and for the same reason. */}
         <Stat
           label="Conversions"
           icon={Target}
-          value={integer(store.storeConversions ?? store.conversions)}
-          hint={
-            store.storeConversions != null
-              ? `${integer(store.conversions)} attributed by Google · excl. Meta referrals`
-              : undefined
-          }
+          value={store.googleOrders === null ? "—" : integer(store.googleOrders)}
+          hint={`${integer(store.conversions)} tracked by Google`}
         />
         <Stat
           label="Cost / conv."
           icon={Crosshair}
           value={money(
-            store.storeConversions != null
-              ? store.costPerStoreConversion
-              : store.costPerConversion,
+            store.googleOrders === null ? store.costPerConversion : store.costPerGoogleOrder,
             currency,
           )}
         />
@@ -149,17 +182,7 @@ function StoreCard({ store }: { store: AdminStoreOverview }) {
           label="ROAS"
           icon={TrendingUp}
           value={multiplier(store.roas)}
-          hint={`${multiplier(store.googleRoas)} attributed by Google`}
-        />
-        <Stat
-          label="Conv. value"
-          icon={BadgeDollarSign}
-          value={money(store.storeConversionValue ?? store.conversionValue, currency)}
-          hint={
-            store.storeConversionValue != null
-              ? `${money(store.conversionValue, currency)} attributed by Google`
-              : undefined
-          }
+          hint={`${multiplier(store.trackedRoas)} tracked by Google`}
         />
         <Stat
           label="We bill"
@@ -174,11 +197,6 @@ function StoreCard({ store }: { store: AdminStoreOverview }) {
         />
       </div>
 
-      {/* Store-side reality check: the shop's own numbers next to the ad spend
-          above, so a store that spends well but sells badly is visible here. */}
-      <p className="mt-3 border-t border-[var(--border-subtle)] pt-2.5 text-[11.5px] text-[var(--text-muted)]">
-        Store: {money(store.netRevenue, currency)} net revenue · {integer(store.orders)} orders
-      </p>
     </section>
   );
 }
@@ -191,13 +209,27 @@ function Body({ data }: { data: AdminClientOverview }) {
     <div className="space-y-5">
       {/* ---- the client's business ---- */}
       <section className="space-y-2">
-        <h3 className="label-caps">Client — all stores</h3>
+        <div className="flex flex-wrap items-center gap-2">
+          <h3 className="label-caps">Client — all stores</h3>
+          {/* Stated once, plainly, at the top. Without it an admin reading
+              "Revenue" here against the client's Shopify admin sees a shortfall
+              and assumes the report is broken, when the gap IS the point. */}
+          <Badge variant="neutral">Google only · excludes Meta referrals</Badge>
+        </div>
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6">
+          {/* Revenue leads, in gold and at double width. It is the number the
+              conversation starts from — everything else on this row explains
+              what it cost to get there or what is left of it. */}
           <Stat
-            label="Net revenue"
+            hero
+            label="Google revenue"
             icon={BadgeDollarSign}
-            value={money(t.netRevenue, currency)}
-            hint={`${integer(t.orders)} orders`}
+            value={maybeMoney(t.googleRevenue, currency)}
+            hint={
+              t.googleOrders === null
+                ? "awaiting attribution sync"
+                : `${integer(t.googleOrders)} orders · ${money(t.aov, currency)} avg`
+            }
           />
           <Stat
             label="Ad spend"
@@ -205,32 +237,37 @@ function Body({ data }: { data: AdminClientOverview }) {
             value={money(t.adSpend, currency)}
             hint={`${compact(t.impressions)} impressions`}
           />
-          {/* The client's own figure first — this popup exists to see what
-              they see. Google's attributed one sits underneath, because a
-              0.00x there is the tell that their conversion tracking is off. */}
+          {/* The real return first. Google's own tracked figure sits
+              underneath, because a 0.00x there is the tell that their
+              conversion tag is off — not that the ads failed. */}
           <Stat
             label="ROAS"
             icon={TrendingUp}
-            value={multiplier(t.mer)}
-            hint={`${multiplier(t.roas)} attributed by Google`}
+            value={multiplier(t.roas)}
+            hint={`${multiplier(t.trackedRoas)} tracked by Google`}
           />
-          {/* Was MER, which is the same division as the ROAS beside it now —
-              two cards for one number. Margin is the other half of the story:
-              a 4x return still loses money if the products cost too much. */}
           <Stat
             label="Margin"
             icon={Percent}
-            value={percent(t.netRevenue > 0 ? t.netProfitAfterFee / t.netRevenue : 0)}
-            hint="after COGS, fees and our cut"
+            value={t.margin === null ? "—" : percent(t.margin)}
+            hint="costs apportioned · after our cut"
           />
-          <Stat label="AOV" icon={ShoppingBag} value={money(t.aov, currency)} />
+          {/* AOV moved into the revenue hint — it is a property of revenue,
+              not a figure that earns its own card next to it. */}
           <Stat
             label="Their profit"
             icon={Coins}
-            value={money(t.netProfitAfterFee, currency)}
-            hint="after COGS, fees and our cut"
+            value={maybeMoney(t.netProfitAfterFee, currency)}
+            hint="costs apportioned · after our cut"
           />
         </div>
+        {/* COGS, payment fees and shipping are recorded per DAY, not per order,
+            so the Google slice of them can only be estimated by revenue share.
+            Saying so is cheaper than having someone discover it later. */}
+        <p className="text-[11px] text-[var(--text-muted)]">
+          Profit and margin apportion COGS, payment fees and shipping by revenue
+          share — Shopify does not record them per referrer.
+        </p>
       </section>
 
       {/* ---- what the agency earns ---- */}
@@ -372,10 +409,10 @@ export function ClientDashboardDialog({
           void open_();
         }}
         className="transition-smooth inline-flex shrink-0 items-center gap-1.5 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-base)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-secondary)] hover:border-[var(--accent-gold)]/40 hover:text-[var(--accent-gold-strong)]"
-        aria-label={`Open ${clientName}'s dashboard`}
+        aria-label={`Open ${clientName}'s report`}
       >
         <LayoutDashboard className="size-3.5" aria-hidden />
-        Dashboard
+        Report
       </button>
 
       <Dialog open={open} onOpenChange={setOpen}>
@@ -395,6 +432,11 @@ export function ClientDashboardDialog({
                   {data && ` · ${data.range.from} → ${data.range.to}`}
                   {data?.updatedAt && ` · synced ${new Date(data.updatedAt).toLocaleString()}`}
                 </DialogDescription>
+
+                {/* Says when the figures below are next rebuilt, so an admin
+                    reading a number knows whether it is worth waiting for the
+                    next run rather than guessing at how stale it is. */}
+                <NextRefresh className="mt-2" />
               </div>
 
               {/* The period belongs to the dashboard, not to the page behind
