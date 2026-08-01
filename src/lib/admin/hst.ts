@@ -15,6 +15,8 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 import { decryptToken, encryptToken } from "@/lib/google-ads/crypto";
 import { HST_NOTE_PREFIX, noteClientName } from "@/lib/finance/config";
+import { parseExpiry, tokenFault, tokenIsFresh } from "@/lib/admin/hst-token";
+import { clientNameFromShop, normalizeDay } from "@/lib/admin/hst-parse";
 import type { Database, HstPayment } from "@/lib/supabase/types";
 
 type Supabase = SupabaseClient<Database>;
@@ -26,7 +28,11 @@ const HST_SOURCE = "HST";
 const HST_CURRENCY = "EUR";
 const THROTTLE_MS = 60 * 60 * 1000;
 const PAGE_LIMIT = 1000;
-const EXPIRY_MARGIN_MS = 5 * 60 * 1000; // refresh a bit before the token actually dies
+// A malformed response must not page forever. 50 × 1000 rows is far beyond
+// anything HST has sent; hitting it is reported, never silently accepted.
+const MAX_PAGES = 50;
+/** Rows whose shop string carries no client name. Booked, but labelled. */
+const UNNAMED_CLIENT = "Unattributed (no name in HST shop)";
 // PostgREST takes one statement per request: a chunk that fails fails whole,
 // and a delete filter travels in the URL, so ids go in smaller batches.
 const INSERT_CHUNK = 500;
@@ -49,44 +55,29 @@ export type HstSyncOpts = {
 };
 
 export class HstError extends Error {
-  constructor(message: string) {
+  /**
+   * HST refused the token (401/403).
+   *
+   * Separated from every other failure because it is the only one we can act
+   * on: a refused token can be renewed and the request retried, whereas a 500
+   * or a parser mismatch cannot. Before this flag existed, a refusal ended the
+   * sync and the only way back was a human pasting a fresh login out of F12.
+   */
+  readonly unauthorized: boolean;
+
+  constructor(message: string, unauthorized = false) {
     super(message);
     this.name = "HstError";
+    this.unauthorized = unauthorized;
   }
 }
 
-/** "2026/07/26 20:57:52" (and ISO) → epoch ms, or 0 when unparseable. */
-function parseExpiry(value: string | null | undefined): number {
-  if (!value) return 0;
-  const ms = new Date(value.includes("T") ? value : value.replace(/-/g, "/")).getTime();
-  return Number.isFinite(ms) ? ms : 0;
-}
 
 // ---------------------------------------------------------------------------
 // Session: save, refresh, ensure-fresh
 // ---------------------------------------------------------------------------
 
 type Session = { accessToken: string; refreshToken: string | null; expires: string | null };
-
-/**
- * Why a token can't be used, or null when it's fine.
- *
- * HTTP header values are ByteStrings: every character must fit in one byte.
- * A token carrying anything above U+00FF was copied from a view that elided
- * it — DevTools' Preview tab truncates long strings with "…" — and `fetch`
- * would only reject it much later, with an opaque message about a character
- * value of 8230. Catching it at paste time is the difference between a
- * one-line fix and an afternoon.
- */
-function tokenFault(token: string): string | null {
-  const chars = [...token];
-  const index = chars.findIndex((char) => (char.codePointAt(0) ?? 0) > 255);
-  if (index === -1) return null;
-
-  return chars[index] === "…"
-    ? `it is truncated — there's a "…" at position ${index}. Copy the raw Response tab in F12, not Preview (Preview shortens long values).`
-    : `it has a character that can't travel in an HTTP header ("${chars[index]}" at position ${index}). Copy the raw Response tab in F12.`;
-}
 
 /** Extract a session from the pasted login response JSON, or a raw bearer token. */
 function parseSession(input: string): Session | null {
@@ -159,8 +150,30 @@ async function refreshSession(refreshToken: string): Promise<Session | null> {
   };
 }
 
-/** A valid access token, renewing from the refresh token when expired. */
-async function ensureFreshToken(supabase: Supabase): Promise<string> {
+/**
+ * A valid access token, renewing from the refresh token when needed.
+ *
+ * "When needed" used to mean ONLY when `token_expires_at` said the token had
+ * expired — and an expiry of 0 (the ERP's refresh response often carries no
+ * `expires` field, so the column is stored null) was read as "never expires".
+ * A token whose lifetime we could not see was therefore used forever, until
+ * HST refused it and the sync simply failed. That is why the session had to be
+ * re-pasted by hand: nothing ever tried to renew it.
+ *
+ * Now an unknown expiry means "assume it needs renewing". The cost is one
+ * refresh call per sync in that case; the benefit is that the session keeps
+ * itself alive. Renewal failure is NOT fatal — a stored token that still works
+ * is better than a sync that refuses to run — except when `forceRenew` says
+ * HST has already refused this token, where falling back would just repeat it.
+ *
+ * `forceRenew` is the 401 retry path: proof the current token is dead.
+ */
+async function ensureFreshToken(
+  supabase: Supabase,
+  opts?: { forceRenew?: boolean },
+): Promise<string> {
+  const forceRenew = opts?.forceRenew ?? false;
+
   const { data } = await supabase
     .from("hst_integration")
     .select("access_token, refresh_token, token_expires_at")
@@ -174,14 +187,18 @@ async function ensureFreshToken(supabase: Supabase): Promise<string> {
   // that exactly like an expired one and try to renew past it.
   const stored = data?.access_token ? await decryptToken(data.access_token) : null;
   const storedFault = stored ? tokenFault(stored) : null;
-  const expiresAt = parseExpiry(data?.token_expires_at);
-  const unexpired = expiresAt === 0 || expiresAt - EXPIRY_MARGIN_MS > Date.now();
+  // Only a KNOWN, future expiry counts as fresh — see hst-token.ts for why an
+  // unknown one now falls through to renewal instead of being trusted forever.
+  const fresh = tokenIsFresh(parseExpiry(data?.token_expires_at), Date.now());
 
-  if (stored && !storedFault && unexpired) return stored;
+  if (stored && !storedFault && fresh && !forceRenew) return stored;
 
-  // Expired, unknown or unusable → renew from the refresh token.
+  // Expired, unknown, unusable, or refused → renew from the refresh token.
   if (!data?.refresh_token) {
-    if (stored && !storedFault) return stored; // no refresh; try as-is
+    // No renewal capability at all (a raw bearer token was pasted). Using it is
+    // the only option left — unless HST has just refused it, in which case
+    // there is genuinely nothing to do but ask for a fresh login.
+    if (stored && !storedFault && !forceRenew) return stored;
     throw new HstError(
       storedFault
         ? `The saved HST access token can't be used: ${storedFault}`
@@ -197,6 +214,11 @@ async function ensureFreshToken(supabase: Supabase): Promise<string> {
 
   const renewed = await refreshSession(refreshToken);
   if (!renewed) {
+    // The refresh endpoint is unreachable or shaped differently than expected.
+    // If the stored token has not actually been refused, try it: renewal being
+    // unavailable must not break setups that were working before this function
+    // started attempting renewal on unknown expiries.
+    if (stored && !storedFault && !forceRenew) return stored;
     throw new HstError(
       "Couldn't renew the HST token (the refresh endpoint may differ) — paste a fresh login.",
     );
@@ -275,32 +297,6 @@ type HstResponse = {
 /** One day's commission for one client. */
 export type HstEntry = { day: string; client: string; amount: number };
 
-const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
-
-/**
- * `express_date` → a date Postgres will accept, or null.
- *
- * The ERP has been seen sending "2026-07-25", "2026/07/25" and values with a
- * time part. Anything else is dropped rather than sent to the database: one
- * unparseable day used to be enough to make the whole booking fail.
- */
-function normalizeDay(value: string): string | null {
-  const day = value.trim().replace(/\//g, "-").slice(0, 10);
-  return ISO_DAY.test(day) ? day : null;
-}
-
-/**
- * The client name is the last "-" segment of the HST shop name, e.g.
- * "AZL90266-РАЯ НИКОЛОВА-Tomas" → "Tomas", "AYW98711-椿工房-Caio" → "Caio".
- */
-function clientNameFromShop(shopName: string): string {
-  const parts = shopName
-    .split("-")
-    .map((part) => part.trim())
-    .filter(Boolean);
-  return parts.length > 0 ? parts[parts.length - 1] : shopName.trim() || "Unknown";
-}
-
 /**
  * The SHAPE of a payload — key names, array lengths — never the values. When a
  * sync finds nothing to book, this is what says whether HST sent an empty list
@@ -329,7 +325,7 @@ async function fetchPage(token: string, page: number): Promise<HstResponse> {
     headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
   });
   if (res.status === 401 || res.status === 403) {
-    throw new HstError("HST rejected the token — the session likely expired.");
+    throw new HstError("HST rejected the token — the session likely expired.", true);
   }
   if (!res.ok) throw new HstError(`HST returned ${res.status}.`);
 
@@ -353,37 +349,106 @@ export async function fetchHstCommissions(token: string): Promise<{
   entries: HstEntry[];
   grandTotal: number;
   rowCount: number;
+  /** How many rows HST said exist (`all.count`), or 0 when it didn't say. */
+  expectedRows: number;
   droppedRows: number;
+  /** Rows booked without a client name — the shop string had none. */
+  unnamedRows: number;
+  /** How many pages were actually read. */
+  pages: number;
+  /** MAX_PAGES was hit, so rows are certainly missing. */
+  truncated: boolean;
   /** Key-only description of page 1, for when nothing parses out. */
   shape: string;
 }> {
   const first = await fetchPage(token, 1);
   const rows = [...(first.data?.data ?? [])];
-  const lastPage = first.data?.last_page ?? 1;
-  for (let page = 2; page <= lastPage; page++) {
-    const next = await fetchPage(token, page);
-    rows.push(...(next.data?.data ?? []));
+
+  /**
+   * Keep paging while HST keeps filling pages.
+   *
+   * This used to trust `last_page` alone: `first.data?.last_page ?? 1`. When
+   * that field is absent — or lives somewhere else in the payload, which is the
+   * kind of thing an ERP changes without telling anyone — the fallback of 1
+   * meant exactly one page was ever read. Everything past row 1000 was dropped
+   * in silence, and since the grand total comes from the server's own `all`
+   * block, the totals still looked right while whole clients were missing.
+   *
+   * So the stop condition is now evidence rather than metadata: a page that
+   * comes back short is the last page. `last_page` is still honoured when it is
+   * present and larger, and MAX_PAGES stops a malformed response from looping.
+   */
+  const lastPage = Number(first.data?.last_page ?? 0) || 0;
+  // How many rows HST says exist in total. This is the reliable stop condition:
+  // it does not care what page size the server actually used, which is the trap
+  // the other two signals fall into. The ERP's own table paginates at 10 while
+  // we ask for limit=1000 — so a "short" page proves nothing, and a `last_page`
+  // that is absent used to end the read after a single page.
+  const totalRows = Number(first.data?.all?.count ?? 0) || 0;
+
+  let page = 1;
+  let pageCount = rows.length;
+  let truncated = false;
+
+  for (;;) {
+    const moreByCount = totalRows > 0 && rows.length < totalRows;
+    const moreByMeta = page < lastPage;
+    // Only trusted when HST has no better answer: a page filled exactly to the
+    // limit we asked for suggests it was cut off there.
+    const moreByFullPage = totalRows === 0 && lastPage === 0 && pageCount === PAGE_LIMIT;
+    if (!moreByCount && !moreByMeta && !moreByFullPage) break;
+
+    if (page >= MAX_PAGES) {
+      truncated = true;
+      break;
+    }
+
+    page += 1;
+    const nextRows = (await fetchPage(token, page)).data?.data ?? [];
+    rows.push(...nextRows);
+    pageCount = nextRows.length;
+
+    // An empty page means there is nothing further, whatever the metadata says.
+    // Without this a wrong `count` would spin until MAX_PAGES.
+    if (pageCount === 0) break;
   }
+
+  // HST promised more rows than it delivered. Say so — this is the difference
+  // between "that client has no commission" and "we failed to read it".
+  if (totalRows > 0 && rows.length < totalRows) truncated = true;
 
   const grouped = new Map<string, HstEntry>();
   let droppedRows = 0;
+  let unnamedRows = 0;
   for (const row of rows) {
     const day = row.express_date ? normalizeDay(row.express_date.toString()) : null;
     if (!day) {
       droppedRows += 1;
       continue;
     }
-    const client = clientNameFromShop((row.shopName ?? "").toString());
+
+    // No usable name in the shop string. Counted and still booked — the money
+    // is real even when the attribution isn't — but under a label that says so
+    // rather than one that pretends to be a client.
+    const parsed = clientNameFromShop(row.shopName?.toString());
+    if (!parsed) unnamedRows += 1;
+    const client = parsed ?? UNNAMED_CLIENT;
+
     const key = `${day}|${client}`;
     const entry = grouped.get(key) ?? { day, client, amount: 0 };
     entry.amount += Number(row.total ?? 0);
     grouped.set(key, entry);
   }
+
   return {
     entries: [...grouped.values()],
     grandTotal: Number(first.data?.all?.total ?? 0),
     rowCount: rows.length,
+    expectedRows: totalRows,
     droppedRows,
+    unnamedRows,
+    pages: page,
+    truncated,
     shape: describeShape(first),
   };
 }
@@ -397,6 +462,16 @@ export type HstSyncResult = {
   booked?: number;
   /** Raw HST rows thrown away for having no usable date. */
   ignoredRows?: number;
+  /** Rows booked with no client name in the HST shop string. */
+  unnamedRows?: number;
+  /** Pages read from HST, and whether the read came up short. */
+  pages?: number;
+  truncated?: boolean;
+  /** Rows actually read vs. the count HST reported. Unequal = rows were lost. */
+  rowsRead?: number;
+  rowsExpected?: number;
+  /** Distinct clients the sync attributed commission to. */
+  clients?: number;
   skipped?: boolean;
 };
 
@@ -511,18 +586,49 @@ async function runSync(supabase: Supabase): Promise<HstSyncResult> {
   let entries: HstEntry[];
   let grandTotal: number;
   let rowCount: number;
+  let expectedRows: number;
   let droppedRows: number;
+  let unnamedRows: number;
+  let pages: number;
+  let truncated: boolean;
   let shape: string;
   try {
-    ({ entries, grandTotal, rowCount, droppedRows, shape } = await fetchHstCommissions(token));
+    ({ entries, grandTotal, rowCount, expectedRows, droppedRows, unnamedRows, pages, truncated, shape } =
+      await fetchHstCommissions(token));
   } catch (error) {
-    return {
-      ok: false,
-      error:
-        error instanceof HstError
-          ? error.message
-          : `HST fetch failed: ${error instanceof Error ? error.message : String(error)}`,
-    };
+    // A refused token is the one failure worth a second attempt: renew and go
+    // again. Everything else (a 500, HTML instead of JSON, a network fault)
+    // would only fail the same way twice.
+    //
+    // Exactly one retry. If a freshly renewed token is also refused, the
+    // refresh token itself is dead and no amount of retrying reaches HST —
+    // that is the case that genuinely needs a human to paste a new login, and
+    // the error below says so.
+    if (!(error instanceof HstError) || !error.unauthorized) {
+      return {
+        ok: false,
+        error:
+          error instanceof HstError
+            ? error.message
+            : `HST fetch failed: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+
+    try {
+      const renewedToken = await ensureFreshToken(supabase, { forceRenew: true });
+      ({ entries, grandTotal, rowCount, expectedRows, droppedRows, unnamedRows, pages, truncated, shape } =
+        await fetchHstCommissions(renewedToken));
+    } catch (retryError) {
+      return {
+        ok: false,
+        error:
+          retryError instanceof HstError
+            ? `${retryError.message} (renewal was attempted first)`
+            : `HST fetch failed after renewing the token: ${
+                retryError instanceof Error ? retryError.message : String(retryError)
+              }`,
+      };
+    }
   }
 
   // Nothing usable came back — leave the ledger exactly as it is and say so,
@@ -609,6 +715,12 @@ async function runSync(supabase: Supabase): Promise<HstSyncResult> {
     days: new Set(entries.map((entry) => entry.day)).size,
     booked: written.length,
     ignoredRows: droppedRows,
+    unnamedRows,
+    pages,
+    truncated,
+    rowsRead: rowCount,
+    rowsExpected: expectedRows,
+    clients: new Set(entries.map((entry) => entry.client)).size,
   };
 }
 

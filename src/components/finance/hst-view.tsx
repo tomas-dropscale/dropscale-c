@@ -67,14 +67,47 @@ export function HstView({ overview }: { overview: HstOverview }) {
     setNotice(null);
     const res = await fetch("/api/hst/sync", { method: "POST" });
     const body = (await res.json().catch(() => null)) as
-      | { ok?: boolean; error?: string; booked?: number; days?: number }
+      | {
+          ok?: boolean;
+          error?: string;
+          booked?: number;
+          days?: number;
+          clients?: number;
+          pages?: number;
+          unnamedRows?: number;
+          ignoredRows?: number;
+          truncated?: boolean;
+          rowsRead?: number;
+          rowsExpected?: number;
+        }
       | null;
     setBusy(null);
     if (!res.ok || !body?.ok) {
       setError(body?.error ?? "Sync failed.");
       return;
     }
-    setNotice(`Synced — ${body.booked} entries across ${body.days} day(s).`);
+
+    // Report what came back, not just that something did. "Some clients are
+    // missing" is impossible to diagnose from a bare success message: the
+    // client count, the page count and the rows that were dropped or had no
+    // name in the shop string are what say WHERE they went.
+    const parts = [`${body.booked} entries across ${body.days} day(s)`];
+    if (body.clients !== undefined) parts.push(`${body.clients} clients`);
+    // Read vs. expected is the direct answer to "are rows missing?" — HST
+    // reports its own total, so a gap here is not a guess.
+    if (body.rowsRead !== undefined) {
+      parts.push(
+        body.rowsExpected
+          ? `${body.rowsRead}/${body.rowsExpected} rows read`
+          : `${body.rowsRead} rows read`,
+      );
+    }
+    if (body.pages !== undefined) parts.push(`${body.pages} page(s)`);
+    if (body.ignoredRows) parts.push(`${body.ignoredRows} row(s) dropped — unreadable date`);
+    if (body.unnamedRows) parts.push(`${body.unnamedRows} row(s) with no client name`);
+    if (body.truncated) parts.push("⚠ read came up short — rows are missing");
+
+    setNotice(`Synced — ${parts.join(" · ")}.`);
     router.refresh();
   }
 
