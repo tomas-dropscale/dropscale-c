@@ -349,8 +349,12 @@ export async function fetchHstCommissions(token: string): Promise<{
   entries: HstEntry[];
   grandTotal: number;
   rowCount: number;
-  /** How many rows HST said exist (`all.count`), or 0 when it didn't say. */
-  expectedRows: number;
+  /**
+   * What the parsed entries add up to. Compared against HST's own `all.total`
+   * by the caller: the two agreeing is the real proof that nothing was lost,
+   * and it works regardless of how the ERP paginates.
+   */
+  entriesTotal: number;
   droppedRows: number;
   /** Rows booked without a client name — the shop string had none. */
   unnamedRows: number;
@@ -379,24 +383,26 @@ export async function fetchHstCommissions(token: string): Promise<{
    * present and larger, and MAX_PAGES stops a malformed response from looping.
    */
   const lastPage = Number(first.data?.last_page ?? 0) || 0;
-  // How many rows HST says exist in total. This is the reliable stop condition:
-  // it does not care what page size the server actually used, which is the trap
-  // the other two signals fall into. The ERP's own table paginates at 10 while
-  // we ask for limit=1000 — so a "short" page proves nothing, and a `last_page`
-  // that is absent used to end the read after a single page.
-  const totalRows = Number(first.data?.all?.count ?? 0) || 0;
 
+  /**
+   * `all.count` is NOT a row count — it is the total QUANTITY across the whole
+   * result (units, at the ERP's per-unit rate). Proven by arithmetic on live
+   * data: count 508 against `all.total` 304.80, and 508 × €0.60 = €304.80,
+   * the per-unit price the ERP's own table shows. Reading it as "rows expected"
+   * made a complete 43-row read report itself as "43/508 — rows are missing".
+   *
+   * So pagination stops on evidence from the pages themselves: a page that came
+   * back short of the limit we asked for is the last one, and an empty page
+   * ends it outright. `last_page` is honoured when present and larger.
+   */
   let page = 1;
   let pageCount = rows.length;
   let truncated = false;
 
   for (;;) {
-    const moreByCount = totalRows > 0 && rows.length < totalRows;
     const moreByMeta = page < lastPage;
-    // Only trusted when HST has no better answer: a page filled exactly to the
-    // limit we asked for suggests it was cut off there.
-    const moreByFullPage = totalRows === 0 && lastPage === 0 && pageCount === PAGE_LIMIT;
-    if (!moreByCount && !moreByMeta && !moreByFullPage) break;
+    const moreByFullPage = pageCount === PAGE_LIMIT;
+    if (!moreByMeta && !moreByFullPage) break;
 
     if (page >= MAX_PAGES) {
       truncated = true;
@@ -407,15 +413,8 @@ export async function fetchHstCommissions(token: string): Promise<{
     const nextRows = (await fetchPage(token, page)).data?.data ?? [];
     rows.push(...nextRows);
     pageCount = nextRows.length;
-
-    // An empty page means there is nothing further, whatever the metadata says.
-    // Without this a wrong `count` would spin until MAX_PAGES.
     if (pageCount === 0) break;
   }
-
-  // HST promised more rows than it delivered. Say so — this is the difference
-  // between "that client has no commission" and "we failed to read it".
-  if (totalRows > 0 && rows.length < totalRows) truncated = true;
 
   const grouped = new Map<string, HstEntry>();
   let droppedRows = 0;
@@ -440,11 +439,13 @@ export async function fetchHstCommissions(token: string): Promise<{
     grouped.set(key, entry);
   }
 
+  const entries = [...grouped.values()];
+
   return {
-    entries: [...grouped.values()],
+    entries,
     grandTotal: Number(first.data?.all?.total ?? 0),
+    entriesTotal: entries.reduce((sum, entry) => sum + entry.amount, 0),
     rowCount: rows.length,
-    expectedRows: totalRows,
     droppedRows,
     unnamedRows,
     pages: page,
@@ -467,9 +468,15 @@ export type HstSyncResult = {
   /** Pages read from HST, and whether the read came up short. */
   pages?: number;
   truncated?: boolean;
-  /** Rows actually read vs. the count HST reported. Unequal = rows were lost. */
+  /** Raw HST rows read across all pages. */
   rowsRead?: number;
-  rowsExpected?: number;
+  /**
+   * What we booked vs. HST's own grand total. These agreeing is the proof the
+   * read was complete — a row-count comparison cannot do this job, because
+   * HST's `all.count` is a quantity, not a number of rows.
+   */
+  bookedTotal?: number;
+  reportedTotal?: number;
   /** Distinct clients the sync attributed commission to. */
   clients?: number;
   skipped?: boolean;
@@ -586,14 +593,14 @@ async function runSync(supabase: Supabase): Promise<HstSyncResult> {
   let entries: HstEntry[];
   let grandTotal: number;
   let rowCount: number;
-  let expectedRows: number;
+  let entriesTotal: number;
   let droppedRows: number;
   let unnamedRows: number;
   let pages: number;
   let truncated: boolean;
   let shape: string;
   try {
-    ({ entries, grandTotal, rowCount, expectedRows, droppedRows, unnamedRows, pages, truncated, shape } =
+    ({ entries, grandTotal, entriesTotal, rowCount, droppedRows, unnamedRows, pages, truncated, shape } =
       await fetchHstCommissions(token));
   } catch (error) {
     // A refused token is the one failure worth a second attempt: renew and go
@@ -616,7 +623,7 @@ async function runSync(supabase: Supabase): Promise<HstSyncResult> {
 
     try {
       const renewedToken = await ensureFreshToken(supabase, { forceRenew: true });
-      ({ entries, grandTotal, rowCount, expectedRows, droppedRows, unnamedRows, pages, truncated, shape } =
+      ({ entries, grandTotal, entriesTotal, rowCount, droppedRows, unnamedRows, pages, truncated, shape } =
         await fetchHstCommissions(renewedToken));
     } catch (retryError) {
       return {
@@ -719,7 +726,8 @@ async function runSync(supabase: Supabase): Promise<HstSyncResult> {
     pages,
     truncated,
     rowsRead: rowCount,
-    rowsExpected: expectedRows,
+    bookedTotal: entriesTotal,
+    reportedTotal: grandTotal,
     clients: new Set(entries.map((entry) => entry.client)).size,
   };
 }

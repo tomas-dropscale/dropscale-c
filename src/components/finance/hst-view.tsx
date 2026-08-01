@@ -78,7 +78,8 @@ export function HstView({ overview }: { overview: HstOverview }) {
           ignoredRows?: number;
           truncated?: boolean;
           rowsRead?: number;
-          rowsExpected?: number;
+          bookedTotal?: number;
+          reportedTotal?: number;
         }
       | null;
     setBusy(null);
@@ -93,19 +94,25 @@ export function HstView({ overview }: { overview: HstOverview }) {
     // name in the shop string are what say WHERE they went.
     const parts = [`${body.booked} entries across ${body.days} day(s)`];
     if (body.clients !== undefined) parts.push(`${body.clients} clients`);
-    // Read vs. expected is the direct answer to "are rows missing?" — HST
-    // reports its own total, so a gap here is not a guess.
-    if (body.rowsRead !== undefined) {
-      parts.push(
-        body.rowsExpected
-          ? `${body.rowsRead}/${body.rowsExpected} rows read`
-          : `${body.rowsRead} rows read`,
-      );
-    }
+    if (body.rowsRead !== undefined) parts.push(`${body.rowsRead} rows read`);
     if (body.pages !== undefined) parts.push(`${body.pages} page(s)`);
     if (body.ignoredRows) parts.push(`${body.ignoredRows} row(s) dropped — unreadable date`);
     if (body.unnamedRows) parts.push(`${body.unnamedRows} row(s) with no client name`);
-    if (body.truncated) parts.push("⚠ read came up short — rows are missing");
+    if (body.truncated) parts.push("⚠ page limit reached — rows are missing");
+
+    // The integrity check that actually works: what we booked against HST's
+    // own grand total. Only flagged when they disagree, so a healthy sync stays
+    // quiet instead of crying wolf the way the row-count comparison did.
+    if (
+      body.bookedTotal !== undefined &&
+      body.reportedTotal !== undefined &&
+      body.reportedTotal > 0 &&
+      Math.abs(body.bookedTotal - body.reportedTotal) > 0.01
+    ) {
+      parts.push(
+        `⚠ booked ${money(body.bookedTotal, intl)} but HST reports ${money(body.reportedTotal, intl)}`,
+      );
+    }
 
     setNotice(`Synced — ${parts.join(" · ")}.`);
     router.refresh();
