@@ -18,6 +18,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { decryptToken } from "@/lib/google-ads/crypto";
+import { googleRoas } from "@/lib/admin/google-attribution";
 import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
 import { fetchLiveCampaignsDetailed } from "@/lib/google-ads/portal";
 import { sumMetrics, type DailyMetricRow } from "@/lib/metrics/queries";
@@ -71,7 +72,9 @@ export type ReportMetrics = {
   taxa_dropscale: number;
   /** Revenue share billed on advertised collections. Not in the panel's box. */
   revenue_share: number;
+  /** COGS + payment fees + shipping + ad spend. Our fee is NOT among them. */
   custos_totais: number;
+  /** Trading profit BEFORE our management fee — see the note in metricsBlock. */
   lucro_liquido: number;
   /** lucro_liquido ÷ receita, 0–1. */
   margem: number;
@@ -85,6 +88,27 @@ export type ReportMetrics = {
   taxa_conversao: number;
   /** Orders minus those Instagram/Facebook referred. Null = not computed yet. */
   conversoes: number | null;
+
+  /**
+   * Revenue with Instagram and Facebook referrals taken out — what the panel's
+   * share card shows, so the two can be quoted side by side without one of them
+   * looking wrong.
+   *
+   * The name says "google" because that is what the panel calls it and what
+   * consumers already ask for, but read it as NOT-META rather than as
+   * Google-attributed: direct, organic, email and every other non-Meta channel
+   * are in here too. Google's own attributed figures are a different thing and
+   * are usually near zero, because conversion tracking is rarely wired up.
+   *
+   * Null when no attribution has been computed for the day yet — never 0, which
+   * would read as "sold nothing" instead of "not known yet".
+   */
+  receita_google: number | null;
+  /** Orders behind that revenue. Same value as `conversoes`, named for callers
+   *  that pair it with receita_google. */
+  encomendas_google: number | null;
+  /** receita_google ÷ gasto. Null follows receita_google; 0 when nothing spent. */
+  roas_google: number | null;
 };
 
 export type ReportStore = ReportMetrics & {
@@ -329,9 +353,21 @@ function metricsBlock(
   fee: number,
   revShare: number,
 ): ReportMetrics {
-  const netProfit = totals.profit - fee;
+  const attributed = totals.attributedRevenue;
+
+  /**
+   * The client's trading result, WITHOUT our management fee.
+   *
+   * This used to be `totals.profit - fee`. The panel stopped deducting the fee
+   * — a shop that traded to €50 made €50, whatever it owes us afterwards — and
+   * an API that kept deducting it would report €40 for the same day. Since the
+   * entire reason these fields exist is that the two must agree, the fee comes
+   * out here too. It is still reported separately as `taxa_dropscale`, so a
+   * consumer that wants the after-fee figure can subtract it themselves.
+   */
+  const netProfit = totals.profit;
   const totalCosts =
-    totals.adSpend + totals.productCost + totals.paymentFees + totals.shippingCost + fee;
+    totals.adSpend + totals.productCost + totals.paymentFees + totals.shippingCost;
 
   return {
     receita_bruta: round(totals.revenue),
@@ -355,5 +391,10 @@ function metricsBlock(
     custo_por_encomenda: round(totals.costPerOrder),
     taxa_conversao: ratio(totals.orderConversionRate),
     conversoes: totals.attributedOrders,
+    receita_google: attributed === null ? null : round(attributed),
+    encomendas_google: totals.attributedOrders,
+    // Same helper the panel divides with, so the two ROAS figures cannot drift
+    // apart through one of them rounding or guarding differently.
+    roas_google: attributed === null ? null : round(googleRoas(attributed, totals.adSpend)),
   };
 }

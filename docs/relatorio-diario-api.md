@@ -81,7 +81,10 @@ campos.
         "aov": 63.57,
         "custo_por_encomenda": 12.40,
         "taxa_conversao": 0.0336,
-        "conversoes": 4
+        "conversoes": 4,
+        "receita_google": 254.30,
+        "encomendas_google": 4,
+        "roas_google": 4.10
       },
       "lojas": [
         {
@@ -128,7 +131,7 @@ mesmo dia e confrontar — se algum não bater, é um bug nosso e queremos saber
 | `encomendas`          | ORDERS                |                                             |
 | `gasto`               | AD SPEND              |                                             |
 | `impressoes`          | (hint do AD SPEND)    |                                             |
-| `lucro_liquido`       | NET PROFIT            | `receita − custos − gasto − taxa_dropscale` |
+| `lucro_liquido`       | NET PROFIT            | `receita − custos − gasto`. **A nossa fee NÃO é descontada** — ver nota abaixo. |
 | `margem`              | (hint do NET PROFIT)  | 0–1. `0.4529` = 45,29 %.                    |
 | `roas` / `mer`        | ROAS / MER            | Receita ÷ gasto. **Não** é o ROAS do Google. |
 | `aov`                 | AOV                   |                                             |
@@ -141,8 +144,31 @@ mesmo dia e confrontar — se algum não bater, é um bug nosso e queremos saber
 | `custos_totais`       | Cost breakdown        |                                             |
 | `revenue_share`       | —                     | Não aparece no painel do cliente.           |
 | `conversoes`          | —                     | Encomendas **menos** as vindas do Instagram/Facebook. `null` se ainda não foi calculado para esse dia. |
+| `receita_google`      | GOOGLE REVENUE (card Share) | Receita **sem** referências do Instagram/Facebook. `null` enquanto o dia não tiver atribuição calculada. |
+| `encomendas_google`   | (hint do GOOGLE REVENUE) | As encomendas dessa receita. Mesmo valor que `conversoes`. |
+| `roas_google`         | ROAS (card Share)     | `receita_google ÷ gasto`. `null` acompanha `receita_google`; `0` se não houve gasto. |
 
 Percentagens vêm como fracção (`0.4529`), não como `45.29` nem como texto.
+
+### `receita_google` não é "atribuída pelo Google"
+
+O nome vem do rótulo do painel, mas leia-se como **tudo menos Meta**: directo,
+orgânico, email, TikTok e qualquer outro canal entram nesta receita. O que fica
+de fora são apenas as encomendas que o Instagram ou o Facebook referenciaram.
+
+A receita realmente atribuída pelo Google Ads é outra coisa e costuma andar perto
+de zero, porque o conversion tracking raramente está configurado — é por isso que
+não a usamos para nada que o cliente veja.
+
+### `lucro_liquido` deixou de descontar a nossa fee
+
+Mudança de comportamento num campo que já existia. Um cliente que negociou até
+€50 de lucro fez €50, deva-nos €10 depois ou não — a fee é uma factura à parte,
+não um custo de exploração. O painel passou a fazer o mesmo, e a API tinha de
+acompanhar, senão os dois reportavam números diferentes para o mesmo dia.
+
+`taxa_dropscale` continua a ser enviada, por isso quem quiser o valor depois da
+fee subtrai-a: `lucro_liquido − taxa_dropscale`.
 
 ---
 
