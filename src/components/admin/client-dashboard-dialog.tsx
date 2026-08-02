@@ -27,6 +27,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { NextRefresh } from "@/components/admin/next-refresh";
+import { StoreShareCard } from "@/components/admin/store-share-card";
 import { DailyPerformanceChart } from "@/components/portal/daily-performance-chart";
 import { DateRangePicker } from "@/components/ui/date-range-picker";
 import { compact, integer, money, multiplier, percent } from "@/lib/format";
@@ -133,7 +134,16 @@ function Stat({
 }
 
 /** One store's ad-spend dashboard. */
-function StoreCard({ store }: { store: AdminStoreOverview }) {
+function StoreCard({
+  store,
+  clientName,
+  range,
+}: {
+  store: AdminStoreOverview;
+  /** Both only travel this far to fill in the share card's header. */
+  clientName: string;
+  range: { from: string; to: string };
+}) {
   const currency = store.currency;
 
   return (
@@ -155,6 +165,7 @@ function StoreCard({ store }: { store: AdminStoreOverview }) {
         )}
         <Badge variant="neutral">{store.commissionRate}% ad spend</Badge>
         {store.revShareEnabled && <Badge variant="success">+ rev share</Badge>}
+        <StoreShareCard store={store} clientName={clientName} range={range} />
       </header>
 
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-5">
@@ -330,7 +341,12 @@ function Body({ data }: { data: AdminClientOverview }) {
         ) : (
           <div className="space-y-3">
             {data.stores.map((store) => (
-              <StoreCard key={store.accountId} store={store} />
+              <StoreCard
+                key={store.accountId}
+                store={store}
+                clientName={data.clientName}
+                range={data.range}
+              />
             ))}
           </div>
         )}

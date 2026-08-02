@@ -89,6 +89,14 @@ export type AdminStoreOverview = {
   commission: number;
   revShareEnabled: boolean;
   revShare: number;
+  /**
+   * This store's day-by-day spend and Google revenue, oldest first.
+   *
+   * Only the share card reads it — the card needs a shape, and a single
+   * period total cannot show one. Revenue follows the same Google-only rule as
+   * every other figure here, so the curve and the headline agree.
+   */
+  days: { day: string; adSpend: number; revenue: number }[];
 };
 
 export type AdminClientOverview = {
@@ -219,6 +227,15 @@ export async function fetchClientOverview(
           (sum, row) => sum + Number(row.revenue_share_amount),
           0,
         ),
+        days: [...accountRows]
+          .sort((a, b) => a.day.localeCompare(b.day))
+          .map((row) => ({
+            day: row.day,
+            adSpend: Number(row.ad_spend),
+            // Null attribution plots as 0 rather than breaking the line; the
+            // headline above the chart is what carries the "—" when unknown.
+            revenue: Number(row.attributed_revenue ?? 0),
+          })),
       };
     })
     // Biggest spender first: an agency reads this list looking for where the
