@@ -4,7 +4,6 @@ import { ClientsManager } from "@/components/admin/clients-manager";
 import { createClient, getSessionProfile } from "@/lib/supabase/server";
 import { customerHasCard, stripeConfigured } from "@/lib/stripe/client";
 import {
-  ensureWeeklyInvoices,
   fetchBillingSummaries,
   reconcileInvoices,
 } from "@/lib/billing/invoices";
@@ -69,9 +68,8 @@ export default async function ClientsPage() {
     accountCount.set(row.client_id, (accountCount.get(row.client_id) ?? 0) + 1);
   }
 
-  // Billing state per client. Generation and reconciliation run first, exactly
-  // like the ledgers: opening this tab is what makes Monday's invoices exist.
-  await ensureWeeklyInvoices();
+  // Billing state per client. Reconcile existing Stripe invoices, but never
+  // create or send new ones as a side effect of opening an admin page.
   await reconcileInvoices();
   const billing = await fetchBillingSummaries();
 
