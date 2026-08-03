@@ -99,7 +99,7 @@ export function RevenueTimeline() {
         .lte("occurred_on", to)
         .order("occurred_on", { ascending: true });
       if (!cancelled) {
-        setRows(data ?? []);
+        setRows((data ?? []).map((row) => ({ ...row, amount: Number(row.amount) })));
         setLoading(false);
       }
     }

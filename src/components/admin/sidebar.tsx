@@ -3,7 +3,9 @@
 import { usePathname } from "next/navigation";
 import {
   BarChart3,
+  BadgePercent,
   Clapperboard,
+  FileText,
   LayoutGrid,
   Receipt,
   Settings,
@@ -41,6 +43,7 @@ const NAV_GROUPS: Group[] = [
       // Revenue and the daily P&L are one screen: money in, then what it left
       // behind, then every transaction that produced it.
       { href: "/admin/revenue", icon: TrendingUp, label: (d) => d.nav.revenue },
+      { href: "/admin/billing", icon: FileText, label: (d) => d.nav.billing },
       { href: "/admin/expenses", icon: Receipt, label: (d) => d.nav.expenses },
       // A brand name — the same word in every locale, so no dictionary entry.
       { href: "/admin/hst", icon: Truck, label: () => "HST" },
@@ -50,6 +53,7 @@ const NAV_GROUPS: Group[] = [
     label: (d) => d.nav.groupGrowth,
     items: [
       { href: "/admin/clients", icon: UserCheck, label: (d) => d.nav.clients },
+      { href: "/admin/referrals", icon: BadgePercent, label: () => "Referrals" },
       // Next to Campaigns on purpose: the creatives clients hand in are the raw
       // material for the screen right below it.
       { href: "/admin/creatives", icon: Clapperboard, label: (d) => d.nav.creatives },

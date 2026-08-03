@@ -9,11 +9,11 @@ import { fmt } from "@/lib/i18n";
 import { useI18n } from "@/lib/i18n/provider";
 
 /**
- * Why a referral is or is not earning anything, straight from the database
- * (migration 0023). Anything other than `counting` has a reason the client can
- * act on, which is the point of showing it.
+ * The manual decision state returned by migration 0027. Eligibility can put a
+ * referral in the admin review queue, but only a sealed `approved` item changes
+ * the client's current fee.
  */
-export type ReferralStatus = "counting" | "pending" | "partner" | "inactive";
+export type ReferralStatus = "approved" | "scheduled" | "awaiting_review" | "pending";
 
 export type ReferredClient = {
   name: string;
@@ -28,9 +28,8 @@ export type ReferredClient = {
  * invoice, and a percentage off a percentage is the kind of phrasing that
  * generates a support message.
  *
- * Pending referrals are counted separately and shown as not-yet-earning,
- * because a signup that has not been approved has not moved anybody's fee — and
- * silence about them would read as the discount being broken.
+ * Every non-approved referral names its manual state. A code claim and live
+ * spend are evidence for review, never an automatic promise of a discount.
  */
 export function ReferralCard({
   code,
@@ -49,7 +48,7 @@ export function ReferralCard({
   const { d } = useI18n();
   const [copied, setCopied] = React.useState(false);
 
-  const notCounting = referred.filter((client) => client.status !== "counting").length;
+  const notApproved = referred.filter((client) => client.status !== "approved").length;
   const discount =
     listRate != null && effectiveRate != null ? Math.max(0, listRate - effectiveRate) : 0;
 
@@ -127,7 +126,8 @@ export function ReferralCard({
             <>
               <ul className="divide-y divide-[var(--border-subtle)] rounded-[10px] border border-[var(--border-subtle)]">
                 {referred.map((client, index) => {
-                  const counting = client.status === "counting";
+                  const approved = client.status === "approved";
+                  const scheduled = client.status === "scheduled";
                   return (
                     <li
                       key={`${client.name}-${index}`}
@@ -139,22 +139,28 @@ export function ReferralCard({
                         </p>
                         {/* The reason, in the client's own terms. "Not counting"
                             without a why is what turns into a support message. */}
-                        {!counting && (
+                        {!approved && (
                           <p className="text-[11.5px] text-[var(--text-muted)]">
                             {d.referrals.reason[client.status]}
                           </p>
                         )}
                       </div>
-                      <Badge variant={counting ? "gold" : "neutral"}>
-                        {counting ? `−${REFERRAL_STEP_PCT}%` : d.referrals.notCounting}
+                      <Badge variant={approved ? "gold" : scheduled ? "warning" : "neutral"}>
+                        {approved
+                          ? `−${REFERRAL_STEP_PCT}%`
+                          : scheduled
+                            ? d.referrals.scheduled
+                            : client.status === "awaiting_review"
+                              ? d.referrals.awaitingReview
+                              : d.referrals.pendingStatus}
                       </Badge>
                     </li>
                   );
                 })}
               </ul>
-              {notCounting > 0 && (
+              {notApproved > 0 && (
                 <p className="text-[11.5px] text-[var(--text-muted)]">
-                  {fmt(d.referrals.notCountingNote, { count: notCounting })}
+                  {fmt(d.referrals.notCountingNote, { count: notApproved })}
                 </p>
               )}
             </>

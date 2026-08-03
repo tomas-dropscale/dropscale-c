@@ -21,7 +21,7 @@ export type PnlDay = {
   netRevenue: number;
   cogs: number;
   adSpend: number;
-  /** The agency's cut of ad spend, at each store's own rate. */
+  /** Operational estimate; exact invoices additionally apply start/end counters. */
   agencyFee: number;
   revShare: number;
   paymentFees: number;
@@ -64,14 +64,14 @@ export function monthDays(year: number, month: number): string[] {
  * spreadsheet with holes in it is hard to read, and a zero row is information:
  * it says nothing was spent and nothing sold.
  *
- * `feeRateByAccount` is each store's commission_rate. The fee is summed per
- * account rather than applied to the day's total spend, because two stores can
- * bill at different rates and a blended rate on the total would be wrong.
+ * The resolver may vary by account and day. This is required by immutable
+ * Monday-effective referral terms: applying today's cache to a past month
+ * would silently rewrite the client's historical P&L.
  */
 export function buildPnlSheet(
   rows: DailyMetricRow[],
   days: string[],
-  feeRateByAccount: Map<string, number>,
+  feeRate: Map<string, number> | ((accountId: string, day: string) => number),
 ): PnlSheet {
   const byDay = new Map<string, DailyMetricRow[]>();
   for (const row of rows) {
@@ -94,7 +94,13 @@ export function buildPnlSheet(
     const shipping = dayRows.reduce((sum, row) => sum + Number(row.shipping_cost), 0);
     const revShare = dayRows.reduce((sum, row) => sum + Number(row.revenue_share_amount), 0);
     const agencyFee = dayRows.reduce(
-      (sum, row) => sum + (Number(row.ad_spend) * (feeRateByAccount.get(row.ad_account_id) ?? 0)) / 100,
+      (sum, row) => {
+        const rate =
+          typeof feeRate === "function"
+            ? feeRate(row.ad_account_id, row.day)
+            : (feeRate.get(row.ad_account_id) ?? 0);
+        return sum + (Number(row.ad_spend) * rate) / 100;
+      },
       0,
     );
 

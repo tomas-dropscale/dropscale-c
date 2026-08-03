@@ -61,16 +61,21 @@ export function GettingStartedGuide({
   const [shopifyOpen, setShopifyOpen] = React.useState(false);
 
   const hasAccounts = accounts.length > 0;
-  const googleConnected = accounts.some((account) => account.google_ads_connected);
-  const shopifyConnected = accounts.some((account) => account.shopify_connected);
-
   // "Approved" is the whole gate: a pending account is one we haven't accepted
   // yet, and nothing may be wired to it.
   const approved = accounts.filter((account) => account.status !== "pending");
+  const googleConnected = approved.some((account) => account.google_ads_connected);
+  const shopifyConnected = approved.some((account) => account.shopify_connected);
 
   // The specific account each connect targets (onboarding is usually one store).
-  const googleTarget = accounts.find((account) => !account.google_ads_connected);
+  const googleTarget = approved.find((account) => !account.google_ads_connected);
   const unlinkedShopify = approved.filter((account) => !account.shopify_connected);
+
+  const googleLock = !hasAccounts
+    ? { reason: d.onboarding.lockAddStore, href: "/dashboard/settings/accounts" }
+    : approved.length === 0
+      ? { reason: d.onboarding.lockApproval, href: "/dashboard/settings/connections" }
+      : undefined;
 
   const shopifyLock = !hasAccounts
     ? { reason: d.onboarding.lockAddStore, href: "/dashboard/settings/accounts" }
@@ -97,6 +102,7 @@ export function GettingStartedGuide({
             body: d.onboarding.googleBody,
             cta: d.onboarding.googleCta,
             done: googleConnected,
+            locked: googleLock,
             action: googleTarget
               ? ({ kind: "external", href: `/api/google-ads/connect?account=${googleTarget.id}` } as StepAction)
               : ({ kind: "link", href: "/dashboard/settings/accounts" } as StepAction),

@@ -2,25 +2,25 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "dropscale-da",
   // Not .open-next/worker.js directly: custom-worker.ts wraps the generated
-  // fetch handler and adds the weekly billing cron below. OpenNext's worker
+  // fetch handler and adds operational cron handlers below. OpenNext's worker
   // exports fetch only, so a scheduled handler has to live in a wrapper.
   "main": "custom-worker.ts",
   "compatibility_date": "2025-03-25",
   "triggers": {
     "crons": [
-      // Mondays 06:00 UTC — bill the Monday→Sunday week that just closed. Late
-      // enough that Google Ads has settled Sunday's spend, early enough that the
-      // invoice is waiting when the client starts their week.
-      "0 6 * * 1",
+      // Mondays 14:05 UTC - every Google account timezone has crossed into
+      // Monday, with extra time for Sunday's delayed Google reporting. Capture
+      // the exact closed-week evidence and reconcile Stripe payment state;
+      // invoice issue remains manual in /admin/billing.
+      "5 14 * * 1",
       // Hourly on the hour, from midnight UTC — rebuild the metrics rollup the
       // client reports read, then the commission ledger the finance pages read.
       // The countdown in the report is derived from this same schedule, so if
       // this expression changes, change PERIOD_MINUTES in next-refresh.tsx too.
       "0 * * * *",
-      // 23:55 — close the day. Pulls every account's Google spend and Shopify
-      // revenue into daily_metrics before the date rolls over, so the client
-      // reports show a complete day rather than whatever the last page view
-      // happened to capture.
+      // 23:55 — close the day and reconcile all open Stripe invoices. This
+      // bounds stale payment state to one day even if a webhook delivery is
+      // missed, while still keeping the webhook as the primary live path.
       "55 23 * * *"
     ]
   },

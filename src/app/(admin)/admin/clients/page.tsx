@@ -2,12 +2,6 @@ import type { Metadata } from "next";
 import { PageContainer } from "@/components/ui/page-container";
 import { ClientsManager } from "@/components/admin/clients-manager";
 import { createClient, getSessionProfile } from "@/lib/supabase/server";
-import { customerHasCard, stripeConfigured } from "@/lib/stripe/client";
-import {
-  ensureWeeklyInvoices,
-  fetchBillingSummaries,
-  reconcileInvoices,
-} from "@/lib/billing/invoices";
 
 export const metadata: Metadata = { title: "Clients" };
 
@@ -19,14 +13,20 @@ export const metadata: Metadata = { title: "Clients" };
 export default async function ClientsPage() {
   const supabase = await createClient();
 
-  const [clientsRes, profilesRes, accountsRes, requestsRes, { profile }] = await Promise.all([
+  const [
+    clientsRes,
+    profilesRes,
+    accountsRes,
+    billingStartsRes,
+    billingEndsRes,
+    requestsRes,
+    { profile },
+  ] = await Promise.all([
     supabase.from("portal_clients").select("*").order("created_at", { ascending: true }),
     supabase.from("profiles").select("*").order("created_at", { ascending: true }),
-    supabase
-      .from("ad_accounts")
-      .select("*")
-      .eq("status", "pending")
-      .order("created_at", { ascending: true }),
+    supabase.from("ad_accounts").select("*").order("created_at", { ascending: true }),
+    supabase.from("ad_account_billing_starts").select("*"),
+    supabase.from("ad_account_billing_ends").select("*"),
     supabase
       .from("account_requests")
       .select("*")
@@ -37,8 +37,45 @@ export default async function ClientsPage() {
 
   const allClients = clientsRes.data ?? [];
   const profiles = profilesRes.data ?? [];
-  const pendingAccounts = accountsRes.data ?? [];
+  const allAccounts = accountsRes.data ?? [];
+  const pendingAccounts = allAccounts.filter((account) => account.status === "pending");
   const pendingRequests = requestsRes.data ?? [];
+  const nameById = new Map(allClients.map((client) => [client.id, client.full_name]));
+  const billingStartByAccount = new Map(
+    (billingStartsRes.data ?? []).map((start) => [start.ad_account_id, start]),
+  );
+  const billingEndByAccount = new Map(
+    (billingEndsRes.data ?? []).map((end) => [end.ad_account_id, end]),
+  );
+  // Fail closed if the evidence table cannot be read. Treating an empty/error
+  // response as "every legacy account is missing" would invite duplicate live
+  // captures and turn a database fault into misleading review work.
+  const billingStartAuditFailed = Boolean(accountsRes.error || billingStartsRes.error);
+  const billingBoundaryAuditFailed = Boolean(
+    accountsRes.error || billingStartsRes.error || billingEndsRes.error,
+  );
+  const untrackedAccounts = billingStartAuditFailed
+    ? []
+    : allAccounts.filter(
+        (account) =>
+          (account.status === "active" || account.status === "suspended") &&
+          !billingStartByAccount.has(account.id),
+      );
+  const billingAccounts = billingBoundaryAuditFailed
+    ? []
+    : allAccounts.flatMap((account) => {
+        if (account.status !== "active" && account.status !== "suspended") return [];
+        const billingStart = billingStartByAccount.get(account.id);
+        if (!billingStart) return [];
+        return [
+          {
+            ...account,
+            owner: nameById.get(account.client_id) ?? "Unknown client",
+            billingStart,
+            billingEnd: billingEndByAccount.get(account.id) ?? null,
+          },
+        ];
+      });
 
   // Self-registrations get their own section at the top; everyone else —
   // approved or rejected — stays in the main list.
@@ -46,7 +83,6 @@ export default async function ClientsPage() {
   const clients = allClients.filter((client) => client.approval_status !== "pending");
 
   const clientIds = new Set(allClients.map((client) => client.id));
-  const nameById = new Map(allClients.map((client) => [client.id, client.full_name]));
 
   // Who is a sócio of whom (migration 0015). Only used to warn in the approval
   // queue: a self-registration that is really somebody's partner looks like an
@@ -63,37 +99,10 @@ export default async function ClientsPage() {
   }
 
   // Count stores per client for the list badges.
-  const { data: allAccounts } = await supabase.from("ad_accounts").select("client_id");
   const accountCount = new Map<string, number>();
-  for (const row of allAccounts ?? []) {
+  for (const row of allAccounts) {
     accountCount.set(row.client_id, (accountCount.get(row.client_id) ?? 0) + 1);
   }
-
-  // Billing state per client. Generation and reconciliation run first, exactly
-  // like the ledgers: opening this tab is what makes Monday's invoices exist.
-  await ensureWeeklyInvoices();
-  await reconcileInvoices();
-  const billing = await fetchBillingSummaries();
-
-  /**
-   * Who will be charged on Monday, and who will merely be emailed a link.
-   *
-   * Asked of Stripe directly rather than cached in a column: a card can be
-   * added or removed on Stripe's side at any moment, and a stale "will auto
-   * charge" here is the kind of wrong that only shows up as an unpaid invoice
-   * a week later. One GET per client with a Stripe customer, in parallel —
-   * fine at agency scale, worth revisiting past a few hundred clients.
-   */
-  const withCustomer = clients.filter((client) => client.stripe_customer_id);
-  const cardChecks = stripeConfigured()
-    ? await Promise.all(
-        withCustomer.map(async (client) => [
-          client.id,
-          await customerHasCard(client.stripe_customer_id!),
-        ] as const),
-      )
-    : [];
-  const hasCard = new Map(cardChecks);
 
   return (
     <PageContainer
@@ -104,16 +113,20 @@ export default async function ClientsPage() {
         clients={clients.map((client) => ({
           ...client,
           accounts: accountCount.get(client.id) ?? 0,
-          billing: billing.get(client.id) ?? null,
-          hasCard: hasCard.get(client.id) ?? false,
         }))}
-        stripeReady={stripeConfigured()}
         pendingClients={pendingClients}
         candidates={profiles.filter((profile) => !clientIds.has(profile.id))}
         pendingAccounts={pendingAccounts.map((account) => ({
           ...account,
           owner: nameById.get(account.client_id) ?? "Unknown client",
         }))}
+        untrackedAccounts={untrackedAccounts.map((account) => ({
+          ...account,
+          owner: nameById.get(account.client_id) ?? "Unknown client",
+        }))}
+        billingStartAuditFailed={billingStartAuditFailed}
+        billingAccounts={billingAccounts}
+        billingBoundaryAuditFailed={billingBoundaryAuditFailed}
         pendingRequests={pendingRequests.map((request) => ({
           ...request,
           owner: nameById.get(request.client_id) ?? "Unknown client",

@@ -172,7 +172,12 @@ export async function fetchLiveMetrics(
 }
 
 /** Spend for one calendar day, straight from Google. */
-export type DailySpend = { date: string; spend: number };
+export type DailySpend = {
+  date: string;
+  spend: number;
+  /** Authoritative account currency returned by Google Ads. */
+  currency: string | null;
+};
 
 /**
  * Per-day spend for the last 7 days. Feeds the commission ledger sync — a
@@ -199,7 +204,7 @@ export async function fetchLiveDailySpend(
   to: string,
 ): Promise<DailySpend[]> {
   const query = `
-    SELECT segments.date, metrics.cost_micros
+    SELECT customer.currency_code, segments.date, metrics.cost_micros
     FROM customer
     WHERE segments.date BETWEEN '${from}' AND '${to}'
   `;
@@ -210,6 +215,10 @@ export async function fetchLiveDailySpend(
     .map((row) => ({
       date: String((row.segments ?? {}).date ?? ""),
       spend: micros((row.metrics ?? {}).costMicros),
+      currency:
+        typeof (row.customer ?? {}).currencyCode === "string"
+          ? String((row.customer ?? {}).currencyCode).toUpperCase()
+          : null,
     }))
     .filter((entry) => entry.date !== "");
 }

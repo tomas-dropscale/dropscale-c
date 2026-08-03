@@ -193,19 +193,26 @@ import type { MetricSet } from "@/lib/portal/mock";
 
 /**
  * One account's daily_metrics rows → the MetricSet the metric cards render.
- * `feeRatePct` is that account's commission_rate — the days when every store
- * paid a flat DROPSCALE_FEE_RATE are over, so fee is computed here, per
- * account, never by the generic aggregator.
+ * A number is retained for demo/legacy callers. Financial portal pages pass a
+ * resolver so each row uses the sealed manual term in force on that day; a
+ * Monday grant must never reprice earlier dashboard history.
  */
-export function metricSetFromRows(rows: DailyMetricRow[], feeRatePct: number): MetricSet {
+export function metricSetFromRows(
+  rows: DailyMetricRow[],
+  feeRate: number | ((row: DailyMetricRow) => number),
+): MetricSet {
   const totals = sumMetrics(rows);
+  const fee = rows.reduce((sum, row) => {
+    const rate = typeof feeRate === "function" ? feeRate(row) : feeRate;
+    return sum + (Number(row.ad_spend) * rate) / 100;
+  }, 0);
   return {
     spend: totals.adSpend,
     impressions: totals.impressions,
     clicks: totals.clicks,
     conversions: totals.conversions,
     ctr: totals.ctr,
-    fee: (totals.adSpend * feeRatePct) / 100,
+    fee,
     cpc: totals.cpc,
     costPerConversion: totals.costPerConversion,
     roas: totals.roas,

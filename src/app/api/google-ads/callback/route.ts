@@ -38,6 +38,29 @@ export async function GET(request: NextRequest) {
   const { user, client } = await getSessionClient();
   if (!user || !client) return NextResponse.redirect(new URL("/login", origin));
 
+  // Re-check the signed target through RLS before exchanging/storing a token.
+  // This also guarantees reconnects keep the already-approved customer id;
+  // OAuth may rotate the credential but never rewrites billing identity.
+  const supabase = await createClient();
+  const { data: account, error: accountError } = await supabase
+    .from("ad_accounts")
+    .select("id, client_id, status, google_ads_customer_id")
+    .eq("id", accountId)
+    .maybeSingle();
+  const { data: isMember } = account
+    ? await supabase.rpc("is_client_member", { p_client_id: account.client_id })
+    : { data: false };
+  if (
+    accountError ||
+    !account ||
+    !isMember ||
+    account.status === "pending" ||
+    !account.google_ads_customer_id ||
+    !/^\d{10}$/.test(account.google_ads_customer_id)
+  ) {
+    return back("gads=error");
+  }
+
   let email: string | null = null;
   let cipher: string;
   try {
@@ -49,7 +72,6 @@ export async function GET(request: NextRequest) {
     return back("gads=error");
   }
 
-  const supabase = await createClient();
   const { error: updateError } = await supabase
     .from("ad_accounts")
     .update({

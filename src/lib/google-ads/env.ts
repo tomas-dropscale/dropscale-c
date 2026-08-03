@@ -60,7 +60,7 @@ export function googleAdsEnv(): GoogleAdsEnv {
     clientId,
     clientSecret,
     loginCustomerId: loginCustomerId || null,
-    apiVersion: process.env.GOOGLE_ADS_API_VERSION?.trim() || "v21",
+    apiVersion: process.env.GOOGLE_ADS_API_VERSION?.trim() || "v25",
   };
 }
 
@@ -76,7 +76,7 @@ export function googleAdsApiBasics() {
   }
   return {
     developerToken,
-    apiVersion: process.env.GOOGLE_ADS_API_VERSION?.trim() || "v21",
+    apiVersion: process.env.GOOGLE_ADS_API_VERSION?.trim() || "v25",
   };
 }
 

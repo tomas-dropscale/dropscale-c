@@ -1,14 +1,17 @@
+import "server-only";
+
 import { createClient as createSupabaseClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/supabase/types";
 
 /**
- * A Supabase client that bypasses RLS. Exactly one caller is entitled to it:
- * the Stripe webhook, which arrives with no session — its signature is its
- * authentication, and it has to write payment state nobody else may write.
+ * A Supabase client that bypasses RLS. It is reserved for authenticated
+ * server-only operations: signed Stripe webhooks, CRON_SECRET-protected jobs,
+ * the atomic Google billing-start commit, and reviewed invoice issuance after
+ * an admin session and the relevant source evidence have both been verified.
  *
- * Everything else in this app deliberately rides the viewer's own session, and
- * should keep doing so. Returns null when the key isn't configured, so the
- * feature degrades to the page-load reconciliation instead of crashing.
+ * Interactive requests still ride the viewer's own session. Returning null
+ * when the service key is absent lets each machine route fail closed with a
+ * clear 503 instead of ever falling back to broader browser permissions.
  */
 export function createServiceClient(): SupabaseClient<Database> | null {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;

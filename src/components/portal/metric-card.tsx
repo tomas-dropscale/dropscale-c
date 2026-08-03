@@ -82,9 +82,10 @@ export function MetricCard({
  *
  * Every card ranks equal — no hero treatment here; the gold highlight is the
  * main dashboard's Revenue card, and only there.
- * `feeRate` personalises the fee hint (accounts bill their own
- * commission_rate); null means mixed rates across stores, so no single
- * percentage would be true.
+ * `feeRate` personalises the explicitly estimated fee hint; null means mixed
+ * rates across stores, so no single percentage would be true. Exact weekly
+ * invoice amounts live in Payments because start/end counters are not part of
+ * the operational daily_metrics rows rendered here.
  */
 export function MetricsGrid({
   d,

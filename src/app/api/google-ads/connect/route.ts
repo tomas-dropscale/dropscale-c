@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { getSessionClient } from "@/lib/supabase/server";
+import { createClient, getSessionClient } from "@/lib/supabase/server";
 import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
 import { googleAdsConsentUrl } from "@/lib/google-ads/oauth";
 
@@ -27,6 +27,32 @@ export async function GET(request: NextRequest) {
   const { user, client } = await getSessionClient();
   if (!user || !client) {
     return NextResponse.redirect(new URL("/login", origin));
+  }
+
+  // Resolve the target through the caller's RLS view before sending them to
+  // Google. The billing identity must already be canonical and the caller must
+  // be an owner/member allowed to mutate this workspace, not merely someone
+  // who can guess an account UUID.
+  const supabase = await createClient();
+  const { data: account, error: accountError } = await supabase
+    .from("ad_accounts")
+    .select("id, client_id, status, google_ads_customer_id")
+    .eq("id", accountId)
+    .maybeSingle();
+  const { data: isMember } = account
+    ? await supabase.rpc("is_client_member", { p_client_id: account.client_id })
+    : { data: false };
+  if (
+    accountError ||
+    !account ||
+    !isMember ||
+    account.status === "pending" ||
+    !account.google_ads_customer_id ||
+    !/^\d{10}$/.test(account.google_ads_customer_id)
+  ) {
+    return NextResponse.redirect(
+      new URL("/dashboard/settings/accounts?gads=error", origin),
+    );
   }
 
   const nonce = crypto.randomUUID();

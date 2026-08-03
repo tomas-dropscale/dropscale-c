@@ -11,6 +11,8 @@ import {
   sumMetrics,
 } from "@/lib/metrics/queries";
 import { parseRange } from "@/lib/portal/range";
+import { fetchManualReferralRateSchedule } from "@/lib/billing/referral-rate-schedule";
+import { manualReferralRateOnDay } from "@/lib/billing/referrals";
 import { dateTime, multiplier } from "@/lib/format";
 import { Button } from "@/components/ui/button";
 import { MetricsGrid } from "@/components/portal/metric-card";
@@ -49,13 +51,20 @@ export default async function AccountPage({
   await ensureDailyCoverage([account], range.from);
   await recomputeDailyMetrics([account]);
 
-  const [rows, campaigns, { d }] = await Promise.all([
+  const [rows, campaigns, referralRateSchedule, { d }] = await Promise.all([
     fetchDailyMetrics([account.id], range.from, range.to),
     fetchCampaigns(account, range),
+    fetchManualReferralRateSchedule(account.client_id),
     getServerDictionary(),
   ]);
 
-  const metrics = metricSetFromRows(rows, Number(account.commission_rate));
+  const referralRateForDay = (day: string) =>
+    Number(account.list_commission_rate) === 10 && !account.revenue_share_enabled
+      ? manualReferralRateOnDay(day, referralRateSchedule)
+      : Number(account.commission_rate);
+  const metrics = metricSetFromRows(rows, (row) => referralRateForDay(row.day));
+  const historicalRates = new Set(rows.map((row) => referralRateForDay(row.day)));
+  const uniformFeeRate = historicalRates.size === 1 ? [...historicalRates][0] : null;
   const totals = sumMetrics(rows);
   // This store's own return: its Shopify revenue over its own ad spend.
   const storeRoas = totals.mer;
@@ -121,7 +130,7 @@ export default async function AccountPage({
             d={d}
             metrics={metrics}
             currency={account.currency}
-            feeRate={Number(account.commission_rate)}
+            feeRate={uniformFeeRate}
             storeRoas={storeRoas}
             storeConversions={storeConversions}
             storeConversionValue={storeConversionValue}
