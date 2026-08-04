@@ -8,6 +8,7 @@ import {
   FileText,
   LayoutGrid,
   Receipt,
+  ReceiptText,
   Settings,
   Store,
   Target,
@@ -44,6 +45,7 @@ const NAV_GROUPS: Group[] = [
       // behind, then every transaction that produced it.
       { href: "/admin/revenue", icon: TrendingUp, label: (d) => d.nav.revenue },
       { href: "/admin/billing", icon: FileText, label: (d) => d.nav.billing },
+      { href: "/admin/invoices", icon: ReceiptText, label: (d) => d.nav.invoices },
       { href: "/admin/expenses", icon: Receipt, label: (d) => d.nav.expenses },
       // A brand name — the same word in every locale, so no dictionary entry.
       { href: "/admin/hst", icon: Truck, label: () => "HST" },

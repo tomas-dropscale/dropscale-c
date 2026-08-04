@@ -265,15 +265,23 @@ export function BillingAdminView({
           ),
         })} · ${failedDetail}`
       : failedDetail;
-  const notReceivedDetail = `${fmt(d.adminBilling.closedThrough, {
+  // "Not received" is the superset: certified closed money not yet in the
+  // bank. Its breakdown makes the relation to the Outstanding card explicit —
+  // Outstanding is only the already-invoiced part.
+  const notReceivedDetail = `${fmt(d.adminBilling.unissuedAndOpen, {
+    unissued: money(
+      dashboard.positions.summary.closedSupportedUnissued,
+      intl,
+      dashboard.currency,
+    ),
+    open: money(
+      dashboard.positions.summary.issuedOutstanding,
+      intl,
+      dashboard.currency,
+    ),
+  })} · ${fmt(d.adminBilling.closedThrough, {
     date: shortDate(dashboard.positions.closedThrough, intl),
-  })}${
-    dashboard.positions.summary.clientsNeedingAttention > 0
-      ? ` · ${fmt(d.adminBilling.attentionCount, {
-          count: dashboard.positions.summary.clientsNeedingAttention,
-        })}`
-      : ""
-  }`;
+  })}`;
   const automation = dashboard.automation;
   const automationStatus = automation
     ? automationStatusLabel(automation.status, d)
@@ -354,9 +362,59 @@ export function BillingAdminView({
     }
   }
 
+  const cycleInvoices = dashboard.invoices.filter(
+    (invoice) =>
+      invoice.period_start === dashboard.selectedWeek.start &&
+      (invoice.status === "paid" ||
+        invoice.status === "open" ||
+        invoice.status === "draft" ||
+        invoice.status === "uncollectible"),
+  );
+  const cycleUnissued = dashboard.positions.clients.flatMap((position) =>
+    position.closed.weeks
+      .filter(
+        (week) =>
+          week.periodStart === dashboard.selectedWeek.start &&
+          week.state === "unissued",
+      )
+      .map((week) => ({
+        clientId: position.clientId,
+        clientName: position.clientName,
+        amount: week.amount,
+      })),
+  );
+
+  function selectCycle(periodStart: string) {
+    router.push(
+      periodStart === dashboard.weeks[0]?.start
+        ? "/admin/billing"
+        : `/admin/billing?periodStart=${periodStart}`,
+    );
+  }
+
   return (
     <div className="space-y-6">
       <section aria-label={d.adminBilling.summaryLabel}>
+        <div className="mb-3 flex items-center justify-end gap-2">
+          <label
+            className="label-caps"
+            htmlFor="billing-cycle-select"
+          >
+            {d.adminBilling.cycleLabel}
+          </label>
+          <select
+            id="billing-cycle-select"
+            value={dashboard.selectedWeek.start}
+            onChange={(event) => selectCycle(event.target.value)}
+            className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-base)] px-3 py-1.5 text-[12.5px] text-[var(--text-primary)] outline-none focus:border-[var(--accent-gold)]"
+          >
+            {dashboard.weeks.map((week) => (
+              <option key={week.start} value={week.start}>
+                {formatPeriod(week.start, week.end, intl)}
+              </option>
+            ))}
+          </select>
+        </div>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <SummaryCard
             label={d.adminBilling.selectedWeekBilled}
@@ -502,6 +560,97 @@ export function BillingAdminView({
       )}
 
       <section
+        className="panel p-4 sm:p-5"
+        aria-label={d.adminBilling.cycleReviewTitle}
+      >
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <div>
+            <h2 className="text-[15px] font-semibold text-[var(--text-primary)]">
+              {d.adminBilling.cycleReviewTitle}
+            </h2>
+            <p className="mt-0.5 text-[12px] text-[var(--text-muted)]">
+              {formatPeriod(
+                dashboard.selectedWeek.start,
+                dashboard.selectedWeek.end,
+                intl,
+              )}
+            </p>
+          </div>
+          <p className="text-[12px] text-[var(--text-secondary)] tabular-nums">
+            {fmt(d.adminBilling.cycleTotals, {
+              billed: money(
+                dashboard.summary.selectedWeekBilled,
+                intl,
+                dashboard.currency,
+              ),
+              paid: money(
+                dashboard.summary.selectedWeekPaid,
+                intl,
+                dashboard.currency,
+              ),
+            })}
+          </p>
+        </div>
+
+        {cycleInvoices.length === 0 && cycleUnissued.length === 0 ? (
+          <p className="mt-3 text-[12.5px] text-[var(--text-muted)]">
+            {d.adminBilling.cycleReviewEmpty}
+          </p>
+        ) : (
+          <ul className="mt-3 space-y-1.5">
+            {cycleInvoices.map((invoice) => (
+              <li
+                key={invoice.id}
+                className="flex items-center justify-between gap-3 text-[12.5px]"
+              >
+                <span className="min-w-0 truncate text-[var(--text-primary)]">
+                  {invoice.clientName}
+                </span>
+                <span className="flex shrink-0 items-center gap-2">
+                  {invoice.status === "paid" && invoice.paid_at && (
+                    <span className="text-[11px] text-[var(--text-muted)]">
+                      {formatTimestamp(invoice.paid_at, intl, "—")}
+                    </span>
+                  )}
+                  <Badge variant={STATUS_VARIANT[invoice.status]}>
+                    {statusLabel(invoice.status, d)}
+                  </Badge>
+                  <span
+                    className={cn(
+                      "min-w-[4.5rem] text-right font-medium tabular-nums",
+                      invoice.status === "paid"
+                        ? "text-[var(--success-green)]"
+                        : "text-[var(--text-primary)]",
+                    )}
+                  >
+                    {money(invoice.amount, intl, invoice.currency)}
+                  </span>
+                </span>
+              </li>
+            ))}
+            {cycleUnissued.map((entry) => (
+              <li
+                key={entry.clientId}
+                className="flex items-center justify-between gap-3 text-[12.5px]"
+              >
+                <span className="min-w-0 truncate text-[var(--text-primary)]">
+                  {entry.clientName}
+                </span>
+                <span className="flex shrink-0 items-center gap-2">
+                  <span className="text-[11.5px] text-[var(--text-secondary)]">
+                    {d.adminBilling.notIssued}
+                  </span>
+                  <span className="min-w-[4.5rem] text-right font-medium text-[var(--text-primary)] tabular-nums">
+                    {money(entry.amount, intl, dashboard.currency)}
+                  </span>
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <section
         className="space-y-4"
         aria-label={d.adminBilling.positionTitle}
       >
@@ -534,18 +683,21 @@ export function BillingAdminView({
                         })}
                       </Badge>
                     )}
-                    {position.closed.needsAttentionCount > 0 && (
-                      <Badge variant="warning">
-                        {d.adminBilling.needsAttention}
-                      </Badge>
-                    )}
                   </div>
                   <p className="mt-1 truncate text-[11.5px] text-[var(--text-muted)]">
                     {position.email}
                   </p>
                 </div>
 
-                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3">
+                <div
+                  className={cn(
+                    "rounded-xl border p-3",
+                    position.closed.supportedNotReceived === 0 &&
+                      position.closed.failedNotReceived === 0
+                      ? "border-[var(--success-green)]/30 bg-[var(--success-green)]/5"
+                      : "border-[var(--border-subtle)] bg-[var(--bg-base)]",
+                  )}
+                >
                   <div className="flex items-start justify-between gap-3">
                     <p className="label-caps">{d.adminBilling.closedBalance}</p>
                     {position.closed.issuedOutstanding > 0 && (
@@ -554,7 +706,15 @@ export function BillingAdminView({
                       </Badge>
                     )}
                   </div>
-                  <p className="mt-1 text-[17px] font-semibold text-[var(--text-primary)] tabular-nums">
+                  <p
+                    className={cn(
+                      "mt-1 text-[17px] font-semibold tabular-nums",
+                      position.closed.supportedNotReceived === 0 &&
+                        position.closed.failedNotReceived === 0
+                        ? "text-[var(--success-green)]"
+                        : "text-[var(--text-primary)]",
+                    )}
+                  >
                     {money(
                       position.closed.supportedNotReceived,
                       intl,

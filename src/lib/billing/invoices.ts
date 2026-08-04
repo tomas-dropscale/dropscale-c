@@ -2060,6 +2060,38 @@ export async function fetchAdminBillingDashboard(
   };
 }
 
+/**
+ * The complete agency invoice record for the finance area: every issued
+ * invoice plus unissued drafts, newest first. Same rows the billing history
+ * shows, without dragging the whole positions dashboard along.
+ */
+export async function fetchAdminInvoiceRecord(): Promise<
+  BillingInvoiceHistoryRow[]
+> {
+  const supabase = await createClient();
+  const [issued, drafts, { data: clientRows, error: clientsError }] =
+    await Promise.all([
+      fetchAllIssuedInvoices(supabase),
+      fetchUnissuedDraftInvoices(supabase),
+      supabase.from("portal_clients").select("id, full_name, email"),
+    ]);
+  if (clientsError)
+    throw new Error(`Could not load invoice clients: ${clientsError.message}`);
+  const clientById = new Map(
+    (clientRows ?? []).map((client) => [client.id, client]),
+  );
+  return [...issued, ...drafts]
+    .sort((a, b) =>
+      (b.issued_at ?? b.created_at).localeCompare(a.issued_at ?? a.created_at),
+    )
+    .map((invoice) => ({
+      ...invoice,
+      clientName: clientById.get(invoice.client_id)?.full_name ?? "Unknown client",
+      clientEmail: clientById.get(invoice.client_id)?.email ?? "",
+      outstandingAmount: outstandingAmount(invoice),
+    }));
+}
+
 export class BillingIssueError extends Error {
   constructor(
     message: string,
