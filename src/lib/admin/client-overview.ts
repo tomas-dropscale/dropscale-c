@@ -33,6 +33,7 @@
 
 import { createClient } from "@/lib/supabase/server";
 import { ACCOUNT_COLUMNS } from "@/lib/portal/data";
+import { currencyScope, displayCurrency } from "@/lib/portal/currency";
 import { ensureDailyCoverage, recomputeDailyMetrics } from "@/lib/metrics/recompute";
 import {
   googleProfit,
@@ -104,6 +105,10 @@ export type AdminClientOverview = {
   clientName: string;
   clientEmail: string;
   currency: string;
+  /** True when the client's stores trade in more than one currency, so the
+   *  client-level totals below are sums of unlike amounts. */
+  mixedCurrency: boolean;
+  currencies: string[];
   range: { from: string; to: string };
   totals: {
     /** Non-Meta Shopify revenue across the client's stores. Null = uncomputed. */
@@ -172,6 +177,7 @@ export async function fetchClientOverview(
   if (!client) return null;
 
   const accounts = (accountsRes.data as AdAccount[] | null) ?? [];
+  const currencies = currencyScope(accounts);
 
   // Bring this client's rollup current before reading it — see the note at the
   // top. Never let a sync failure take the popup down: a partial view of a
@@ -295,7 +301,12 @@ export async function fetchClientOverview(
     clientEmail: client.email,
     // Stores can differ in currency; the client-level strip uses the first
     // store's, which is what the client's own dashboard does too.
-    currency: accounts[0]?.currency ?? "EUR",
+    // One currency across the client's stores, or the first as a fallback with
+    // `mixedCurrency` set — the client-level strip sums across stores, and a
+    // sum of EUR and GBP is not a figure in either.
+    currency: displayCurrency(currencies),
+    mixedCurrency: currencies.mixed,
+    currencies: currencies.currencies,
     range: { from: range.from, to: range.to },
     totals: {
       googleRevenue: revenue,

@@ -1,3 +1,4 @@
+import { UpdatedAt } from "@/components/portal/updated-at";
 import type { Metadata } from "next";
 import { PackageOpen } from "lucide-react";
 
@@ -12,7 +13,9 @@ import {
   sumMetrics,
 } from "@/lib/metrics/queries";
 import { parseRange } from "@/lib/portal/range";
-import { dateTime, multiplier } from "@/lib/format";
+import { currencyScope, displayCurrency } from "@/lib/portal/currency";
+import { MixedCurrencyNotice } from "@/components/portal/mixed-currency-notice";
+import { multiplier } from "@/lib/format";
 import { MetricsGrid } from "@/components/portal/metric-card";
 import { PageContainer } from "@/components/ui/page-container";
 import { RangePicker } from "@/components/portal/range-picker";
@@ -50,6 +53,9 @@ export default async function GoogleAllStoresPage({
   );
   const byAccount = groupByAccount(rows);
   const { updatedAt } = freshness(rows);
+  // Totals here span every store, so they are only a real figure when the
+  // stores share a currency.
+  const scope = currencyScope(accounts);
 
   const perAccount = accounts.map((account) => {
     const accountRows = byAccount.get(account.id) ?? [];
@@ -101,7 +107,7 @@ export default async function GoogleAllStoresPage({
       title={d.portal.allStores}
       description={
         updatedAt
-          ? fmt(d.portal.allStoresSubtitle, { time: dateTime(updatedAt) })
+          ? <UpdatedAt template={d.portal.allStoresSubtitle} updatedAt={updatedAt} />
           : d.portal.noData
       }
       actions={
@@ -124,10 +130,11 @@ export default async function GoogleAllStoresPage({
         </div>
       ) : (
         <div className="space-y-6">
+          <MixedCurrencyNotice scope={scope} />
           <MetricsGrid
             d={d}
             metrics={totals}
-            currency={accounts[0]?.currency ?? "EUR"}
+            currency={displayCurrency(scope)}
             feeRate={uniformFeeRate}
             storeRoas={storeRoas}
             storeConversions={storeConversions}

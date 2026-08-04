@@ -100,6 +100,40 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Account not found." }, { status: 404 });
   }
 
+  /**
+   * One Shopify store, one Dropscale store.
+   *
+   * Connecting the same shop to two stores double-counts everything it
+   * produces: the orders are pulled twice into daily_metrics under two
+   * different ad_account_ids, so revenue, orders and COGS all appear twice on
+   * the dashboard, and the commission computed from them follows. Nothing
+   * errors — the figures simply come out roughly double, which is far harder to
+   * spot than a refusal here.
+   *
+   * RLS scopes this to the signed-in client's own stores, which is the case
+   * that actually happens: someone re-connecting during setup and picking the
+   * wrong row. A domain already attached to a DIFFERENT client is invisible
+   * from here and needs the database constraint (see the note in the reply).
+   */
+  const { data: clash } = await supabase
+    .from("ad_accounts")
+    .select("id, store_name")
+    .eq("shopify_url", domain)
+    .neq("id", accountId)
+    .maybeSingle();
+
+  if (clash) {
+    return NextResponse.json(
+      {
+        error:
+          `${domain} is already connected to "${clash.store_name}". ` +
+          "Disconnect it there first — connecting one Shopify store twice counts its " +
+          "orders and revenue twice.",
+      },
+      { status: 409 },
+    );
+  }
+
   // Onboarding has an order, and this is where it is enforced — the UI hides
   // the form, but the rule lives here. A store is wired to Shopify only after
   // the team has accepted its ad account: connecting earlier stored real

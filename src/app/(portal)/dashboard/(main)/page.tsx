@@ -1,3 +1,4 @@
+import { UpdatedAt } from "@/components/portal/updated-at";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { ArrowRight, Info, PackageOpen, Database } from "lucide-react";
@@ -26,7 +27,9 @@ import {
   sumMetrics,
 } from "@/lib/metrics/queries";
 import { parseRange } from "@/lib/portal/range";
-import { compact, dateTime, integer, money, multiplier, percent } from "@/lib/format";
+import { currencyScope, displayCurrency } from "@/lib/portal/currency";
+import { MixedCurrencyNotice } from "@/components/portal/mixed-currency-notice";
+import { compact, integer, money, multiplier, percent } from "@/lib/format";
 import { MetricCard } from "@/components/portal/metric-card";
 import { RefreshButton } from "@/components/portal/refresh-button";
 import { DailyPerformanceChart, type ChartDay } from "@/components/portal/daily-performance-chart";
@@ -77,7 +80,10 @@ export default async function DashboardPage({
 
   const totals = sumMetrics(rows);
   const { updatedAt } = freshness(rows);
-  const currency = visible[0]?.currency ?? "EUR";
+  // Was `visible[0].currency`, which printed one symbol against a sum of two
+  // currencies. The scope says whether that sum means anything.
+  const scope = currencyScope(visible);
+  const currency = displayCurrency(scope);
 
   // Setup state drives the first-run guide. It does NOT vanish after the first
   // connection: it stays, ticking each step off, until EVERY applicable step is
@@ -167,7 +173,7 @@ export default async function DashboardPage({
       title={d.portal.dashboard}
       description={
         updatedAt
-          ? fmt(d.portal.allStoresSubtitle, { time: dateTime(updatedAt) })
+          ? <UpdatedAt template={d.portal.allStoresSubtitle} updatedAt={updatedAt} />
           : d.portal.noData
       }
       actions={
@@ -245,6 +251,10 @@ export default async function DashboardPage({
               </div>
             )
           )}
+
+          {/* Above the money, not below it: by the time someone has read a
+              total in the wrong currency, the warning has come too late. */}
+          <MixedCurrencyNotice scope={scope} />
 
           {/* Hero — the client's money, RevFlow-style: rev/profit lead. */}
           <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">

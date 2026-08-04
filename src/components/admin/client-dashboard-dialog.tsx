@@ -242,6 +242,14 @@ function Body({ data }: { data: AdminClientOverview }) {
               "Revenue" here against the client's Shopify admin sees a shortfall
               and assumes the report is broken, when the gap IS the point. */}
           <Badge variant="neutral">Google only · excludes Meta referrals</Badge>
+          {/* Client-level totals sum across stores. When those stores trade in
+              different currencies the sum is not a figure in either of them,
+              and the strip below has to say so rather than pick a symbol. */}
+          {data.mixedCurrency && (
+            <Badge variant="warning">
+              Mixed currencies ({data.currencies.join(", ")}) — totals not converted
+            </Badge>
+          )}
         </div>
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6">
           {/* Revenue leads, in gold and at double width. It is the number the
