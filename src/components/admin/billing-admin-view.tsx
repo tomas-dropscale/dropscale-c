@@ -50,6 +50,21 @@ type InvoiceHistoryItem = BillingAdminDashboard["invoices"][number];
 
 type Feedback = { tone: "error" | "success"; message: string } | null;
 
+type StripeReadiness = {
+  ready: boolean;
+  keyMode: "live" | "test" | null;
+  liveMode: boolean;
+  webhookSecretConfigured: boolean;
+  serviceRoleConfigured: boolean;
+  issuanceEnabled: boolean;
+  permissions: {
+    customersRead: boolean;
+    invoicesRead: boolean;
+    invoiceItemsRead: boolean;
+  };
+  limitations: string[];
+};
+
 const STATUS_VARIANT: Record<
   InvoiceStatus,
   "success" | "warning" | "neutral" | "danger"
@@ -97,6 +112,16 @@ function formatTimestamp(value: string | null, intl: string, fallback: string) {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function moneyRange(
+  minimum: number,
+  maximum: number,
+  intl: string,
+  currency: string,
+) {
+  if (minimum === maximum) return money(maximum, intl, currency);
+  return `${money(minimum, intl, currency)} – ${money(maximum, intl, currency)}`;
 }
 
 function deliveryNeedsReconciliation(invoice: {
@@ -275,6 +300,9 @@ export function BillingAdminView({
   const { d, intl } = useI18n();
   const [changingWeek, startWeekTransition] = React.useTransition();
   const [syncing, setSyncing] = React.useState(false);
+  const [checkingStripe, setCheckingStripe] = React.useState(false);
+  const [stripeReadiness, setStripeReadiness] =
+    React.useState<StripeReadiness | null>(null);
   const [issuingId, setIssuingId] = React.useState<string | null>(null);
   const [confirmClient, setConfirmClient] =
     React.useState<ClientPreview | null>(null);
@@ -320,6 +348,35 @@ export function BillingAdminView({
       setFeedback({ tone: "error", message: d.adminBilling.refreshFailed });
     } finally {
       setSyncing(false);
+    }
+  }
+
+  async function checkStripe() {
+    setCheckingStripe(true);
+    setFeedback(null);
+    try {
+      const response = await fetch("/api/admin/stripe/readiness", {
+        method: "GET",
+        cache: "no-store",
+      });
+      const body = (await response.json().catch(() => null)) as
+        | StripeReadiness
+        | { error?: string }
+        | null;
+      if (!response.ok || !body || !("ready" in body)) {
+        setStripeReadiness(null);
+        setFeedback({
+          tone: "error",
+          message: requestError(body, d.adminBilling.stripeCheckFailed),
+        });
+        return;
+      }
+      setStripeReadiness(body);
+    } catch {
+      setStripeReadiness(null);
+      setFeedback({ tone: "error", message: d.adminBilling.stripeCheckFailed });
+    } finally {
+      setCheckingStripe(false);
     }
   }
 
@@ -416,22 +473,293 @@ export function BillingAdminView({
           </p>
         </div>
 
-        <Button
-          type="button"
-          variant="secondary"
-          className="min-h-10 w-full sm:w-auto"
-          loading={syncing}
-          disabled={changingWeek || Boolean(issuingId)}
-          onClick={refreshLedger}
-        >
-          <RefreshCw />
-          {syncing ? d.adminBilling.refreshing : d.adminBilling.refreshLedger}
-        </Button>
+        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+          <Button
+            type="button"
+            variant="secondary"
+            className="min-h-10 w-full sm:w-auto"
+            loading={checkingStripe}
+            disabled={syncing || changingWeek || Boolean(issuingId)}
+            onClick={checkStripe}
+          >
+            <CheckCircle2 />
+            {checkingStripe
+              ? d.adminBilling.stripeChecking
+              : d.adminBilling.stripeCheck}
+          </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            className="min-h-10 w-full sm:w-auto"
+            loading={syncing}
+            disabled={checkingStripe || changingWeek || Boolean(issuingId)}
+            onClick={refreshLedger}
+          >
+            <RefreshCw />
+            {syncing ? d.adminBilling.refreshing : d.adminBilling.refreshLedger}
+          </Button>
+        </div>
       </section>
 
       {feedback && (
         <FormAlert tone={feedback.tone}>{feedback.message}</FormAlert>
       )}
+
+      {stripeReadiness && (
+        <section
+          className={cn(
+            "rounded-[var(--radius-card)] border p-4 sm:p-5",
+            stripeReadiness.ready
+              ? "border-[var(--success-green)]/30 bg-[var(--success-green)]/5"
+              : "border-[var(--warning-orange)]/30 bg-[var(--warning-orange)]/5",
+          )}
+          aria-live="polite"
+        >
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-[14px] font-semibold text-[var(--text-primary)]">
+                  {stripeReadiness.ready
+                    ? d.adminBilling.stripeReady
+                    : d.adminBilling.stripeNotReady}
+                </h2>
+                <Badge variant={stripeReadiness.liveMode ? "success" : "danger"}>
+                  {stripeReadiness.liveMode ? "LIVE" : "NOT LIVE"}
+                </Badge>
+                <Badge
+                  variant={
+                    stripeReadiness.issuanceEnabled ? "warning" : "neutral"
+                  }
+                >
+                  {stripeReadiness.issuanceEnabled
+                    ? d.adminBilling.stripeGateEnabled
+                    : d.adminBilling.stripeGateDisabled}
+                </Badge>
+              </div>
+              <p className="mt-2 max-w-3xl text-[12px] leading-relaxed text-[var(--text-secondary)]">
+                {stripeReadiness.ready
+                  ? d.adminBilling.stripeReadyDetail
+                  : d.adminBilling.stripeNotReadyDetail}
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2 text-[11px]">
+              <Badge
+                variant={
+                  stripeReadiness.permissions.customersRead
+                    ? "success"
+                    : "danger"
+                }
+              >
+                Customers
+              </Badge>
+              <Badge
+                variant={
+                  stripeReadiness.permissions.invoicesRead
+                    ? "success"
+                    : "danger"
+                }
+              >
+                Invoices
+              </Badge>
+              <Badge
+                variant={
+                  stripeReadiness.permissions.invoiceItemsRead
+                    ? "success"
+                    : "danger"
+                }
+              >
+                Invoice items
+              </Badge>
+            </div>
+          </div>
+          <p className="mt-3 text-[11px] leading-relaxed text-[var(--text-muted)]">
+            {d.adminBilling.stripeReadOnlyLimitation}
+          </p>
+        </section>
+      )}
+
+      <section className="space-y-4" aria-label={d.adminBilling.positionTitle}>
+        <div>
+          <h2 className="text-[16px] font-semibold text-[var(--text-primary)]">
+            {d.adminBilling.positionTitle}
+          </h2>
+          <p className="mt-1 max-w-4xl text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
+            {d.adminBilling.positionSubtitle}
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <SummaryCard
+            label={d.adminBilling.notReceived}
+            value={moneyRange(
+              dashboard.positions.summary.supportedNotReceived,
+              dashboard.positions.summary.maximumNotReceived,
+              intl,
+              dashboard.currency,
+            )}
+            detail={fmt(d.adminBilling.closedThrough, {
+              date: shortDate(
+                dashboard.positions.closedThrough,
+                intl,
+              ),
+            })}
+            icon={CircleDollarSign}
+          />
+          <SummaryCard
+            label={d.adminBilling.closedUnissued}
+            value={moneyRange(
+              dashboard.positions.summary.closedSupportedUnissued,
+              dashboard.positions.summary.closedUnissuedEstimate,
+              intl,
+              dashboard.currency,
+            )}
+            detail={fmt(d.adminBilling.entryReviewAmount, {
+              amount: money(
+                dashboard.positions.summary.closedNeedsEntryReview,
+                intl,
+                dashboard.currency,
+              ),
+            })}
+            tone={
+              dashboard.positions.summary.closedNeedsEntryReview > 0
+                ? "warning"
+                : "gold"
+            }
+            icon={TriangleAlert}
+          />
+          <SummaryCard
+            label={d.adminBilling.issuedOutstanding}
+            value={money(
+              dashboard.positions.summary.issuedOutstanding,
+              intl,
+              dashboard.currency,
+            )}
+            detail={d.adminBilling.clientCanPay}
+            icon={FileCheck2}
+          />
+          <SummaryCard
+            label={d.adminBilling.currentAccrued}
+            value={money(
+              dashboard.positions.summary.currentAccruedFee,
+              intl,
+              dashboard.currency,
+            )}
+            detail={formatPeriod(
+              dashboard.positions.currentPeriod.start,
+              dashboard.positions.currentPeriod.end,
+              intl,
+            )}
+            tone="warning"
+            icon={Clock3}
+          />
+        </div>
+
+        <div className="space-y-3">
+          {dashboard.positions.clients.map((position) => {
+            const hasEntryReview = position.closed.needsEntryReview > 0;
+            return (
+              <article key={position.clientId} className="panel p-4 sm:p-5">
+                <div className="flex flex-col gap-4 xl:flex-row xl:items-center">
+                  <div className="min-w-0 xl:w-[25%]">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h3 className="truncate text-[14px] font-semibold text-[var(--text-primary)]">
+                        {position.clientName}
+                      </h3>
+                      {hasEntryReview && (
+                        <Badge variant="warning">
+                          {d.adminBilling.entryReviewNeeded}
+                        </Badge>
+                      )}
+                    </div>
+                    <p className="mt-1 truncate text-[11.5px] text-[var(--text-muted)]">
+                      {position.email}
+                    </p>
+                  </div>
+
+                  <div className="grid min-w-0 flex-1 grid-cols-1 gap-3 sm:grid-cols-3">
+                    <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3">
+                      <p className="label-caps">{d.adminBilling.closedBalance}</p>
+                      <p className="mt-1 text-[17px] font-semibold tabular-nums text-[var(--text-primary)]">
+                        {moneyRange(
+                          position.closed.supportedNotReceived,
+                          position.closed.maximumNotReceived,
+                          intl,
+                          position.currency,
+                        )}
+                      </p>
+                      <p className="mt-1 text-[11px] text-[var(--text-muted)]">
+                        {fmt(d.adminBilling.unissuedAndOpen, {
+                          unissued: moneyRange(
+                            position.closed.supportedUnissued,
+                            position.closed.unissuedEstimate,
+                            intl,
+                            position.currency,
+                          ),
+                          open: money(
+                            position.closed.issuedOutstanding,
+                            intl,
+                            position.currency,
+                          ),
+                        })}
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3">
+                      <p className="label-caps">{d.adminBilling.entryBoundary}</p>
+                      <p
+                        className={cn(
+                          "mt-1 text-[17px] font-semibold tabular-nums",
+                          hasEntryReview
+                            ? "text-[var(--warning-orange)]"
+                            : "text-[var(--text-primary)]",
+                        )}
+                      >
+                        {hasEntryReview
+                          ? money(
+                              position.closed.needsEntryReview,
+                              intl,
+                              position.currency,
+                            )
+                          : d.adminBilling.noAmbiguousAmount}
+                      </p>
+                      <p className="mt-1 text-[11px] text-[var(--text-muted)]">
+                        {fmt(d.adminBilling.missingBillingStarts, {
+                          count: position.closed.missingStartCount,
+                        })}
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-[var(--warning-orange)]/25 bg-[var(--warning-orange)]/5 p-3">
+                      <p className="label-caps">{d.adminBilling.currentCycle}</p>
+                      <p className="mt-1 text-[17px] font-semibold tabular-nums text-[var(--warning-orange)]">
+                        {money(
+                          position.current.accruedFee,
+                          intl,
+                          position.currency,
+                        )}
+                      </p>
+                      <p className="mt-1 text-[11px] text-[var(--text-muted)]">
+                        {position.current.through
+                          ? fmt(d.adminBilling.buildingThrough, {
+                              date: shortDate(position.current.through, intl),
+                              spend: money(
+                                position.current.grossSpend,
+                                intl,
+                                position.currency,
+                              ),
+                            })
+                          : d.adminBilling.noCurrentData}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </article>
+            );
+          })}
+        </div>
+
+        <p className="text-[11.5px] leading-relaxed text-[var(--text-muted)]">
+          {d.adminBilling.positionCaveat}
+        </p>
+      </section>
 
       <section aria-label={d.adminBilling.summaryLabel}>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">

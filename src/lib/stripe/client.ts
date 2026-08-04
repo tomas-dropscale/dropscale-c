@@ -51,6 +51,26 @@ export function stripeConfigured(): boolean {
   );
 }
 
+export type StripeReadinessLimitation =
+  | "stripe_write_permissions_not_verified"
+  | "webhook_signing_secret_match_not_verified";
+
+export type StripeReadiness = {
+  keyMode: StripeApiKeyMode | null;
+  liveMode: boolean;
+  permissions: {
+    customersRead: boolean;
+    invoicesRead: boolean;
+    invoiceItemsRead: boolean;
+  };
+  limitations: StripeReadinessLimitation[];
+};
+
+const STRIPE_READINESS_LIMITATIONS: StripeReadinessLimitation[] = [
+  "stripe_write_permissions_not_verified",
+  "webhook_signing_secret_match_not_verified",
+];
+
 /** Stripe speaks form encoding, including for nested params (`a[b][c]`). */
 function encode(params: Record<string, unknown>, prefix = ""): string[] {
   const parts: string[] = [];
@@ -175,6 +195,62 @@ async function stripeFetch<T>(
     });
   }
   return payload as T;
+}
+
+/**
+ * Prove live Stripe authentication and the three read permissions billing uses.
+ *
+ * Every path and method is fixed here rather than accepted from the caller. A
+ * future `created` filter guarantees the list responses are empty, so the check
+ * neither mutates Stripe nor reads Customer or Invoice data into its result.
+ * Write permissions and the remote webhook signing secret cannot be proved by a
+ * read-only API call and remain explicit, normalized limitations.
+ */
+export async function checkStripeReadiness(): Promise<StripeReadiness> {
+  const keyMode = stripeApiKeyMode();
+  const unavailable = {
+    customersRead: false,
+    invoicesRead: false,
+    invoiceItemsRead: false,
+  };
+
+  if (keyMode !== "live") {
+    return {
+      keyMode,
+      liveMode: false,
+      permissions: unavailable,
+      limitations: [...STRIPE_READINESS_LIMITATIONS],
+    };
+  }
+
+  // Stripe object creation times come from Stripe's clock. Asking only for
+  // objects created tomorrow makes these permission probes deterministically
+  // empty without relying on any real Customer or Invoice identifier.
+  const futureCreatedAt = Math.floor(Date.now() / 1_000) + 24 * 60 * 60;
+  const read = async (path: "/customers" | "/invoices" | "/invoiceitems") => {
+    try {
+      await stripeFetch(path, {
+        method: "GET",
+        params: { created: { gt: futureCreatedAt }, limit: 1 },
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const [customersRead, invoicesRead, invoiceItemsRead] = await Promise.all([
+    read("/customers"),
+    read("/invoices"),
+    read("/invoiceitems"),
+  ]);
+
+  return {
+    keyMode,
+    liveMode: true,
+    permissions: { customersRead, invoicesRead, invoiceItemsRead },
+    limitations: [...STRIPE_READINESS_LIMITATIONS],
+  };
 }
 
 // ---------------------------------------------------------------------------
