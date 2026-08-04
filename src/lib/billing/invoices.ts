@@ -65,6 +65,7 @@ import {
   DAYS_UNTIL_DUE,
   isoDay,
   isManualAgencyCalculationVersion,
+  mondayOf,
   referralFeeTerms,
   round2,
   storeLines,
@@ -80,6 +81,18 @@ import {
   manualReferralCutoverPreviewBlocker,
 } from "@/lib/billing/manual-referral-cutover";
 import { stripeInvoiceRecoveryMode } from "@/lib/billing/invoice-delivery";
+import {
+  buildBillingPositions,
+  type BillingPositionAccount,
+  type BillingPositionClient,
+  type BillingPositionEnd,
+  type BillingPositionInvoice,
+  type BillingPositionLedgerRow,
+  type BillingPositionMetricRow,
+  type BillingPositionReferralTerm,
+  type BillingPositions,
+  type BillingPositionStart,
+} from "@/lib/billing/positions";
 
 type Supabase = SupabaseClient<Database>;
 
@@ -215,6 +228,8 @@ export type BillingAdminDashboard = {
   weeks: { start: string; end: string }[];
   selectedWeek: { start: string; end: string };
   summary: BillingAdminSummary;
+  /** Closed receivables and the current in-progress cycle, never mixed. */
+  positions: BillingPositions;
   clients: BillingClientPreview[];
   invoices: BillingInvoiceHistoryRow[];
 };
@@ -1303,6 +1318,311 @@ async function fetchAllIssuedInvoices(supabase: Supabase): Promise<Invoice[]> {
   }
 }
 
+type PositionLedgerDatabaseRow = BillingPositionLedgerRow & { id: string };
+type PositionInvoiceDatabaseRow = BillingPositionInvoice & { id: string };
+type PositionReferralDatabaseRow = BillingPositionReferralTerm & {
+  id: string;
+  clientId: string;
+};
+
+async function fetchPositionLedgerRows(
+  supabase: Supabase,
+  sourceId: string,
+  accountIds: string[],
+): Promise<BillingPositionLedgerRow[]> {
+  if (accountIds.length === 0) return [];
+  const rows: PositionLedgerDatabaseRow[] = [];
+  const pageSize = 1_000;
+  let afterId: string | null = null;
+  for (;;) {
+    let query = supabase
+      .from("commissions")
+      .select(
+        "id, ad_account_id, occurred_on, gross_amount, currency, updated_at",
+      )
+      .eq("source_id", sourceId)
+      .eq("status", "confirmed")
+      .in("ad_account_id", accountIds)
+      .order("id", { ascending: true })
+      .limit(pageSize);
+    if (afterId) query = query.gt("id", afterId);
+    const { data, error } = await query;
+    if (error) {
+      throw new Error(`Could not load billing position ledger: ${error.message}`);
+    }
+    const page = (data ?? []).map((row) => ({
+      id: row.id,
+      accountId: row.ad_account_id!,
+      occurredOn: row.occurred_on,
+      grossAmount: row.gross_amount,
+      currency: row.currency,
+      updatedAt: row.updated_at,
+    })) as PositionLedgerDatabaseRow[];
+    rows.push(...page);
+    if (page.length < pageSize) break;
+    afterId = page.at(-1)?.id ?? null;
+    if (!afterId) break;
+  }
+  return rows.map((row) => ({
+    accountId: row.accountId,
+    occurredOn: row.occurredOn,
+    grossAmount: row.grossAmount,
+    currency: row.currency,
+    updatedAt: row.updatedAt,
+  }));
+}
+
+async function fetchPositionInvoices(
+  supabase: Supabase,
+  clientIds: string[],
+): Promise<BillingPositionInvoice[]> {
+  if (clientIds.length === 0) return [];
+  const rows: PositionInvoiceDatabaseRow[] = [];
+  const pageSize = 1_000;
+  let afterId: string | null = null;
+  for (;;) {
+    let query = supabase
+      .from("invoices")
+      .select(
+        "id, client_id, period_start, status, amount, amount_remaining, issued_at, calculation_version",
+      )
+      .in("client_id", clientIds)
+      .order("id", { ascending: true })
+      .limit(pageSize);
+    if (afterId) query = query.gt("id", afterId);
+    const { data, error } = await query;
+    if (error) {
+      throw new Error(`Could not load billing position invoices: ${error.message}`);
+    }
+    const page = (data ?? []).map((row) => ({
+      id: row.id,
+      clientId: row.client_id,
+      periodStart: row.period_start,
+      status: row.status,
+      amount: row.amount,
+      amountRemaining: row.amount_remaining,
+      issuedAt: row.issued_at,
+      calculationVersion: row.calculation_version,
+    })) as PositionInvoiceDatabaseRow[];
+    rows.push(...page);
+    if (page.length < pageSize) break;
+    afterId = page.at(-1)?.id ?? null;
+    if (!afterId) break;
+  }
+  return rows.map((row) => ({
+    clientId: row.clientId,
+    periodStart: row.periodStart,
+    status: row.status,
+    amount: row.amount,
+    amountRemaining: row.amountRemaining,
+    issuedAt: row.issuedAt,
+    calculationVersion: row.calculationVersion,
+  }));
+}
+
+async function fetchPositionMetrics(
+  supabase: Supabase,
+  accountIds: string[],
+  periodStart: string,
+  periodEnd: string,
+): Promise<BillingPositionMetricRow[]> {
+  if (accountIds.length === 0) return [];
+  const rows: BillingPositionMetricRow[] = [];
+  const pageSize = 1_000;
+  for (let from = 0; ; from += pageSize) {
+    const { data, error } = await supabase
+      .from("daily_metrics")
+      .select("ad_account_id, day, ad_spend, computed_at")
+      .in("ad_account_id", accountIds)
+      .gte("day", periodStart)
+      .lte("day", periodEnd)
+      .order("day", { ascending: true })
+      .order("ad_account_id", { ascending: true })
+      .range(from, from + pageSize - 1);
+    if (error) {
+      throw new Error(`Could not load current Google estimates: ${error.message}`);
+    }
+    const page = (data ?? []).map((row) => ({
+      accountId: row.ad_account_id,
+      day: row.day,
+      adSpend: row.ad_spend,
+      computedAt: row.computed_at,
+    })) as BillingPositionMetricRow[];
+    rows.push(...page);
+    if (page.length < pageSize) break;
+  }
+  return rows;
+}
+
+async function fetchPositionReferralTerms(
+  supabase: Supabase,
+  clientIds: string[],
+): Promise<Map<string, BillingPositionReferralTerm[]>> {
+  const byClient = new Map<string, BillingPositionReferralTerm[]>();
+  if (clientIds.length === 0) return byClient;
+  const rows: PositionReferralDatabaseRow[] = [];
+  const pageSize = 1_000;
+  let afterId: string | null = null;
+  for (;;) {
+    let query = supabase
+      .from("referral_discount_terms")
+      .select(
+        "id, client_id, effective_from, revision, referral_count, list_rate, referral_step_rate, referral_discount_rate, fee_rate",
+      )
+      .in("client_id", clientIds)
+      .not("sealed_at", "is", null)
+      .order("id", { ascending: true })
+      .limit(pageSize);
+    if (afterId) query = query.gt("id", afterId);
+    const { data, error } = await query;
+    if (error) {
+      throw new Error(`Could not load billing position terms: ${error.message}`);
+    }
+    const page = (data ?? []).map((row) => ({
+      id: row.id,
+      clientId: row.client_id,
+      effectiveFrom: row.effective_from,
+      revision: row.revision,
+      referralCount: row.referral_count,
+      listRate: Number(row.list_rate),
+      stepRate: Number(row.referral_step_rate),
+      discountRate: Number(row.referral_discount_rate),
+      feeRate: Number(row.fee_rate),
+    })) as PositionReferralDatabaseRow[];
+    rows.push(...page);
+    if (page.length < pageSize) break;
+    afterId = page.at(-1)?.id ?? null;
+    if (!afterId) break;
+  }
+  for (const row of rows) {
+    const current = byClient.get(row.clientId) ?? [];
+    current.push({
+      effectiveFrom: row.effectiveFrom,
+      revision: row.revision,
+      referralCount: row.referralCount,
+      listRate: row.listRate,
+      stepRate: row.stepRate,
+      discountRate: row.discountRate,
+      feeRate: row.feeRate,
+    });
+    byClient.set(row.clientId, current);
+  }
+  return byClient;
+}
+
+async function fetchAdminBillingPositions(
+  supabase: Supabase,
+  now: Date,
+): Promise<BillingPositions> {
+  const currentStart = mondayOf(now);
+  const currentEnd = addDays(currentStart, 6);
+  const [{ data: adminRows, error: adminsError }, { data: clientRows, error: clientsError }] =
+    await Promise.all([
+      supabase.from("profiles").select("id").eq("role", "admin"),
+      supabase
+        .from("portal_clients")
+        .select("id, full_name, email, approval_status")
+        .in("approval_status", ["approved", "rejected"]),
+    ]);
+  if (adminsError) {
+    throw new Error(`Could not load billing position owners: ${adminsError.message}`);
+  }
+  if (clientsError) {
+    throw new Error(`Could not load billing position clients: ${clientsError.message}`);
+  }
+  const adminIds = new Set((adminRows ?? []).map((row) => row.id));
+  const clients: BillingPositionClient[] = (clientRows ?? [])
+    .filter((client) => !adminIds.has(client.id))
+    .map((client) => ({
+      id: client.id,
+      fullName: client.full_name,
+      email: client.email,
+    }));
+  const clientIds = clients.map((client) => client.id);
+
+  let accounts: BillingPositionAccount[] = [];
+  if (clientIds.length > 0) {
+    const { data, error } = await supabase
+      .from("ad_accounts")
+      .select("id, client_id, store_name, created_at, currency")
+      .in("client_id", clientIds)
+      .in("status", ["active", "suspended"]);
+    if (error) {
+      throw new Error(`Could not load billing position accounts: ${error.message}`);
+    }
+    accounts = (data ?? []).map((account) => ({
+      id: account.id,
+      clientId: account.client_id,
+      storeName: account.store_name,
+      createdAt: account.created_at,
+      currency: account.currency,
+    }));
+  }
+  const accountIds = accounts.map((account) => account.id);
+
+  let starts: BillingPositionStart[] = [];
+  let ends: BillingPositionEnd[] = [];
+  if (accountIds.length > 0) {
+    const [startsResult, endsResult] = await Promise.all([
+      supabase
+        .from("ad_account_billing_starts")
+        .select("id, ad_account_id, google_local_date, baseline_cost_micros")
+        .in("ad_account_id", accountIds),
+      supabase
+        .from("ad_account_billing_ends")
+        .select("ad_account_id, google_local_date, end_cost_micros")
+        .in("ad_account_id", accountIds),
+    ]);
+    if (startsResult.error) {
+      throw new Error(`Could not load billing position starts: ${startsResult.error.message}`);
+    }
+    if (endsResult.error) {
+      throw new Error(`Could not load billing position ends: ${endsResult.error.message}`);
+    }
+    starts = (startsResult.data ?? []).map((start) => ({
+      id: start.id,
+      accountId: start.ad_account_id,
+      googleLocalDate: start.google_local_date,
+      baselineCostMicros: start.baseline_cost_micros,
+    }));
+    ends = (endsResult.data ?? []).map((end) => ({
+      accountId: end.ad_account_id,
+      googleLocalDate: end.google_local_date,
+      endCostMicros: end.end_cost_micros,
+    }));
+  }
+
+  const { data: source, error: sourceError } = await supabase
+    .from("revenue_sources")
+    .select("id")
+    .eq("name", SPEND_SOURCE)
+    .maybeSingle();
+  if (sourceError) {
+    throw new Error(`Could not load billing position source: ${sourceError.message}`);
+  }
+  if (!source) throw new Error(`Revenue source "${SPEND_SOURCE}" is missing.`);
+
+  const [ledgerRows, metricRows, invoices, referralTermsByClient] =
+    await Promise.all([
+      fetchPositionLedgerRows(supabase, source.id, accountIds),
+      fetchPositionMetrics(supabase, accountIds, currentStart, currentEnd),
+      fetchPositionInvoices(supabase, clientIds),
+      fetchPositionReferralTerms(supabase, clientIds),
+    ]);
+
+  return buildBillingPositions({
+    now,
+    clients,
+    accounts,
+    starts,
+    ends,
+    ledgerRows,
+    metricRows,
+    invoices,
+    referralTermsByClient,
+  });
+}
+
 /** Full serialisable model consumed by /admin/billing. */
 export async function fetchAdminBillingDashboard(
   periodStart?: string,
@@ -1316,7 +1636,11 @@ export async function fetchAdminBillingDashboard(
     : [selectedWeek, ...recentWeeks].sort((left, right) =>
         right.start.localeCompare(left.start),
       );
-  const calculated = await calculateWeek(supabase, selectedWeek);
+  const generatedAt = new Date();
+  const [calculated, positions] = await Promise.all([
+    calculateWeek(supabase, selectedWeek),
+    fetchAdminBillingPositions(supabase, generatedAt),
+  ]);
 
   const [invoiceRows, { data: clientRows, error: clientsError }] =
     await Promise.all([
@@ -1387,7 +1711,7 @@ export async function fetchAdminBillingDashboard(
   ) => round2(rows.reduce((total, invoice) => total + value(invoice), 0));
 
   return {
-    generatedAt: new Date().toISOString(),
+    generatedAt: generatedAt.toISOString(),
     currency: BILLING_CURRENCY,
     feeRate: AGENCY_FEE_RATE,
     weeks,
@@ -1409,6 +1733,7 @@ export async function fetchAdminBillingDashboard(
       outstandingCount: open.length,
       failedCount: failed.length,
     },
+    positions,
     // Pre-v2 rows can contain spend/revenue-share lines and do not carry the
     // boundary/referral fields needed by this review card. Keep them in the
     // immutable history below instead of reconstructing a false v3 preview.
