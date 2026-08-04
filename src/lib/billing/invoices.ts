@@ -1455,6 +1455,39 @@ async function fetchAllIssuedInvoices(supabase: Supabase): Promise<Invoice[]> {
   }
 }
 
+/**
+ * Local drafts that never reached issuance — a stalled automatic emission or
+ * an interrupted recovery. They join the admin history so a half-issued
+ * invoice is inspectable from the UI, but they stay out of every summary
+ * metric: nothing was billed and nothing is outstanding until issuance is
+ * real. Never-issued legacy voids remain excluded.
+ */
+async function fetchUnissuedDraftInvoices(
+  supabase: Supabase,
+): Promise<Invoice[]> {
+  const rows: Invoice[] = [];
+  const pageSize = 1_000;
+  let afterId: string | null = null;
+  for (;;) {
+    let query = supabase
+      .from("invoices")
+      .select("*")
+      .is("issued_at", null)
+      .eq("status", "draft")
+      .order("id", { ascending: true })
+      .limit(pageSize);
+    if (afterId) query = query.gt("id", afterId);
+    const { data, error } = await query;
+    if (error)
+      throw new Error(`Could not load unissued drafts: ${error.message}`);
+    const page = (data ?? []) as Invoice[];
+    rows.push(...page);
+    if (page.length < pageSize) return rows;
+    afterId = page.at(-1)?.id ?? null;
+    if (!afterId) return rows;
+  }
+}
+
 type PositionInvoiceDatabaseRow = BillingPositionInvoice & { id: string };
 type PositionReferralDatabaseRow = BillingPositionReferralTerm & {
   id: string;
@@ -1917,12 +1950,14 @@ export async function fetchAdminBillingDashboard(
     positions,
     automation,
     invoiceRows,
+    draftRows,
     { data: clientRows, error: clientsError },
   ] =
     await Promise.all([
       fetchAdminBillingPositions(supabase, generatedAt),
       fetchLatestBillingAutomationRun(supabase),
       fetchAllIssuedInvoices(supabase),
+      fetchUnissuedDraftInvoices(supabase),
       supabase.from("portal_clients").select("id, full_name, email"),
     ]);
   if (clientsError)
@@ -1931,7 +1966,10 @@ export async function fetchAdminBillingDashboard(
   const clientById = new Map(
     (clientRows ?? []).map((client) => [client.id, client]),
   );
-  const historyRows = invoiceRows.sort((a, b) =>
+  // Drafts join the visible history only — every summary metric below is
+  // computed from invoiceRows, so an unissued draft can never count as billed
+  // or outstanding.
+  const historyRows = [...invoiceRows, ...draftRows].sort((a, b) =>
     (b.issued_at ?? b.created_at).localeCompare(a.issued_at ?? a.created_at),
   );
   const invoices: BillingInvoiceHistoryRow[] = historyRows.map((invoice) => {

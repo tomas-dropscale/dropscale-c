@@ -287,10 +287,12 @@ describe("billing positions", () => {
 
     expect(result.clients[0].closed).toMatchObject({
       issuedOutstanding: 0,
-      failedNotReceived: 0,
+      // Visible as a written-off balance, but never in the collectible headline.
+      failedNotReceived: 7.5,
       supportedNotReceived: 0,
       needsAttentionCount: 1,
     });
+    expect(result.summary.failedNotReceived).toBe(7.5);
   });
 
   it("excludes a non-EUR open invoice from the EUR position", () => {

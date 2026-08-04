@@ -465,6 +465,16 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
       );
     }
 
+    // A written-off invoice occupies its certified week, which suppresses the
+    // unissued amount, and it is deliberately excluded from the collectible
+    // headline. Without this separate bucket the failed balance would vanish
+    // from the per-client position entirely.
+    if (invoice.status === "uncollectible" && isEur) {
+      position.closed.failedNotReceived = round2(
+        position.closed.failedNotReceived + remaining,
+      );
+    }
+
     if (
       invoice.status === "draft" ||
       invoice.status === "uncollectible" ||
