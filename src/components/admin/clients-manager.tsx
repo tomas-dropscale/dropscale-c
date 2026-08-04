@@ -2,52 +2,116 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { Check, ChevronRight, ShieldOff, Store, TriangleAlert, UserPlus, X } from "lucide-react";
+import { Check, ShieldOff, Store, UserPlus, X } from "lucide-react";
 
 import type {
   AccountRequest,
   AdAccount,
+  AdAccountBillingEnd,
+  AdAccountBillingStart,
   Client,
   Profile,
 } from "@/lib/supabase/types";
-import type { ClientBillingSummary } from "@/lib/billing/invoices";
-import { money } from "@/lib/format";
 import { Avatar } from "@/components/ui/avatar";
 import { InlineRename } from "@/components/admin/inline-rename";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { FormAlert } from "@/components/auth/auth-card";
 import { createClient } from "@/lib/supabase/client";
+
+type BillingStartReceipt = {
+  storeName: string;
+  googleAdsCustomerId: string;
+  googleLocalDate: string;
+  googleTimeZone: string;
+  currency: string;
+  baselineCostMicros: string;
+  capturedAt: string;
+};
+
+type BillingEndReceipt = {
+  storeName: string;
+  googleAdsCustomerId: string;
+  googleLocalDate: string;
+  googleTimeZone: string;
+  currency: string;
+  endCostMicros: string;
+  capturedAt: string;
+};
+
+type BillingAccount = AdAccount & {
+  owner: string;
+  billingStart: AdAccountBillingStart;
+  billingEnd: AdAccountBillingEnd | null;
+};
+
+function formatMicros(micros: string, currency: string) {
+  try {
+    const value = BigInt(micros);
+    const microsPerUnit = BigInt(1_000_000);
+    const whole = value / microsPerUnit;
+    const rawFraction = (value % microsPerUnit).toString().padStart(6, "0");
+    const fraction = rawFraction.replace(/0+$/, "").padEnd(2, "0");
+    const symbol = currency === "EUR" ? "€" : `${currency} `;
+    return `${symbol}${whole.toLocaleString("en-IE")}.${fraction}`;
+  } catch {
+    return `${currency} ${micros} micros`;
+  }
+}
+
+function formatGoogleDay(day: string) {
+  const date = new Date(`${day}T00:00:00.000Z`);
+  return Number.isNaN(date.getTime())
+    ? day
+    : date.toLocaleDateString("en-GB", { dateStyle: "medium", timeZone: "UTC" });
+}
 
 /**
  * Admin-side client management. English-only for now (the rest of the admin
  * is EN/PT — translate when the flows settle).
  *
- * Every action here is an ordinary RLS-checked write with the anon key: the
- * admin policies (`public.is_admin()`) are what authorise it, never a
- * service key in the browser.
+ * Ordinary management actions are RLS-checked browser writes. Starting Google
+ * billing is different: the browser calls an admin-only server route, which
+ * verifies live agency access before one service-side atomic commit.
  */
 export function ClientsManager({
   clients,
   pendingClients,
   candidates,
   pendingAccounts,
+  untrackedAccounts,
+  billingStartAuditFailed,
+  billingAccounts,
+  billingBoundaryAuditFailed,
   pendingRequests,
   partnerOf,
   adminId,
-  stripeReady,
 }: {
   clients: (Client & {
     accounts: number;
-    billing: ClientBillingSummary | null;
-    /** A saved card on the Stripe customer — i.e. Monday charges itself. */
-    hasCard: boolean;
   })[];
   /** self-registered clients waiting on approval_status (migration 0002) */
   pendingClients: Client[];
   /** profiles with no portal_clients row — can be promoted to clients */
   candidates: Profile[];
   pendingAccounts: (AdAccount & { owner: string })[];
+  /** Legacy active/suspended accounts that predate the immutable opening counter. */
+  untrackedAccounts: (AdAccount & { owner: string })[];
+  /** The evidence query failed; never present an empty response as a real audit result. */
+  billingStartAuditFailed: boolean;
+  /** Approved accounts with their immutable commercial start/end evidence. */
+  billingAccounts: BillingAccount[];
+  /** A boundary query failed; stopping billing must fail closed. */
+  billingBoundaryAuditFailed: boolean;
   pendingRequests: (AccountRequest & { owner: string })[];
   /**
    * portal_clients id → the clients they are a sócio of (migration 0015).
@@ -58,17 +122,15 @@ export function ClientsManager({
    */
   partnerOf: Record<string, string[]>;
   adminId: string;
-  /** Stripe configured at all — without it the badge means nothing. */
-  stripeReady: boolean;
 }) {
   const router = useRouter();
   const [error, setError] = React.useState<string | null>(null);
   const [busy, setBusy] = React.useState<string | null>(null);
-
-  // Who owes money that is past its due date, and how much of it.
-  const lateClients = clients.filter((client) => (client.billing?.overdue ?? 0) > 0);
-  const lateCount = lateClients.reduce((sum, client) => sum + client.billing!.overdue, 0);
-  const lateAmount = lateClients.reduce((sum, client) => sum + client.billing!.overdueAmount, 0);
+  const [receipt, setReceipt] = React.useState<BillingStartReceipt | null>(null);
+  const [endReceipt, setEndReceipt] = React.useState<BillingEndReceipt | null>(null);
+  const [endTarget, setEndTarget] = React.useState<BillingAccount | null>(null);
+  const [endConfirmed, setEndConfirmed] = React.useState(false);
+  const trackingGapCount = billingStartAuditFailed ? "unavailable" : untrackedAccounts.length;
 
   async function run(key: string, action: () => Promise<{ error: { message: string } | null }>) {
     setBusy(key);
@@ -84,9 +146,188 @@ export function ClientsManager({
 
   const supabase = () => createClient();
 
+  function googleStartBlockReason(customerId: string | null) {
+    if (billingStartAuditFailed) {
+      return "Billing-start records are unavailable. Refresh first.";
+    }
+    if (!customerId) return "Add a Google Ads customer ID first.";
+    return undefined;
+  }
+
+  async function activateGoogle(
+    key: string,
+    target: { accountId: string } | { requestId: string },
+  ) {
+    setBusy(key);
+    setError(null);
+    setReceipt(null);
+
+    try {
+      const response = await fetch("/api/admin/google-ads/activate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(target),
+      });
+      const payload = (await response.json().catch(() => null)) as
+        | {
+            error?: unknown;
+            account?: { storeName?: unknown };
+            billingStart?: {
+              googleAdsCustomerId?: unknown;
+              googleLocalDate?: unknown;
+              googleTimeZone?: unknown;
+              currency?: unknown;
+              baselineCostMicros?: unknown;
+              capturedAt?: unknown;
+            };
+          }
+        | null;
+
+      if (!response.ok) {
+        throw new Error(
+          typeof payload?.error === "string"
+            ? payload.error
+            : "Google tracking could not be started.",
+        );
+      }
+
+      const account = payload?.account;
+      const start = payload?.billingStart;
+      if (
+        typeof account?.storeName !== "string" ||
+        typeof start?.googleAdsCustomerId !== "string" ||
+        typeof start.googleLocalDate !== "string" ||
+        typeof start.googleTimeZone !== "string" ||
+        typeof start.currency !== "string" ||
+        typeof start.baselineCostMicros !== "string" ||
+        typeof start.capturedAt !== "string"
+      ) {
+        throw new Error(
+          "Tracking started, but its confirmation receipt was incomplete. Refresh the page.",
+        );
+      }
+
+      setReceipt({
+        storeName: account.storeName,
+        googleAdsCustomerId: start.googleAdsCustomerId,
+        googleLocalDate: start.googleLocalDate,
+        googleTimeZone: start.googleTimeZone,
+        currency: start.currency,
+        baselineCostMicros: start.baselineCostMicros,
+        capturedAt: start.capturedAt,
+      });
+      router.refresh();
+    } catch (activationError) {
+      setError(
+        activationError instanceof Error
+          ? activationError.message
+          : "Google tracking could not be started.",
+      );
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function terminateGoogle() {
+    if (!endTarget || !endConfirmed || endTarget.billingEnd) return;
+    const key = `end-google-${endTarget.id}`;
+    setBusy(key);
+    setError(null);
+    setEndReceipt(null);
+
+    try {
+      const response = await fetch("/api/admin/google-ads/terminate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accountId: endTarget.id }),
+      });
+      const payload = (await response.json().catch(() => null)) as
+        | {
+            error?: unknown;
+            account?: { storeName?: unknown };
+            billingEnd?: {
+              googleAdsCustomerId?: unknown;
+              googleLocalDate?: unknown;
+              googleTimeZone?: unknown;
+              currency?: unknown;
+              endCostMicros?: unknown;
+              capturedAt?: unknown;
+            };
+          }
+        | null;
+
+      if (!response.ok) {
+        throw new Error(
+          typeof payload?.error === "string"
+            ? payload.error
+            : "Google billing could not be stopped.",
+        );
+      }
+
+      const account = payload?.account;
+      const end = payload?.billingEnd;
+      if (
+        typeof account?.storeName !== "string" ||
+        typeof end?.googleAdsCustomerId !== "string" ||
+        typeof end.googleLocalDate !== "string" ||
+        typeof end.googleTimeZone !== "string" ||
+        typeof end.currency !== "string" ||
+        typeof end.endCostMicros !== "string" ||
+        typeof end.capturedAt !== "string"
+      ) {
+        throw new Error(
+          "Billing stopped, but its confirmation receipt was incomplete. Refresh the page.",
+        );
+      }
+
+      setEndReceipt({
+        storeName: account.storeName,
+        googleAdsCustomerId: end.googleAdsCustomerId,
+        googleLocalDate: end.googleLocalDate,
+        googleTimeZone: end.googleTimeZone,
+        currency: end.currency,
+        endCostMicros: end.endCostMicros,
+        capturedAt: end.capturedAt,
+      });
+      setEndTarget(null);
+      setEndConfirmed(false);
+      router.refresh();
+    } catch (terminationError) {
+      setError(
+        terminationError instanceof Error
+          ? terminationError.message
+          : "Google billing could not be stopped.",
+      );
+    } finally {
+      setBusy(null);
+    }
+  }
+
   return (
     <div className="space-y-8">
       {error && <FormAlert>{error}</FormAlert>}
+      {receipt && (
+        <FormAlert tone="success">
+          <span className="font-semibold">Google tracking baseline saved for {receipt.storeName}.</span>{" "}
+          Opening counter: {formatMicros(receipt.baselineCostMicros, receipt.currency)} on{" "}
+          {formatGoogleDay(receipt.googleLocalDate)} ({receipt.googleTimeZone}), captured{" "}
+          {new Date(receipt.capturedAt).toLocaleString("en-GB")}. Spend already present at this
+          reported counter is excluded from the agency fee. Google reporting can arrive later;
+          this receipt freezes the value returned at capture time, not an instantaneous event
+          cutoff. Customer {receipt.googleAdsCustomerId}.
+        </FormAlert>
+      )}
+      {endReceipt && (
+        <FormAlert tone="success">
+          <span className="font-semibold">Agency billing ended for {endReceipt.storeName}.</span>{" "}
+          Closing counter: {formatMicros(endReceipt.endCostMicros, endReceipt.currency)} on{" "}
+          {formatGoogleDay(endReceipt.googleLocalDate)} ({endReceipt.googleTimeZone}), captured{" "}
+          {new Date(endReceipt.capturedAt).toLocaleString("en-GB")}. The final invoice uses this
+          immutable reported boundary. Google reporting can arrive later, so the receipt is not
+          an instantaneous event cutoff. Customer{" "}
+          {endReceipt.googleAdsCustomerId}.
+        </FormAlert>
+      )}
 
       {/* ---- clients awaiting approval --------------------------------- */}
       <section className="space-y-3">
@@ -186,17 +427,170 @@ export function ClientsManager({
                   variant="primary"
                   size="sm"
                   loading={busy === `acc-${account.id}`}
+                  disabled={Boolean(googleStartBlockReason(account.google_ads_customer_id))}
+                  title={
+                    googleStartBlockReason(account.google_ads_customer_id) ??
+                    "Verify agency access and save Google's currently reported opening spend counter."
+                  }
                   onClick={() =>
-                    run(`acc-${account.id}`, async () =>
-                      supabase().from("ad_accounts").update({ status: "active" }).eq("id", account.id),
-                    )
+                    activateGoogle(`acc-${account.id}`, { accountId: account.id })
                   }
                 >
                   <Check />
-                  Activate
+                  Verify Google &amp; start tracking
                 </Button>
               </li>
             ))}
+          </ul>
+        )}
+      </section>
+
+      {/* ---- legacy accounts without an opening counter --------------- */}
+      <section className="space-y-3">
+        <div className="space-y-1">
+          <h2 className="label-caps">Google tracking gaps ({trackingGapCount})</h2>
+          <p className="text-[13px] leading-relaxed text-[var(--text-muted)]">
+            Active or suspended legacy accounts listed here have no immutable opening Google
+            counter. Capture the counter Google reports now; spend already present in that value
+            will remain outside agency billing. Google reporting itself can arrive later.
+          </p>
+        </div>
+        {billingStartAuditFailed ? (
+          <FormAlert>
+            Billing-start records could not be audited. Refresh before capturing any legacy
+            account.
+          </FormAlert>
+        ) : untrackedAccounts.length === 0 ? (
+          <p className="text-[13px] text-[var(--text-muted)]">
+            Every billable client Google Ads account has a billing start.
+          </p>
+        ) : (
+          <ul className="space-y-2">
+            {untrackedAccounts.map((account) => (
+              <li key={account.id} className="panel flex flex-wrap items-center gap-3 p-4">
+                <Store className="size-4 shrink-0 text-[var(--accent-gold)]" />
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="truncate text-[13.5px] font-medium text-[var(--text-primary)]">
+                      {account.store_name}
+                    </p>
+                    <Badge variant={account.status === "suspended" ? "neutral" : "gold"}>
+                      {account.status}
+                    </Badge>
+                  </div>
+                  <p className="truncate text-[12px] text-[var(--text-muted)]">
+                    {account.owner}
+                    {account.google_ads_customer_id
+                      ? ` · ${account.google_ads_customer_id}`
+                      : " · no Google Ads customer ID"}
+                  </p>
+                  {account.status === "suspended" && (
+                    <p className="mt-1 text-[12px] text-[var(--text-muted)]">
+                      Capturing the baseline will not reactivate this account.
+                    </p>
+                  )}
+                </div>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  loading={busy === `legacy-acc-${account.id}`}
+                  disabled={Boolean(googleStartBlockReason(account.google_ads_customer_id))}
+                  title={
+                    googleStartBlockReason(account.google_ads_customer_id) ??
+                    "Save Google's currently reported opening counter. Suspended accounts remain suspended."
+                  }
+                  onClick={() =>
+                    activateGoogle(`legacy-acc-${account.id}`, { accountId: account.id })
+                  }
+                >
+                  <Check />
+                  Verify Google &amp; start tracking
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      {/* ---- immutable Google billing boundaries ---------------------- */}
+      <section className="space-y-3">
+        <div className="space-y-1">
+          <h2 className="label-caps">Google billing boundaries ({billingAccounts.length})</h2>
+          <p className="text-[13px] leading-relaxed text-[var(--text-muted)]">
+            Billing status is separate from the account&apos;s technical active or suspended status.
+            Stopping billing captures one Google-local closing counter as currently reported and
+            cannot be undone or replaced from the dashboard. Google reporting can arrive with a
+            delay, so this is an observed counter boundary rather than an event-time guarantee.
+          </p>
+        </div>
+        {billingBoundaryAuditFailed ? (
+          <FormAlert>
+            Billing boundary records could not be audited. Refresh before stopping billing for
+            any account.
+          </FormAlert>
+        ) : billingAccounts.length === 0 ? (
+          <p className="text-[13px] text-[var(--text-muted)]">
+            No billable client Google account has an opening billing boundary yet.
+          </p>
+        ) : (
+          <ul className="space-y-2">
+            {billingAccounts.map((account) => {
+              const ended = account.billingEnd;
+              const endBusy = busy === `end-google-${account.id}`;
+              return (
+                <li key={account.id} className="panel flex flex-wrap items-center gap-3 p-4">
+                  <Store className="size-4 shrink-0 text-[var(--accent-gold)]" />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="truncate text-[13.5px] font-medium text-[var(--text-primary)]">
+                        {account.store_name}
+                      </p>
+                      <Badge variant={ended ? "neutral" : "success"}>
+                        {ended ? "billing ended" : "billing active"}
+                      </Badge>
+                      <Badge variant="neutral">account {account.status}</Badge>
+                    </div>
+                    <p className="mt-1 text-[11.5px] leading-relaxed text-[var(--text-muted)]">
+                      Started {formatGoogleDay(account.billingStart.google_local_date)} · opening{" "}
+                      {formatMicros(
+                        String(account.billingStart.baseline_cost_micros),
+                        account.billingStart.currency,
+                      )}{" "}
+                      · {account.billingStart.google_time_zone}
+                    </p>
+                    {ended ? (
+                      <p className="mt-1 text-[11.5px] leading-relaxed text-[var(--text-secondary)]">
+                        Ended {formatGoogleDay(ended.google_local_date)} · closing{" "}
+                        {formatMicros(String(ended.end_cost_micros), ended.currency)} · captured{" "}
+                        {new Date(ended.captured_at).toLocaleString("en-GB")} · {ended.google_time_zone}
+                      </p>
+                    ) : (
+                      <p className="mt-1 text-[11.5px] text-[var(--text-muted)]">
+                        {account.owner} · Google customer {account.billingStart.google_ads_customer_id}
+                      </p>
+                    )}
+                  </div>
+                  {!ended && (
+                    <Button
+                      variant="danger"
+                      size="sm"
+                      loading={endBusy}
+                      disabled={Boolean(busy) || billingBoundaryAuditFailed}
+                      title="Capture Google's currently reported final counter without changing account status."
+                      onClick={() => {
+                        setError(null);
+                        setEndReceipt(null);
+                        setEndConfirmed(false);
+                        setEndTarget(account);
+                      }}
+                    >
+                      <ShieldOff />
+                      Stop billing now
+                    </Button>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         )}
       </section>
@@ -228,29 +622,32 @@ export function ClientsManager({
                     variant="primary"
                     size="sm"
                     loading={busy === `req-approve-${request.id}`}
+                    disabled={
+                      request.request_type === "google_ads" &&
+                      Boolean(googleStartBlockReason(request.google_ads_customer_id))
+                    }
+                    title={
+                      request.request_type === "google_ads"
+                        ? googleStartBlockReason(request.google_ads_customer_id)
+                        : undefined
+                    }
                     onClick={() =>
-                      run(`req-approve-${request.id}`, async () => {
-                        const client = supabase();
-                        // Approving a Google Ads request also provisions the
-                        // ad account so the client sees it immediately.
-                        if (request.request_type === "google_ads") {
-                          const { error: insertError } = await client.from("ad_accounts").insert({
-                            client_id: request.client_id,
-                            store_name: request.store_name ?? "New store",
-                            google_ads_customer_id: request.google_ads_customer_id,
-                            status: "active",
-                          });
-                          if (insertError) return { error: insertError };
-                        }
-                        return client
-                          .from("account_requests")
-                          .update({ status: "approved" })
-                          .eq("id", request.id);
-                      })
+                      request.request_type === "google_ads"
+                        ? activateGoogle(`req-approve-${request.id}`, {
+                            requestId: request.id,
+                          })
+                        : run(`req-approve-${request.id}`, async () =>
+                            supabase()
+                              .from("account_requests")
+                              .update({ status: "approved" })
+                              .eq("id", request.id),
+                          )
                     }
                   >
                     <Check />
-                    Approve
+                    {request.request_type === "google_ads"
+                      ? "Approve & start tracking"
+                      : "Approve"}
                   </Button>
                   <Button
                     variant="danger"
@@ -279,43 +676,6 @@ export function ClientsManager({
       <section className="space-y-3">
         <h2 className="label-caps">Portal clients ({clients.length})</h2>
 
-        {/* Billing state, summed across clients. Collapsed to one line unless
-            money is actually late — an alert that is always on is furniture. */}
-        {lateClients.length > 0 && (
-          <details className="group/late overflow-hidden rounded-[var(--radius-card)] border border-[var(--danger-red)]/30 bg-[var(--danger-red)]/8">
-            <summary className="transition-smooth flex cursor-pointer list-none items-center gap-3 px-4 py-3 hover:bg-[var(--danger-red)]/12 [&::-webkit-details-marker]:hidden">
-              <ChevronRight className="size-4 shrink-0 text-[var(--danger-red)] transition-transform group-open/late:rotate-90" />
-              <TriangleAlert className="size-4 shrink-0 text-[var(--danger-red)]" aria-hidden />
-              <span className="min-w-0 flex-1 text-[13.5px] font-semibold text-[var(--text-primary)]">
-                {lateCount} {lateCount === 1 ? "invoice" : "invoices"} overdue across{" "}
-                {lateClients.length} {lateClients.length === 1 ? "client" : "clients"}
-              </span>
-              <span className="shrink-0 text-[13.5px] font-semibold text-[var(--danger-red)] tabular-nums">
-                {money(lateAmount, "EUR")}
-              </span>
-            </summary>
-
-            <ul className="border-t border-[var(--danger-red)]/20">
-              {lateClients.map((client) => (
-                <li
-                  key={client.id}
-                  className="flex flex-wrap items-center gap-3 border-b border-[var(--danger-red)]/10 px-4 py-2.5 last:border-b-0"
-                >
-                  <Avatar name={client.full_name} src={client.avatar_url} seed={client.id} size="sm" />
-                  <span className="min-w-0 flex-1 truncate text-[13px] text-[var(--text-primary)]">
-                    {client.full_name}
-                  </span>
-                  <Badge variant="danger">
-                    {client.billing!.overdue} overdue
-                  </Badge>
-                  <span className="text-[13px] font-medium text-[var(--text-primary)] tabular-nums">
-                    {money(client.billing!.overdueAmount, "EUR")}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </details>
-        )}
         {clients.length === 0 ? (
           <p className="text-[13px] text-[var(--text-muted)]">
             No portal clients yet. Promote a registered user below, or create one in
@@ -353,26 +713,6 @@ export function ClientsManager({
                   </InlineRename>
                   <p className="truncate text-[12px] text-[var(--text-muted)]">{client.email}</p>
                 </div>
-                {/* Whether Monday charges them or merely emails a link. Worth
-                    a badge of its own: an agency going live needs to know how
-                    many clients will actually settle without being chased. */}
-                {stripeReady && (
-                  <Badge variant={client.hasCard ? "success" : "neutral"}>
-                    {client.hasCard ? "auto-charge" : "pays by link"}
-                  </Badge>
-                )}
-                {client.billing && client.billing.overdue > 0 && (
-                  <Badge variant="danger">
-                    {client.billing.overdue} overdue · {money(client.billing.overdueAmount, "EUR")}
-                  </Badge>
-                )}
-                {client.billing &&
-                  client.billing.overdue === 0 &&
-                  client.billing.open > 0 && (
-                    <Badge variant="warning">
-                      {client.billing.open} unpaid · {money(client.billing.openAmount, "EUR")}
-                    </Badge>
-                  )}
                 {client.approval_status === "rejected" ? (
                   <Badge variant="danger">rejected</Badge>
                 ) : (
@@ -402,20 +742,29 @@ export function ClientsManager({
                     Approve
                   </Button>
                 )}
-                <Button
-                  variant="danger"
-                  size="sm"
-                  loading={busy === `revoke-${client.id}`}
-                  onClick={() =>
-                    run(`revoke-${client.id}`, async () =>
-                      supabase().from("portal_clients").delete().eq("id", client.id),
-                    )
-                  }
-                  title="Removes portal access. Their auth account and CRM record stay."
-                >
-                  <ShieldOff />
-                  Revoke access
-                </Button>
+                {client.approval_status !== "rejected" && (
+                  <Button
+                    variant="danger"
+                    size="sm"
+                    loading={busy === `revoke-${client.id}`}
+                    onClick={() =>
+                      run(`revoke-${client.id}`, async () =>
+                        supabase()
+                          .from("portal_clients")
+                          .update({
+                            approval_status: "rejected",
+                            approved_at: new Date().toISOString(),
+                            approved_by: adminId,
+                          })
+                          .eq("id", client.id),
+                      )
+                    }
+                    title="Revokes portal access without deleting the client or billing history."
+                  >
+                    <ShieldOff />
+                    Revoke access
+                  </Button>
+                )}
               </li>
             ))}
           </ul>
@@ -470,6 +819,93 @@ export function ClientsManager({
           </ul>
         )}
       </section>
+
+      <Dialog
+        open={Boolean(endTarget)}
+        onOpenChange={(open) => {
+          if (!open && !busy) {
+            setEndTarget(null);
+            setEndConfirmed(false);
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Permanently stop agency billing?</DialogTitle>
+            <DialogDescription>
+              {endTarget
+                ? `${endTarget.store_name} will receive one immutable closing Google Ads counter as currently reported.`
+                : ""}
+            </DialogDescription>
+          </DialogHeader>
+
+          {error && <FormAlert>{error}</FormAlert>}
+
+          {endTarget && (
+            <div className="space-y-4">
+              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-base)] p-4 text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
+                <p>
+                  The cumulative spend currently reported for the Google-local day in{" "}
+                  {endTarget.billingStart.google_time_zone} becomes the final boundary. The final
+                  invoice may include eligible spend up to that captured counter. Google reporting
+                  can arrive later, so this is not a guaranteed instantaneous event cutoff.
+                </p>
+                <p className="mt-2">
+                  The account remains <span className="font-medium">{endTarget.status}</span>. This
+                  action does not disconnect Google, suspend campaigns or change who pays Google.
+                </p>
+              </div>
+
+              <div className="flex items-start gap-2.5 rounded-xl border border-[var(--danger-red)]/25 bg-[var(--danger-red)]/10 p-3 text-[12px] leading-relaxed text-[var(--text-secondary)]">
+                <ShieldOff className="mt-0.5 size-4 shrink-0 text-[var(--danger-red)]" />
+                <p>
+                  The boundary cannot be edited, deleted or reopened from this dashboard. If the
+                  live Google capture fails or no longer matches the opening evidence, billing
+                  stays active.
+                </p>
+              </div>
+
+              <label className="flex min-h-11 cursor-pointer items-start gap-3 rounded-xl border border-[var(--border-subtle)] p-3 transition-smooth hover:border-[var(--border-strong)]">
+                <Checkbox
+                  checked={endConfirmed}
+                  onCheckedChange={(checked) => setEndConfirmed(checked === true)}
+                  className="mt-0.5"
+                  aria-label="Confirm permanent Google billing end"
+                />
+                <span className="text-[12.5px] leading-relaxed text-[var(--text-primary)]">
+                  I understand that this permanently closes agency billing for this Google Ads
+                  account at the Google-reported counter captured now, and that Google reporting
+                  can arrive later.
+                </span>
+              </label>
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={Boolean(busy)}
+              onClick={() => {
+                setEndTarget(null);
+                setEndConfirmed(false);
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              variant="danger"
+              loading={Boolean(endTarget && busy === `end-google-${endTarget.id}`)}
+              disabled={!endConfirmed || Boolean(busy) || billingBoundaryAuditFailed}
+              onClick={terminateGoogle}
+            >
+              <ShieldOff />
+              Capture counter &amp; stop billing
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

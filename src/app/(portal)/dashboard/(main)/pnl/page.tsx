@@ -7,6 +7,8 @@ import { PageContainer } from "@/components/ui/page-container";
 import { ensureDailyCoverage, recomputeDailyMetrics } from "@/lib/metrics/recompute";
 import { fetchDailyMetrics } from "@/lib/metrics/queries";
 import { buildPnlSheet, monthDays } from "@/lib/portal/pnl";
+import { fetchManualReferralRateSchedule } from "@/lib/billing/referral-rate-schedule";
+import { manualReferralRateOnDay } from "@/lib/billing/referrals";
 import { currencyScope, displayCurrency } from "@/lib/portal/currency";
 import { MixedCurrencyNotice } from "@/components/portal/mixed-currency-notice";
 import { intlLocale } from "@/lib/i18n";
@@ -59,16 +61,26 @@ export default async function PnlPage({
   await ensureDailyCoverage(scope, from);
   await recomputeDailyMetrics(scope);
 
-  const rows = await fetchDailyMetrics(
-    scope.map((account) => account.id),
-    from,
-    to,
-  );
+  const [rows, referralRateSchedule] = await Promise.all([
+    fetchDailyMetrics(
+      scope.map((account) => account.id),
+      from,
+      to,
+    ),
+    scope[0]
+      ? fetchManualReferralRateSchedule(scope[0].client_id)
+      : Promise.resolve([]),
+  ]);
 
   const sheet = buildPnlSheet(
     rows,
     days,
-    new Map(scope.map((account) => [account.id, Number(account.commission_rate)])),
+    (accountId, day) => {
+      const account = scope.find((candidate) => candidate.id === accountId);
+      return Number(account?.list_commission_rate) === 10 && !account?.revenue_share_enabled
+        ? manualReferralRateOnDay(day, referralRateSchedule)
+        : Number(account?.commission_rate ?? 0);
+    },
   );
 
   const years = Array.from({ length: YEARS_BACK + 1 }, (_, index) => now.getFullYear() - index)

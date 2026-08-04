@@ -1,31 +1,47 @@
 import { createClient } from "@/lib/supabase/server";
-import { decryptToken } from "@/lib/google-ads/crypto";
-import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
-import { fetchLiveDailySpend } from "@/lib/google-ads/portal";
-import { markIfAuthRevoked } from "@/lib/google-ads/revoked";
+import { hasAgencyServiceAccount } from "@/lib/google-ads/env";
+import {
+  addIsoDays,
+  decimalToMicros,
+  fetchGoogleBillingMetadataAsAgency,
+  fetchGoogleDailyCostMicrosAsAgency,
+  googleLocalDate,
+  googlePeriodIsClosed,
+  microsToDecimal,
+  parseGoogleMicros,
+  percentageOfMicrosToDecimal,
+} from "@/lib/google-ads/billing-start";
 import {
   GOOGLE_ADS_NOTE_PREFIX,
   NOTE_DETAIL_SEPARATOR,
   REV_SHARE_NOTE_PREFIX,
 } from "@/lib/finance/config";
+import {
+  billableGoogleSpendWindow,
+  manualReferralRateForDate,
+  matchesAuthoritativeGoogleSpend,
+  needsGoogleLedgerRewrite,
+  type ManualReferralRateTerm,
+} from "@/lib/admin/commission-sync-logic";
 import type { AdAccount } from "@/lib/supabase/types";
 
 /**
- * Turns connected accounts' Google Ads spend into real finance rows: one
- * commissions entry per account per day (gross = spend, amount = spend ×
- * commission_rate), tagged with ad_account_id so synced rows never mix with
- * hand-entered ones.
+ * Turns agency-readable Google Ads spend into real finance rows: one
+ * commissions entry per account per day. `gross_amount` preserves Google's
+ * raw daily counter; `amount` applies the immutable manual-referral term for
+ * that Google day to the billable portion (the first-day delta above the
+ * opening counter, then full daily spend until the closing counter), tagged
+ * with ad_account_id so synced rows never mix with hand-entered ones.
  *
- * Three things run it:
- *   · an admin opening a finance page — throttled, so navigation stays cheap;
+ * Two things run it:
  *   · the "Sync now" button — forced, for an exact match with what
  *     /admin/campaigns computes live from Google;
  *   · the hourly cron — forced, with the service-role client, so the ledger
  *     stays current even in a week nobody opens the panel.
  *
- * A 7-day window per run heals gaps. Page loads ride the admin's own session
- * and RLS; only the cron uses the service key, because it has no session and
- * `commissions` is admin-only.
+ * A 7-day window per run heals gaps. Both entry points authenticate first and
+ * then use a server-role client; browser sessions can read the resulting
+ * evidence but cannot manufacture a completed Google sync window.
  */
 
 const SOURCE_NAME = "Google Ads Management";
@@ -40,7 +56,7 @@ const SOURCE_NAME = "Google Ads Management";
  */
 const SPEND_WINDOW_DAYS = 7;
 /**
- * How stale a page load will tolerate the ledger being.
+ * How stale a non-forced caller will tolerate the ledger being.
  *
  * Was an hour, which is why the overview's commission could sit €0.75 below
  * what /admin/campaigns computed live: campaigns asks Google on every render,
@@ -57,11 +73,35 @@ type SyncOpts = {
   /** Ignore both throttles — an explicit "do it now". */
   force?: boolean;
   /**
-   * Supabase to work through. Page loads pass nothing and ride the admin's own
-   * session; the cron has no session and passes the service-role client, since
-   * `commissions` is admin-only under RLS.
+   * Supabase to work through. Production callers pass the service-role client
+   * after either admin-session or cron-secret authentication.
    */
   client?: Supa;
+  /** Exact closed week requested by the billing review screen. */
+  period?: { start: string; end: string };
+};
+
+type BillingStartRow = {
+  id: string;
+  ad_account_id: string;
+  google_ads_customer_id: string;
+  google_local_date: string;
+  google_time_zone: string;
+  currency: string;
+  baseline_cost_micros: string | number;
+  captured_at: string;
+};
+
+type BillingEndRow = {
+  id: string;
+  ad_account_id: string;
+  billing_start_id: string;
+  google_ads_customer_id: string;
+  google_local_date: string;
+  google_time_zone: string;
+  currency: string;
+  end_cost_micros: string | number;
+  captured_at: string;
 };
 
 /**
@@ -91,8 +131,63 @@ function noteFor(prefix: string, clientName: string | undefined, storeName: stri
  * book agency revenue.
  */
 async function adminClientIds(supabase: Supa): Promise<Set<string>> {
-  const { data } = await supabase.from("profiles").select("id").eq("role", "admin");
+  const { data, error } = await supabase.from("profiles").select("id").eq("role", "admin");
+  if (error) throw new Error(`Could not identify admin accounts: ${error.message}`);
   return new Set((data ?? []).map((row) => row.id));
+}
+
+async function manualReferralTermsByClient(
+  supabase: Supa,
+  clientIds: string[],
+): Promise<Map<string, ManualReferralRateTerm[]>> {
+  type Row = {
+    id: string;
+    client_id: string;
+    effective_from: string;
+    revision: number;
+    referral_count: number;
+    list_rate: string | number;
+    referral_step_rate: string | number;
+    referral_discount_rate: string | number;
+    fee_rate: string | number;
+  };
+
+  const byClient = new Map<string, ManualReferralRateTerm[]>();
+  const pageSize = 1_000;
+  let afterId: string | null = null;
+  for (;;) {
+    let query = supabase
+      .from("referral_discount_terms")
+      .select(
+        "id, client_id, effective_from, revision, referral_count, list_rate, " +
+          "referral_step_rate, referral_discount_rate, fee_rate",
+      )
+      .in("client_id", clientIds)
+      .not("sealed_at", "is", null)
+      .order("id", { ascending: true })
+      .limit(pageSize);
+    if (afterId) query = query.gt("id", afterId);
+    const { data, error } = await query;
+    if (error) throw new Error(`Could not load manual referral rates: ${error.message}`);
+    const page = (data ?? []) as unknown as Row[];
+    for (const row of page) {
+      const current = byClient.get(row.client_id) ?? [];
+      current.push({
+        effectiveFrom: row.effective_from,
+        revision: row.revision,
+        referralCount: row.referral_count,
+        listRate: Number(row.list_rate),
+        stepRate: Number(row.referral_step_rate),
+        discountRate: Number(row.referral_discount_rate),
+        feeRate: Number(row.fee_rate),
+      });
+      byClient.set(row.client_id, current);
+    }
+    if (page.length < pageSize) break;
+    afterId = page.at(-1)?.id ?? null;
+    if (!afterId) break;
+  }
+  return byClient;
 }
 
 let lastPurgeAt = 0;
@@ -114,13 +209,18 @@ export async function purgeAdminAccountRevenue(opts?: SyncOpts): Promise<void> {
       return;
     }
 
-    const { data: adminAccounts } = await supabase
+    const { data: adminAccounts, error: accountsError } = await supabase
       .from("ad_accounts")
       .select("id")
       .in("client_id", [...adminIds]);
+    if (accountsError) throw accountsError;
     const ids = (adminAccounts ?? []).map((row) => row.id);
     if (ids.length > 0) {
-      await supabase.from("commissions").delete().in("ad_account_id", ids);
+      const { error: deleteError } = await supabase
+        .from("commissions")
+        .delete()
+        .in("ad_account_id", ids);
+      if (deleteError) throw deleteError;
     }
     lastPurgeAt = Date.now();
   } catch (error) {
@@ -133,7 +233,10 @@ export async function purgeAdminAccountRevenue(opts?: SyncOpts): Promise<void> {
 let lastRunAt = 0;
 
 export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
-  if (!hasGoogleAdsEnv()) return;
+  if (!hasAgencyServiceAccount()) {
+    if (opts?.force) throw new Error("Agency Google Ads is not configured on this server.");
+    return;
+  }
   if (!opts?.force && Date.now() - lastRunAt < THROTTLE_MS) return;
 
   try {
@@ -141,38 +244,44 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
 
     // Cross-instance throttle: the newest synced row's updated_at tells us
     // when ANY admin's isolate last ran this.
-    const { data: newest } = await supabase
+    const { data: newest, error: newestError } = await supabase
       .from("commissions")
       .select("updated_at")
       .not("ad_account_id", "is", null)
       .order("updated_at", { ascending: false })
       .limit(1)
       .maybeSingle();
+    if (newestError) throw newestError;
 
-    if (newest && Date.now() - new Date(newest.updated_at).getTime() < THROTTLE_MS) {
+    if (!opts?.force && newest && Date.now() - new Date(newest.updated_at).getTime() < THROTTLE_MS) {
       lastRunAt = Date.now();
       return;
     }
 
-    const { data: source } = await supabase
+    const { data: source, error: sourceError } = await supabase
       .from("revenue_sources")
       .select("id")
       .eq("name", SOURCE_NAME)
       .maybeSingle();
+    if (sourceError) throw sourceError;
     if (!source) {
       // Migration 0007 seeds it; without the seed there is nowhere to book to.
-      console.error("Commission sync: revenue source missing — run migration 0007.");
+      const error = new Error("Commission sync: revenue source missing — run migration 0007.");
+      if (opts?.force) throw error;
+      console.error(error.message);
       return;
     }
 
-    const { data: accountRows } = await supabase
+    const { data: accountRows, error: accountRowsError } = await supabase
       .from("ad_accounts")
       .select(
-        "id, client_id, store_name, google_ads_customer_id, google_ads_connected, " +
-          "google_ads_refresh_token, commission_rate, currency",
+        "id, client_id, store_name, google_ads_customer_id, currency",
       )
-      .eq("google_ads_connected", true)
+      // Pending rows are unapproved requests. Suspended rows remain eligible:
+      // a client can still owe the final closed week from before suspension.
+      .in("status", ["active", "suspended"])
       .not("google_ads_customer_id", "is", null);
+    if (accountRowsError) throw accountRowsError;
 
     // The typed client cannot parse a concatenated column string, so it types
     // the rows as an error sentinel; the columns above match this Pick exactly.
@@ -182,9 +291,6 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
       | "client_id"
       | "store_name"
       | "google_ads_customer_id"
-      | "google_ads_connected"
-      | "google_ads_refresh_token"
-      | "commission_rate"
       | "currency"
     >[];
     if (accounts.length === 0) {
@@ -201,82 +307,282 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
       return;
     }
 
+    // The immutable counter is the commercial boundary. Status/created_at are
+    // not substitutes: without this row there is no defensible way to know how
+    // much of the first Google-local day belongs to the agency service.
+    const { data: billingStartRows, error: billingStartsError } = await supabase
+      .from("ad_account_billing_starts")
+      .select(
+        "id, ad_account_id, google_ads_customer_id, google_local_date, google_time_zone, " +
+          "currency, baseline_cost_micros, captured_at",
+      )
+      .in("ad_account_id", billable.map((account) => account.id));
+    if (billingStartsError) throw billingStartsError;
+    const billingStartByAccount = new Map(
+      ((billingStartRows ?? []) as unknown as BillingStartRow[]).map((row) => [
+        row.ad_account_id,
+        row,
+      ]),
+    );
+
+    const { data: billingEndRows, error: billingEndsError } = await supabase
+      .from("ad_account_billing_ends")
+      .select(
+        "id, ad_account_id, billing_start_id, google_ads_customer_id, google_local_date, " +
+          "google_time_zone, currency, end_cost_micros, captured_at",
+      )
+      .in("ad_account_id", billable.map((account) => account.id));
+    if (billingEndsError) throw billingEndsError;
+    const billingEndByAccount = new Map(
+      ((billingEndRows ?? []) as unknown as BillingEndRow[]).map((row) => [
+        row.ad_account_id,
+        row,
+      ]),
+    );
+
     // Portal login → CRM record, for the finance rows' client attribution.
     //
     // `crm_client_id` is nearly always null: nothing in the product writes it,
     // so a synced row usually has no client_id at all and the finance pages
     // showed every euro of it as "Unattributed". The NAME is carried in the
     // note as well, which is what the finance reader falls back to.
-    const { data: portalClients } = await supabase
+    const { data: portalClients, error: portalClientsError } = await supabase
       .from("portal_clients")
       .select("id, crm_client_id, full_name")
       .in("id", [...new Set(billable.map((account) => account.client_id))]);
+    if (portalClientsError) throw portalClientsError;
     const crmByLogin = new Map(
       (portalClients ?? []).map((row) => [row.id, row.crm_client_id]),
     );
     const nameByLogin = new Map((portalClients ?? []).map((row) => [row.id, row.full_name]));
+    const referralTermsByClient = await manualReferralTermsByClient(
+      supabase,
+      [...new Set(billable.map((account) => account.client_id))],
+    );
 
-    // Seven days INCLUDING today. Today matters most: it is the figure an admin
-    // compares against /admin/campaigns, which reads Google live. The previous
-    // `DURING LAST_7_DAYS` literal excluded it, which is why the overview's
-    // commission was stuck below the campaigns page no matter how often the
-    // ledger re-synced.
-    const to = isoDay(0);
-    const from = isoDay(-(SPEND_WINDOW_DAYS - 1));
-
+    const failures: string[] = [];
     await Promise.all(
       billable.map(async (account) => {
+        let marker:
+          | {
+              runId: string;
+              from: string;
+              to: string;
+              billingStartId: string;
+              billingEndId: string | null;
+            }
+          | undefined;
         try {
-          if (!account.google_ads_refresh_token) return;
-          const token = await decryptToken(account.google_ads_refresh_token);
-          const days = await fetchLiveDailySpend(
-            account.google_ads_customer_id!,
-            token,
+          const start = billingStartByAccount.get(account.id);
+          if (!start) {
+            throw new Error("Billing has not started: no immutable Google spend baseline exists.");
+          }
+          // The activation migration stores the canonical ten digits. Do not
+          // silently strip arbitrary characters here: a corrupted identity
+          // must fail closed instead of being treated as the baseline owner.
+          const accountCustomerId = account.google_ads_customer_id ?? "";
+          if (
+            !/^\d{10}$/.test(accountCustomerId) ||
+            start.google_ads_customer_id !== accountCustomerId
+          ) {
+            throw new Error("The billing baseline belongs to a different Google customer.");
+          }
+          if (account.currency.toUpperCase() !== "EUR" || start.currency.toUpperCase() !== "EUR") {
+            throw new Error("Agency billing supports EUR Google Ads accounts only.");
+          }
+          // PostgREST may represent an int8 as either string or number. Reject
+          // an unsafe numeric value instead of stringifying an already-rounded
+          // baseline and silently moving the commercial boundary.
+          const baselineCostMicros = parseGoogleMicros(start.baseline_cost_micros);
+          const end = billingEndByAccount.get(account.id);
+          let endCostMicros: bigint | null = null;
+          if (end) {
+            if (
+              end.billing_start_id !== start.id ||
+              end.google_ads_customer_id !== start.google_ads_customer_id ||
+              end.google_time_zone !== start.google_time_zone ||
+              end.currency.toUpperCase() !== start.currency.toUpperCase() ||
+              end.google_local_date < start.google_local_date
+            ) {
+              throw new Error("The billing end does not match the immutable Google start.");
+            }
+            endCostMicros = parseGoogleMicros(end.end_cost_micros);
+          }
+
+          // Rolling windows follow each Google customer's immutable local day,
+          // not the Worker's UTC date. Exact admin periods keep their explicit
+          // Monday/Sunday labels, but are not certifiable until local Monday.
+          const runStartedAt = new Date();
+          const localToday = googleLocalDate(runStartedAt, start.google_time_zone);
+          const to = opts?.period?.end ?? localToday;
+          const from = opts?.period?.start ?? addIsoDays(to, -(SPEND_WINDOW_DAYS - 1));
+          // A closed account has no evidence in a wholly later window. Keeping
+          // it out of the marker table also keeps hourly syncs from touching
+          // Google forever after its final billable week has healed.
+          if (end && end.google_local_date < from) return;
+          const queryTo = end && end.google_local_date < to ? end.google_local_date : to;
+          const syncRunId = crypto.randomUUID();
+          marker = {
+            runId: syncRunId,
             from,
             to,
+            billingStartId: start.id,
+            billingEndId: end?.id ?? null,
+          };
+
+          // Supersede the previous proof BEFORE the first Google network read.
+          // A crash or partial failure can then leave only an explicit failed or
+          // in-progress generation, never a stale green marker.
+          const syncStartedAt = runStartedAt.toISOString();
+          const { error: beginWindowError } = await supabase
+            .from("google_ledger_sync_windows")
+            .upsert(
+              {
+                ad_account_id: account.id,
+                period_start: from,
+                period_end: to,
+                billing_start_id: start.id,
+                billing_end_id: end?.id ?? null,
+                run_id: syncRunId,
+                status: "in_progress" as const,
+                started_at: syncStartedAt,
+                synced_at: syncStartedAt,
+                ledger_snapshot: [],
+              },
+              { onConflict: "ad_account_id,period_start,period_end" },
+            );
+          if (beginWindowError) throw beginWindowError;
+
+          if (
+            opts?.period &&
+            !googlePeriodIsClosed(opts.period.end, runStartedAt, start.google_time_zone)
+          ) {
+            throw new Error(
+              `The ${opts.period.end} Google-local day is not closed in ${start.google_time_zone}.`,
+            );
+          }
+
+          const metadata = await fetchGoogleBillingMetadataAsAgency(accountCustomerId);
+          if (
+            metadata.customerId !== start.google_ads_customer_id ||
+            metadata.currency !== start.currency.toUpperCase() ||
+            metadata.timeZone !== start.google_time_zone
+          ) {
+            throw new Error("Live Google account metadata does not match the billing baseline.");
+          }
+          if (metadata.currency !== "EUR") {
+            throw new Error(`Google Ads account currency is ${metadata.currency}, not EUR.`);
+          }
+
+          const queryFrom = start.google_local_date > from ? start.google_local_date : from;
+          const reportedDays =
+            queryFrom <= queryTo
+              ? await fetchGoogleDailyCostMicrosAsAgency(accountCustomerId, queryFrom, queryTo)
+              : [];
+          const days = billableGoogleSpendWindow(
+            from,
+            to,
+            reportedDays,
+            {
+              googleLocalDate: start.google_local_date,
+              baselineCostMicros: baselineCostMicros.toString(),
+            },
+            end && endCostMicros !== null
+              ? {
+                  googleLocalDate: end.google_local_date,
+                  endCostMicros: endCostMicros.toString(),
+                }
+              : undefined,
           );
 
-          const withSpend = days.filter((day) => day.spend > 0);
-          const { data: existingRows } = await supabase
-            .from("commissions")
-            .select("id, occurred_on, gross_amount")
-            .eq("ad_account_id", account.id)
-            .eq("source_id", source.id)
-            .in("occurred_on", days.map((day) => day.date));
+          let existingRows: {
+            id: string;
+            occurred_on: string;
+            gross_amount: string | number;
+            amount: string | number;
+            rate: string | number;
+            currency: string;
+            status: string;
+          }[] = [];
+          if (days.length > 0) {
+            const { data, error: existingRowsError } = await supabase
+              .from("commissions")
+              .select("id, occurred_on, gross_amount, amount, rate, currency, status")
+              .eq("ad_account_id", account.id)
+              .eq("source_id", source.id)
+              .in("occurred_on", days.map((day) => day.date));
+            if (existingRowsError) throw existingRowsError;
+            existingRows = (data ?? []) as unknown as typeof existingRows;
+          }
           const existing = new Map(
-            (existingRows ?? []).map((row) => [row.occurred_on, row]),
+            existingRows.map((row) => [row.occurred_on, row]),
           );
 
-          const rate = Number(account.commission_rate);
-
-          for (const day of withSpend) {
+          for (const day of days) {
             const current = existing.get(day.date);
-            const amount = (day.spend * rate) / 100;
+            const rawMicros = BigInt(day.rawCostMicros);
+            const billableMicros = BigInt(day.billableCostMicros);
+            const grossAmount = microsToDecimal(rawMicros);
+            const rate = manualReferralRateForDate(
+              day.date,
+              referralTermsByClient.get(account.client_id) ?? [],
+            );
+            const amount = percentageOfMicrosToDecimal(billableMicros, rate);
+
+            // Do not manufacture empty financial rows. A zero is written only
+            // when it corrects a value that used to be positive. A positive raw
+            // first-day counter is retained even when its net delta is zero.
+            if (!current && rawMicros === BigInt(0)) continue;
 
             if (!current) {
               // Unique index (ad_account_id, occurred_on) makes a concurrent
               // duplicate insert fail loudly instead of double-booking — that
               // error is safe to swallow.
-              await supabase.from("commissions").insert({
+              const { error: insertError } = await supabase.from("commissions").insert({
                 source_id: source.id,
                 client_id: crmByLogin.get(account.client_id) ?? null,
                 ad_account_id: account.id,
                 occurred_on: day.date,
-                gross_amount: day.spend,
+                gross_amount: grossAmount,
                 rate,
                 amount,
-                currency: account.currency,
+                currency: "EUR",
                 status: "confirmed",
                 notes: noteFor(GOOGLE_ADS_NOTE_PREFIX, nameByLogin.get(account.client_id), account.store_name),
               });
-            } else if (Math.abs(Number(current.gross_amount) - day.spend) > 0.01) {
-              // Google restates recent days (fraud filtering, late clicks).
-              await supabase
+              // A concurrent writer can win the unique account/day race, but
+              // this attempt did not verify the winning value. Fail closed and
+              // let the explicit admin retry produce an authoritative marker.
+              if (insertError) throw insertError;
+            } else if (
+              needsGoogleLedgerRewrite(
+                {
+                  grossAmount: current.gross_amount,
+                  amount: current.amount,
+                  rate: current.rate,
+                  currency: current.currency,
+                  status: current.status,
+                },
+                {
+                  grossAmount,
+                  amount,
+                  rate,
+                  currency: "EUR",
+                },
+              )
+            ) {
+              // Google can restate a day all the way to zero. Rate/currency
+              // changes also need to refresh the ledger even when spend did
+              // not move, so the admin preview never reads a stale fee basis.
+              const { data: updatedRow, error: updateError } = await supabase
                 .from("commissions")
                 .update({
-                  gross_amount: day.spend,
+                  gross_amount: grossAmount,
                   rate,
                   amount,
+                  currency: "EUR",
+                  // Heal rows manually moved out of the authoritative set.
+                  status: "confirmed",
                   // Rewritten so rows booked before the note carried a client
                   // name stop reading as "Unattributed" once they refresh.
                   notes: noteFor(
@@ -286,23 +592,129 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
                   ),
                   updated_at: new Date().toISOString(),
                 })
-                .eq("id", current.id);
+                .eq("id", current.id)
+                .select("id")
+                .maybeSingle();
+              if (updateError) throw updateError;
+              if (!updatedRow) {
+                throw new Error(`Google ledger row ${current.id} changed during refresh.`);
+              }
             }
           }
-        } catch (error) {
-          // A revoked authorisation is permanent: flag it so the client is
-          // asked to reconnect, instead of this failing on every finance page
-          // load forever. Anything else stays a plain log and retries.
-          if (!(await markIfAuthRevoked(supabase, account.id, error))) {
-            console.error(`Commission sync failed for ${account.id}:`, error);
+
+          // Snapshot exactly the fields the invoice RPC treats as
+          // authoritative. SQL compares this JSONB under table locks before
+          // allowing issue, which closes the last mutation/completion race.
+          let snapshotRows: {
+            id: string;
+            occurred_on: string;
+            gross_amount: string | number;
+            currency: string;
+            status: string;
+          }[] = [];
+          if (days.length > 0) {
+            const { data, error: snapshotRowsError } = await supabase
+              .from("commissions")
+              .select("id, occurred_on, gross_amount, currency, status")
+              .eq("ad_account_id", account.id)
+              .eq("source_id", source.id)
+              .eq("status", "confirmed")
+              .gte("occurred_on", queryFrom)
+              .lte("occurred_on", queryTo)
+              .order("id", { ascending: true });
+            if (snapshotRowsError) throw snapshotRowsError;
+            snapshotRows = (data ?? []) as unknown as typeof snapshotRows;
           }
+          if (
+            !matchesAuthoritativeGoogleSpend(
+              days,
+              snapshotRows.map((row) => ({
+                occurred_on: row.occurred_on,
+                gross_amount: row.gross_amount,
+                currency: row.currency,
+              })),
+              "EUR",
+            )
+          ) {
+            throw new Error("The ledger changed while Google spend was being refreshed.");
+          }
+          const ledgerSnapshot = snapshotRows.map((row) => ({
+            id: row.id,
+            occurred_on: row.occurred_on,
+            gross_amount: microsToDecimal(decimalToMicros(row.gross_amount)),
+            currency: row.currency.toUpperCase(),
+            status: "confirmed" as const,
+          }));
+
+          let completeWindow = supabase
+            .from("google_ledger_sync_windows")
+            .update({
+              status: "complete",
+              synced_at: new Date().toISOString(),
+              billing_start_id: start.id,
+              billing_end_id: end?.id ?? null,
+              ledger_snapshot: ledgerSnapshot,
+            })
+            .eq("ad_account_id", account.id)
+            .eq("period_start", marker.from)
+            .eq("period_end", marker.to)
+            .eq("run_id", syncRunId)
+            .eq("billing_start_id", start.id)
+            .eq("status", "in_progress");
+          completeWindow = end
+            ? completeWindow.eq("billing_end_id", end.id)
+            : completeWindow.is("billing_end_id", null);
+          const { data: completedWindow, error: syncWindowError } = await completeWindow
+            .select("ad_account_id")
+            .maybeSingle();
+          if (syncWindowError) throw syncWindowError;
+          if (!completedWindow) {
+            throw new Error("This refresh was superseded by a newer account or sync change.");
+          }
+        } catch (error) {
+          if (marker) {
+            let failWindow = supabase
+              .from("google_ledger_sync_windows")
+              .update({ status: "failed" })
+              .eq("ad_account_id", account.id)
+              .eq("period_start", marker.from)
+              .eq("period_end", marker.to)
+              .eq("run_id", marker.runId)
+              .eq("billing_start_id", marker.billingStartId)
+              .eq("status", "in_progress");
+            failWindow = marker.billingEndId
+              ? failWindow.eq("billing_end_id", marker.billingEndId)
+              : failWindow.is("billing_end_id", null);
+            const { error: failedWindowError } = await failWindow;
+            if (failedWindowError) {
+              console.error(
+                `Could not fail Google sync marker for ${account.id}:`,
+                failedWindowError,
+              );
+            }
+          }
+
+          failures.push(
+            `${account.store_name}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+          console.error(`Commission sync failed for ${account.id}:`, error);
         }
       }),
     );
 
+    // Explicit refreshes are promises to the operator, not best-effort page
+    // decoration. Surface partial failure so the billing screen cannot say
+    // "updated" while one client's Google account stayed stale.
+    if (opts?.force && failures.length > 0) {
+      throw new Error(`Google Ads sync incomplete — ${failures.join(" | ")}`);
+    }
+
     lastRunAt = Date.now();
   } catch (error) {
     // The ledger must never take a finance page down with it.
+    if (opts?.force) throw error;
     console.error("Commission sync failed:", error);
   }
 }

@@ -88,16 +88,11 @@ export type CommentWithAuthor = CardComment & {
 // ---------------------------------------------------------------------------
 
 export type ClientStatus = "lead" | "active" | "paused" | "churned";
-export type SourceCategory = "platform" | "supplier" | "incorporation" | "saas" | "other";
+export type SourceCategory =
+  "platform" | "supplier" | "incorporation" | "saas" | "other";
 export type CommissionStatus = "pending" | "confirmed" | "paid";
 export type ExpenseCategory =
-  | "ads"
-  | "tools"
-  | "salaries"
-  | "contractors"
-  | "office"
-  | "taxes"
-  | "other";
+  "ads" | "tools" | "salaries" | "contractors" | "office" | "taxes" | "other";
 
 export type CrmClient = {
   id: string;
@@ -125,9 +120,9 @@ export type Commission = {
   source_id: string;
   client_id: string | null;
   occurred_on: string;
-  gross_amount: number;
+  gross_amount: number | string;
   rate: number;
-  amount: number;
+  amount: number | string;
   currency: string;
   status: CommissionStatus;
   notes: string | null;
@@ -213,13 +208,10 @@ export type ClientInvite = {
   accepted_by: string | null;
 };
 
-export type InvoiceStatus = "draft" | "open" | "paid" | "void" | "uncollectible";
+export type InvoiceStatus =
+  "draft" | "open" | "paid" | "void" | "uncollectible" | "waived";
 
-/**
- * What an invoice line is for. `spend` is the Google Ads money the agency
- * fronted and is passing through at cost; `fee` and `rev_share` are the two
- * ways the agency earns on top of it.
- */
+/** Legacy invoices may contain spend/revenue-share lines; new invoices use fee only. */
 export type InvoiceLineKind = "spend" | "fee" | "rev_share";
 
 /**
@@ -240,6 +232,69 @@ export type InvoiceLine = {
   store?: string;
   /** Percentage the line was computed at — blended over the week. Spend: null. */
   rate?: number | null;
+  /** Standard agency list fee before the sealed manual-referral term. */
+  listRate?: number;
+  /** Percentage points removed by the sealed manual-referral term. */
+  referralDiscountRate?: number;
+  /** Number of approved referrals represented by that term. */
+  referralCount?: number;
+  /** Informational fee base. It is not included in the payable line amount. */
+  baseAmount?: number;
+  /** Raw Google spend observed for this store in the invoiced period. */
+  sourceGrossAmount?: number;
+  /** Opening same-day Google counter excluded from the first partial week. */
+  baselineDeductionAmount?: number;
+  /** Spend after the immutable closing counter, excluded from the final partial week. */
+  endDeductionAmount?: number;
+  /** True only for the invoice week whose spend is clipped by the closing counter. */
+  endingCapApplied?: true;
+  /** Full cumulative Google counter observed when tracking began. */
+  billingStartBaselineAmount?: number;
+  /** Immutable billing-start record that authorised this line. */
+  billingStartId?: string;
+  /** Google-local day on which billing started for this store. */
+  billingStartDate?: string;
+  /** UTC instant at which the opening Google counter was captured. */
+  billingStartedAt?: string;
+  /** IANA timezone used by the Google Ads account for the opening day. */
+  billingTimeZone?: string;
+  /** Full cumulative Google counter observed when billing ended. */
+  billingEndCounterAmount?: number;
+  /** Immutable billing-end record that closed this line's commercial period. */
+  billingEndId?: string;
+  /** Google-local day on which billing ended for this store. */
+  billingEndDate?: string;
+  /** UTC instant at which the closing Google counter was captured. */
+  billingEndedAt?: string;
+  /** IANA timezone used by the Google Ads account for the closing day. */
+  billingEndTimeZone?: string;
+};
+
+/** Exact legal/email identity reviewed for a v3 invoice and frozen at creation. */
+export type BillingRecipientSnapshot = {
+  email: string;
+  fallbackName: string;
+  billingName: string | null;
+  taxId: string | null;
+  addressLine1: string | null;
+  addressLine2: string | null;
+  addressCity: string | null;
+  addressPostalCode: string | null;
+  addressState: string | null;
+  addressCountry: string | null;
+};
+
+/** One immutable generation of the per-client Stripe issue lease (0032). */
+export type BillingIssueLease = {
+  lease_token: string;
+  client_id: string;
+  fencing_token: number;
+  period_start: string;
+  issued_by: string;
+  acquired_at: string;
+  renewed_at: string;
+  lease_expires_at: string;
+  released_at: string | null;
 };
 
 /** A week's agency commission, billed to one portal client (migration 0013). */
@@ -255,12 +310,199 @@ export type Invoice = {
   line_items: InvoiceLine[];
   stripe_invoice_id: string | null;
   stripe_hosted_url: string | null;
+  /** Stripe's human-readable number and PDF, available after finalisation. */
+  stripe_invoice_number: string | null;
+  stripe_invoice_pdf: string | null;
+  /** Authoritative Stripe balance in major currency units. */
+  amount_remaining: number | null;
   issued_at: string | null;
+  issued_by: string | null;
+  /** Last safe-to-display error from the manual issue attempt. */
+  issue_error: string | null;
+  issue_attempted_at: string | null;
+  /** Pins the commercial formula used for this immutable snapshot. */
+  calculation_version: string;
+  /** Immutable manual-referral term used for this week; null means list fee. */
+  referral_discount_term_id: string | null;
+  /** Immutable v3 recipient snapshot; null only on older invoice contracts. */
+  billing_recipient: BillingRecipientSnapshot | null;
+  /** Durable evidence that Stripe accepted explicit invoice delivery. */
+  stripe_sent_at: string | null;
+  /** Historical safety marker when delivery predates explicit evidence. */
+  stripe_delivery_assumed_at: string | null;
   paid_at: string | null;
   /** Set when Stripe reported a failed charge; cleared once it is paid (0014). */
   payment_failed_at: string | null;
   created_at: string;
   updated_at: string;
+};
+
+/** Exact ledger rows consumed by an invoice; each commission can be billed once. */
+export type InvoiceCommissionRow = {
+  invoice_id: string;
+  commission_id: string;
+  /** Raw Google-reported daily spend, before the opening baseline. */
+  gross_amount: number | string;
+  /** Portion of the opening day excluded because it preceded tracking. */
+  baseline_deduction_amount: number | string;
+  /** Immutable start boundary used to allocate this row. */
+  billing_start_id: string;
+  /** Immutable end boundary used for a final-day row, otherwise null. */
+  billing_end_id: string | null;
+  /** Portion of the final day excluded because it followed service. */
+  end_deduction_amount: number | string | null;
+  /** Gross amount on which the agency fee was actually calculated. */
+  billable_gross_amount: number | string;
+  currency: string;
+  created_at: string;
+};
+
+export type ReferralDiscountAction = "grant" | "revoke";
+
+/** Immutable singleton that bounds which weeks v3 may price (migration 0030). */
+export type ManualReferralBillingConfig = {
+  singleton: boolean;
+  v3_cutover_monday: string;
+  created_at: string;
+};
+
+/** Immutable referral-code signal awaiting independent admin review. */
+export type ReferralClaimRequest = {
+  id: string;
+  referred_client_id: string;
+  referrer_client_id: string;
+  referral_code: string;
+  claim_source: "signup" | "client";
+  created_at: string;
+};
+
+/** Append-only receipt for a one-time referral attribution applied by an admin. */
+export type ReferralAttributionEvent = {
+  id: string;
+  decision_id: string;
+  referred_client_id: string;
+  referrer_client_id: string;
+  reason: string;
+  reviewed_by: string;
+  created_at: string;
+  sealed_at: string;
+};
+
+/** Append-only, Monday-effective manual referral price snapshot. */
+export type ReferralDiscountTerm = {
+  id: string;
+  client_id: string;
+  effective_from: string;
+  revision: number;
+  supersedes_id: string | null;
+  decision_id: string;
+  decision_action: ReferralDiscountAction;
+  decision_referred_client_id: string;
+  expected_term_id: string | null;
+  list_rate: number | string;
+  referral_step_rate: number | string;
+  referral_count: number;
+  referral_discount_rate: number | string;
+  fee_rate: number | string;
+  reason: string;
+  reviewed_by: string;
+  created_at: string;
+  sealed_at: string | null;
+};
+
+/** One validated referred client sealed into a referral term. */
+export type ReferralDiscountTermItem = {
+  id: string;
+  term_id: string;
+  referred_client_id: string;
+  evidence_billing_start_id: string;
+  evidence_commission_id: string;
+  eligibility_checked_on: string;
+  evidence_occurred_on: string;
+  evidence_gross_amount: number | string;
+  /** Positive Google spend after the immutable opening/closing boundaries. */
+  evidence_billable_amount: number | string;
+  created_at: string;
+};
+
+/** Exact referral grants pinned to an invoice/waived settlement. */
+export type InvoiceReferralEvent = {
+  invoice_id: string;
+  referral_discount_term_id: string;
+  referral_discount_term_item_id: string;
+  created_at: string;
+};
+
+/** Proof that Google was read successfully for one exact billing period. */
+export type GoogleLedgerSnapshotRow = {
+  id: string;
+  occurred_on: string;
+  /** Decimal string with six places; never round-tripped through JSON Number. */
+  gross_amount: string;
+  currency: string;
+  status: "confirmed";
+};
+
+export type GoogleLedgerSyncWindow = {
+  ad_account_id: string;
+  billing_start_id: string;
+  /** Bound closing counter when this proof covers an account's final week. */
+  billing_end_id: string | null;
+  period_start: string;
+  period_end: string;
+  run_id: string;
+  status: "in_progress" | "complete" | "failed";
+  started_at: string;
+  synced_at: string;
+  ledger_snapshot: GoogleLedgerSnapshotRow[];
+};
+
+/** Immutable opening Google Ads counter that starts financial tracking. */
+export type AdAccountBillingStart = {
+  id: string;
+  ad_account_id: string;
+  google_ads_customer_id: string;
+  google_local_date: string;
+  google_time_zone: string;
+  currency: string;
+  /** Integer micros. Read as a string whenever it participates in arithmetic. */
+  baseline_cost_micros: number | string;
+  capture_started_at: string;
+  captured_at: string;
+  capture_id: string;
+  source: string;
+  reviewed_by: string;
+  created_at: string;
+};
+
+/** Immutable closing Google Ads counter that ends financial tracking. */
+export type AdAccountBillingEnd = {
+  id: string;
+  ad_account_id: string;
+  billing_start_id: string;
+  google_ads_customer_id: string;
+  google_local_date: string;
+  google_time_zone: string;
+  currency: string;
+  /** Integer micros. Read as a string whenever it participates in arithmetic. */
+  end_cost_micros: number | string;
+  capture_started_at: string;
+  captured_at: string;
+  capture_id: string;
+  source: string;
+  reviewed_by: string;
+  created_at: string;
+};
+
+/** Durable, de-duplicated Stripe webhook inbox (migration 0028). */
+export type StripeWebhookEvent = {
+  id: string;
+  type: string;
+  stripe_created_at: string;
+  payload: Record<string, unknown>;
+  received_at: string;
+  processed_at: string | null;
+  processing_error: string | null;
 };
 
 export type BillingProfile = {
@@ -520,7 +762,8 @@ export type CogsCollectionTier = {
 // ---------------------------------------------------------------------------
 
 type Row<T> = T;
-type Insert<T, Optional extends keyof T> = Omit<T, Optional> & Partial<Pick<T, Optional>>;
+type Insert<T, Optional extends keyof T> = Omit<T, Optional> &
+  Partial<Pick<T, Optional>>;
 
 export type Database = {
   public: {
@@ -654,7 +897,13 @@ export type Database = {
         Row: Row<RevenueSource>;
         Insert: Insert<
           RevenueSource,
-          "id" | "category" | "default_rate" | "recurring" | "active" | "notes" | "created_at"
+          | "id"
+          | "category"
+          | "default_rate"
+          | "recurring"
+          | "active"
+          | "notes"
+          | "created_at"
         >;
         Update: Partial<RevenueSource>;
         Relationships: [];
@@ -723,7 +972,18 @@ export type Database = {
           | "line_items"
           | "stripe_invoice_id"
           | "stripe_hosted_url"
+          | "stripe_invoice_number"
+          | "stripe_invoice_pdf"
+          | "amount_remaining"
           | "issued_at"
+          | "issued_by"
+          | "issue_error"
+          | "issue_attempted_at"
+          | "calculation_version"
+          | "referral_discount_term_id"
+          | "billing_recipient"
+          | "stripe_sent_at"
+          | "stripe_delivery_assumed_at"
           | "paid_at"
           | "payment_failed_at"
           | "created_at"
@@ -738,7 +998,337 @@ export type Database = {
             referencedRelation: "portal_clients";
             referencedColumns: ["id"];
           },
+          {
+            foreignKeyName: "invoices_issued_by_fkey";
+            columns: ["issued_by"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "invoices_referral_discount_term_id_fkey";
+            columns: ["referral_discount_term_id"];
+            isOneToOne: false;
+            referencedRelation: "referral_discount_terms";
+            referencedColumns: ["id"];
+          },
         ];
+      };
+      billing_issue_leases: {
+        Row: Row<BillingIssueLease>;
+        Insert: Row<BillingIssueLease>;
+        Update: Partial<BillingIssueLease>;
+        Relationships: [
+          {
+            foreignKeyName: "billing_issue_leases_client_id_fkey";
+            columns: ["client_id"];
+            isOneToOne: false;
+            referencedRelation: "portal_clients";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "billing_issue_leases_issued_by_fkey";
+            columns: ["issued_by"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      invoice_commission_rows: {
+        Row: Row<InvoiceCommissionRow>;
+        Insert: Insert<InvoiceCommissionRow, "created_at">;
+        Update: Partial<InvoiceCommissionRow>;
+        Relationships: [
+          {
+            foreignKeyName: "invoice_commission_rows_invoice_id_fkey";
+            columns: ["invoice_id"];
+            isOneToOne: false;
+            referencedRelation: "invoices";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "invoice_commission_rows_commission_id_fkey";
+            columns: ["commission_id"];
+            isOneToOne: true;
+            referencedRelation: "commissions";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "invoice_commission_rows_billing_start_id_fkey";
+            columns: ["billing_start_id"];
+            isOneToOne: false;
+            referencedRelation: "ad_account_billing_starts";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "invoice_commission_rows_billing_end_id_fkey";
+            columns: ["billing_end_id"];
+            isOneToOne: false;
+            referencedRelation: "ad_account_billing_ends";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      manual_referral_billing_config: {
+        Row: Row<ManualReferralBillingConfig>;
+        Insert: Insert<
+          ManualReferralBillingConfig,
+          "singleton" | "created_at"
+        >;
+        Update: Partial<ManualReferralBillingConfig>;
+        Relationships: [];
+      };
+      referral_claim_requests: {
+        Row: Row<ReferralClaimRequest>;
+        Insert: Insert<ReferralClaimRequest, "id" | "created_at">;
+        Update: Partial<ReferralClaimRequest>;
+        Relationships: [
+          {
+            foreignKeyName: "referral_claim_requests_referred_client_id_fkey";
+            columns: ["referred_client_id"];
+            isOneToOne: true;
+            referencedRelation: "portal_clients";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "referral_claim_requests_referrer_client_id_fkey";
+            columns: ["referrer_client_id"];
+            isOneToOne: false;
+            referencedRelation: "portal_clients";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      referral_discount_terms: {
+        Row: Row<ReferralDiscountTerm>;
+        Insert: Insert<ReferralDiscountTerm, "id" | "created_at" | "sealed_at">;
+        Update: Partial<ReferralDiscountTerm>;
+        Relationships: [
+          {
+            foreignKeyName: "referral_discount_terms_client_id_fkey";
+            columns: ["client_id"];
+            isOneToOne: false;
+            referencedRelation: "portal_clients";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "referral_discount_terms_supersedes_id_fkey";
+            columns: ["supersedes_id"];
+            isOneToOne: false;
+            referencedRelation: "referral_discount_terms";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "referral_discount_terms_expected_term_id_fkey";
+            columns: ["expected_term_id"];
+            isOneToOne: false;
+            referencedRelation: "referral_discount_terms";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "referral_discount_terms_reviewed_by_fkey";
+            columns: ["reviewed_by"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "referral_discount_terms_decision_referred_client_id_fkey";
+            columns: ["decision_referred_client_id"];
+            isOneToOne: false;
+            referencedRelation: "portal_clients";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      referral_attribution_events: {
+        Row: Row<ReferralAttributionEvent>;
+        Insert: Insert<
+          ReferralAttributionEvent,
+          "id" | "created_at" | "sealed_at"
+        >;
+        Update: Partial<ReferralAttributionEvent>;
+        Relationships: [
+          {
+            foreignKeyName: "referral_attribution_events_referred_client_id_fkey";
+            columns: ["referred_client_id"];
+            isOneToOne: true;
+            referencedRelation: "portal_clients";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "referral_attribution_events_referrer_client_id_fkey";
+            columns: ["referrer_client_id"];
+            isOneToOne: false;
+            referencedRelation: "portal_clients";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "referral_attribution_events_reviewed_by_fkey";
+            columns: ["reviewed_by"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      referral_discount_term_items: {
+        Row: Row<ReferralDiscountTermItem>;
+        Insert: Insert<ReferralDiscountTermItem, "id" | "created_at">;
+        Update: Partial<ReferralDiscountTermItem>;
+        Relationships: [
+          {
+            foreignKeyName: "referral_discount_term_items_term_id_fkey";
+            columns: ["term_id"];
+            isOneToOne: false;
+            referencedRelation: "referral_discount_terms";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "referral_discount_term_items_referred_client_id_fkey";
+            columns: ["referred_client_id"];
+            isOneToOne: false;
+            referencedRelation: "portal_clients";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "referral_discount_term_items_evidence_billing_start_id_fkey";
+            columns: ["evidence_billing_start_id"];
+            isOneToOne: false;
+            referencedRelation: "ad_account_billing_starts";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "referral_discount_term_items_evidence_commission_id_fkey";
+            columns: ["evidence_commission_id"];
+            isOneToOne: false;
+            referencedRelation: "commissions";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      invoice_referral_events: {
+        Row: Row<InvoiceReferralEvent>;
+        Insert: Insert<InvoiceReferralEvent, "created_at">;
+        Update: Partial<InvoiceReferralEvent>;
+        Relationships: [
+          {
+            foreignKeyName: "invoice_referral_events_invoice_id_fkey";
+            columns: ["invoice_id"];
+            isOneToOne: false;
+            referencedRelation: "invoices";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "invoice_referral_events_referral_discount_term_id_fkey";
+            columns: ["referral_discount_term_id"];
+            isOneToOne: false;
+            referencedRelation: "referral_discount_terms";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "invoice_referral_events_referral_discount_term_item_id_fkey";
+            columns: ["referral_discount_term_item_id"];
+            isOneToOne: false;
+            referencedRelation: "referral_discount_term_items";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      ad_account_billing_starts: {
+        Row: Row<AdAccountBillingStart>;
+        Insert: Insert<AdAccountBillingStart, "id" | "created_at">;
+        Update: Partial<AdAccountBillingStart>;
+        Relationships: [
+          {
+            foreignKeyName: "ad_account_billing_starts_ad_account_id_fkey";
+            columns: ["ad_account_id"];
+            isOneToOne: true;
+            referencedRelation: "ad_accounts";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "ad_account_billing_starts_reviewed_by_fkey";
+            columns: ["reviewed_by"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      ad_account_billing_ends: {
+        Row: Row<AdAccountBillingEnd>;
+        Insert: Insert<AdAccountBillingEnd, "id" | "created_at">;
+        Update: Partial<AdAccountBillingEnd>;
+        Relationships: [
+          {
+            foreignKeyName: "ad_account_billing_ends_ad_account_id_fkey";
+            columns: ["ad_account_id"];
+            isOneToOne: true;
+            referencedRelation: "ad_accounts";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "ad_account_billing_ends_billing_start_id_fkey";
+            columns: ["billing_start_id"];
+            isOneToOne: true;
+            referencedRelation: "ad_account_billing_starts";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "ad_account_billing_ends_reviewed_by_fkey";
+            columns: ["reviewed_by"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      google_ledger_sync_windows: {
+        Row: Row<GoogleLedgerSyncWindow>;
+        Insert: Insert<
+          GoogleLedgerSyncWindow,
+          | "billing_end_id"
+          | "run_id"
+          | "status"
+          | "started_at"
+          | "synced_at"
+          | "ledger_snapshot"
+        >;
+        Update: Partial<GoogleLedgerSyncWindow>;
+        Relationships: [
+          {
+            foreignKeyName: "google_ledger_sync_windows_ad_account_id_fkey";
+            columns: ["ad_account_id"];
+            isOneToOne: false;
+            referencedRelation: "ad_accounts";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "google_ledger_sync_windows_billing_start_id_fkey";
+            columns: ["billing_start_id"];
+            isOneToOne: false;
+            referencedRelation: "ad_account_billing_starts";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "google_ledger_sync_windows_billing_end_id_fkey";
+            columns: ["billing_end_id"];
+            isOneToOne: false;
+            referencedRelation: "ad_account_billing_ends";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      stripe_webhook_events: {
+        Row: Row<StripeWebhookEvent>;
+        Insert: Insert<
+          StripeWebhookEvent,
+          "received_at" | "processed_at" | "processing_error"
+        >;
+        Update: Partial<StripeWebhookEvent>;
+        Relationships: [];
       };
       portal_clients: {
         Row: Row<Client>;
@@ -790,7 +1380,12 @@ export type Database = {
         Row: Row<ClientInvite>;
         Insert: Insert<
           ClientInvite,
-          "id" | "invited_by" | "status" | "created_at" | "accepted_at" | "accepted_by"
+          | "id"
+          | "invited_by"
+          | "status"
+          | "created_at"
+          | "accepted_at"
+          | "accepted_by"
         >;
         Update: Partial<ClientInvite>;
         Relationships: [
@@ -922,7 +1517,10 @@ export type Database = {
       };
       store_products: {
         Row: Row<StoreProduct>;
-        Insert: Insert<StoreProduct, "id" | "price" | "currency" | "source" | "last_seen" | "created_at">;
+        Insert: Insert<
+          StoreProduct,
+          "id" | "price" | "currency" | "source" | "last_seen" | "created_at"
+        >;
         Update: Partial<StoreProduct>;
         Relationships: [
           {
@@ -936,7 +1534,10 @@ export type Database = {
       };
       product_costs: {
         Row: Row<ProductCost>;
-        Insert: Insert<ProductCost, "id" | "currency" | "effective_from" | "created_at">;
+        Insert: Insert<
+          ProductCost,
+          "id" | "currency" | "effective_from" | "created_at"
+        >;
         Update: Partial<ProductCost>;
         Relationships: [
           {
@@ -1105,7 +1706,12 @@ export type Database = {
         Row: Row<CreativeDelivery>;
         Insert: Insert<
           CreativeDelivery,
-          "id" | "status" | "file_count" | "size_mb" | "thumbnail_urls" | "created_at"
+          | "id"
+          | "status"
+          | "file_count"
+          | "size_mb"
+          | "thumbnail_urls"
+          | "created_at"
         >;
         Update: Partial<CreativeDelivery>;
         Relationships: [
@@ -1157,35 +1763,191 @@ export type Database = {
         Args: Record<string, never>;
         Returns: number;
       };
-      /** The one portal_clients column a sócio may set on the owner's row (0015). */
-      set_workspace_stripe_customer: {
-        Args: { p_client_id: string; p_customer_id: string };
-        Returns: undefined;
+      /** Acquire the only active Stripe-issue generation for one client (0032). */
+      acquire_billing_issue_lease: {
+        Args: {
+          p_client_id: string;
+          p_lease_token: string;
+          p_period_start: string;
+          p_issued_by: string;
+        };
+        Returns: BillingIssueLease[];
+      };
+      /** Heartbeat and fence-check one active Stripe-issue generation (0032). */
+      renew_billing_issue_lease: {
+        Args: {
+          p_client_id: string;
+          p_lease_token: string;
+          p_fencing_token: number;
+        };
+        Returns: BillingIssueLease[];
+      };
+      /** Release only the still-current Stripe-issue generation (0032). */
+      release_billing_issue_lease: {
+        Args: {
+          p_client_id: string;
+          p_lease_token: string;
+          p_fencing_token: number;
+        };
+        Returns: boolean;
+      };
+      /** Record an issue error only while the exact fence is still current (0032). */
+      record_billing_issue_error: {
+        Args: {
+          p_client_id: string;
+          p_lease_token: string;
+          p_fencing_token: number;
+          p_invoice_id: string;
+          p_issue_error: string;
+        };
+        Returns: boolean;
+      };
+      /** Atomically creates one manual invoice and consumes its Google ledger rows (0028). */
+      create_manual_invoice: {
+        Args: {
+          p_client_id: string;
+          p_period_start: string;
+          p_period_end: string;
+          p_amount: number;
+          p_line_items: InvoiceLine[];
+          p_ledger_rows: {
+            commission_id: string;
+            gross_amount: number | string;
+            currency: string;
+          }[];
+          p_issued_by: string;
+          p_calculation_version: string;
+        };
+        Returns: Invoice[];
+      };
+      /** V3 issue/waive transaction with a sealed manual-referral term (0030). */
+      create_manual_referral_invoice: {
+        Args: {
+          p_client_id: string;
+          p_period_start: string;
+          p_period_end: string;
+          p_amount: number;
+          p_line_items: InvoiceLine[];
+          p_ledger_rows: {
+            commission_id: string;
+            gross_amount: number | string;
+            currency: string;
+          }[];
+          p_billing_recipient: BillingRecipientSnapshot;
+          p_referral_term_id: string | null;
+          p_issued_by: string;
+          p_calculation_version: string;
+        };
+        Returns: Invoice[];
+      };
+      /** Fill one empty referral attribution after a verified admin review (0031). */
+      assign_manual_referral_attribution: {
+        Args: {
+          p_referred_client_id: string;
+          p_referrer_client_id: string;
+          p_decision_id: string;
+          p_reason: string;
+          p_reviewed_by: string;
+        };
+        Returns: ReferralAttributionEvent[];
+      };
+      /** Service-only append of one CAS-protected referral grant/revoke decision. */
+      schedule_manual_referral_discount: {
+        Args: {
+          p_client_id: string;
+          p_referred_client_id: string;
+          p_action: ReferralDiscountAction;
+          p_effective_from: string;
+          p_expected_term_id: string | null;
+          p_decision_id: string;
+          p_reason: string;
+          p_reviewed_by: string;
+        };
+        Returns: ReferralDiscountTerm[];
+      };
+      /** Resolve the exact term in force for one client's Monday billing week. */
+      resolve_manual_referral_term: {
+        Args: { p_client_id: string; p_period_start: string };
+        Returns: {
+          term_id: string | null;
+          effective_from: string | null;
+          revision: number;
+          list_rate: number | string;
+          referral_step_rate: number | string;
+          referral_count: number;
+          referral_discount_rate: number | string;
+          fee_rate: number | string;
+        }[];
       };
       /**
-       * Links the caller to whoever owns that affiliate code (migration 0022).
-       * Returns a status string — 'ok', 'unknown_code', 'own_code',
-       * 'already_referred', 'not_a_client', 'empty' or 'not_signed_in' — never
-       * the referrer, so a code cannot be used to probe for other clients.
+       * Portal-safe historical fee timeline. The authenticated RPC returns no
+       * term ids, people, evidence, review metadata or reasons.
+       */
+      manual_referral_rate_schedule: {
+        Args: { p_client_id: string };
+        Returns: {
+          effective_from: string;
+          revision: number;
+          referral_count: number;
+          referral_discount_rate: number | string;
+          fee_rate: number | string;
+        }[];
+      };
+      /**
+       * Service-only commit of an authoritative Google opening counter. It
+       * either activates an existing account or provisions a pending Google
+       * request, with the baseline and status change in one transaction.
+       */
+      commit_google_ads_billing_start: {
+        Args: {
+          p_account_id: string | null;
+          p_request_id: string | null;
+          p_capture_id: string;
+          p_google_ads_customer_id: string;
+          p_google_local_date: string;
+          p_google_time_zone: string;
+          p_currency: string;
+          p_baseline_cost_micros: string;
+          p_capture_started_at: string;
+          p_captured_at: string;
+          p_source: string;
+          p_reviewed_by: string;
+        };
+        Returns: AdAccount[];
+      };
+      /** Service-only commit of an authoritative Google closing counter. */
+      commit_google_ads_billing_end: {
+        Args: {
+          p_account_id: string;
+          p_capture_id: string;
+          p_google_ads_customer_id: string;
+          p_google_local_date: string;
+          p_google_time_zone: string;
+          p_currency: string;
+          p_end_cost_micros: string;
+          p_capture_started_at: string;
+          p_captured_at: string;
+          p_source: string;
+          p_reviewed_by: string;
+        };
+        Returns: AdAccountBillingEnd[];
+      };
+      /**
+       * Appends one pending referral-code signal without changing referred_by.
+       * 'ok' also covers an exact retry; 'claim_pending' means a different
+       * immutable first claim already exists. The RPC never returns a client
+       * identity, and only the reviewed admin attribution RPC seals the link.
        */
       claim_referral_code: {
         Args: { p_code: string };
         Returns: string;
       };
-      /**
-       * Re-prices every account whose billed rate no longer matches the rule
-       * (migration 0023). Returns how many changed. The hourly cron's job: a
-       * referral going dormant is a change nothing else would notice.
-       */
+      /** Refreshes the current display cache from Monday-effective manual terms. */
       refresh_all_referral_rates: {
         Args: Record<string, never>;
         Returns: number;
       };
-      /**
-       * Per-referral status for a workspace — 'counting', 'pending', 'partner'
-       * or 'inactive'. Names and statuses only: the referrer must never be able
-       * to read the referred client's stores or spend.
-       */
+      /** Manual portal state; names and statuses only, never referral evidence. */
       referral_summary: {
         Args: { p_client_id: string };
         Returns: { name: string; status: string }[];

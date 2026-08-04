@@ -3,11 +3,9 @@ import { createServiceClient } from "@/lib/supabase/service";
 import { reconcileInvoices } from "@/lib/billing/invoices";
 
 /**
- * Stripe-state reconciliation safety net. Automatic legacy issuance is paused
- * while the reviewed manual-billing cutover is prepared. This route never
- * calculates, creates, finalises or sends a new invoice.
+ * Stripe-state reconciliation safety net. It never calculates, creates,
+ * finalises or sends an invoice; issuance is an explicit admin action only.
  */
-
 export const dynamic = "force-dynamic";
 
 async function run(request: NextRequest) {
@@ -15,7 +13,6 @@ async function run(request: NextRequest) {
   if (!secret) {
     return NextResponse.json({ error: "CRON_SECRET is not configured." }, { status: 503 });
   }
-
   if (request.headers.get("authorization") !== `Bearer ${secret}`) {
     return NextResponse.json({ error: "Forbidden." }, { status: 403 });
   }
@@ -28,8 +25,11 @@ async function run(request: NextRequest) {
     );
   }
 
-  await reconcileInvoices(supabase);
-  return NextResponse.json({ ok: true, ranAt: new Date().toISOString() });
+  const result = await reconcileInvoices(supabase);
+  return NextResponse.json(
+    { ok: result.errors.length === 0, ranAt: new Date().toISOString(), ...result },
+    { status: result.errors.length === 0 ? 200 : 502 },
+  );
 }
 
 export async function POST(request: NextRequest) {

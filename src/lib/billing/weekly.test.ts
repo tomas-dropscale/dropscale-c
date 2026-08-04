@@ -1,22 +1,26 @@
 import { describe, expect, it } from "vitest";
 import {
-  AUTO_BILL_WEEKS,
+  AGENCY_FEE_RATE,
   BACKFILL_WEEKS,
+  BILLING_EVIDENCE_READY_HOUR_UTC,
+  BILLING_EVIDENCE_READY_MINUTE_UTC,
+  BILLING_CURRENCY,
+  agencyFee,
+  billingEvidenceIsReady,
+  billingEvidenceReadyAt,
+  billingCurrency,
+  closedWeekStarting,
   closedWeeks,
-  isAutoBillable,
   mondayOf,
+  referralFeeTerms,
+  round2,
   storeLines,
+  sumGoogleSpend,
   type StoreTotals,
 } from "./weekly";
 
-/**
- * The weekly invoice is the ad spend the agency fronted PLUS the fee on it, so
- * these tests pin the two things that decide what a client is charged: which
- * week is billable, and how a week's ledger totals become invoice lines.
- */
-
 function totals(over: Partial<StoreTotals> = {}): StoreTotals {
-  return { spend: 0, fee: 0, revShare: 0, revShareBase: 0, currency: "EUR", ...over };
+  return { spend: 0, referralCount: 0, currency: BILLING_CURRENCY, ...over };
 }
 
 describe("mondayOf", () => {
@@ -28,111 +32,322 @@ describe("mondayOf", () => {
     const [y, m, d] = day.split("-").map(Number);
     expect(mondayOf(new Date(y, m - 1, d))).toBe(expected);
   });
+
+  it("uses Lisbon's calendar day at the UTC summer boundary", () => {
+    expect(mondayOf(new Date("2026-08-02T23:30:00.000Z"))).toBe("2026-08-03");
+  });
 });
 
-describe("closedWeeks", () => {
-  // Sunday 2026-07-26: the week starting the 20th is still running, and must
-  // not be billed — commission for it is still moving.
-  const weeks = closedWeeks(new Date(2026, 6, 26), 3);
+describe("closed weeks", () => {
+  const now = new Date(2026, 6, 26);
+  const weeks = closedWeeks(now, 3);
 
-  it("never includes the week in progress", () => {
-    expect(weeks.map((week) => week.start)).not.toContain("2026-07-20");
-  });
-
-  it("returns whole Monday→Sunday windows, newest first", () => {
+  it("returns only whole closed Monday-to-Sunday windows", () => {
     expect(weeks).toEqual([
       { start: "2026-07-13", end: "2026-07-19" },
       { start: "2026-07-06", end: "2026-07-12" },
       { start: "2026-06-29", end: "2026-07-05" },
     ]);
+    expect(weeks.map((week) => week.start)).not.toContain("2026-07-20");
+  });
+
+  it("exposes eight weeks to the admin by default", () => {
+    expect(closedWeeks(now)).toHaveLength(BACKFILL_WEEKS);
+  });
+
+  it("accepts any fully closed Monday, including operational backfill", () => {
+    expect(closedWeekStarting("2026-07-13", now)).toEqual({
+      start: "2026-07-13",
+      end: "2026-07-19",
+    });
+    expect(closedWeekStarting("2024-01-01", now)).toEqual({
+      start: "2024-01-01",
+      end: "2024-01-07",
+    });
+    expect(closedWeekStarting("2026-07-14", now)).toBeNull();
+    expect(closedWeekStarting("2026-07-20", now)).toBeNull();
+    expect(closedWeekStarting("2026-02-30", now)).toBeNull();
+  });
+
+  it("waits for the Monday Google-settling cutoff before certifying Sunday", () => {
+    expect(BILLING_EVIDENCE_READY_HOUR_UTC).toBe(14);
+    expect(BILLING_EVIDENCE_READY_MINUTE_UTC).toBe(5);
+    expect(billingEvidenceReadyAt("2026-08-02").toISOString()).toBe(
+      "2026-08-03T14:05:00.000Z",
+    );
+    expect(
+      billingEvidenceIsReady(
+        "2026-08-02",
+        new Date("2026-08-03T14:04:59.999Z"),
+      ),
+    ).toBe(false);
+    expect(
+      billingEvidenceIsReady(
+        "2026-08-02",
+        new Date("2026-08-03T14:05:00.000Z"),
+      ),
+    ).toBe(true);
+    expect(() => billingEvidenceReadyAt("2026-02-30")).toThrow(/real date/i);
   });
 });
 
-describe("isAutoBillable", () => {
-  it("bills only the most recent weeks", () => {
-    // closedWeeks() is newest-first, so index 0 is the week that just closed.
-    expect(isAutoBillable(0)).toBe(true);
-    expect(isAutoBillable(AUTO_BILL_WEEKS - 1)).toBe(true);
+describe("the sealed agency fee", () => {
+  it("starts at ten percent and rounds to euro cents", () => {
+    expect(AGENCY_FEE_RATE).toBe(10);
+    expect(agencyFee(4_000)).toBe(400);
+    expect(agencyFee(33.333)).toBe(3.33);
   });
 
-  it("refuses to send anything older on its own", () => {
-    expect(isAutoBillable(AUTO_BILL_WEEKS)).toBe(false);
-    expect(isAutoBillable(BACKFILL_WEEKS - 1)).toBe(false);
+  it("matches PostgreSQL numeric rounding at binary half-cent edges", () => {
+    expect(round2(10.075)).toBe(10.08);
+    expect(round2(1.049)).toBe(1.05);
+    expect(round2(-10.075)).toBe(-10.08);
+    expect(storeLines("acc-1", "Velas", totals({ spend: 10.075 }))).toMatchObject([
+      { baseAmount: 10.08, amount: 1.01 },
+    ]);
+    expect(storeLines("acc-1", "Velas", totals({ spend: 1.049 }))).toMatchObject([
+      {
+        baseAmount: 1.05,
+        amount: 0.1,
+        label:
+          "Velas - Google Ads agency fee (10% of captured Google-reported billable spend: EUR 1.049000; manual referral term: approved referral count 0; 10% - 0 percentage points = 10%)",
+      },
+    ]);
+    expect(agencyFee(10.045)).toBe(1);
+    expect(round2(sumGoogleSpend([1.049, 9.026]))).toBe(10.08);
   });
 
-  it("holds back most of the backfill window", () => {
-    // The guard exists because a first run against a live key would otherwise
-    // send every healed week at once, ad spend included.
-    const weeks = closedWeeks(new Date(2026, 6, 27));
-    const sendable = weeks.filter((_, index) => isAutoBillable(index));
-
-    expect(weeks).toHaveLength(BACKFILL_WEEKS);
-    expect(sendable).toHaveLength(AUTO_BILL_WEEKS);
-    expect(weeks.length - sendable.length).toBeGreaterThan(0);
-  });
-});
-
-describe("storeLines", () => {
-  it("bills the spend at cost and the fee on top, as separate lines", () => {
-    const lines = storeLines("acc-1", "Velas", totals({ spend: 4000, fee: 400 }));
+  it("never makes Google spend itself payable", () => {
+    const lines = storeLines("acc-1", "Velas", totals({ spend: 4_000 }));
 
     expect(lines).toEqual([
-      {
-        accountId: "acc-1",
-        kind: "spend",
-        store: "Velas",
-        rate: null,
-        label: "Velas — Google Ads spend",
-        amount: 4000,
-      },
       {
         accountId: "acc-1",
         kind: "fee",
         store: "Velas",
         rate: 10,
-        label: "Velas — management fee (10%)",
+        listRate: 10,
+        referralDiscountRate: 0,
+        referralCount: 0,
+        baseAmount: 4_000,
+        sourceGrossAmount: 4_000,
+        label:
+          "Velas - Google Ads agency fee (10% of captured Google-reported billable spend: EUR 4000.000000; manual referral term: approved referral count 0; 10% - 0 percentage points = 10%)",
         amount: 400,
+      },
+    ]);
+    expect(lines.some((line) => line.kind === "spend" || line.kind === "rev_share")).toBe(false);
+  });
+
+  it("puts the raw spend, opening baseline and billable delta on the first invoice", () => {
+    expect(
+      storeLines(
+        "acc-1",
+        "Velas",
+        totals({
+          spend: 170,
+          sourceSpend: 250,
+          baselineDeduction: 80,
+          openingBaselineApplied: true,
+          billingStart: {
+            id: "start-1",
+            date: "2026-08-06",
+            capturedAt: "2026-08-06T14:30:00.123456Z",
+            timeZone: "Europe/Lisbon",
+            baselineAmount: 80,
+          },
+          periodEnd: "2026-08-09",
+        }),
+      ),
+    ).toEqual([
+      {
+        accountId: "acc-1",
+        kind: "fee",
+        store: "Velas",
+        rate: 10,
+        listRate: 10,
+        referralDiscountRate: 0,
+        referralCount: 0,
+        baseAmount: 170,
+        sourceGrossAmount: 250,
+        baselineDeductionAmount: 80,
+        billingStartId: "start-1",
+        billingStartDate: "2026-08-06",
+        billingStartedAt: "2026-08-06T14:30:00.123456Z",
+        billingTimeZone: "Europe/Lisbon",
+        billingStartBaselineAmount: 80,
+        label:
+          "Velas - Google Ads agency fee (10% of captured Google-reported billable spend: EUR 170.000000; manual referral term: approved referral count 0; 10% - 0 percentage points = 10%; billing started 2026-08-06T14:30:00.123Z; first billable period 2026-08-06 to 2026-08-09 in Europe/Lisbon; Google-reported spend EUR 250.000000 minus opening baseline EUR 80.000000)",
+        amount: 17,
       },
     ]);
   });
 
-  it("adds a rev-share line only when the store has one", () => {
-    const withShare = storeLines(
-      "acc-1",
-      "Velas",
-      totals({ spend: 1000, fee: 100, revShareBase: 2200, revShare: 110 }),
-    );
-    expect(withShare.map((line) => line.kind)).toEqual(["spend", "fee", "rev_share"]);
-    expect(withShare[2]).toMatchObject({ rate: 5, amount: 110 });
+  it("derives the weekly rate only from the approved referral count", () => {
+    expect(referralFeeTerms(1)).toEqual({
+      referralCount: 1,
+      referralDiscountRate: 0.5,
+      feeRate: 9.5,
+    });
+    expect(referralFeeTerms(20)).toEqual({
+      referralCount: 20,
+      referralDiscountRate: 10,
+      feeRate: 0,
+    });
+    expect(referralFeeTerms(21)).toEqual({
+      referralCount: 21,
+      referralDiscountRate: 10,
+      feeRate: 0,
+    });
+    expect(() => referralFeeTerms(-1)).toThrow(/non-negative whole number/i);
 
-    const withoutShare = storeLines("acc-1", "Velas", totals({ spend: 1000, fee: 100 }));
-    expect(withoutShare.map((line) => line.kind)).toEqual(["spend", "fee"]);
+    expect(
+      storeLines("acc-1", "Velas", totals({ spend: 100, referralCount: 1 })),
+    ).toMatchObject([
+      {
+        rate: 9.5,
+        listRate: 10,
+        referralDiscountRate: 0.5,
+        referralCount: 1,
+        amount: 9.5,
+        label:
+          "Velas - Google Ads agency fee (9.5% of captured Google-reported billable spend: EUR 100.000000; manual referral term: approved referral count 1; 10% - 0.5 percentage points = 9.5%)",
+      },
+    ]);
   });
 
-  it("blends the rate over the week rather than assuming it never changed", () => {
-    // 3 days at 10% of 1000, then 4 days at 15% of 1000 → 1250 on 7000.
-    const lines = storeLines("acc-1", "Velas", totals({ spend: 7000, fee: 1250 }));
-    expect(lines[1]).toMatchObject({ rate: 17.9, label: "Velas — management fee (17.9%)" });
+  it("keeps zero-value lines as local evidence for a waived week", () => {
+    expect(
+      storeLines("acc-1", "Velas", totals({ spend: 250, referralCount: 20 })),
+    ).toMatchObject([
+      {
+        rate: 0,
+        referralDiscountRate: 10,
+        referralCount: 20,
+        baseAmount: 250,
+        amount: 0,
+      },
+    ]);
+
+    // A positive rate that rounds below one cent is also settled locally; it
+    // must not become billable later after a Google restatement or rate change.
+    expect(storeLines("acc-1", "Velas", totals({ spend: 0.04 }))).toMatchObject([
+      { rate: 10, baseAmount: 0.04, amount: 0 },
+    ]);
   });
 
-  it("drops sub-cent lines, which Stripe would finalise at zero", () => {
-    const lines = storeLines("acc-1", "Velas", totals({ spend: 50, fee: 0.004 }));
-    expect(lines.map((line) => line.kind)).toEqual(["spend"]);
+  it("puts the raw spend, closing counter and post-service deduction on the final line", () => {
+    expect(
+      storeLines(
+        "acc-1",
+        "Velas",
+        totals({
+          spend: 140,
+          sourceSpend: 190,
+          endDeduction: 50,
+          endingCapApplied: true,
+          billingEnd: {
+            id: "end-1",
+            date: "2026-08-06",
+            capturedAt: "2026-08-06T17:15:00.654321Z",
+            timeZone: "Europe/Lisbon",
+            counterAmount: 140,
+          },
+          periodStart: "2026-08-03",
+          periodEnd: "2026-08-09",
+          referralCount: 2,
+        }),
+      ),
+    ).toEqual([
+      {
+        accountId: "acc-1",
+        kind: "fee",
+        store: "Velas",
+        rate: 9,
+        listRate: 10,
+        referralDiscountRate: 1,
+        referralCount: 2,
+        baseAmount: 140,
+        sourceGrossAmount: 190,
+        endDeductionAmount: 50,
+        endingCapApplied: true,
+        billingEndCounterAmount: 140,
+        billingEndId: "end-1",
+        billingEndDate: "2026-08-06",
+        billingEndedAt: "2026-08-06T17:15:00.654321Z",
+        billingEndTimeZone: "Europe/Lisbon",
+        label:
+          "Velas - Google Ads agency fee (9% of captured Google-reported billable spend: EUR 140.000000; manual referral term: approved referral count 2; 10% - 1 percentage points = 9%; billing ended 2026-08-06T17:15:00.654Z at Google day counter EUR 140.000000; final billable period 2026-08-03 to 2026-08-06 in Europe/Lisbon; Google-reported spend EUR 190.000000 minus post-service spend EUR 50.000000)",
+        amount: 12.6,
+      },
+    ]);
   });
 
-  it("rounds money to cents", () => {
-    const lines = storeLines("acc-1", "Velas", totals({ spend: 33.333, fee: 3.3333 }));
-    expect(lines[0].amount).toBe(33.33);
-    expect(lines[1].amount).toBe(3.33);
+  it("composes both counters when service starts and ends on the same day", () => {
+    expect(
+      storeLines(
+        "acc-1",
+        "Velas",
+        totals({
+          spend: 20,
+          sourceSpend: 150,
+          baselineDeduction: 80,
+          endDeduction: 50,
+          openingBaselineApplied: true,
+          endingCapApplied: true,
+          billingStart: {
+            id: "start-1",
+            date: "2026-08-06",
+            capturedAt: "2026-08-06T09:00:00.111111Z",
+            timeZone: "Europe/Lisbon",
+            baselineAmount: 80,
+          },
+          billingEnd: {
+            id: "end-1",
+            date: "2026-08-06",
+            capturedAt: "2026-08-06T17:00:00.222222Z",
+            timeZone: "Europe/Lisbon",
+            counterAmount: 100,
+          },
+          periodStart: "2026-08-03",
+          periodEnd: "2026-08-09",
+        }),
+      ),
+    ).toMatchObject([
+      {
+        baseAmount: 20,
+        baselineDeductionAmount: 80,
+        endDeductionAmount: 50,
+        amount: 2,
+        label:
+          "Velas - Google Ads agency fee (10% of captured Google-reported billable spend: EUR 20.000000; manual referral term: approved referral count 0; 10% - 0 percentage points = 10%; billing started 2026-08-06T09:00:00.111Z; billing ended 2026-08-06T17:00:00.222Z at Google day counter EUR 100.000000; billable period 2026-08-06 to 2026-08-06 in Europe/Lisbon; Google-reported spend EUR 150.000000 minus opening baseline EUR 80.000000 minus post-service spend EUR 50.000000)",
+      },
+    ]);
   });
 
-  it("returns nothing for a store with no activity", () => {
-    expect(storeLines("acc-1", "Velas", totals())).toEqual([]);
+  it("fails closed when a line's boundary arithmetic is internally inconsistent", () => {
+    expect(() =>
+      storeLines(
+        "acc-1",
+        "Velas",
+        totals({ spend: 100, sourceSpend: 120, baselineDeduction: 10 }),
+      ),
+    ).toThrow(/does not match/i);
   });
 
-  it("keeps the store name it was billed under, for the snapshot", () => {
-    const lines = storeLines("acc-1", "Old Name", totals({ spend: 100, fee: 10 }));
-    expect(lines.every((line) => line.store === "Old Name")).toBe(true);
-    expect(lines[0].label).toContain("Old Name");
+  it("does not turn a negative correction into a charge", () => {
+    expect(agencyFee(-100)).toBe(0);
+  });
+});
+
+describe("billingCurrency", () => {
+  it("accepts EUR only", () => {
+    expect(billingCurrency(new Set(["eur"]))).toBe("EUR");
+  });
+
+  it("never relabels foreign or mixed spend as EUR", () => {
+    expect(billingCurrency(new Set(["USD"]))).toBeNull();
+    expect(billingCurrency(new Set(["EUR", "USD"]))).toBeNull();
+    expect(billingCurrency(new Set())).toBeNull();
   });
 });

@@ -13,6 +13,8 @@ import {
   sumMetrics,
 } from "@/lib/metrics/queries";
 import { parseRange } from "@/lib/portal/range";
+import { fetchManualReferralRateSchedule } from "@/lib/billing/referral-rate-schedule";
+import { manualReferralRateOnDay } from "@/lib/billing/referrals";
 import { currencyScope, displayCurrency } from "@/lib/portal/currency";
 import { MixedCurrencyNotice } from "@/components/portal/mixed-currency-notice";
 import { multiplier } from "@/lib/format";
@@ -46,22 +48,35 @@ export default async function GoogleAllStoresPage({
   await ensureDailyCoverage(accounts, range.from);
   await recomputeDailyMetrics(accounts);
 
-  const rows = await fetchDailyMetrics(
-    accounts.map((account) => account.id),
-    range.from,
-    range.to,
-  );
+  const [rows, referralRateSchedule] = await Promise.all([
+    fetchDailyMetrics(
+      accounts.map((account) => account.id),
+      range.from,
+      range.to,
+    ),
+    accounts[0]
+      ? fetchManualReferralRateSchedule(accounts[0].client_id)
+      : Promise.resolve([]),
+  ]);
   const byAccount = groupByAccount(rows);
   const { updatedAt } = freshness(rows);
+  const referralRateForDay = (day: string) =>
+    manualReferralRateOnDay(day, referralRateSchedule);
   // Totals here span every store, so they are only a real figure when the
   // stores share a currency.
   const scope = currencyScope(accounts);
 
   const perAccount = accounts.map((account) => {
     const accountRows = byAccount.get(account.id) ?? [];
+    const standardManualContract =
+      Number(account.list_commission_rate) === 10 && !account.revenue_share_enabled;
     return {
       account,
-      metrics: metricSetFromRows(accountRows, Number(account.commission_rate)),
+      metrics: metricSetFromRows(accountRows, (row) =>
+        standardManualContract
+          ? referralRateForDay(row.day)
+          : Number(account.commission_rate),
+      ),
       // Store-wide totals from Shopify, alongside the Google-attributed ones.
       // The per-store table below reports the STORE's conversions, not
       // Google's: the shop sells through channels Google never sees, so the
@@ -77,8 +92,20 @@ export default async function GoogleAllStoresPage({
   const storeConversions = allStores.attributedOrders;
   const storeConversionValue = allStores.attributedRevenue;
 
-  // One fee percentage is only honest when every store bills at the same rate.
-  const rates = new Set(accounts.map((account) => Number(account.commission_rate)));
+  // One percentage is only honest if the selected historical rows all used
+  // the same Monday-effective manual term.
+  const rates = new Set(
+    accounts.flatMap((account) => {
+      const accountRows = byAccount.get(account.id) ?? [];
+      const standardManualContract =
+        Number(account.list_commission_rate) === 10 && !account.revenue_share_enabled;
+      return accountRows.map((row) =>
+        standardManualContract
+          ? referralRateForDay(row.day)
+          : Number(account.commission_rate),
+      );
+    }),
+  );
   const uniformFeeRate = rates.size === 1 ? [...rates][0] : null;
 
   const comparisonRows: StoreComparisonRow[] = perAccount.map(({ account, metrics, store }) => ({

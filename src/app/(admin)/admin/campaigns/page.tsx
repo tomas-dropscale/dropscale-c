@@ -259,7 +259,6 @@ export default async function AdminCampaignsPage({
                       one inside <summary> would toggle the panel shut. */}
                   <div className="flex flex-wrap items-start gap-2 px-5 pt-1 pb-2">
                     <CommissionRate
-                      accountId={entry.account.id}
                       rate={Number(entry.account.commission_rate)}
                       listRate={Number(entry.account.list_commission_rate)}
                       revenueShareEnabled={entry.account.revenue_share_enabled}

@@ -1,30 +1,30 @@
 "use client";
 
-import * as React from "react";
-import { CheckCircle2, CreditCard, ExternalLink, Info, TriangleAlert } from "lucide-react";
+import { ExternalLink, Info, TriangleAlert } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { FormAlert } from "@/components/auth/auth-card";
 import { money } from "@/lib/format";
 import { useI18n } from "@/lib/i18n/provider";
 import { fmt, type Dictionary } from "@/lib/i18n";
+import {
+  isoDay,
+  isManualAgencyCalculationVersion,
+} from "@/lib/billing/weekly";
 import { cn } from "@/lib/utils";
+import { safeStripeUrl } from "@/lib/stripe/urls";
 import type { Invoice, InvoiceLine, InvoiceStatus } from "@/lib/supabase/types";
 
 /**
- * The client's Payments tab: one invoice per week, what it's made of, and a
- * link to pay it.
+ * The client's Payments tab: one manually-issued agency-fee invoice per week,
+ * what it is made of, and a Stripe-hosted link to pay it.
  *
  * Read-only by design — every figure comes from the ledger the dashboard
  * already shows, and the only action is paying. Nothing here can change what
  * is owed.
  *
- * A week's invoice is the ad spend we fronted PLUS our fee on it, so the
- * breakdown is doing real work: it is the difference between "you owe €5,610"
- * and "€5,000 of that went to Google". Lines are rendered from their parts
- * (kind/store/rate) rather than the stored English label, which is what lets
- * them translate; rows written before those parts existed fall back to it.
+ * Google charges the client directly. Dropscale invoices only the 10% agency
+ * fee; lines are rendered from their parts (kind/store/rate) rather than the
+ * stored English label so they can be translated.
  */
 
 function isLate(invoice: Invoice, today: string) {
@@ -39,6 +39,8 @@ function statusLabel(status: InvoiceStatus, d: Dictionary): string {
       return d.payments.statusOpen;
     case "draft":
       return d.payments.statusDraft;
+    case "waived":
+      return d.payments.statusWaived;
     case "void":
       return d.payments.statusVoid;
     case "uncollectible":
@@ -46,10 +48,24 @@ function statusLabel(status: InvoiceStatus, d: Dictionary): string {
   }
 }
 
+function lineTimestamp(value: string, intl: string) {
+  return new Date(value).toLocaleString(intl, {
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function rate(value: number, intl: string) {
+  return new Intl.NumberFormat(intl, { maximumFractionDigits: 2 }).format(value);
+}
+
 const STATUS_VARIANT: Record<InvoiceStatus, "success" | "warning" | "neutral" | "danger"> = {
   paid: "success",
   open: "warning",
   draft: "neutral",
+  waived: "neutral",
   void: "neutral",
   uncollectible: "danger",
 };
@@ -72,31 +88,64 @@ function lineLabel(line: InvoiceLine, d: Dictionary): string {
   }
 }
 
-export function PaymentsView({
-  invoices,
-  hasCardOnFile,
-  stripeReady,
-  setupOutcome = null,
-}: {
-  invoices: Invoice[];
-  hasCardOnFile: boolean;
-  stripeReady: boolean;
-  /** How the client came back from Stripe Checkout, if they just did. */
-  setupOutcome?: "done" | "cancelled" | null;
-}) {
-  const { d, intl } = useI18n();
-  const [busy, setBusy] = React.useState(false);
-  const [error, setError] = React.useState<string | null>(null);
+type CurrencyTotal = {
+  currency: string;
+  amount: number;
+};
 
-  const today = new Date().toISOString().slice(0, 10);
+/** Never add unlike currencies. EUR is first because all new billing is EUR. */
+function totalsByCurrency(
+  invoices: Invoice[],
+  value: (invoice: Invoice) => number,
+): CurrencyTotal[] {
+  const totals = new Map<string, number>();
+
+  for (const invoice of invoices) {
+    const currency = invoice.currency.toUpperCase();
+    totals.set(currency, (totals.get(currency) ?? 0) + value(invoice));
+  }
+
+  return [...totals.entries()]
+    .map(([currency, amount]) => ({ currency, amount }))
+    .sort((a, b) => {
+      if (a.currency === "EUR") return -1;
+      if (b.currency === "EUR") return 1;
+      return a.currency.localeCompare(b.currency);
+    });
+}
+
+function CurrencyTotals({ totals }: { totals: CurrencyTotal[] }) {
+  const rows = totals.length > 0 ? totals : [{ currency: "EUR", amount: 0 }];
+
+  return (
+    <div className="mt-1 space-y-0.5">
+      {rows.map((total) => (
+        <p key={total.currency} className="metric-value !text-[24px] tabular-nums">
+          {money(total.amount, total.currency)}
+        </p>
+      ))}
+    </div>
+  );
+}
+
+export function PaymentsView({ invoices }: { invoices: Invoice[] }) {
+  const { d, intl } = useI18n();
+
+  const today = isoDay(new Date());
+  const hasLegacyInvoices = invoices.some(
+    (invoice) => !isManualAgencyCalculationVersion(invoice.calculation_version),
+  );
   const outstanding = invoices.filter((invoice) => invoice.status === "open");
   const late = outstanding.filter((invoice) => isLate(invoice, today));
   const failed = outstanding.filter((invoice) => invoice.payment_failed_at);
-  const owed = outstanding.reduce((sum, invoice) => sum + Number(invoice.amount), 0);
-  const paidTotal = invoices
-    .filter((invoice) => invoice.status === "paid")
-    .reduce((sum, invoice) => sum + Number(invoice.amount), 0);
-  const currency = invoices[0]?.currency ?? "EUR";
+  const owedByCurrency = totalsByCurrency(
+    outstanding,
+    (invoice) => Number(invoice.amount_remaining ?? invoice.amount),
+  );
+  const paidByCurrency = totalsByCurrency(
+    invoices.filter((invoice) => invoice.status === "paid"),
+    (invoice) => Number(invoice.amount),
+  );
 
   function period(invoice: Invoice) {
     const format = (iso: string) => {
@@ -112,30 +161,8 @@ export function PaymentsView({
   const invoiceCount = (count: number) =>
     fmt(count === 1 ? d.payments.invoiceCountOne : d.payments.invoiceCountMany, { count });
 
-  async function setUpCard() {
-    setBusy(true);
-    setError(null);
-    const res = await fetch("/api/billing/setup", { method: "POST" });
-    const body = (await res.json().catch(() => null)) as { url?: string; error?: string } | null;
-    setBusy(false);
-    if (!res.ok || !body?.url) {
-      setError(body?.error ?? d.payments.setupFailed);
-      return;
-    }
-    window.location.href = body.url;
-  }
-
   return (
     <div className="space-y-4">
-      {error && <FormAlert>{error}</FormAlert>}
-
-      {/* The answer to "did that work?", which the return from Stripe cannot
-          give on its own — the client is simply dropped back on this page. */}
-      {setupOutcome === "done" && (
-        <FormAlert tone="success">{d.payments.setupDone}</FormAlert>
-      )}
-      {setupOutcome === "cancelled" && <FormAlert>{d.payments.setupCancelled}</FormAlert>}
-
       {/* A refused charge is not the same as an unpaid invoice, and only the
           client can clear it. Shown above everything, because if this is
           happening nothing else on the page matters. */}
@@ -169,58 +196,40 @@ export function PaymentsView({
         </div>
       )}
 
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <div className="panel p-4">
           <p className="label-caps">{d.payments.outstanding}</p>
-          <p className="metric-value mt-1 !text-[24px]">{money(owed, currency)}</p>
+          <CurrencyTotals totals={owedByCurrency} />
           <p className="mt-1 text-[11.5px] text-[var(--text-muted)]">
             {invoiceCount(outstanding.length)}
           </p>
         </div>
         <div className="panel p-4">
           <p className="label-caps">{d.payments.paidToDate}</p>
-          <p className="metric-value mt-1 !text-[24px]">{money(paidTotal, currency)}</p>
-        </div>
-        <div className="panel flex flex-col justify-between gap-3 p-4">
-          <div>
-            <p className="label-caps">{d.payments.paymentMethod}</p>
-            <p className="mt-1 flex items-center gap-1.5 text-[13px] text-[var(--text-primary)]">
-              {hasCardOnFile ? (
-                <>
-                  <CheckCircle2 className="size-3.5 text-[var(--success-green)]" />
-                  {d.payments.cardOnFile}
-                </>
-              ) : (
-                d.payments.noCard
-              )}
-            </p>
-            {/* Without this the client assumes they must enter a card here to
-                be billed automatically. They don't: paying the first invoice
-                on Stripe's page is enough, and the button below is a shortcut,
-                not a requirement. */}
-            {!hasCardOnFile && (
-              <p className="mt-1.5 text-[11.5px] leading-relaxed text-[var(--text-muted)]">
-                {d.payments.noCardHelp}
-              </p>
-            )}
-          </div>
-          {stripeReady && (
-            <Button variant="secondary" size="sm" loading={busy} onClick={setUpCard}>
-              <CreditCard />
-              {hasCardOnFile ? d.payments.changeCard : d.payments.saveCard}
-            </Button>
-          )}
+          <CurrencyTotals totals={paidByCurrency} />
         </div>
       </div>
 
-      {/* What a weekly invoice is made of. Worth saying once, up front: the
-          total is mostly money that went straight to Google. */}
+      {/* Google is paid separately; this removes any ambiguity about whether
+          the number below includes ad spend. */}
       <div className="flex items-start gap-3 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-panel)] px-4 py-3">
         <Info className="mt-0.5 size-3.5 shrink-0 text-[var(--accent-gold)]" aria-hidden />
         <p className="text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
           {d.payments.howItWorks}
         </p>
       </div>
+
+      {hasLegacyInvoices && (
+        <div className="flex items-start gap-3 rounded-[var(--radius-card)] border border-[var(--warning-orange)]/30 bg-[var(--warning-orange)]/10 px-4 py-3">
+          <TriangleAlert
+            className="mt-0.5 size-3.5 shrink-0 text-[var(--warning-orange)]"
+            aria-hidden
+          />
+          <p className="text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
+            {d.payments.legacyHistoryNote}
+          </p>
+        </div>
+      )}
 
       <section className="flex flex-col gap-3">
         <h2 className="text-[15px] font-semibold text-[var(--text-primary)]">
@@ -235,15 +244,17 @@ export function PaymentsView({
           <ul className="flex flex-col gap-2">
             {invoices.map((invoice) => {
               const overdue = isLate(invoice, today);
-
-              // Spend passed through at cost vs. what the agency earns — the
-              // two numbers a client actually wants separated.
-              const spend = invoice.line_items
-                .filter((line) => line.kind === "spend")
-                .reduce((sum, line) => sum + Number(line.amount), 0);
-              const fees = invoice.line_items
-                .filter((line) => line.kind === "fee" || line.kind === "rev_share")
-                .reduce((sum, line) => sum + Number(line.amount), 0);
+              const paymentFailed = invoice.status === "open" && Boolean(invoice.payment_failed_at);
+              const stripeHostedUrl = safeStripeUrl(invoice.stripe_hosted_url);
+              const stripeInvoicePdf = safeStripeUrl(invoice.stripe_invoice_pdf);
+              const invoiceTotal = Number(invoice.amount);
+              const amountRemaining =
+                invoice.status === "open"
+                  ? Number(invoice.amount_remaining ?? invoice.amount)
+                  : 0;
+              const amountPaid = Math.max(0, invoiceTotal - amountRemaining);
+              const partiallyPaid =
+                invoice.status === "open" && amountPaid > 0 && amountRemaining < invoiceTotal;
 
               return (
                 <li
@@ -251,6 +262,9 @@ export function PaymentsView({
                   className={cn(
                     "panel p-4",
                     overdue && "border-[var(--danger-red)]/30 bg-[var(--danger-red)]/5",
+                    paymentFailed &&
+                      !overdue &&
+                      "border-[var(--warning-orange)]/30 bg-[var(--warning-orange)]/5",
                   )}
                 >
                   <div className="flex flex-wrap items-center gap-3">
@@ -261,69 +275,188 @@ export function PaymentsView({
                       <p className="text-[11.5px] text-[var(--text-muted)]">
                         {invoice.due_date && invoice.status === "open"
                           ? fmt(d.payments.due, { date: invoice.due_date })
+                          : invoice.status === "waived" && invoice.issued_at
+                            ? fmt(d.payments.waivedOn, {
+                                date: new Date(invoice.issued_at).toLocaleDateString(intl),
+                              })
                           : invoice.paid_at
                             ? fmt(d.payments.paidOn, {
                                 date: new Date(invoice.paid_at).toLocaleDateString(intl),
                               })
-                            : d.payments.notIssued}
+                            : invoice.issued_at
+                              ? `${d.adminBilling.issued}: ${new Date(
+                                  invoice.issued_at,
+                                ).toLocaleDateString(intl)}`
+                              : d.payments.notIssued}
                       </p>
                     </div>
 
-                    <Badge variant={overdue ? "danger" : STATUS_VARIANT[invoice.status]}>
-                      {overdue ? d.payments.statusOverdue : statusLabel(invoice.status, d)}
-                    </Badge>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {!isManualAgencyCalculationVersion(invoice.calculation_version) && (
+                        <Badge variant="neutral">{d.payments.legacyLabel}</Badge>
+                      )}
+                      <Badge variant={overdue ? "danger" : STATUS_VARIANT[invoice.status]}>
+                        {overdue ? d.payments.statusOverdue : statusLabel(invoice.status, d)}
+                      </Badge>
+                      {paymentFailed && (
+                        <Badge variant="danger">{d.payments.statusPaymentFailed}</Badge>
+                      )}
+                    </div>
 
-                    <p className="text-[15px] font-semibold text-[var(--text-primary)] tabular-nums">
-                      {money(invoice.amount, invoice.currency)}
-                    </p>
+                    <div className="text-right">
+                      <p className="text-[15px] font-semibold text-[var(--text-primary)] tabular-nums">
+                        {money(partiallyPaid ? amountRemaining : invoice.amount, invoice.currency)}
+                      </p>
+                      {partiallyPaid && (
+                        <p className="mt-0.5 text-[10.5px] text-[var(--text-muted)]">
+                          {d.payments.amountRemaining}
+                        </p>
+                      )}
+                    </div>
 
-                    {invoice.status === "open" && invoice.stripe_hosted_url && (
-                      <a
-                        href={invoice.stripe_hosted_url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="transition-smooth inline-flex shrink-0 items-center gap-1.5 rounded-full bg-[var(--accent-gold)] px-3.5 py-1.5 text-[12px] font-semibold text-[#1a1409] hover:opacity-90"
-                      >
-                        {d.payments.payNow}
-                        <ExternalLink className="size-3.5" />
-                      </a>
-                    )}
+                    <div className="flex flex-wrap items-center gap-2">
+                      {invoice.status === "open" && stripeHostedUrl && (
+                        <a
+                          href={stripeHostedUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="transition-smooth inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-full bg-[var(--accent-gold)] px-3.5 py-1.5 text-[12px] font-semibold text-[#1a1409] hover:opacity-90"
+                        >
+                          {d.payments.payNow}
+                          <ExternalLink className="size-3.5" />
+                        </a>
+                      )}
+                      {stripeInvoicePdf && (
+                        <a
+                          href={stripeInvoicePdf}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="transition-smooth inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-full border border-[var(--border-subtle)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-secondary)] hover:border-[var(--border-strong)] hover:text-[var(--text-primary)]"
+                        >
+                          {d.payments.invoicePdf}
+                          <ExternalLink className="size-3.5" />
+                        </a>
+                      )}
+                    </div>
                   </div>
 
-                  {/* Spend vs. fee at a glance, above the per-store detail.
-                      Only for invoices that carry the newer line parts. */}
-                  {spend > 0 && (
-                    <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 border-t border-[var(--border-subtle)] pt-3 text-[12px]">
-                      <span className="text-[var(--text-secondary)]">
-                        {d.payments.adSpendTotal}{" "}
-                        <span className="font-medium text-[var(--text-primary)] tabular-nums">
-                          {money(spend, invoice.currency)}
-                        </span>
-                      </span>
-                      <span className="text-[var(--text-secondary)]">
-                        {d.payments.feeTotal}{" "}
-                        <span className="font-medium text-[var(--text-primary)] tabular-nums">
-                          {money(fees, invoice.currency)}
-                        </span>
-                      </span>
-                    </div>
+                  {partiallyPaid && (
+                    <dl className="mt-3 grid grid-cols-1 gap-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3 sm:grid-cols-3">
+                      <div>
+                        <dt className="label-caps">{d.payments.invoiceTotal}</dt>
+                        <dd className="mt-1 text-[13px] font-medium text-[var(--text-primary)] tabular-nums">
+                          {money(invoiceTotal, invoice.currency)}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt className="label-caps">{d.payments.amountPaid}</dt>
+                        <dd className="mt-1 text-[13px] font-medium text-[var(--success-green)] tabular-nums">
+                          {money(amountPaid, invoice.currency)}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt className="label-caps">{d.payments.amountRemaining}</dt>
+                        <dd className="mt-1 text-[13px] font-semibold text-[var(--warning-orange)] tabular-nums">
+                          {money(amountRemaining, invoice.currency)}
+                        </dd>
+                      </div>
+                    </dl>
                   )}
 
                   {invoice.line_items.length > 0 && (
-                    <ul
-                      className={cn(
-                        "mt-3 space-y-1 pt-3",
-                        spend > 0 ? "" : "border-t border-[var(--border-subtle)]",
-                      )}
-                    >
+                    <ul className="mt-3 space-y-1 border-t border-[var(--border-subtle)] pt-3">
                       {invoice.line_items.map((line, index) => (
                         <li
                           key={`${invoice.id}-${index}`}
                           className="flex items-center justify-between gap-3 text-[12px]"
                         >
-                          <span className="min-w-0 truncate text-[var(--text-secondary)]">
-                            {lineLabel(line, d)}
-                          </span>
+                          <div className="min-w-0 text-[var(--text-secondary)]">
+                            <span className="block truncate">{lineLabel(line, d)}</span>
+                            {line.kind === "fee" && line.baseAmount != null && (
+                              line.sourceGrossAmount != null ? (
+                                <span className="mt-1 grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-0.5 text-[10.5px] text-[var(--text-muted)]">
+                                  <span>{d.payments.lineReportedSpend}</span>
+                                  <span className="text-right tabular-nums">
+                                    {money(line.sourceGrossAmount, invoice.currency)}
+                                  </span>
+                                  {line.baselineDeductionAmount != null && (
+                                    <>
+                                      <span>{d.payments.lineOpeningBaseline}</span>
+                                      <span className="text-right tabular-nums">
+                                        −{money(line.baselineDeductionAmount, invoice.currency)}
+                                      </span>
+                                    </>
+                                  )}
+                                  {line.endDeductionAmount != null && (
+                                    <>
+                                      <span>{d.payments.lineClosingDeduction}</span>
+                                      <span className="text-right tabular-nums">
+                                        −{money(line.endDeductionAmount, invoice.currency)}
+                                      </span>
+                                    </>
+                                  )}
+                                  <span className="font-medium text-[var(--text-secondary)]">
+                                    {d.payments.lineBillableSpend}
+                                  </span>
+                                  <span className="text-right font-medium text-[var(--text-secondary)] tabular-nums">
+                                    {money(line.baseAmount, invoice.currency)}
+                                  </span>
+                                </span>
+                              ) : (
+                                <span className="mt-0.5 block text-[10.5px] text-[var(--text-muted)]">
+                                  {fmt(d.payments.lineBaseAmount, {
+                                    amount: money(line.baseAmount, invoice.currency),
+                                  })}
+                                </span>
+                              )
+                            )}
+                            {line.kind === "fee" &&
+                              line.referralCount != null &&
+                              line.listRate != null &&
+                              line.referralDiscountRate != null &&
+                              line.rate != null && (
+                                <span className="mt-1 block text-[10px] leading-relaxed text-[var(--text-muted)]">
+                                  {fmt(d.payments.lineReferralTerm, {
+                                    count: line.referralCount,
+                                    list: rate(line.listRate, intl),
+                                    discount: rate(line.referralDiscountRate, intl),
+                                    rate: rate(line.rate, intl),
+                                  })}
+                                </span>
+                              )}
+                            {line.billingStartedAt &&
+                              line.billingTimeZone &&
+                              line.billingStartBaselineAmount != null && (
+                                <span className="mt-1 block text-[10px] leading-relaxed text-[var(--text-muted)]">
+                                  {fmt(d.payments.lineTrackingStarted, {
+                                    date: lineTimestamp(line.billingStartedAt, intl),
+                                    timeZone: line.billingTimeZone,
+                                    amount: money(
+                                      line.billingStartBaselineAmount,
+                                      invoice.currency,
+                                    ),
+                                  })}
+                                </span>
+                              )}
+                            {line.billingEndedAt &&
+                              line.billingEndTimeZone &&
+                              line.billingEndCounterAmount != null && (
+                                <span className="mt-1 block text-[10px] leading-relaxed text-[var(--text-muted)]">
+                                  {fmt(d.payments.lineTrackingEnded, {
+                                    date: lineTimestamp(line.billingEndedAt, intl),
+                                    timeZone: line.billingEndTimeZone,
+                                    amount: money(
+                                      line.billingEndCounterAmount,
+                                      invoice.currency,
+                                    ),
+                                    deduction: money(
+                                      line.endDeductionAmount ?? 0,
+                                      invoice.currency,
+                                    ),
+                                  })}
+                                </span>
+                              )}
+                          </div>
                           <span className="shrink-0 text-[var(--text-muted)] tabular-nums">
                             {money(line.amount, invoice.currency)}
                           </span>

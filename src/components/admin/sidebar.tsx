@@ -3,6 +3,7 @@
 import { usePathname } from "next/navigation";
 import {
   BarChart3,
+  BadgePercent,
   Clapperboard,
   FileText,
   LayoutGrid,
@@ -52,6 +53,7 @@ const NAV_GROUPS: Group[] = [
     label: (d) => d.nav.groupGrowth,
     items: [
       { href: "/admin/clients", icon: UserCheck, label: (d) => d.nav.clients },
+      { href: "/admin/referrals", icon: BadgePercent, label: () => "Referrals" },
       // Next to Campaigns on purpose: the creatives clients hand in are the raw
       // material for the screen right below it.
       { href: "/admin/creatives", icon: Clapperboard, label: (d) => d.nav.creatives },

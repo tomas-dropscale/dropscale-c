@@ -5,7 +5,12 @@ import { getWorkspaceContext } from "@/lib/portal/workspace";
 import { ReferralCard, type ReferralStatus } from "@/components/portal/referral-card";
 import { PageContainer } from "@/components/ui/page-container";
 import { getServerDictionary } from "@/lib/i18n/server";
-import { REFERRAL_FLOOR_RATE } from "@/lib/billing/referrals";
+import {
+  manualReferralRateOnDay,
+  REFERRAL_FLOOR_RATE,
+} from "@/lib/billing/referrals";
+import { fetchManualReferralRateSchedule } from "@/lib/billing/referral-rate-schedule";
+import { isoDay } from "@/lib/billing/weekly";
 
 export async function generateMetadata(): Promise<Metadata> {
   const { d } = await getServerDictionary();
@@ -13,8 +18,8 @@ export async function generateMetadata(): Promise<Metadata> {
 }
 
 /**
- * Settings → Affiliates: the client's code, who they brought, and what it takes
- * off their fee.
+ * Settings → Affiliates: attribution, manual review state and the sealed rate
+ * currently in force for the workspace.
  *
  * A tab of its own rather than a card on personal settings: this is the only
  * screen in the portal that pays the client something, and burying it under a
@@ -28,26 +33,38 @@ export default async function AffiliatesPage() {
   if (!viewer || !active) return null; // gate already handled this
 
   const supabase = await createClient();
-  const [{ data: referred }, { data: rateRows }] = await Promise.all([
-    // Who the WORKSPACE OWNER brought in, and whether each is earning anything.
-    // Through the definer function (0023) rather than a direct select: deciding
-    // "counting" needs the referred client's ad spend, which the referrer has
-    // no business reading. It answers with a status and a name, nothing more.
+  const [{ data: referred, error: referralError }, { data: rateRows, error: rateError }, schedule] = await Promise.all([
+    // Who the WORKSPACE OWNER brought in and whether the manual term is active,
+    // scheduled or awaiting review. The definer returns only name + status;
+    // no referred client's spend, evidence or account identity crosses RLS.
     supabase.rpc("referral_summary", { p_client_id: active.id }),
     supabase
       .from("ad_accounts")
-      .select("commission_rate, list_commission_rate")
+      .select("commission_rate, list_commission_rate, revenue_share_enabled")
       .eq("client_id", active.id),
+    fetchManualReferralRateSchedule(active.id),
   ]);
+  if (referralError) throw new Error("Could not load the manual referral summary", { cause: referralError });
+  if (rateError) throw new Error("Could not verify the account list rate", { cause: rateError });
 
   // Stores can sit on different deals, so there is no single "your fee". Show
   // the highest list price rather than an average nobody is actually billed at;
   // with one store — the usual case — it is exact.
   const rates = rateRows ?? [];
-  const listRate =
-    rates.length > 0 ? Math.max(...rates.map((row) => Number(row.list_commission_rate))) : null;
-  const effectiveRate =
-    rates.length > 0 ? Math.max(...rates.map((row) => Number(row.commission_rate))) : null;
+  const compatibleListRate =
+    rates.length > 0 &&
+    rates.every(
+      (row) =>
+        Number(row.list_commission_rate) === 10 &&
+        !row.revenue_share_enabled,
+    );
+  // The mutable per-account cache is presentation-only. This card resolves
+  // the sealed client-wide term for Lisbon today, including a scheduled term
+  // that became effective even if a maintenance refresh was delayed.
+  const listRate = compatibleListRate ? 10 : null;
+  const effectiveRate = compatibleListRate
+    ? manualReferralRateOnDay(isoDay(new Date()), schedule)
+    : null;
 
   return (
     <PageContainer title={d.referrals.navLabel} description={d.referrals.subtitle}>

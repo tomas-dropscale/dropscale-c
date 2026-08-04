@@ -22,10 +22,11 @@ import { ensureDailyCoverage, recomputeDailyMetrics } from "@/lib/metrics/recomp
 import {
   fetchDailyMetrics,
   freshness,
-  groupByAccount,
   groupByDay,
   sumMetrics,
 } from "@/lib/metrics/queries";
+import { fetchManualReferralRateSchedule } from "@/lib/billing/referral-rate-schedule";
+import { manualReferralRateOnDay } from "@/lib/billing/referrals";
 import { parseRange } from "@/lib/portal/range";
 import { currencyScope, displayCurrency } from "@/lib/portal/currency";
 import { MixedCurrencyNotice } from "@/components/portal/mixed-currency-notice";
@@ -72,11 +73,16 @@ export default async function DashboardPage({
     ? accounts.filter((account) => account.id === selectedStore)
     : accounts;
 
-  const rows = await fetchDailyMetrics(
-    visible.map((account) => account.id),
-    range.from,
-    range.to,
-  );
+  const [rows, referralRateSchedule] = await Promise.all([
+    fetchDailyMetrics(
+      visible.map((account) => account.id),
+      range.from,
+      range.to,
+    ),
+    accounts[0]
+      ? fetchManualReferralRateSchedule(accounts[0].client_id)
+      : Promise.resolve([]),
+  ]);
 
   const totals = sumMetrics(rows);
   const { updatedAt } = freshness(rows);
@@ -132,13 +138,23 @@ export default async function DashboardPage({
     shopifyConnected &&
     costsDone;
 
-  // Fee respects each account's own commission_rate.
-  const rateById = new Map(accounts.map((account) => [account.id, Number(account.commission_rate)]));
-  let fee = 0;
-  for (const [accountId, accountRows] of groupByAccount(rows)) {
-    const spend = accountRows.reduce((sum, row) => sum + Number(row.ad_spend), 0);
-    fee += (spend * (rateById.get(accountId) ?? 0)) / 100;
-  }
+  // A Monday referral decision changes that Monday onward only. Standard 10%
+  // accounts use the sealed history. Legacy/custom contracts keep their own
+  // current cache, and every portal fee display is explicitly an estimate;
+  // only Payments/admin billing applies exact start/end counters and rounding.
+  const accountById = new Map(visible.map((account) => [account.id, account]));
+  const fee = rows.reduce(
+    (sum, row) => {
+      const account = accountById.get(row.ad_account_id);
+      const standardManualContract =
+        Number(account?.list_commission_rate) === 10 && !account?.revenue_share_enabled;
+      const rate = standardManualContract
+        ? manualReferralRateOnDay(row.day, referralRateSchedule)
+        : Number(account?.commission_rate ?? 0);
+      return sum + (Number(row.ad_spend) * rate) / 100;
+    },
+    0,
+  );
   /**
    * The full chain (spec: COGS moves PROFIT, never revenue):
    * net − COGS − payment fees − shipping − ad spend.
@@ -391,19 +407,22 @@ export default async function DashboardPage({
                 </p>
               </div>
 
-              {/* Still shown, still exact — just outside the profit chain, so a
-                  client can see what they owe without it eating the result they
-                  earned. Hidden entirely when there is nothing to bill. */}
+              {/* Informational estimate outside the trading-profit chain. The
+                  exact amount owed lives in Payments after boundary counters
+                  and per-store weekly rounding have been applied. */}
               {fee > 0 && (
                 <div className="mt-3 border-t border-[var(--border-subtle)] pt-3 text-[13px]">
                   <div className="flex items-center justify-between gap-3">
-                    <span className="text-[var(--text-secondary)]">Dropscale fee</span>
+                    <span className="text-[var(--text-secondary)]">
+                      Estimated Dropscale fee
+                    </span>
                     <span className="font-medium whitespace-nowrap text-[var(--text-primary)]">
                       {money(fee, currency)}
                     </span>
                   </div>
                   <p className="mt-1 text-[11.5px] leading-relaxed text-[var(--text-muted)]">
-                    Billed separately — not deducted from the profit above.
+                    Based on reported daily spend. The exact weekly invoice is in Payments and
+                    is not deducted from the profit above.
                   </p>
                 </div>
               )}

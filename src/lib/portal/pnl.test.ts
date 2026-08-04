@@ -119,6 +119,20 @@ describe("buildPnlSheet", () => {
     expect(sheet.days[0].agencyFee).toBe(35); // 10 + 25, not 200 × some average
   });
 
+  it("keeps earlier days at their historical rate after a Monday referral change", () => {
+    const sheet = buildPnlSheet(
+      [
+        row({ day: "2026-07-05", ad_spend: 100 }),
+        row({ day: "2026-07-06", ad_spend: 100 }),
+      ],
+      ["2026-07-05", "2026-07-06"],
+      (_accountId, day) => (day < "2026-07-06" ? 10 : 9.5),
+    );
+
+    expect(sheet.days.map((day) => day.agencyFee)).toEqual([10, 9.5]);
+    expect(sheet.totals.agencyFee).toBe(19.5);
+  });
+
   it("re-derives total ratios from the sums, not by averaging the days", () => {
     const sheet = buildPnlSheet(
       [
