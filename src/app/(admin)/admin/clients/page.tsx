@@ -38,6 +38,11 @@ export default async function ClientsPage() {
   const allClients = clientsRes.data ?? [];
   const profiles = profilesRes.data ?? [];
   const allAccounts = accountsRes.data ?? [];
+  // Internal/admin-owned stores are useful for operations and testing, but are
+  // deliberately outside the agency billing contract and its Google boundary UI.
+  const adminIds = new Set(
+    profiles.filter((profile) => profile.role === "admin").map((profile) => profile.id),
+  );
   const pendingAccounts = allAccounts.filter((account) => account.status === "pending");
   const pendingRequests = requestsRes.data ?? [];
   const nameById = new Map(allClients.map((client) => [client.id, client.full_name]));
@@ -50,21 +55,25 @@ export default async function ClientsPage() {
   // Fail closed if the evidence table cannot be read. Treating an empty/error
   // response as "every legacy account is missing" would invite duplicate live
   // captures and turn a database fault into misleading review work.
-  const billingStartAuditFailed = Boolean(accountsRes.error || billingStartsRes.error);
+  const billingStartAuditFailed = Boolean(
+    accountsRes.error || profilesRes.error || billingStartsRes.error,
+  );
   const billingBoundaryAuditFailed = Boolean(
-    accountsRes.error || billingStartsRes.error || billingEndsRes.error,
+    accountsRes.error || profilesRes.error || billingStartsRes.error || billingEndsRes.error,
   );
   const untrackedAccounts = billingStartAuditFailed
     ? []
     : allAccounts.filter(
         (account) =>
           (account.status === "active" || account.status === "suspended") &&
+          !adminIds.has(account.client_id) &&
           !billingStartByAccount.has(account.id),
       );
   const billingAccounts = billingBoundaryAuditFailed
     ? []
     : allAccounts.flatMap((account) => {
         if (account.status !== "active" && account.status !== "suspended") return [];
+        if (adminIds.has(account.client_id)) return [];
         const billingStart = billingStartByAccount.get(account.id);
         if (!billingStart) return [];
         return [

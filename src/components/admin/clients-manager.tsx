@@ -462,7 +462,7 @@ export function ClientsManager({
           </FormAlert>
         ) : untrackedAccounts.length === 0 ? (
           <p className="text-[13px] text-[var(--text-muted)]">
-            Every approved Google Ads account has a billing start.
+            Every billable client Google Ads account has a billing start.
           </p>
         ) : (
           <ul className="space-y-2">
@@ -530,7 +530,7 @@ export function ClientsManager({
           </FormAlert>
         ) : billingAccounts.length === 0 ? (
           <p className="text-[13px] text-[var(--text-muted)]">
-            No approved Google account has an opening billing boundary yet.
+            No billable client Google account has an opening billing boundary yet.
           </p>
         ) : (
           <ul className="space-y-2">
