@@ -38,7 +38,7 @@ The production cutover is ready only when all of the following are true:
    window.
 3. Every active or suspended non-admin account is EUR and has one canonical
    10-digit Google Ads customer ID that the agency connection can read.
-4. The database migrations `0026` through `0032` have committed in order.
+4. The database migrations `0026` through `0033` have committed in order.
 5. Every active or suspended client Google account has a newly captured
    immutable billing start.
 6. The deployed Worker has the live Stripe key, Stripe webhook signing secret,
@@ -124,6 +124,7 @@ used, run one complete file at a time and stop immediately on the first error.
 5. `0030_manual_referral_discounts.sql`
 6. `0031_manual_referral_attribution.sql`
 7. `0032_billing_issue_leases.sql`
+8. `0033_disable_direct_invoice_inserts.sql`
 
 The sequence is intentional:
 
@@ -139,6 +140,10 @@ The sequence is intentional:
   journal and an admin-only attribution decision.
 - `0032` serialises Stripe issue attempts per client and records explicit send
   evidence so retries cannot double-send or revive an obsolete worker.
+- `0033` revokes direct invoice INSERT from browser and service roles. This
+  closes the still-deployed legacy admin endpoint during application rollout;
+  v3 creation remains available only through its validated SECURITY DEFINER
+  transaction.
 
 All migration preflights fail closed. A failure means the live facts differ
 from the reviewed cutover contract and require investigation, not a broad SQL
