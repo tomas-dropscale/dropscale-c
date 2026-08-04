@@ -1,5 +1,8 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { commissionClientLabel } from "@/lib/finance/config";
+import {
+  commissionClientLabel,
+  GOOGLE_ADS_NOTE_PREFIX,
+} from "./config";
 import type {
   CrmClient,
   Commission,
@@ -41,31 +44,89 @@ export async function fetchFinanceSnapshot(
   from: string,
   to: string,
 ): Promise<FinanceSnapshot> {
-  const [sources, clients, commissions, expenses] = await Promise.all([
-    supabase.from("revenue_sources").select("*").order("name"),
-    supabase.from("clients").select("*").order("name"),
-    supabase
-      .from("commissions")
-      .select("*")
-      .gte("occurred_on", from)
-      .lte("occurred_on", to)
-      .order("occurred_on", { ascending: false }),
-    supabase
-      .from("expenses")
-      .select("*")
-      .gte("incurred_on", from)
-      .lte("incurred_on", to)
-      .order("incurred_on", { ascending: false }),
-  ]);
+  const [sources, clients, commissions, expenses, starts, ends] =
+    await Promise.all([
+      supabase.from("revenue_sources").select("*").order("name"),
+      supabase.from("clients").select("*").order("name"),
+      supabase
+        .from("commissions")
+        .select("*")
+        .gte("occurred_on", from)
+        .lte("occurred_on", to)
+        .order("occurred_on", { ascending: false }),
+      supabase
+        .from("expenses")
+        .select("*")
+        .gte("incurred_on", from)
+        .lte("incurred_on", to)
+        .order("incurred_on", { ascending: false }),
+      supabase
+        .from("ad_account_billing_starts")
+        .select("ad_account_id, google_local_date"),
+      supabase
+        .from("ad_account_billing_ends")
+        .select("ad_account_id, google_local_date"),
+    ]);
 
   return {
     sources: sources.data ?? [],
     clients: clients.data ?? [],
-    commissions: commissions.data ?? [],
+    commissions: boundCommissionLedger(
+      commissions.data ?? [],
+      ledgerBoundaries(starts.data ?? [], ends.data ?? []),
+    ),
     expenses: expenses.data ?? [],
     from,
     to,
   };
+}
+
+export type LedgerBoundary = { start?: string; end?: string };
+
+/** Earliest start and latest end per account, as immutable billing days. */
+export function ledgerBoundaries(
+  starts: { ad_account_id: string; google_local_date: string }[],
+  ends: { ad_account_id: string; google_local_date: string }[],
+): Map<string, LedgerBoundary> {
+  const boundaries = new Map<string, LedgerBoundary>();
+  for (const row of starts) {
+    const boundary = boundaries.get(row.ad_account_id) ?? {};
+    if (!boundary.start || row.google_local_date < boundary.start) {
+      boundary.start = row.google_local_date;
+    }
+    boundaries.set(row.ad_account_id, boundary);
+  }
+  for (const row of ends) {
+    const boundary = boundaries.get(row.ad_account_id) ?? {};
+    if (!boundary.end || row.google_local_date > boundary.end) {
+      boundary.end = row.google_local_date;
+    }
+    boundaries.set(row.ad_account_id, boundary);
+  }
+  return boundaries;
+}
+
+/**
+ * Google Ads ledger rows are agency revenue only inside the account's billing
+ * boundaries. Rows with no account binding are unattributable sync artifacts
+ * (they double-counted onboarding spend once) and never count; rows before
+ * the immutable billing start or after the billing end are observed spend the
+ * agency never bills. An account with no recorded start keeps its history —
+ * the boundary discipline postdates the oldest ledger rows. Other revenue
+ * sources (HST, revenue share) pass through untouched.
+ */
+export function boundCommissionLedger<
+  T extends Pick<Commission, "notes" | "ad_account_id" | "occurred_on">,
+>(commissions: T[], boundariesByAccount: ReadonlyMap<string, LedgerBoundary>): T[] {
+  return commissions.filter((entry) => {
+    if (!entry.notes?.startsWith(GOOGLE_ADS_NOTE_PREFIX)) return true;
+    if (!entry.ad_account_id) return false;
+    const boundary = boundariesByAccount.get(entry.ad_account_id);
+    if (!boundary) return true;
+    if (boundary.start && entry.occurred_on < boundary.start) return false;
+    if (boundary.end && entry.occurred_on > boundary.end) return false;
+    return true;
+  });
 }
 
 // ---------------------------------------------------------------------------

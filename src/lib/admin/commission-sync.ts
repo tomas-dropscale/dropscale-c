@@ -120,6 +120,18 @@ type BillingEndRow = {
  * that link exists, the note is the only place the finance pages can learn who
  * earned the money, and without it every synced euro reads as "Unattributed".
  */
+/**
+ * A synced ledger row must always bind its ad account: account-less Google
+ * rows written during a 2026-08 store onboarding double-counted real spend on
+ * the revenue pages, and the finance reader now drops any such row outright.
+ */
+function ensureLedgerAccountBinding(accountId: string | null | undefined): string {
+  if (!accountId) {
+    throw new Error("A synced ledger row requires its ad account binding.");
+  }
+  return accountId;
+}
+
 function noteFor(prefix: string, clientName: string | undefined, storeName: string): string {
   const detail = `${NOTE_DETAIL_SEPARATOR}${storeName}`;
 
@@ -589,7 +601,7 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
               const { error: insertError } = await supabase.from("commissions").insert({
                 source_id: source.id,
                 client_id: crmByLogin.get(account.client_id) ?? null,
-                ad_account_id: account.id,
+                ad_account_id: ensureLedgerAccountBinding(account.id),
                 occurred_on: day.date,
                 gross_amount: grossAmount,
                 rate,
@@ -875,7 +887,7 @@ export async function syncRevenueShareLedger(opts?: SyncOpts): Promise<void> {
             await supabase.from("commissions").insert({
               source_id: source.id,
               client_id: crmByLogin.get(account.client_id) ?? null,
-              ad_account_id: account.id,
+              ad_account_id: ensureLedgerAccountBinding(account.id),
               occurred_on: metric.day,
               gross_amount: base,
               rate,

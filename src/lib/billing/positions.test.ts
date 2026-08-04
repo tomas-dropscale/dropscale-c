@@ -401,3 +401,120 @@ describe("billing positions", () => {
     });
   });
 });
+
+describe("pending closed weeks and overdue balances", () => {
+  it("lists an unbilled certified week with its date range", () => {
+    const result = position({
+      certifiedClosedAmounts: [certified({ amount: 42.17 })],
+    });
+
+    expect(result.clients[0].closed.weeks).toEqual([
+      {
+        periodStart: "2026-07-27",
+        periodEnd: "2026-08-02",
+        amount: 42.17,
+        state: "unissued",
+        overdueDays: 0,
+      },
+    ]);
+  });
+
+  it("shows the invoice-backed state instead of a duplicate certified row", () => {
+    const result = position({
+      certifiedClosedAmounts: [certified({ amount: 2.78 })],
+      invoices: [
+        invoice({ status: "draft", amount: 2.78, issuedAt: null }),
+      ],
+    });
+
+    expect(result.clients[0].closed.weeks).toEqual([
+      {
+        periodStart: "2026-07-27",
+        periodEnd: "2026-08-02",
+        amount: 2.78,
+        state: "draft",
+        overdueDays: 0,
+      },
+    ]);
+  });
+
+  it("marks an open invoice past its due date as overdue, per week and in totals", () => {
+    const result = position({
+      invoices: [
+        invoice({
+          amountRemaining: 16.86,
+          periodEnd: "2026-08-02",
+          dueDate: "2026-08-01",
+        }),
+      ],
+    });
+
+    expect(result.clients[0].closed.weeks).toEqual([
+      {
+        periodStart: "2026-07-27",
+        periodEnd: "2026-08-02",
+        amount: 16.86,
+        state: "open",
+        overdueDays: 3,
+      },
+    ]);
+    expect(result.clients[0].closed.overdueOutstanding).toBe(16.86);
+    expect(result.summary.overdueOutstanding).toBe(16.86);
+    expect(result.summary.clientsOverdue).toBe(1);
+  });
+
+  it("keeps an open invoice inside its payment window out of the overdue bucket", () => {
+    const result = position({
+      invoices: [invoice({ amountRemaining: 9.62, dueDate: "2026-08-10" })],
+    });
+
+    expect(result.clients[0].closed.weeks[0]).toMatchObject({
+      state: "open",
+      overdueDays: 0,
+    });
+    expect(result.clients[0].closed.overdueOutstanding).toBe(0);
+    expect(result.summary.clientsOverdue).toBe(0);
+  });
+
+  it("lists a written-off week as failed and never lists a paid week", () => {
+    const result = position({
+      invoices: [
+        invoice({ status: "uncollectible", amountRemaining: 7.5 }),
+        invoice({
+          status: "paid",
+          periodStart: "2026-07-20",
+          amountRemaining: 0,
+        }),
+      ],
+    });
+
+    expect(result.clients[0].closed.weeks).toEqual([
+      {
+        periodStart: "2026-07-27",
+        periodEnd: "2026-08-02",
+        amount: 7.5,
+        state: "failed",
+        overdueDays: 0,
+      },
+    ]);
+  });
+
+  it("orders pending weeks oldest first across certified and invoiced cycles", () => {
+    const result = position({
+      certifiedClosedAmounts: [
+        certified({ periodStart: "2026-07-27", periodEnd: "2026-08-02" }),
+      ],
+      invoices: [
+        invoice({
+          periodStart: "2026-07-20",
+          periodEnd: "2026-07-26",
+          amountRemaining: 12.83,
+        }),
+      ],
+    });
+
+    expect(
+      result.clients[0].closed.weeks.map((week) => week.periodStart),
+    ).toEqual(["2026-07-20", "2026-07-27"]);
+  });
+});

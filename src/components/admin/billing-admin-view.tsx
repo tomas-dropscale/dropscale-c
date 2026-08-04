@@ -19,6 +19,7 @@ import { FormAlert } from "@/components/auth/auth-card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type { BillingAdminDashboard } from "@/lib/billing/invoices";
+import type { BillingClosedWeekEntry } from "@/lib/billing/positions";
 import { money, shortDate } from "@/lib/format-intl";
 import { fmt, type Dictionary } from "@/lib/i18n";
 import { useI18n } from "@/lib/i18n/provider";
@@ -86,6 +87,19 @@ function requestError(body: unknown, fallback: string) {
   if (typeof record.error === "string") return record.error;
   if (typeof record.message === "string") return record.message;
   return fallback;
+}
+
+function weekStateLabel(state: BillingClosedWeekEntry["state"], d: Dictionary) {
+  switch (state) {
+    case "unissued":
+      return d.adminBilling.notIssued;
+    case "draft":
+      return d.adminBilling.statusDraft;
+    case "open":
+      return d.adminBilling.statusOpen;
+    case "failed":
+      return d.adminBilling.statusUncollectible;
+  }
 }
 
 function deliveryNeedsReconciliation(invoice: {
@@ -241,6 +255,16 @@ export function BillingAdminView({
   const failedDetail = `${fmt(d.adminBilling.failedCount, {
     count: dashboard.summary.failedCount,
   })} · ${money(dashboard.summary.failed, intl, dashboard.currency)}`;
+  const outstandingDetail =
+    dashboard.positions.summary.overdueOutstanding > 0
+      ? `${fmt(d.adminBilling.overdueDetail, {
+          amount: money(
+            dashboard.positions.summary.overdueOutstanding,
+            intl,
+            dashboard.currency,
+          ),
+        })} · ${failedDetail}`
+      : failedDetail;
   const notReceivedDetail = `${fmt(d.adminBilling.closedThrough, {
     date: shortDate(dashboard.positions.closedThrough, intl),
   })}${
@@ -256,6 +280,8 @@ export function BillingAdminView({
     : null;
   const clientPositions = [...dashboard.positions.clients].sort(
     (left, right) =>
+      Number(right.closed.overdueOutstanding > 0) -
+        Number(left.closed.overdueOutstanding > 0) ||
       Number(right.closed.needsAttentionCount > 0) -
         Number(left.closed.needsAttentionCount > 0) ||
       right.closed.supportedNotReceived - left.closed.supportedNotReceived ||
@@ -339,9 +365,13 @@ export function BillingAdminView({
               intl,
               dashboard.currency,
             )}
-            detail={fmt(d.adminBilling.invoiceCount, {
+            detail={`${formatPeriod(
+              dashboard.selectedWeek.start,
+              dashboard.selectedWeek.end,
+              intl,
+            )} · ${fmt(d.adminBilling.invoiceCount, {
               count: dashboard.summary.invoiceCount,
-            })}
+            })}`}
             icon={CalendarDays}
           />
           <SummaryCard
@@ -373,7 +403,7 @@ export function BillingAdminView({
               intl,
               dashboard.currency,
             )}
-            detail={failedDetail}
+            detail={outstandingDetail}
             tone={dashboard.summary.failedCount > 0 ? "warning" : "gold"}
             icon={
               dashboard.summary.failedCount > 0
@@ -493,6 +523,17 @@ export function BillingAdminView({
                     <h3 className="truncate text-[14px] font-semibold text-[var(--text-primary)]">
                       {position.clientName}
                     </h3>
+                    {position.closed.overdueOutstanding > 0 && (
+                      <Badge variant="danger">
+                        {fmt(d.adminBilling.overdueDetail, {
+                          amount: money(
+                            position.closed.overdueOutstanding,
+                            intl,
+                            position.currency,
+                          ),
+                        })}
+                      </Badge>
+                    )}
                     {position.closed.needsAttentionCount > 0 && (
                       <Badge variant="warning">
                         {d.adminBilling.needsAttention}
@@ -574,6 +615,36 @@ export function BillingAdminView({
                   </p>
                 </div>
               </div>
+
+              {position.closed.weeks.length > 0 && (
+                <ul className="mt-4 space-y-1.5 border-t border-[var(--border-subtle)] pt-3">
+                  {position.closed.weeks.map((week) => (
+                    <li
+                      key={week.periodStart}
+                      className="flex items-center justify-between gap-3 text-[11.5px]"
+                    >
+                      <span className="text-[var(--text-muted)]">
+                        {formatPeriod(week.periodStart, week.periodEnd, intl)}
+                      </span>
+                      <span className="flex items-center gap-2">
+                        {week.overdueDays > 0 && (
+                          <Badge variant="danger">
+                            {fmt(d.adminBilling.overdueBadge, {
+                              days: week.overdueDays,
+                            })}
+                          </Badge>
+                        )}
+                        <span className="text-[var(--text-secondary)]">
+                          {weekStateLabel(week.state, d)}
+                        </span>
+                        <span className="min-w-[4.5rem] text-right font-medium text-[var(--text-primary)] tabular-nums">
+                          {money(week.amount, intl, position.currency)}
+                        </span>
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </article>
           ))}
         </div>

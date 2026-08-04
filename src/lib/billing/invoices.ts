@@ -1506,7 +1506,7 @@ async function fetchPositionInvoices(
     let query = supabase
       .from("invoices")
       .select(
-        "id, client_id, period_start, currency, status, amount, amount_remaining, issued_at, calculation_version, issue_error, payment_failed_at",
+        "id, client_id, period_start, period_end, currency, status, amount, amount_remaining, issued_at, due_date, calculation_version, issue_error, payment_failed_at",
       )
       .in("client_id", clientIds)
       .order("id", { ascending: true })
@@ -1520,11 +1520,13 @@ async function fetchPositionInvoices(
       id: row.id,
       clientId: row.client_id,
       periodStart: row.period_start,
+      periodEnd: row.period_end,
       currency: row.currency,
       status: row.status,
       amount: row.amount,
       amountRemaining: row.amount_remaining,
       issuedAt: row.issued_at,
+      dueDate: row.due_date,
       calculationVersion: row.calculation_version,
       issueError: row.issue_error,
       paymentFailedAt: row.payment_failed_at,
@@ -1537,11 +1539,13 @@ async function fetchPositionInvoices(
   return rows.map((row) => ({
     clientId: row.clientId,
     periodStart: row.periodStart,
+    periodEnd: row.periodEnd,
     currency: row.currency,
     status: row.status,
     amount: row.amount,
     amountRemaining: row.amountRemaining,
     issuedAt: row.issuedAt,
+    dueDate: row.dueDate,
     calculationVersion: row.calculationVersion,
     issueError: row.issueError,
     paymentFailedAt: row.paymentFailedAt,

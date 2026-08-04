@@ -122,14 +122,30 @@ export type BillingPositionMetricRow = {
 export type BillingPositionInvoice = {
   clientId: string;
   periodStart: string;
+  periodEnd?: string | null;
   currency: string;
   status: "draft" | "open" | "paid" | "void" | "uncollectible" | "waived";
   amount: string | number;
   amountRemaining: string | number | null;
   issuedAt: string | null;
+  dueDate?: string | null;
   calculationVersion: string;
   issueError?: string | null;
   paymentFailedAt?: string | null;
+};
+
+/**
+ * One pending closed week in a client's position — the per-week answer to
+ * "which cycles does this client still owe". Settled weeks (paid, waived,
+ * legitimately void) never appear here.
+ */
+export type BillingClosedWeekEntry = {
+  periodStart: string;
+  periodEnd: string;
+  amount: number;
+  state: "unissued" | "draft" | "open" | "failed";
+  /** Whole days past the invoice due date; 0 unless state is "open". */
+  overdueDays: number;
 };
 
 /**
@@ -161,6 +177,8 @@ export type BillingClientPosition = {
     /** Compatibility field; unresolved rows never enter the closed balance. */
     needsEntryReview: number;
     issuedOutstanding: number;
+    /** Portion of issuedOutstanding whose invoice is past its due date. */
+    overdueOutstanding: number;
     /** Compatibility field; written-off balances are not collectible. */
     failedNotReceived: number;
     supportedNotReceived: number;
@@ -169,6 +187,8 @@ export type BillingClientPosition = {
     missingStartCount: number;
     needsAttentionCount: number;
     lastLedgerUpdate: string | null;
+    /** Pending closed weeks, oldest first. */
+    weeks: BillingClosedWeekEntry[];
   };
   current: {
     periodStart: string;
@@ -187,6 +207,7 @@ export type BillingPositionSummary = {
   closedSupportedUnissued: number;
   closedNeedsEntryReview: number;
   issuedOutstanding: number;
+  overdueOutstanding: number;
   failedNotReceived: number;
   supportedNotReceived: number;
   maximumNotReceived: number;
@@ -194,6 +215,7 @@ export type BillingPositionSummary = {
   currentAccruedFee: number;
   clientsNeedingEntryReview: number;
   clientsNeedingAttention: number;
+  clientsOverdue: number;
 };
 
 export type BillingPositions = {
@@ -318,6 +340,10 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
 
   type MutablePosition = BillingClientPosition & {
     closedPeriodStarts: Set<string>;
+    /** Weeks materialised by an invoice; wins over the certified entry. */
+    invoiceWeeks: Map<string, BillingClosedWeekEntry>;
+    /** Certified weeks no invoice occupies yet. */
+    unissuedWeeks: Map<string, BillingClosedWeekEntry>;
   };
   const positions = new Map<string, MutablePosition>();
   for (const client of input.clients) {
@@ -332,6 +358,7 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
         supportedUnissued: 0,
         needsEntryReview: 0,
         issuedOutstanding: 0,
+        overdueOutstanding: 0,
         failedNotReceived: 0,
         supportedNotReceived: 0,
         maximumNotReceived: 0,
@@ -339,6 +366,7 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
         missingStartCount: 0,
         needsAttentionCount: 0,
         lastLedgerUpdate: null,
+        weeks: [],
       },
       current: {
         periodStart: currentPeriod.start,
@@ -351,6 +379,8 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
         updatedAt: null,
       },
       closedPeriodStarts: new Set(),
+      invoiceWeeks: new Map(),
+      unissuedWeeks: new Map(),
     });
   }
 
@@ -439,6 +469,16 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
     position.closed.supportedUnissued = round2(
       position.closed.supportedUnissued + amount,
     );
+    position.unissuedWeeks.set(certified.periodStart, {
+      periodStart: certified.periodStart,
+      periodEnd: certified.periodEnd,
+      amount: round2(
+        (position.unissuedWeeks.get(certified.periodStart)?.amount ?? 0) +
+          amount,
+      ),
+      state: "unissued",
+      overdueDays: 0,
+    });
     position.closedPeriodStarts.add(certified.periodStart);
     position.closed.lastLedgerUpdate = newest(
       position.closed.lastLedgerUpdate,
@@ -459,10 +499,41 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
       continue;
     }
 
+    const weekEnd = invoice.periodEnd ?? addDays(invoice.periodStart, 6);
     if (invoice.status === "open" && invoice.issuedAt && isEur) {
       position.closed.issuedOutstanding = round2(
         position.closed.issuedOutstanding + remaining,
       );
+      const overdueDays =
+        invoice.dueDate && invoice.dueDate < today
+          ? Math.floor(
+              (Date.parse(`${today}T00:00:00.000Z`) -
+                Date.parse(`${invoice.dueDate}T00:00:00.000Z`)) /
+                86_400_000,
+            )
+          : 0;
+      if (overdueDays > 0) {
+        position.closed.overdueOutstanding = round2(
+          position.closed.overdueOutstanding + remaining,
+        );
+      }
+      position.invoiceWeeks.set(invoice.periodStart, {
+        periodStart: invoice.periodStart,
+        periodEnd: weekEnd,
+        amount: remaining,
+        state: "open",
+        overdueDays,
+      });
+    }
+
+    if (invoice.status === "draft" && isEur) {
+      position.invoiceWeeks.set(invoice.periodStart, {
+        periodStart: invoice.periodStart,
+        periodEnd: weekEnd,
+        amount: round2(Number(invoice.amount)),
+        state: "draft",
+        overdueDays: 0,
+      });
     }
 
     // A written-off invoice occupies its certified week, which suppresses the
@@ -473,6 +544,13 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
       position.closed.failedNotReceived = round2(
         position.closed.failedNotReceived + remaining,
       );
+      position.invoiceWeeks.set(invoice.periodStart, {
+        periodStart: invoice.periodStart,
+        periodEnd: weekEnd,
+        amount: remaining,
+        state: "failed",
+        overdueDays: 0,
+      });
     }
 
     if (
@@ -595,7 +673,7 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
   }
 
   const clients = [...positions.values()]
-    .map(({ closedPeriodStarts, ...position }) => {
+    .map(({ closedPeriodStarts, invoiceWeeks, unissuedWeeks, ...position }) => {
       position.closed.periodCount = closedPeriodStarts.size;
       position.closed.supportedNotReceived = round2(
         position.closed.supportedUnissued +
@@ -604,6 +682,16 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
       position.closed.maximumNotReceived = round2(
         position.closed.unissuedEstimate +
           position.closed.issuedOutstanding,
+      );
+      // An invoice-backed entry supersedes the certified one for the same
+      // week: the money is the same receivable, now materialised.
+      position.closed.weeks = [
+        ...[...unissuedWeeks.entries()]
+          .filter(([periodStart]) => !invoiceWeeks.has(periodStart))
+          .map(([, entry]) => entry),
+        ...invoiceWeeks.values(),
+      ].sort((left, right) =>
+        left.periodStart.localeCompare(right.periodStart),
       );
       return position;
     })
@@ -632,6 +720,9 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
       issuedOutstanding: sum(
         (position) => position.closed.issuedOutstanding,
       ),
+      overdueOutstanding: sum(
+        (position) => position.closed.overdueOutstanding,
+      ),
       failedNotReceived: sum(
         (position) => position.closed.failedNotReceived,
       ),
@@ -648,6 +739,9 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
       ).length,
       clientsNeedingAttention: clients.filter(
         (position) => position.closed.needsAttentionCount > 0,
+      ).length,
+      clientsOverdue: clients.filter(
+        (position) => position.closed.overdueOutstanding > 0,
       ).length,
     },
     clients,
