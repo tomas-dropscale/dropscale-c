@@ -259,6 +259,25 @@ Invoice instead of trusting delivery order.
 5. Only after accepting that batch, set both gates to the exact value `true`
    and invoke the protected billing cron. No admin confirmation dialog is part
    of the normal issuance path.
+   The one-time historical rollover deliberately delivers at most one Stripe
+   invoice per invocation, and enters at most two candidates in total, to keep
+   a single invocation inside the Worker's external-subrequest budget. Repeat
+   the protected run until every sealed rollover is issued; leases, receipts
+   and Stripe idempotency make those retries safe. Delivery order is fair:
+   never-attempted rollovers go first (those with a recorded `issue_error`
+   demoted behind clean work), then failed attempts rotate oldest-first
+   through the durable `issue_attempted_at` stamp claimed before each
+   delivery, so a permanently failing rollover cannot starve the clients
+   behind it. The completion authority is `stripeInvoiceRecoveryMode` alone —
+   an invoice that finalized (`open`, `issued_at` set) but never recorded
+   `stripe_sent_at` is still send-only work, not a settled delivery. Two
+   operational cautions remain: `reconcileInvoices` runs after every cron
+   invocation and spends roughly three external calls per open invoice, so on
+   the Workers Free plan the repeat-until-done recovery approaches the
+   50-subrequest cap as delivered-but-unpaid invoices accumulate (upgrade the
+   plan, or space the runs so clients pay in between), and the whole historical
+   backlog must be cleared before the next Monday seeds the recurring weekly
+   queue into the same invocation.
 6. Verify that each expected Stripe `send_invoice` Invoice is in EUR, contains
    only agency-fee lines, has a hosted URL and matches its local invoice ID in
    metadata.

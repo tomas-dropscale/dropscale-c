@@ -90,6 +90,7 @@ import {
   stripeInvoiceRecoveryMode,
 } from "@/lib/billing/invoice-delivery";
 import { automaticBillingIssuanceEnabled } from "@/lib/billing/issuance-gate";
+import { planHistoricalRolloverDelivery } from "@/lib/billing/historical-rollover-batch";
 import {
   fetchBillingAutomationAttentionClientIds,
   fetchBillingAutomationPositionTargets,
@@ -2720,6 +2721,46 @@ function primaryAutomaticBlocker(preview: BillingClientPreview): BillingBlocker 
   );
 }
 
+/**
+ * Stamp the durable attempt marker with the same compare-and-set discipline as
+ * the manual issue path: the update only lands on the exact status and
+ * `issue_attempted_at` generation this worker loaded, and a send-only recovery
+ * additionally requires that no delivery marker appeared in the meantime. A
+ * null return means another worker claimed the invoice first.
+ */
+async function claimHistoricalIssueAttempt(
+  client: Supabase,
+  invoice: Invoice,
+): Promise<Invoice | null> {
+  const recoveryMode = stripeInvoiceRecoveryMode(invoice);
+  // A settled invoice must never have its attempt bookkeeping mutated, even
+  // when a race delivers one to this claim.
+  if (recoveryMode === null) return null;
+  let claim = client
+    .from("invoices")
+    .update({
+      issue_attempted_at: new Date().toISOString(),
+      issue_error: null,
+    })
+    .eq("id", invoice.id)
+    .eq("status", invoice.status);
+  claim = invoice.issue_attempted_at
+    ? claim.eq("issue_attempted_at", invoice.issue_attempted_at)
+    : claim.is("issue_attempted_at", null);
+  if (recoveryMode === "send_only") {
+    claim = claim
+      .is("stripe_sent_at", null)
+      .is("stripe_delivery_assumed_at", null);
+  }
+  const { data: claimed, error } = await claim.select("*").maybeSingle();
+  if (error) {
+    throw new Error(
+      `Could not claim the historical issue attempt: ${error.message}`,
+    );
+  }
+  return (claimed as Invoice | null) ?? null;
+}
+
 async function issueAutomaticHistoricalRollovers(
   client: Supabase,
   result: AutomaticBillingResult,
@@ -2740,10 +2781,76 @@ async function issueAutomaticHistoricalRollovers(
 
   const rollovers = (data ?? []) as HistoricalBillingRolloverReview[];
   result.historicalRolloversChecked += rollovers.length;
-  if (rollovers.length > 0) result.periodsChecked += 1;
+  if (rollovers.length === 0) return;
+  result.periodsChecked += 1;
+  result.clientsChecked += rollovers.length;
 
-  for (const rollover of rollovers) {
-    result.clientsChecked += 1;
+  const receiptIds = rollovers
+    .map((rollover) => rollover.invoice_id)
+    .filter((invoiceId): invoiceId is string => Boolean(invoiceId));
+  const receiptsById = new Map<string, Invoice>();
+  let planRollovers = rollovers;
+  if (receiptIds.length > 0) {
+    const { data: receiptRows, error: receiptsError } = await client
+      .from("invoices")
+      .select("*")
+      .in("id", receiptIds);
+    if (receiptsError) {
+      // Degrade instead of abandoning the queue: rollovers without a receipt
+      // never needed this read, so they stay deliverable; the rest defer to a
+      // later run rather than being misreported as missing receipts.
+      result.errors.push({
+        clientId: null,
+        periodStart: null,
+        code: "historical_rollover_receipts_load_failed",
+        message: receiptsError.message,
+      });
+      planRollovers = rollovers.filter((rollover) => !rollover.invoice_id);
+      result.blocked += rollovers.length - planRollovers.length;
+      if (planRollovers.length === 0) return;
+    } else {
+      for (const receipt of (receiptRows ?? []) as Invoice[]) {
+        receiptsById.set(receipt.id, receipt);
+      }
+    }
+  }
+
+  const plan = planHistoricalRolloverDelivery(planRollovers, receiptsById, {
+    now: Date.now(),
+    lockMs: ISSUE_LOCK_MS,
+  });
+  result.alreadySettled += plan.settled.length;
+  result.blocked += plan.inProgress.length;
+  for (const rollover of plan.missingReceipts) {
+    result.errors.push({
+      clientId: rollover.client_id,
+      periodStart: rollover.period_start,
+      code: "historical_rollover_issue_failed",
+      message: "The historical rollover invoice receipt is missing.",
+    });
+  }
+
+  // A Worker invocation cannot absorb the whole sealed backlog: the 2026-08-04
+  // run exhausted its external-request budget mid-second-invoice. Spend at
+  // most one Stripe delivery attempt per invocation, and enter at most two
+  // candidates in total — every entered candidate costs external calls (lease,
+  // reload/create, claim) even when it never reaches Stripe, so the entry cap
+  // is what actually bounds the budget when candidates fail early. A failed
+  // delivery rotates to the back of the queue through the durable
+  // issue_attempted_at stamp claimed below.
+  const maxCandidateEntries = 2;
+  let candidateEntries = 0;
+  let stripeAttempted = false;
+  for (const candidate of plan.candidates) {
+    if (stripeAttempted || candidateEntries >= maxCandidateEntries) {
+      // Bounded operational deferral, not missing commercial evidence. A later
+      // idempotent run resumes the remaining sealed rollovers.
+      result.blocked += 1;
+      continue;
+    }
+    candidateEntries += 1;
+
+    const { rollover } = candidate;
     let lease: BillingIssueLeaseHandle | null = null;
     let invoice: Invoice | null = null;
 
@@ -2757,6 +2864,16 @@ async function issueAutomaticHistoricalRollovers(
         throw new Error("The sealed historical rollover contract is invalid.");
       }
 
+      lease = await acquireBillingIssueLease(client, {
+        clientId: rollover.client_id,
+        periodStart: rollover.period_start,
+        issuedBy: null,
+      });
+      if (!lease) {
+        result.blocked += 1;
+        continue;
+      }
+
       if (rollover.invoice_id) {
         const { data: stored, error: invoiceError } = await client
           .from("invoices")
@@ -2768,23 +2885,10 @@ async function issueAutomaticHistoricalRollovers(
           throw new Error("The historical rollover invoice receipt is missing.");
         }
         invoice = stored as Invoice;
-        if (stripeInvoiceRecoveryMode(invoice) === null) {
-          result.alreadySettled += 1;
-          continue;
-        }
-      }
-
-      lease = await acquireBillingIssueLease(client, {
-        clientId: rollover.client_id,
-        periodStart: rollover.period_start,
-        issuedBy: null,
-      });
-      if (!lease) {
-        result.blocked += 1;
-        continue;
-      }
-
-      if (!invoice) {
+      } else {
+        // The creation RPC is idempotent and returns the EXISTING invoice when
+        // a concurrent run already materialised this rollover, so the fresh
+        // settled/in-progress checks below must cover both branches.
         const { data: createdRows, error: createError } = await client.rpc(
           "create_historical_rollover_invoice",
           { p_rollover_id: rollover.rollover_id },
@@ -2794,6 +2898,20 @@ async function issueAutomaticHistoricalRollovers(
         if (!invoice) {
           throw new Error("Historical rollover creation returned no invoice.");
         }
+      }
+
+      if (stripeInvoiceRecoveryMode(invoice) === null) {
+        result.alreadySettled += 1;
+        continue;
+      }
+      if (
+        !invoice.issue_error &&
+        invoice.issue_attempted_at &&
+        Date.now() - new Date(invoice.issue_attempted_at).getTime() <
+          ISSUE_LOCK_MS
+      ) {
+        result.blocked += 1;
+        continue;
       }
 
       if (
@@ -2811,6 +2929,14 @@ async function issueAutomaticHistoricalRollovers(
         );
       }
 
+      const claimed = await claimHistoricalIssueAttempt(client, invoice);
+      if (!claimed) {
+        result.blocked += 1;
+        continue;
+      }
+      invoice = claimed;
+
+      stripeAttempted = true;
       const ownedLease = lease;
       await pushToStripe(client, invoice, () =>
         renewBillingIssueLease(client, ownedLease),
