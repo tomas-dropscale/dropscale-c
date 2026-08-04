@@ -1,12 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
+  automaticBillingIssuanceEnabled: vi.fn(),
   billingIssuanceEnabled: vi.fn(),
   checkStripeReadiness: vi.fn(),
   getSessionProfile: vi.fn(),
 }));
 
 vi.mock("@/lib/billing/issuance-gate", () => ({
+  automaticBillingIssuanceEnabled: mocks.automaticBillingIssuanceEnabled,
   billingIssuanceEnabled: mocks.billingIssuanceEnabled,
 }));
 vi.mock("@/lib/stripe/client", () => ({
@@ -36,6 +38,7 @@ describe("admin Stripe readiness route", () => {
       },
     });
     mocks.billingIssuanceEnabled.mockReturnValue(false);
+    mocks.automaticBillingIssuanceEnabled.mockReturnValue(false);
     mocks.checkStripeReadiness.mockResolvedValue({
       keyMode: "live",
       liveMode: true,
@@ -71,9 +74,10 @@ describe("admin Stripe readiness route", () => {
     await expect(response.json()).resolves.toEqual({ error: "Forbidden." });
     expect(mocks.checkStripeReadiness).not.toHaveBeenCalled();
     expect(mocks.billingIssuanceEnabled).not.toHaveBeenCalled();
+    expect(mocks.automaticBillingIssuanceEnabled).not.toHaveBeenCalled();
   });
 
-  it("returns normalized, no-store readiness without enabling issuance", async () => {
+  it("reports infrastructure readiness separately from locked issuance", async () => {
     const response = await GET();
 
     expect(response.status).toBe(200);
@@ -87,6 +91,7 @@ describe("admin Stripe readiness route", () => {
       webhookSecretConfigured: true,
       serviceRoleConfigured: true,
       issuanceEnabled: false,
+      automationEnabled: false,
       permissions: {
         customersRead: true,
         invoicesRead: true,
@@ -97,10 +102,32 @@ describe("admin Stripe readiness route", () => {
     expect(mocks.checkStripeReadiness).toHaveBeenCalledWith();
   });
 
+  it("reports armed gates without changing the infrastructure result", async () => {
+    mocks.billingIssuanceEnabled.mockReturnValue(true);
+    mocks.automaticBillingIssuanceEnabled.mockReturnValue(true);
+
+    const response = await GET();
+
+    await expect(response.json()).resolves.toMatchObject({
+      ready: true,
+      liveMode: true,
+      webhookSecretConfigured: true,
+      serviceRoleConfigured: true,
+      issuanceEnabled: true,
+      automationEnabled: true,
+      permissions: {
+        customersRead: true,
+        invoicesRead: true,
+        invoiceItemsRead: true,
+      },
+    });
+  });
+
   it("fails readiness for missing server secrets or any denied read", async () => {
     vi.stubEnv("STRIPE_WEBHOOK_SECRET", "");
     vi.stubEnv("SUPABASE_SERVICE_ROLE_KEY", undefined);
     mocks.billingIssuanceEnabled.mockReturnValue(true);
+    mocks.automaticBillingIssuanceEnabled.mockReturnValue(true);
     mocks.checkStripeReadiness.mockResolvedValue({
       keyMode: "live",
       liveMode: true,
@@ -120,6 +147,7 @@ describe("admin Stripe readiness route", () => {
       webhookSecretConfigured: false,
       serviceRoleConfigured: false,
       issuanceEnabled: true,
+      automationEnabled: true,
       permissions: { invoicesRead: false },
       limitations: LIMITATIONS,
     });

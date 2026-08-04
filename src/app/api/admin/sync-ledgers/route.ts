@@ -60,10 +60,9 @@ export async function POST(request: NextRequest) {
           { status: 409 },
         );
       }
-      // Monday's machine job captures Google's latest available snapshot for
-      // the just-closed Monday-to-Sunday week. It still cannot issue an
-      // invoice: issuance lives only behind the authenticated admin
-      // confirmation route.
+      // Monday's first machine step captures Google's latest available
+      // snapshot for the just-closed Monday-to-Sunday week. The following
+      // protected billing step may issue only after this proof is complete.
       return run({ force: true, client: supabase, period }, true);
     }
     return run({ force: true, client: supabase });

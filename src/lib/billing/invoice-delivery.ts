@@ -1,6 +1,7 @@
 import type { Invoice } from "@/lib/supabase/types";
 
 export type StripeInvoiceRecoveryMode = "draft" | "send_only" | null;
+export type AutomaticInvoiceAction = "settled" | "blocked" | "issue";
 
 type DeliveryRecoveryInvoice = Pick<
   Invoice,
@@ -37,4 +38,19 @@ export function stripeInvoiceRecoveryMode(
   }
 
   return null;
+}
+
+/**
+ * Route a closed-week preview without confusing a locally-created Stripe
+ * object with a delivered settlement. Draft and send-only recovery states
+ * remain actionable even when a temporary blocker makes `canIssue` false.
+ */
+export function automaticInvoiceAction(
+  invoice: DeliveryRecoveryInvoice | null,
+  canIssue: boolean,
+): AutomaticInvoiceAction {
+  if (invoice && stripeInvoiceRecoveryMode(invoice) === null) {
+    return "settled";
+  }
+  return canIssue ? "issue" : "blocked";
 }

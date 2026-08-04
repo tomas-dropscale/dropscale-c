@@ -1,5 +1,5 @@
 /**
- * Pure arithmetic for the agency's manual weekly billing flow.
+ * Pure arithmetic for the agency's weekly billing flow.
  *
  * The client pays Google directly. Dropscale therefore invoices exactly one
  * thing: the agency fee over the Google Ads spend recorded for a closed
@@ -10,14 +10,14 @@
 
 import type { InvoiceLine } from "@/lib/supabase/types";
 
-/** How long a client has to pay a manually issued invoice. */
+/** How long a client has to pay an issued agency invoice. */
 export const DAYS_UNTIL_DUE = 7;
 
 /**
  * Google can restate Sunday's spend for several hours after its calendar day
  * closes. The scheduled evidence capture runs at this UTC time on Monday, so
- * manual review uses the same lower bound instead of accepting a 00:01
- * snapshot that merely happens to be on the next date.
+ * both automation and admin diagnostics use the same lower bound instead of
+ * accepting a 00:01 snapshot that merely happens to be on the next date.
  */
 export const BILLING_EVIDENCE_READY_HOUR_UTC = 14;
 export const BILLING_EVIDENCE_READY_MINUTE_UTC = 5;
@@ -33,9 +33,22 @@ export const CALCULATION_VERSION =
   "agency-fee-eur-v3-manual-referrals-google-boundaries";
 export const LEGACY_MANUAL_CALCULATION_VERSION =
   "agency-fee-eur-10-v2-google-baseline";
+export const HISTORICAL_ROLLOVER_CALCULATION_VERSION =
+  "agency-fee-eur-10-historical-rollover-2026-07-27";
 
 export function isManualAgencyCalculationVersion(value: string): boolean {
-  return value === CALCULATION_VERSION || value === LEGACY_MANUAL_CALCULATION_VERSION;
+  return (
+    value === CALCULATION_VERSION ||
+    value === LEGACY_MANUAL_CALCULATION_VERSION ||
+    value === HISTORICAL_ROLLOVER_CALCULATION_VERSION
+  );
+}
+
+export function hasImmutableBillingRecipient(value: string): boolean {
+  return (
+    value === CALCULATION_VERSION ||
+    value === HISTORICAL_ROLLOVER_CALCULATION_VERSION
+  );
 }
 const BILLING_TIME_ZONE = "Europe/Lisbon";
 
@@ -184,13 +197,28 @@ export type StoreTotals = {
   baselineDeduction?: number;
   /** True in the one invoice period that contains the account's start day. */
   openingBaselineApplied?: boolean;
-  billingStart?: {
-    id: string;
-    date: string;
-    capturedAt: string;
-    timeZone: string;
-    baselineAmount: number;
-  };
+  /** True when the reviewed policy includes the complete Google reporting day. */
+  reviewedFullDayApplied?: boolean;
+  billingStart?:
+    | {
+        basis: "observed_google_counter";
+        id: string;
+        date: string;
+        capturedAt: string;
+        timeZone: string;
+        baselineAmount: number;
+      }
+    | {
+        basis: "reviewed_full_day";
+        id: string;
+        date: string;
+        timeZone: string;
+        entryDate: string;
+        entryTimeZone: "Europe/Lisbon";
+        reviewedFullDayBoundaryId: string;
+        policyVersion: string;
+        entryDayTreatment: "full-day-inclusive";
+      };
   /** Spend after the closing counter, excluded in the final partial week. */
   endDeduction?: number;
   /** True in the one invoice period that contains the account's end day. */
@@ -267,6 +295,21 @@ export function storeLines(accountId: string, store: string, totals: StoreTotals
   if (totals.openingBaselineApplied && (!totals.billingStart || !totals.periodEnd)) {
     throw new RangeError("Opening-boundary evidence is incomplete.");
   }
+  if (
+    totals.openingBaselineApplied &&
+    totals.billingStart?.basis !== "observed_google_counter"
+  ) {
+    throw new RangeError("An opening Google baseline requires an observed counter start.");
+  }
+  if (
+    totals.reviewedFullDayApplied &&
+    (totals.billingStart?.basis !== "reviewed_full_day" || !totals.periodEnd)
+  ) {
+    throw new RangeError("Reviewed full-day boundary evidence is incomplete.");
+  }
+  if (totals.openingBaselineApplied && totals.reviewedFullDayApplied) {
+    throw new RangeError("A start cannot be both observed-counter and reviewed full-day.");
+  }
   if (totals.endingCapApplied && (!totals.billingEnd || !totals.periodStart)) {
     throw new RangeError("Closing-boundary evidence is incomplete.");
   }
@@ -308,13 +351,41 @@ export function storeLines(accountId: string, store: string, totals: StoreTotals
   );
   const fee = agencyFee(preciseSpend, feeRate);
 
-  const billingStartedAt = capturedAt(totals.billingStart?.capturedAt, "unknown time");
+  const billingStartedAt =
+    totals.billingStart?.basis === "observed_google_counter"
+      ? capturedAt(totals.billingStart.capturedAt, "unknown time")
+      : "unknown time";
   const billingEndedAt = capturedAt(totals.billingEnd?.capturedAt, "unknown time");
   const referralEvidence =
     `; manual referral term: approved referral count ${referralCount}` +
     `; ${AGENCY_FEE_RATE}% - ${exactRate(referralDiscountRate)} percentage points = ${exactRate(feeRate)}%`;
   let boundaryEvidence = "";
-  if (totals.openingBaselineApplied && totals.endingCapApplied) {
+  if (totals.reviewedFullDayApplied && totals.endingCapApplied) {
+    const start = totals.billingStart?.basis === "reviewed_full_day"
+      ? totals.billingStart
+      : null;
+    boundaryEvidence =
+      `; billing began under reviewed full-day policy ${start?.policyVersion ?? "unknown"}` +
+      `; full ${start?.timeZone ?? "unknown timezone"} Google reporting day ${start?.date ?? "unknown"} included` +
+      `; commercial entry ${start?.entryDate ?? "unknown"} in ${start?.entryTimeZone ?? "unknown timezone"}` +
+      `; billing ended ${billingEndedAt}` +
+      ` at Google day counter EUR ${(totals.billingEnd?.counterAmount ?? 0).toFixed(6)}` +
+      `; billable period ${start?.date ?? "unknown"}` +
+      ` to ${totals.billingEnd?.date ?? "unknown"}` +
+      `; Google-reported spend EUR ${sourceSpendExact.toFixed(6)}` +
+      ` minus post-service spend EUR ${endDeductionExact.toFixed(6)}`;
+  } else if (totals.reviewedFullDayApplied) {
+    const start = totals.billingStart?.basis === "reviewed_full_day"
+      ? totals.billingStart
+      : null;
+    boundaryEvidence =
+      `; billing began under reviewed full-day policy ${start?.policyVersion ?? "unknown"}` +
+      `; full ${start?.timeZone ?? "unknown timezone"} Google reporting day ${start?.date ?? "unknown"} included` +
+      `; commercial entry ${start?.entryDate ?? "unknown"} in ${start?.entryTimeZone ?? "unknown timezone"}` +
+      `; first billable period ${start?.date ?? "unknown"}` +
+      ` to ${totals.periodEnd ?? "unknown"}` +
+      `; Google-reported spend EUR ${sourceSpendExact.toFixed(6)}`;
+  } else if (totals.openingBaselineApplied && totals.endingCapApplied) {
     boundaryEvidence =
       `; billing started ${billingStartedAt}` +
       `; billing ended ${billingEndedAt}` +
@@ -358,8 +429,9 @@ export function storeLines(accountId: string, store: string, totals: StoreTotals
       ...(totals.openingBaselineApplied
         ? { baselineDeductionAmount: baselineDeduction }
         : {}),
-      ...(totals.billingStart
+      ...(totals.billingStart?.basis === "observed_google_counter"
         ? {
+            billingStartBasis: totals.billingStart.basis,
             billingStartId: totals.billingStart.id,
             billingStartDate: totals.billingStart.date,
             // Preserve PostgreSQL's full timestamp precision in the immutable
@@ -368,7 +440,20 @@ export function storeLines(accountId: string, store: string, totals: StoreTotals
             billingTimeZone: totals.billingStart.timeZone,
             billingStartBaselineAmount: round2(totals.billingStart.baselineAmount),
           }
-        : {}),
+        : totals.billingStart?.basis === "reviewed_full_day"
+          ? {
+              billingStartBasis: totals.billingStart.basis,
+              billingStartId: totals.billingStart.id,
+              billingStartDate: totals.billingStart.date,
+              billingTimeZone: totals.billingStart.timeZone,
+              reviewedFullDayBoundaryId:
+                totals.billingStart.reviewedFullDayBoundaryId,
+              billingPolicyVersion: totals.billingStart.policyVersion,
+              entryDate: totals.billingStart.entryDate,
+              entryTimeZone: totals.billingStart.entryTimeZone,
+              entryDayTreatment: totals.billingStart.entryDayTreatment,
+            }
+          : {}),
       ...(totals.endingCapApplied && totals.billingEnd
         ? {
             endDeductionAmount: endDeduction,

@@ -1,5 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
-import { hasAgencyServiceAccount } from "@/lib/google-ads/env";
+import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
+import { withClientGoogleAds } from "@/lib/google-ads/ledger-authority";
 import {
   addIsoDays,
   decimalToMicros,
@@ -26,12 +27,16 @@ import {
 import type { AdAccount } from "@/lib/supabase/types";
 
 /**
- * Turns agency-readable Google Ads spend into real finance rows: one
- * commissions entry per account per day. `gross_amount` preserves Google's
- * raw daily counter; `amount` applies the immutable manual-referral term for
- * that Google day to the billable portion (the first-day delta above the
- * opening counter, then full daily spend until the closing counter), tagged
- * with ad_account_id so synced rows never mix with hand-entered ones.
+ * Turns each connected client's authoritative Google Ads spend into real
+ * finance rows: one commissions entry per account per day. The recurring
+ * ledger uses the same per-client OAuth connection as the existing portal,
+ * campaigns and metrics readers; it never substitutes an agency credential.
+ * `gross_amount` preserves Google's raw daily counter; `amount` applies the
+ * immutable manual-referral term for that Google day to the billable portion.
+ * An observed start excludes its captured opening counter; a reviewed pre-v3
+ * start includes its complete Lisbon entry day. Both then include full daily
+ * spend until a closing counter, tagged with ad_account_id so synced rows never
+ * mix with hand-entered ones.
  *
  * Two things run it:
  *   · the "Sync now" button — forced, for an exact match with what
@@ -88,8 +93,10 @@ type BillingStartRow = {
   google_local_date: string;
   google_time_zone: string;
   currency: string;
-  baseline_cost_micros: string | number;
-  captured_at: string;
+  baseline_cost_micros: string | number | null;
+  captured_at: string | null;
+  start_basis: "observed_google_counter" | "reviewed_full_day";
+  reviewed_full_day_boundary_id: string | null;
 };
 
 type BillingEndRow = {
@@ -233,8 +240,10 @@ export async function purgeAdminAccountRevenue(opts?: SyncOpts): Promise<void> {
 let lastRunAt = 0;
 
 export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
-  if (!hasAgencyServiceAccount()) {
-    if (opts?.force) throw new Error("Agency Google Ads is not configured on this server.");
+  if (!hasGoogleAdsEnv()) {
+    const error = new Error("Client Google Ads OAuth is not configured on this server.");
+    if (opts?.force) throw error;
+    console.error("Commission sync configuration failed:", error);
     return;
   }
   if (!opts?.force && Date.now() - lastRunAt < THROTTLE_MS) return;
@@ -275,7 +284,8 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
     const { data: accountRows, error: accountRowsError } = await supabase
       .from("ad_accounts")
       .select(
-        "id, client_id, store_name, google_ads_customer_id, currency",
+        "id, client_id, store_name, google_ads_customer_id, " +
+          "google_ads_connected, currency",
       )
       // Pending rows are unapproved requests. Suspended rows remain eligible:
       // a client can still owe the final closed week from before suspension.
@@ -291,6 +301,7 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
       | "client_id"
       | "store_name"
       | "google_ads_customer_id"
+      | "google_ads_connected"
       | "currency"
     >[];
     if (accounts.length === 0) {
@@ -307,14 +318,15 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
       return;
     }
 
-    // The immutable counter is the commercial boundary. Status/created_at are
-    // not substitutes: without this row there is no defensible way to know how
-    // much of the first Google-local day belongs to the agency service.
+    // The immutable start is the commercial boundary. It either carries a real
+    // Google opening counter or references the sealed pre-v3 full-day policy;
+    // status/created_at alone are never used as a runtime substitute.
     const { data: billingStartRows, error: billingStartsError } = await supabase
       .from("ad_account_billing_starts")
       .select(
         "id, ad_account_id, google_ads_customer_id, google_local_date, google_time_zone, " +
-          "currency, baseline_cost_micros, captured_at",
+          "currency, baseline_cost_micros, captured_at, start_basis, " +
+          "reviewed_full_day_boundary_id",
       )
       .in("ad_account_id", billable.map((account) => account.id));
     if (billingStartsError) throw billingStartsError;
@@ -375,7 +387,7 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
         try {
           const start = billingStartByAccount.get(account.id);
           if (!start) {
-            throw new Error("Billing has not started: no immutable Google spend baseline exists.");
+            throw new Error("Billing has not started: no immutable financial boundary exists.");
           }
           // The activation migration stores the canonical ten digits. Do not
           // silently strip arbitrary characters here: a corrupted identity
@@ -385,15 +397,37 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
             !/^\d{10}$/.test(accountCustomerId) ||
             start.google_ads_customer_id !== accountCustomerId
           ) {
-            throw new Error("The billing baseline belongs to a different Google customer.");
+            throw new Error("The billing start belongs to a different Google customer.");
           }
           if (account.currency.toUpperCase() !== "EUR" || start.currency.toUpperCase() !== "EUR") {
             throw new Error("Agency billing supports EUR Google Ads accounts only.");
           }
-          // PostgREST may represent an int8 as either string or number. Reject
-          // an unsafe numeric value instead of stringifying an already-rounded
-          // baseline and silently moving the commercial boundary.
-          const baselineCostMicros = parseGoogleMicros(start.baseline_cost_micros);
+          // PostgREST may represent an int8 as either string or number. Only an
+          // observed branch may carry one. The reviewed branch uses arithmetic
+          // zero because its policy includes the full day, but never stores or
+          // presents that zero as a Google observation.
+          let baselineCostMicros: bigint;
+          if (start.start_basis === "observed_google_counter") {
+            if (
+              start.reviewed_full_day_boundary_id !== null ||
+              start.baseline_cost_micros === null ||
+              start.captured_at === null
+            ) {
+              throw new Error("The observed Google billing start is incomplete.");
+            }
+            baselineCostMicros = parseGoogleMicros(start.baseline_cost_micros);
+          } else if (start.start_basis === "reviewed_full_day") {
+            if (
+              !start.reviewed_full_day_boundary_id ||
+              start.baseline_cost_micros !== null ||
+              start.captured_at !== null
+            ) {
+              throw new Error("The reviewed full-day billing start is incomplete.");
+            }
+            baselineCostMicros = BigInt(0);
+          } else {
+            throw new Error("The billing start basis is unsupported.");
+          }
           const end = billingEndByAccount.get(account.id);
           let endCostMicros: bigint | null = null;
           if (end) {
@@ -462,23 +496,37 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
             );
           }
 
-          const metadata = await fetchGoogleBillingMetadataAsAgency(accountCustomerId);
+          const queryFrom = start.google_local_date > from ? start.google_local_date : from;
+          const { metadata, reportedDays } = await withClientGoogleAds(
+            supabase,
+            account,
+            async (search) => ({
+              metadata: await fetchGoogleBillingMetadataAsAgency(
+                accountCustomerId,
+                search,
+              ),
+              reportedDays:
+                queryFrom <= queryTo
+                  ? await fetchGoogleDailyCostMicrosAsAgency(
+                      accountCustomerId,
+                      queryFrom,
+                      queryTo,
+                      search,
+                    )
+                  : [],
+            }),
+          );
           if (
             metadata.customerId !== start.google_ads_customer_id ||
             metadata.currency !== start.currency.toUpperCase() ||
             metadata.timeZone !== start.google_time_zone
           ) {
-            throw new Error("Live Google account metadata does not match the billing baseline.");
+            throw new Error("Live Google account metadata does not match the billing start.");
           }
           if (metadata.currency !== "EUR") {
             throw new Error(`Google Ads account currency is ${metadata.currency}, not EUR.`);
           }
 
-          const queryFrom = start.google_local_date > from ? start.google_local_date : from;
-          const reportedDays =
-            queryFrom <= queryTo
-              ? await fetchGoogleDailyCostMicrosAsAgency(accountCustomerId, queryFrom, queryTo)
-              : [];
           const days = billableGoogleSpendWindow(
             from,
             to,

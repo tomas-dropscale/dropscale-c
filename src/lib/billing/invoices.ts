@@ -1,10 +1,10 @@
 /**
  * Review-first agency billing.
  *
- * This module never issues invoices on a page load or a cron. It calculates a
- * closed week's fixed 10% agency fee from Google-spend ledger rows, exposes the
- * evidence to the admin, and issues exactly one client's reviewed snapshot
- * only through issueClientWeek().
+ * Page loads remain read-only. A protected Monday cron calculates each closed
+ * week's agency fee from Google-spend evidence and issues eligible snapshots
+ * automatically; the admin endpoint reuses the same idempotent path as an
+ * emergency recovery control.
  */
 
 import "server-only";
@@ -42,9 +42,11 @@ import type {
   Commission,
   Database,
   GoogleLedgerSnapshotRow,
+  HistoricalBillingRolloverReview,
   Invoice,
   InvoiceLine,
   ReferralDiscountTerm,
+  ReviewedFullDayBillingBoundary,
 } from "@/lib/supabase/types";
 import {
   decimalToMicros,
@@ -63,6 +65,8 @@ import {
   closedWeeks,
   closedWeekStarting,
   DAYS_UNTIL_DUE,
+  hasImmutableBillingRecipient,
+  HISTORICAL_ROLLOVER_CALCULATION_VERSION,
   isoDay,
   isManualAgencyCalculationVersion,
   mondayOf,
@@ -80,16 +84,29 @@ import {
   loadManualReferralCutoverGate,
   manualReferralCutoverPreviewBlocker,
 } from "@/lib/billing/manual-referral-cutover";
-import { stripeInvoiceRecoveryMode } from "@/lib/billing/invoice-delivery";
+import { automaticPositionCandidateIsCertified } from "@/lib/billing/position-certification";
+import {
+  automaticInvoiceAction,
+  stripeInvoiceRecoveryMode,
+} from "@/lib/billing/invoice-delivery";
+import { automaticBillingIssuanceEnabled } from "@/lib/billing/issuance-gate";
+import {
+  fetchBillingAutomationAttentionClientIds,
+  fetchBillingAutomationPositionTargets,
+  fetchLatestBillingAutomationRun,
+  type BillingAutomationPositionTarget,
+  type BillingAutomationRun,
+} from "@/lib/billing/automation-receipts";
 import {
   buildBillingPositions,
   type BillingPositionAccount,
+  type BillingPositionCertifiedClosedAmount,
   type BillingPositionClient,
   type BillingPositionEnd,
   type BillingPositionInvoice,
-  type BillingPositionLedgerRow,
   type BillingPositionMetricRow,
   type BillingPositionReferralTerm,
+  type BillingPositionReviewedEntry,
   type BillingPositions,
   type BillingPositionStart,
 } from "@/lib/billing/positions";
@@ -149,13 +166,27 @@ export type BillingStorePreview = {
   endDeduction: number;
   /** Google spend on which the 10% fee is actually calculated. */
   billableSpend: number;
-  billingStart: {
-    id: string;
-    date: string;
-    capturedAt: string;
-    timeZone: string;
-    baselineAmount: number;
-  } | null;
+  billingStart:
+    | {
+        basis: "observed_google_counter";
+        id: string;
+        date: string;
+        capturedAt: string;
+        timeZone: string;
+        baselineAmount: number;
+      }
+    | {
+        basis: "reviewed_full_day";
+        id: string;
+        date: string;
+        timeZone: string;
+        entryDate: string;
+        entryTimeZone: "Europe/Lisbon";
+        reviewedFullDayBoundaryId: string;
+        policyVersion: string;
+        entryDayTreatment: "full-day-inclusive";
+      }
+    | null;
   billingEnd: {
     id: string;
     date: string;
@@ -188,7 +219,7 @@ export type BillingClientPreview = {
   referralDiscountRate: number;
   feeRate: number;
   listRate: typeof AGENCY_FEE_RATE;
-  /** Exact email/legal identity bound into the admin confirmation. */
+  /** Exact email/legal identity bound into the commercial snapshot. */
   recipient: BillingRecipientSnapshot;
   sourceDays: number;
   lastLedgerUpdate: string | null;
@@ -230,7 +261,8 @@ export type BillingAdminDashboard = {
   summary: BillingAdminSummary;
   /** Closed receivables and the current in-progress cycle, never mixed. */
   positions: BillingPositions;
-  clients: BillingClientPreview[];
+  /** Latest durable automatic-run receipt visible to an admin. */
+  automation: BillingAutomationRun | null;
   invoices: BillingInvoiceHistoryRow[];
 };
 
@@ -258,6 +290,7 @@ type BillingAccount = Pick<
 
 type BillingStart = AdAccountBillingStart;
 type BillingEnd = AdAccountBillingEnd;
+type ReviewedBoundary = ReviewedFullDayBillingBoundary;
 
 type BillingProfileRow = Pick<
   BillingProfile,
@@ -543,6 +576,28 @@ async function calculateWeek(
     billingStarts.map((start) => [start.ad_account_id, start]),
   );
 
+  let reviewedBoundaries: ReviewedBoundary[] = [];
+  const reviewedBoundaryIds = billingStarts.flatMap((start) =>
+    start.start_basis === "reviewed_full_day" &&
+    start.reviewed_full_day_boundary_id
+      ? [start.reviewed_full_day_boundary_id]
+      : [],
+  );
+  if (reviewedBoundaryIds.length > 0) {
+    const { data, error } = await supabase
+      .from("reviewed_full_day_billing_boundaries")
+      .select("*")
+      .in("id", reviewedBoundaryIds);
+    if (error)
+      throw new Error(
+        `Could not load reviewed full-day billing boundaries: ${error.message}`,
+      );
+    reviewedBoundaries = (data ?? []) as ReviewedBoundary[];
+  }
+  const reviewedBoundaryById = new Map(
+    reviewedBoundaries.map((boundary) => [boundary.id, boundary]),
+  );
+
   let billingEnds: BillingEnd[] = [];
   if (allAccounts.length > 0) {
     const { data, error } = await supabase
@@ -692,6 +747,66 @@ async function calculateWeek(
       );
       const storeBlockers: BillingBlocker[] = [];
       const accountCurrency = account.currency.toUpperCase();
+      const reviewedBoundary =
+        start?.reviewed_full_day_boundary_id
+          ? reviewedBoundaryById.get(start.reviewed_full_day_boundary_id) ?? null
+          : null;
+      let billingStartEvidence: NonNullable<
+        BillingStorePreview["billingStart"]
+      > | null = null;
+      if (
+        start?.start_basis === "observed_google_counter" &&
+        start.reviewed_full_day_boundary_id === null &&
+        start.baseline_cost_micros !== null &&
+        start.capture_started_at !== null &&
+        start.captured_at !== null &&
+        start.capture_id !== null &&
+        start.source === "agency" &&
+        start.reviewed_by !== null
+      ) {
+        billingStartEvidence = {
+          basis: "observed_google_counter",
+          id: start.id,
+          date: start.google_local_date,
+          capturedAt: start.captured_at,
+          timeZone: start.google_time_zone,
+          baselineAmount: Number(
+            microsToDecimal(String(start.baseline_cost_micros)),
+          ),
+        };
+      } else if (
+        start?.start_basis === "reviewed_full_day" &&
+        start.reviewed_full_day_boundary_id !== null &&
+        start.baseline_cost_micros === null &&
+        start.capture_started_at === null &&
+        start.captured_at === null &&
+        start.capture_id === null &&
+        start.source === null &&
+        start.reviewed_by === null &&
+        reviewedBoundary?.ad_account_id === account.id &&
+        reviewedBoundary.client_id === account.client_id &&
+        reviewedBoundary.google_ads_customer_id ===
+          start.google_ads_customer_id &&
+        reviewedBoundary.google_local_date === start.google_local_date &&
+        reviewedBoundary.google_time_zone === start.google_time_zone &&
+        reviewedBoundary.currency === start.currency.toUpperCase() &&
+        reviewedBoundary.entry_time_zone === "Europe/Lisbon" &&
+        reviewedBoundary.entry_day_treatment === "full-day-inclusive" &&
+        reviewedBoundary.metadata_authority === "client_oauth" &&
+        reviewedBoundary.metadata_contract === "google-customer-metadata-v1"
+      ) {
+        billingStartEvidence = {
+          basis: "reviewed_full_day",
+          id: start.id,
+          date: start.google_local_date,
+          timeZone: start.google_time_zone,
+          entryDate: reviewedBoundary.entry_day,
+          entryTimeZone: reviewedBoundary.entry_time_zone,
+          reviewedFullDayBoundaryId: reviewedBoundary.id,
+          policyVersion: reviewedBoundary.policy_version,
+          entryDayTreatment: reviewedBoundary.entry_day_treatment,
+        };
+      }
       const ledgerCurrencies = new Set(
         rows.map((row) => row.currency.toUpperCase()),
       );
@@ -726,7 +841,16 @@ async function calculateWeek(
         storeBlockers.push(
           blocker(
             "billing_not_started",
-            `${account.store_name} has no verified Google opening counter. Start tracking before invoicing.`,
+            `${account.store_name} has no immutable billing start. Capture a live Google opening counter before invoicing.`,
+            "error",
+            account.id,
+          ),
+        );
+      } else if (!billingStartEvidence) {
+        storeBlockers.push(
+          blocker(
+            "billing_start_mismatch",
+            `${account.store_name}'s billing-start provenance is incomplete or no longer matches its immutable proof.`,
             "error",
             account.id,
           ),
@@ -799,9 +923,8 @@ async function calculateWeek(
           ),
         );
       }
-      // Billing is read through the agency service account. The client's
-      // optional portal OAuth may be disconnected without erasing a valid
-      // agency-owned closed-week proof.
+      // A completed, server-owned Google proof remains valid even if the
+      // credential that produced it is disconnected later.
       const connected = Boolean(start && account.google_ads_customer_id);
       if (!refreshedAfterClose) {
         storeBlockers.push(
@@ -851,9 +974,14 @@ async function calculateWeek(
             )
         : BigInt(0);
       const openingBaselineApplied = Boolean(
-        start &&
-        start.google_local_date >= week.start &&
-        start.google_local_date <= week.end,
+        billingStartEvidence?.basis === "observed_google_counter" &&
+        billingStartEvidence.date >= week.start &&
+        billingStartEvidence.date <= week.end,
+      );
+      const reviewedFullDayApplied = Boolean(
+        billingStartEvidence?.basis === "reviewed_full_day" &&
+        billingStartEvidence.date >= week.start &&
+        billingStartEvidence.date <= week.end,
       );
       const {
         openingDeductionMicros: deductionMicros,
@@ -862,8 +990,11 @@ async function calculateWeek(
       } = billingBoundaryMicros({
         sourceMicros,
         startDayMicros: rawStartDayMicros,
-        baselineMicros: String(start?.baseline_cost_micros ?? 0),
-        openingApplied: Boolean(start && openingBaselineApplied),
+        baselineMicros:
+          billingStartEvidence?.basis === "observed_google_counter" && start
+            ? String(start.baseline_cost_micros)
+            : "0",
+        openingApplied: openingBaselineApplied,
         endDayMicros,
         endCostMicros,
         endingApplied: endBoundaryApplied,
@@ -880,30 +1011,21 @@ async function calculateWeek(
       const endDeduction = round2(endDeductionExact);
       const billableSpend = round2(billableSpendExact);
       const storeInvoiceLines =
-        accountCurrency === BILLING_CURRENCY && referralTerm.valid
+        accountCurrency === BILLING_CURRENCY &&
+        referralTerm.valid &&
+        billingStartEvidence
           ? storeLines(account.id, account.store_name, {
               spend: billableSpendExact,
               sourceSpend: sourceSpendExact,
               baselineDeduction: baselineDeductionExact,
               openingBaselineApplied,
+              reviewedFullDayApplied,
               endDeduction: endDeductionExact,
               endingCapApplied: endBoundaryApplied,
               periodStart: week.start,
               periodEnd: week.end,
               referralCount: referralTerm.referralCount,
-              ...(start
-                ? {
-                    billingStart: {
-                      id: start.id,
-                      date: start.google_local_date,
-                      capturedAt: start.captured_at,
-                      timeZone: start.google_time_zone,
-                      baselineAmount: Number(
-                        microsToDecimal(String(start.baseline_cost_micros)),
-                      ),
-                    },
-                  }
-                : {}),
+              billingStart: billingStartEvidence,
               ...(endBoundaryApplied && end
                 ? {
                     billingEnd: {
@@ -931,17 +1053,7 @@ async function calculateWeek(
         baselineDeduction,
         endDeduction,
         billableSpend,
-        billingStart: start
-          ? {
-              id: start.id,
-              date: start.google_local_date,
-              capturedAt: start.captured_at,
-              timeZone: start.google_time_zone,
-              baselineAmount: Number(
-                microsToDecimal(String(start.baseline_cost_micros)),
-              ),
-            }
-          : null,
+        billingStart: billingStartEvidence,
         billingEnd:
           endBoundaryApplied && end
             ? {
@@ -1048,20 +1160,44 @@ async function calculateWeek(
             endDeduction: Number(line.endDeductionAmount ?? 0),
             billableSpend: Number(line.baseAmount ?? 0),
             billingStart:
+              line.billingStartBasis === "reviewed_full_day" &&
               line.billingStartId &&
               line.billingStartDate &&
-              line.billingStartedAt &&
-              line.billingTimeZone
+              line.billingTimeZone &&
+              line.entryDate &&
+              line.entryTimeZone === "Europe/Lisbon" &&
+              line.reviewedFullDayBoundaryId &&
+              line.billingPolicyVersion &&
+              line.entryDayTreatment === "full-day-inclusive"
                 ? {
+                    basis: "reviewed_full_day" as const,
                     id: line.billingStartId,
                     date: line.billingStartDate,
-                    capturedAt: line.billingStartedAt,
                     timeZone: line.billingTimeZone,
-                    baselineAmount: Number(
-                      line.billingStartBaselineAmount ?? 0,
-                    ),
+                    entryDate: line.entryDate,
+                    entryTimeZone: line.entryTimeZone,
+                    reviewedFullDayBoundaryId:
+                      line.reviewedFullDayBoundaryId,
+                    policyVersion: line.billingPolicyVersion,
+                    entryDayTreatment: line.entryDayTreatment,
                   }
-                : null,
+                : line.billingStartId &&
+                    line.billingStartDate &&
+                    line.billingStartedAt &&
+                    line.billingTimeZone
+                  ? {
+                      // Pre-0035 v3 invoice snapshots predate the discriminator;
+                      // their real capture timestamp keeps the provenance exact.
+                      basis: "observed_google_counter" as const,
+                      id: line.billingStartId,
+                      date: line.billingStartDate,
+                      capturedAt: line.billingStartedAt,
+                      timeZone: line.billingTimeZone,
+                      baselineAmount: Number(
+                        line.billingStartBaselineAmount ?? 0,
+                      ),
+                    }
+                  : null,
             billingEnd:
               line.endingCapApplied === true &&
               line.billingEndId &&
@@ -1318,59 +1454,11 @@ async function fetchAllIssuedInvoices(supabase: Supabase): Promise<Invoice[]> {
   }
 }
 
-type PositionLedgerDatabaseRow = BillingPositionLedgerRow & { id: string };
 type PositionInvoiceDatabaseRow = BillingPositionInvoice & { id: string };
 type PositionReferralDatabaseRow = BillingPositionReferralTerm & {
   id: string;
   clientId: string;
 };
-
-async function fetchPositionLedgerRows(
-  supabase: Supabase,
-  sourceId: string,
-  accountIds: string[],
-): Promise<BillingPositionLedgerRow[]> {
-  if (accountIds.length === 0) return [];
-  const rows: PositionLedgerDatabaseRow[] = [];
-  const pageSize = 1_000;
-  let afterId: string | null = null;
-  for (;;) {
-    let query = supabase
-      .from("commissions")
-      .select(
-        "id, ad_account_id, occurred_on, gross_amount, currency, updated_at",
-      )
-      .eq("source_id", sourceId)
-      .eq("status", "confirmed")
-      .in("ad_account_id", accountIds)
-      .order("id", { ascending: true })
-      .limit(pageSize);
-    if (afterId) query = query.gt("id", afterId);
-    const { data, error } = await query;
-    if (error) {
-      throw new Error(`Could not load billing position ledger: ${error.message}`);
-    }
-    const page = (data ?? []).map((row) => ({
-      id: row.id,
-      accountId: row.ad_account_id!,
-      occurredOn: row.occurred_on,
-      grossAmount: row.gross_amount,
-      currency: row.currency,
-      updatedAt: row.updated_at,
-    })) as PositionLedgerDatabaseRow[];
-    rows.push(...page);
-    if (page.length < pageSize) break;
-    afterId = page.at(-1)?.id ?? null;
-    if (!afterId) break;
-  }
-  return rows.map((row) => ({
-    accountId: row.accountId,
-    occurredOn: row.occurredOn,
-    grossAmount: row.grossAmount,
-    currency: row.currency,
-    updatedAt: row.updatedAt,
-  }));
-}
 
 async function fetchPositionInvoices(
   supabase: Supabase,
@@ -1384,7 +1472,7 @@ async function fetchPositionInvoices(
     let query = supabase
       .from("invoices")
       .select(
-        "id, client_id, period_start, status, amount, amount_remaining, issued_at, calculation_version",
+        "id, client_id, period_start, currency, status, amount, amount_remaining, issued_at, calculation_version, issue_error, payment_failed_at",
       )
       .in("client_id", clientIds)
       .order("id", { ascending: true })
@@ -1398,11 +1486,14 @@ async function fetchPositionInvoices(
       id: row.id,
       clientId: row.client_id,
       periodStart: row.period_start,
+      currency: row.currency,
       status: row.status,
       amount: row.amount,
       amountRemaining: row.amount_remaining,
       issuedAt: row.issued_at,
       calculationVersion: row.calculation_version,
+      issueError: row.issue_error,
+      paymentFailedAt: row.payment_failed_at,
     })) as PositionInvoiceDatabaseRow[];
     rows.push(...page);
     if (page.length < pageSize) break;
@@ -1412,11 +1503,14 @@ async function fetchPositionInvoices(
   return rows.map((row) => ({
     clientId: row.clientId,
     periodStart: row.periodStart,
+    currency: row.currency,
     status: row.status,
     amount: row.amount,
     amountRemaining: row.amountRemaining,
     issuedAt: row.issuedAt,
     calculationVersion: row.calculationVersion,
+    issueError: row.issueError,
+    paymentFailedAt: row.paymentFailedAt,
   }));
 }
 
@@ -1452,6 +1546,178 @@ async function fetchPositionMetrics(
     if (page.length < pageSize) break;
   }
   return rows;
+}
+
+async function fetchReviewedFullDayEntries(
+  supabase: Supabase,
+  accountIds: string[],
+): Promise<BillingPositionReviewedEntry[]> {
+  if (accountIds.length === 0) return [];
+  const reviewed = new Map<string, string>();
+  const pageSize = 1_000;
+  for (let from = 0; ; from += pageSize) {
+    const { data, error } = await supabase
+      .from("historical_billing_rollover_rows")
+      .select("ad_account_id, entry_day")
+      .in("ad_account_id", accountIds)
+      .order("ad_account_id", { ascending: true })
+      .range(from, from + pageSize - 1);
+    if (error) {
+      throw new Error(
+        `Could not load reviewed historical entry days: ${error.message}`,
+      );
+    }
+    const rows = data ?? [];
+    for (const row of rows) {
+      const current = reviewed.get(row.ad_account_id);
+      if (current && current !== row.entry_day) {
+        throw new Error(
+          "A reviewed historical account has conflicting entry-day proof.",
+        );
+      }
+      reviewed.set(row.ad_account_id, row.entry_day);
+    }
+    if (rows.length < pageSize) break;
+  }
+  return [...reviewed].map(([accountId, entryDay]) => ({
+    accountId,
+    entryDay,
+  }));
+}
+
+function automaticPreviewIsPositionCertified(
+  preview: BillingClientPreview,
+): boolean {
+  return automaticPositionCandidateIsCertified({
+    currency: preview.currency,
+    amount: preview.amount,
+    billableSpend: preview.billableSpend,
+    storeCount: preview.stores.length,
+    existingInvoiceRecoverable:
+      !preview.existingInvoice ||
+      stripeInvoiceRecoveryMode(preview.existingInvoice) !== null,
+    blockers: preview.blockers,
+  });
+}
+
+function automationTargetKey(target: {
+  client_id: string;
+  period_start: string;
+}): string {
+  return `${target.client_id}:${target.period_start}`;
+}
+
+async function fetchCertifiedAutomaticClosedAmounts(
+  supabase: Supabase,
+  now: Date,
+): Promise<BillingPositionCertifiedClosedAmount[]> {
+  const targets = await fetchBillingAutomationPositionTargets(supabase);
+  const targetByKey = new Map<string, BillingAutomationPositionTarget>();
+  for (const target of targets) {
+    const week = closedWeekStarting(target.period_start, now);
+    if (!week || week.end !== target.period_end) {
+      throw new Error("Automatic billing contains an invalid closed-week target.");
+    }
+    const key = automationTargetKey(target);
+    if (targetByKey.has(key)) {
+      throw new Error("Automatic billing contains a duplicate client/week target.");
+    }
+    targetByKey.set(key, target);
+  }
+
+  const periods = new Map<string, { start: string; end: string }>();
+  for (const target of targetByKey.values()) {
+    periods.set(target.period_start, {
+      start: target.period_start,
+      end: target.period_end,
+    });
+  }
+
+  const certified: BillingPositionCertifiedClosedAmount[] = [];
+  for (const week of [...periods.values()].sort((left, right) =>
+    left.start.localeCompare(right.start),
+  )) {
+    const calculated = await calculateWeek(supabase, week);
+    for (const { preview } of calculated) {
+      const key = `${preview.clientId}:${week.start}`;
+      if (!targetByKey.has(key) || !automaticPreviewIsPositionCertified(preview)) {
+        continue;
+      }
+      const certifiedAt =
+        preview.lastLedgerUpdate ?? preview.existingInvoice?.created_at ?? null;
+      if (!certifiedAt) {
+        throw new Error(
+          "A certified automatic billing position has no evidence timestamp.",
+        );
+      }
+      certified.push({
+        clientId: preview.clientId,
+        periodStart: week.start,
+        periodEnd: week.end,
+        amount: preview.amount,
+        currency: BILLING_CURRENCY,
+        source: "automatic_v3",
+        certifiedAt,
+      });
+    }
+  }
+  return certified;
+}
+
+async function fetchCertifiedHistoricalClosedAmounts(
+  supabase: Supabase,
+  now: Date,
+): Promise<BillingPositionCertifiedClosedAmount[]> {
+  const rows: HistoricalBillingRolloverReview[] = [];
+  const pageSize = 1_000;
+  for (let from = 0; ; from += pageSize) {
+    const { data, error } = await supabase
+      .from("historical_billing_rollover_review")
+      .select("*")
+      .order("rollover_id", { ascending: true })
+      .range(from, from + pageSize - 1);
+    if (error) {
+      throw new Error(
+        `Could not load certified historical billing positions: ${error.message}`,
+      );
+    }
+    const page = (data ?? []) as HistoricalBillingRolloverReview[];
+    rows.push(...page);
+    if (page.length < pageSize) break;
+  }
+
+  return rows.map((row) => {
+    const amount = Number(row.amount);
+    const week = closedWeekStarting(row.period_start, now);
+    if (
+      !week ||
+      week.end !== row.period_end ||
+      row.period_start !== "2026-07-27" ||
+      row.period_end !== "2026-08-02" ||
+      row.currency.toUpperCase() !== BILLING_CURRENCY ||
+      row.calculation_version !== HISTORICAL_ROLLOVER_CALCULATION_VERSION ||
+      Number(row.fee_rate) !== AGENCY_FEE_RATE ||
+      Number(row.ad_spend_pass_through_rate) !== 0 ||
+      Number(row.revenue_share_rate) !== 0 ||
+      Number(row.referral_discount_rate) !== 0 ||
+      !Number.isFinite(amount) ||
+      amount < 0.01 ||
+      row.source_row_count < 1 ||
+      row.account_count < 1 ||
+      !/^[0-9a-f]{32}$/.test(row.source_fingerprint)
+    ) {
+      throw new Error("The certified historical billing contract is invalid.");
+    }
+    return {
+      clientId: row.client_id,
+      periodStart: row.period_start,
+      periodEnd: row.period_end,
+      amount,
+      currency: BILLING_CURRENCY,
+      source: "historical_rollover_v1" as const,
+      certifiedAt: row.snapshot_created_at,
+    };
+  });
 }
 
 async function fetchPositionReferralTerms(
@@ -1566,7 +1832,9 @@ async function fetchAdminBillingPositions(
     const [startsResult, endsResult] = await Promise.all([
       supabase
         .from("ad_account_billing_starts")
-        .select("id, ad_account_id, google_local_date, baseline_cost_micros")
+        .select(
+          "id, ad_account_id, start_basis, google_local_date, baseline_cost_micros",
+        )
         .in("ad_account_id", accountIds),
       supabase
         .from("ad_account_billing_ends")
@@ -1582,6 +1850,7 @@ async function fetchAdminBillingPositions(
     starts = (startsResult.data ?? []).map((start) => ({
       id: start.id,
       accountId: start.ad_account_id,
+      basis: start.start_basis,
       googleLocalDate: start.google_local_date,
       baselineCostMicros: start.baseline_cost_micros,
     }));
@@ -1592,22 +1861,23 @@ async function fetchAdminBillingPositions(
     }));
   }
 
-  const { data: source, error: sourceError } = await supabase
-    .from("revenue_sources")
-    .select("id")
-    .eq("name", SPEND_SOURCE)
-    .maybeSingle();
-  if (sourceError) {
-    throw new Error(`Could not load billing position source: ${sourceError.message}`);
-  }
-  if (!source) throw new Error(`Revenue source "${SPEND_SOURCE}" is missing.`);
-
-  const [ledgerRows, metricRows, invoices, referralTermsByClient] =
+  const [
+    metricRows,
+    invoices,
+    referralTermsByClient,
+    reviewedFullDayEntries,
+    automationAttentionClientIds,
+    automaticClosedAmounts,
+    historicalClosedAmounts,
+  ] =
     await Promise.all([
-      fetchPositionLedgerRows(supabase, source.id, accountIds),
       fetchPositionMetrics(supabase, accountIds, currentStart, currentEnd),
       fetchPositionInvoices(supabase, clientIds),
       fetchPositionReferralTerms(supabase, clientIds),
+      fetchReviewedFullDayEntries(supabase, accountIds),
+      fetchBillingAutomationAttentionClientIds(supabase),
+      fetchCertifiedAutomaticClosedAmounts(supabase, now),
+      fetchCertifiedHistoricalClosedAmounts(supabase, now),
     ]);
 
   return buildBillingPositions({
@@ -1615,11 +1885,16 @@ async function fetchAdminBillingPositions(
     clients,
     accounts,
     starts,
+    reviewedFullDayEntries,
     ends,
-    ledgerRows,
+    certifiedClosedAmounts: [
+      ...automaticClosedAmounts,
+      ...historicalClosedAmounts,
+    ],
     metricRows,
     invoices,
     referralTermsByClient,
+    automationAttentionClientIds,
   });
 }
 
@@ -1637,13 +1912,15 @@ export async function fetchAdminBillingDashboard(
         right.start.localeCompare(left.start),
       );
   const generatedAt = new Date();
-  const [calculated, positions] = await Promise.all([
-    calculateWeek(supabase, selectedWeek),
-    fetchAdminBillingPositions(supabase, generatedAt),
-  ]);
-
-  const [invoiceRows, { data: clientRows, error: clientsError }] =
+  const [
+    positions,
+    automation,
+    invoiceRows,
+    { data: clientRows, error: clientsError },
+  ] =
     await Promise.all([
+      fetchAdminBillingPositions(supabase, generatedAt),
+      fetchLatestBillingAutomationRun(supabase),
       fetchAllIssuedInvoices(supabase),
       supabase.from("portal_clients").select("id, full_name, email"),
     ]);
@@ -1681,7 +1958,8 @@ export async function fetchAdminBillingDashboard(
     (invoice) => invoice.period_start === selectedWeek.start,
   );
   const selectedSettlements = issued.filter(
-    (invoice) => invoice.period_start === selectedWeek.start,
+    (invoice) =>
+      invoice.period_start === selectedWeek.start && invoice.status !== "void",
   );
   const month = isoDay(new Date()).slice(0, 7);
   const issuedThisMonth = billed.filter(
@@ -1734,19 +2012,7 @@ export async function fetchAdminBillingDashboard(
       failedCount: failed.length,
     },
     positions,
-    // Pre-v2 rows can contain spend/revenue-share lines and do not carry the
-    // boundary/referral fields needed by this review card. Keep them in the
-    // immutable history below instead of reconstructing a false v3 preview.
-    clients: calculated
-      .map((entry) => entry.preview)
-      .filter(
-        (preview) =>
-          !preview.existingInvoice ||
-          !preview.existingInvoice.issued_at ||
-          isManualAgencyCalculationVersion(
-            preview.existingInvoice.calculation_version,
-          ),
-      ),
+    automation,
     invoices,
   };
 }
@@ -2049,7 +2315,8 @@ export async function issueClientWeek(input: {
   periodStart: string;
   expectedAmount: number;
   expectedReviewToken: string;
-  issuedBy: string;
+  /** Null is reserved for CRON_SECRET-protected automatic issuance. */
+  issuedBy: string | null;
   client?: Supabase;
 }): Promise<Invoice> {
   const week = closedWeekStarting(input.periodStart);
@@ -2321,6 +2588,472 @@ export async function issueClientWeek(input: {
   }
 }
 
+export type AutomaticBillingResult = {
+  periodsChecked: number;
+  historicalRolloversChecked: number;
+  clientsChecked: number;
+  issued: number;
+  noCharge: number;
+  alreadySettled: number;
+  blocked: number;
+  /** Closed periods whose only hard blocker is refreshable Google evidence. */
+  exactRefreshPeriods: { start: string; end: string }[];
+  errors: {
+    clientId: string | null;
+    periodStart: string | null;
+    code: string;
+    message: string;
+  }[];
+  /** Per-item final state used only by the fenced durable automation queue. */
+  outcomes: AutomaticBillingOutcome[];
+};
+
+export type AutomaticBillingTarget = {
+  itemId: string;
+  claimVersion: number;
+  clientId: string;
+  periodStart: string;
+  periodEnd: string;
+};
+
+export type AutomaticBillingOutcome = AutomaticBillingTarget & {
+  state: "issued" | "no_charge" | "blocked";
+  stage: "preview" | "google_evidence" | "stripe_issue" | "complete";
+  code: string | null;
+  invoiceId: string | null;
+  amount: number | null;
+  billableSpend: number | null;
+  evidenceAccountCount: number;
+};
+
+type AutomaticBillingOptions = {
+  /** When present, process exactly these durable client/week claims. */
+  targets?: AutomaticBillingTarget[];
+  /** Historical rollovers are a separate sealed queue, run once per job. */
+  includeHistoricalRollovers?: boolean;
+};
+
+const EXACT_REFRESH_BLOCKERS = new Set<BillingBlockerCode>([
+  "ledger_missing",
+  "ledger_stale",
+]);
+
+function queueExactRefresh(
+  result: AutomaticBillingResult,
+  week: { start: string; end: string },
+  blockers: BillingBlocker[],
+): void {
+  const hardBlockers = blockers.filter((blocker) => blocker.severity === "error");
+  if (
+    hardBlockers.length === 0 ||
+    !hardBlockers.every((blocker) => EXACT_REFRESH_BLOCKERS.has(blocker.code)) ||
+    result.exactRefreshPeriods.some((period) => period.start === week.start)
+  ) {
+    return;
+  }
+  result.exactRefreshPeriods.push(week);
+}
+
+function automaticOutcomeBase(
+  target: AutomaticBillingTarget,
+  preview?: BillingClientPreview,
+) {
+  return {
+    ...target,
+    invoiceId: preview?.existingInvoice?.id ?? null,
+    amount: preview?.amount ?? null,
+    billableSpend: preview?.billableSpend ?? null,
+    evidenceAccountCount: preview?.stores.length ?? 0,
+  };
+}
+
+function blockerStage(
+  code: string,
+): AutomaticBillingOutcome["stage"] {
+  if (
+    code === "ledger_missing" ||
+    code === "ledger_stale" ||
+    code === "evidence_settling"
+  ) {
+    return "google_evidence";
+  }
+  if (
+    code === "stripe_not_configured" ||
+    code === "stripe_issue_failed" ||
+    code.startsWith("issue_") ||
+    code === "automatic_issue_failed"
+  ) {
+    return "stripe_issue";
+  }
+  return "preview";
+}
+
+function exactZeroSpend(preview: BillingClientPreview): boolean {
+  const hardBlockers = preview.blockers.filter(
+    (candidate) => candidate.severity === "error",
+  );
+  return (
+    !preview.existingInvoice &&
+    preview.stores.length > 0 &&
+    preview.billableSpend === 0 &&
+    preview.amount === 0 &&
+    hardBlockers.length === 0 &&
+    preview.blockers.some((candidate) => candidate.code === "no_spend") &&
+    preview.stores.every(
+      (store) =>
+        store.billingStart !== null &&
+        store.billableSpend === 0 &&
+        !store.blockers.some((candidate) => candidate.severity === "error"),
+    )
+  );
+}
+
+function primaryAutomaticBlocker(preview: BillingClientPreview): BillingBlocker {
+  return (
+    preview.blockers.find((candidate) => candidate.severity === "error") ??
+    preview.blockers[0] ??
+    blocker(
+      "no_spend",
+      "This closed week is not ready for automatic settlement.",
+      "warning",
+    )
+  );
+}
+
+async function issueAutomaticHistoricalRollovers(
+  client: Supabase,
+  result: AutomaticBillingResult,
+): Promise<void> {
+  const { data, error } = await client
+    .from("historical_billing_rollover_review")
+    .select("*")
+    .order("rollover_id", { ascending: true });
+  if (error) {
+    result.errors.push({
+      clientId: null,
+      periodStart: null,
+      code: "historical_rollover_load_failed",
+      message: error.message,
+    });
+    return;
+  }
+
+  const rollovers = (data ?? []) as HistoricalBillingRolloverReview[];
+  result.historicalRolloversChecked += rollovers.length;
+  if (rollovers.length > 0) result.periodsChecked += 1;
+
+  for (const rollover of rollovers) {
+    result.clientsChecked += 1;
+    let lease: BillingIssueLeaseHandle | null = null;
+    let invoice: Invoice | null = null;
+
+    try {
+      if (
+        rollover.calculation_version !==
+          HISTORICAL_ROLLOVER_CALCULATION_VERSION ||
+        rollover.currency.toUpperCase() !== BILLING_CURRENCY ||
+        Number(rollover.amount) < 0.01
+      ) {
+        throw new Error("The sealed historical rollover contract is invalid.");
+      }
+
+      if (rollover.invoice_id) {
+        const { data: stored, error: invoiceError } = await client
+          .from("invoices")
+          .select("*")
+          .eq("id", rollover.invoice_id)
+          .maybeSingle();
+        if (invoiceError) throw invoiceError;
+        if (!stored) {
+          throw new Error("The historical rollover invoice receipt is missing.");
+        }
+        invoice = stored as Invoice;
+        if (stripeInvoiceRecoveryMode(invoice) === null) {
+          result.alreadySettled += 1;
+          continue;
+        }
+      }
+
+      lease = await acquireBillingIssueLease(client, {
+        clientId: rollover.client_id,
+        periodStart: rollover.period_start,
+        issuedBy: null,
+      });
+      if (!lease) {
+        result.blocked += 1;
+        continue;
+      }
+
+      if (!invoice) {
+        const { data: createdRows, error: createError } = await client.rpc(
+          "create_historical_rollover_invoice",
+          { p_rollover_id: rollover.rollover_id },
+        );
+        if (createError) throw createError;
+        invoice = (createdRows as Invoice[] | null)?.[0] ?? null;
+        if (!invoice) {
+          throw new Error("Historical rollover creation returned no invoice.");
+        }
+      }
+
+      if (
+        invoice.client_id !== rollover.client_id ||
+        invoice.period_start !== rollover.period_start ||
+        invoice.period_end !== rollover.period_end ||
+        invoice.calculation_version !==
+          HISTORICAL_ROLLOVER_CALCULATION_VERSION ||
+        round2(Number(invoice.amount)) !== round2(Number(rollover.amount)) ||
+        invoice.issuer_kind !== "automation" ||
+        invoice.issued_by !== null
+      ) {
+        throw new Error(
+          "The historical rollover invoice does not match its sealed automation snapshot.",
+        );
+      }
+
+      const ownedLease = lease;
+      await pushToStripe(client, invoice, () =>
+        renewBillingIssueLease(client, ownedLease),
+      );
+      result.issued += 1;
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      if (lease && invoice && !(cause instanceof BillingIssueLeaseLostError)) {
+        try {
+          await recordBillingIssueError(client, lease, invoice.id, message);
+        } catch (recordError) {
+          console.error(
+            "Could not record automatic historical issue error:",
+            recordError,
+          );
+        }
+      }
+      result.errors.push({
+        clientId: rollover.client_id,
+        periodStart: rollover.period_start,
+        code:
+          cause instanceof BillingIssueLeaseLostError
+            ? "issue_lease_lost"
+            : "historical_rollover_issue_failed",
+        message,
+      });
+    } finally {
+      if (lease) {
+        try {
+          await releaseBillingIssueLease(client, lease);
+        } catch (releaseError) {
+          console.error(
+            "Could not release automatic historical issue lease:",
+            releaseError,
+          );
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Issue every eligible closed v3 week without requiring an admin click.
+ *
+ * `calculateWeek` and the SQL RPC remain the authorities for Google evidence,
+ * EUR-only terms, referrals, recipients and idempotency. This orchestration
+ * adds no commercial fallback: blocked previews stay blocked, existing
+ * settlements stay untouched, and a retry resumes only delivery-safe drafts.
+ */
+export async function issueAutomaticClosedWeeks(
+  client: Supabase,
+  options: AutomaticBillingOptions = {},
+): Promise<AutomaticBillingResult> {
+  const result: AutomaticBillingResult = {
+    periodsChecked: 0,
+    historicalRolloversChecked: 0,
+    clientsChecked: 0,
+    issued: 0,
+    noCharge: 0,
+    alreadySettled: 0,
+    blocked: 0,
+    exactRefreshPeriods: [],
+    errors: [],
+    outcomes: [],
+  };
+
+  if (!automaticBillingIssuanceEnabled()) {
+    result.errors.push({
+      clientId: null,
+      periodStart: null,
+      code: "issuance_disabled",
+      message: "Billing issuance is disabled.",
+    });
+    for (const target of options.targets ?? []) {
+      result.blocked += 1;
+      result.outcomes.push({
+        ...automaticOutcomeBase(target),
+        state: "blocked",
+        stage: "stripe_issue",
+        code: "issuance_disabled",
+      });
+    }
+    return result;
+  }
+
+  if (options.includeHistoricalRollovers ?? true) {
+    await issueAutomaticHistoricalRollovers(client, result);
+  }
+
+  const targetsByPeriod = new Map<string, Map<string, AutomaticBillingTarget>>();
+  for (const target of options.targets ?? []) {
+    const current = targetsByPeriod.get(target.periodStart) ?? new Map();
+    current.set(target.clientId, target);
+    targetsByPeriod.set(target.periodStart, current);
+  }
+  const weeks = options.targets
+    ? [...targetsByPeriod].map(([start, targets]) => ({
+        start,
+        end: [...targets.values()][0].periodEnd,
+      }))
+    : closedWeeks();
+  weeks.sort((left, right) => left.start.localeCompare(right.start));
+
+  for (const week of weeks) {
+    result.periodsChecked += 1;
+    const periodTargets = options.targets
+      ? targetsByPeriod.get(week.start) ?? new Map()
+      : null;
+    let calculated: CalculatedClient[];
+    try {
+      calculated = await calculateWeek(client, week);
+    } catch (error) {
+      result.errors.push({
+        clientId: null,
+        periodStart: week.start,
+        code: "preview_failed",
+        message: error instanceof Error ? error.message : String(error),
+      });
+      for (const target of periodTargets?.values() ?? []) {
+        result.blocked += 1;
+        result.outcomes.push({
+          ...automaticOutcomeBase(target),
+          state: "blocked",
+          stage: "preview",
+          code: "preview_failed",
+        });
+      }
+      continue;
+    }
+
+    const calculatedClientIds = new Set<string>();
+    for (const entry of calculated) {
+      const { preview } = entry;
+      const target = periodTargets?.get(preview.clientId) ?? null;
+      if (periodTargets && !target) continue;
+      if (target) calculatedClientIds.add(preview.clientId);
+      result.clientsChecked += 1;
+
+      const automaticAction = automaticInvoiceAction(
+        preview.existingInvoice,
+        preview.canIssue,
+      );
+      if (automaticAction === "settled") {
+        result.alreadySettled += 1;
+        if (target) {
+          result.outcomes.push({
+            ...automaticOutcomeBase(target, preview),
+            state: "issued",
+            stage: "complete",
+            code: null,
+          });
+        }
+        continue;
+      }
+      if (automaticAction === "blocked") {
+        if (target && exactZeroSpend(preview)) {
+          result.noCharge += 1;
+          result.outcomes.push({
+            ...automaticOutcomeBase(target, preview),
+            state: "no_charge",
+            stage: "complete",
+            code: null,
+            invoiceId: null,
+            amount: 0,
+            billableSpend: 0,
+          });
+          continue;
+        }
+        queueExactRefresh(result, week, preview.blockers);
+        // Zero-spend clients and evidence that has not settled yet are normal
+        // operational states. They remain visible in Billing without turning
+        // the entire Monday job into a failed run.
+        result.blocked += 1;
+        if (target) {
+          const primary = primaryAutomaticBlocker(preview);
+          result.outcomes.push({
+            ...automaticOutcomeBase(target, preview),
+            state: "blocked",
+            stage: blockerStage(primary.code),
+            code: primary.code,
+          });
+        }
+        continue;
+      }
+
+      try {
+        const invoice = await issueClientWeek({
+          clientId: preview.clientId,
+          periodStart: week.start,
+          expectedAmount: preview.amount,
+          expectedReviewToken: preview.reviewToken,
+          issuedBy: null,
+          client,
+        });
+        result.issued += 1;
+        if (target) {
+          result.outcomes.push({
+            ...automaticOutcomeBase(target, preview),
+            state: "issued",
+            stage: "complete",
+            code: null,
+            invoiceId: invoice.id,
+            amount: Number(invoice.amount),
+          });
+        }
+      } catch (error) {
+        const code =
+          error instanceof BillingIssueError
+            ? error.code
+            : "automatic_issue_failed";
+        result.errors.push({
+          clientId: preview.clientId,
+          periodStart: week.start,
+          code,
+          message: error instanceof Error ? error.message : String(error),
+        });
+        result.blocked += 1;
+        if (target) {
+          result.outcomes.push({
+            ...automaticOutcomeBase(target, preview),
+            state: "blocked",
+            stage: blockerStage(code),
+            code,
+          });
+        }
+      }
+    }
+
+    for (const target of periodTargets?.values() ?? []) {
+      if (calculatedClientIds.has(target.clientId)) continue;
+      result.blocked += 1;
+      result.outcomes.push({
+        ...automaticOutcomeBase(target),
+        state: "blocked",
+        stage: "preview",
+        code: "billing_client_unavailable",
+      });
+    }
+  }
+
+  return result;
+}
+
 export type ReconcileResult = {
   checked: number;
   updated: number;
@@ -2384,7 +3117,7 @@ export async function reconcileInvoices(
           amount: Number(row.amount),
           requireMetadata: manualAgencyInvoice,
           requireManualCollection: manualAgencyInvoice,
-          ...(row.calculation_version === CALCULATION_VERSION
+          ...(hasImmutableBillingRecipient(row.calculation_version)
             ? { recipient: stripeRecipientExpectation(row.billing_recipient) }
             : {}),
         });

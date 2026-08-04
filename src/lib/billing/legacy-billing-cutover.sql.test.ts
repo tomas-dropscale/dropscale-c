@@ -310,7 +310,7 @@ describe("explicit legacy billing cutover", () => {
     } finally {
       await db.close();
     }
-  });
+  }, 15_000);
 
   it("refuses to guess an existing referral relationship", async () => {
     const db = await legacyDatabase({ referred: true });

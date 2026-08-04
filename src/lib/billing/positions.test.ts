@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import {
   buildBillingPositions,
   type BillingPositionAccount,
+  type BillingPositionCertifiedClosedAmount,
   type BillingPositionClient,
+  type BillingPositionInvoice,
 } from "./positions";
 
 const client: BillingPositionClient = {
@@ -23,6 +25,40 @@ function account(over: Partial<BillingPositionAccount> = {}): BillingPositionAcc
   };
 }
 
+function certified(
+  over: Partial<BillingPositionCertifiedClosedAmount> = {},
+): BillingPositionCertifiedClosedAmount {
+  return {
+    clientId: client.id,
+    periodStart: "2026-07-27",
+    periodEnd: "2026-08-02",
+    amount: 10,
+    currency: "EUR",
+    source: "automatic_v3",
+    certifiedAt: "2026-08-03T15:00:00.000Z",
+    ...over,
+  };
+}
+
+function invoice(
+  over: Partial<BillingPositionInvoice> = {},
+): BillingPositionInvoice {
+  return {
+    clientId: client.id,
+    periodStart: "2026-07-27",
+    currency: "EUR",
+    status: "open",
+    amount: 10,
+    amountRemaining: 10,
+    issuedAt: "2026-08-03T16:00:00.000Z",
+    calculationVersion:
+      "agency-fee-eur-v3-manual-referrals-google-boundaries",
+    issueError: null,
+    paymentFailedAt: null,
+    ...over,
+  };
+}
+
 function position(over: Partial<Parameters<typeof buildBillingPositions>[0]> = {}) {
   return buildBillingPositions({
     now: new Date("2026-08-04T14:00:00.000Z"),
@@ -30,7 +66,7 @@ function position(over: Partial<Parameters<typeof buildBillingPositions>[0]> = {
     accounts: [account()],
     starts: [],
     ends: [],
-    ledgerRows: [],
+    certifiedClosedAmounts: [],
     metricRows: [],
     invoices: [],
     ...over,
@@ -38,38 +74,12 @@ function position(over: Partial<Parameters<typeof buildBillingPositions>[0]> = {
 }
 
 describe("billing positions", () => {
-  it("keeps a Thursday signup's closed cycle separate from the current week", () => {
+  it("keeps one certified closed amount separate from the current week", () => {
     const result = position({
-      ledgerRows: [
-        {
-          accountId: "account-1",
-          occurredOn: "2026-07-29",
-          grossAmount: "999.000000",
-          currency: "EUR",
-          updatedAt: "2026-08-03T15:00:00.000Z",
-        },
-        {
-          accountId: "account-1",
-          occurredOn: "2026-07-30",
-          grossAmount: "100.000000",
-          currency: "EUR",
-          updatedAt: "2026-08-03T15:00:00.000Z",
-        },
-        {
-          accountId: "account-1",
-          occurredOn: "2026-08-02",
-          grossAmount: "50.000000",
-          currency: "EUR",
-          updatedAt: "2026-08-03T15:00:00.000Z",
-        },
-        {
-          accountId: "account-1",
-          occurredOn: "2026-08-03",
-          grossAmount: "200.000000",
-          currency: "EUR",
-          updatedAt: "2026-08-04T13:00:00.000Z",
-        },
+      reviewedFullDayEntries: [
+        { accountId: "account-1", entryDay: "2026-07-30" },
       ],
+      certifiedClosedAmounts: [certified({ amount: 15 })],
       metricRows: [
         {
           accountId: "account-1",
@@ -91,99 +101,132 @@ describe("billing positions", () => {
       start: "2026-08-03",
       end: "2026-08-09",
     });
-    // The pre-entry 29 July row and the current-week ledger row are excluded.
-    expect(result.clients[0].closed.unissuedEstimate).toBe(15);
-    expect(result.clients[0].closed.supportedUnissued).toBe(5);
-    expect(result.clients[0].closed.needsEntryReview).toBe(10);
-    expect(result.clients[0].current.grossSpend).toBe(225);
-    expect(result.clients[0].current.accruedFee).toBe(22.5);
+    expect(result.clients[0].closed).toMatchObject({
+      unissuedEstimate: 15,
+      supportedUnissued: 15,
+      supportedNotReceived: 15,
+      maximumNotReceived: 15,
+      needsEntryReview: 0,
+    });
+    expect(result.clients[0].current).toMatchObject({
+      grossSpend: 225,
+      accruedFee: 22.5,
+    });
   });
 
-  it("shows a positive Sunday entry day as a range instead of an exact debt", () => {
-    const sundayAccount = account({
-      createdAt: "2026-08-02T13:38:00.000Z",
-    });
-    const result = position({
-      accounts: [sundayAccount],
+  it("cannot turn an unproven confirmed ledger row into closed money", () => {
+    const result = buildBillingPositions({
+      now: new Date("2026-08-04T14:00:00.000Z"),
+      clients: [client],
+      accounts: [account()],
+      starts: [],
+      ends: [],
+      certifiedClosedAmounts: [],
+      metricRows: [],
+      invoices: [],
+      // A legacy caller may still carry this runtime property during rollout;
+      // it is deliberately outside PositionInput and therefore ignored.
       ledgerRows: [
         {
-          accountId: sundayAccount.id,
+          accountId: "account-1",
           occurredOn: "2026-08-02",
-          grossAmount: "96.200000",
+          grossAmount: "999.000000",
           currency: "EUR",
           updatedAt: "2026-08-03T15:00:00.000Z",
         },
       ],
+    } as Parameters<typeof buildBillingPositions>[0] & {
+      ledgerRows: unknown[];
+    });
+
+    expect(result.summary.supportedNotReceived).toBe(0);
+    expect(result.summary.closedSupportedUnissued).toBe(0);
+  });
+
+  it("accepts the isolated certified historical rollover without reopening its rows", () => {
+    const result = position({
+      reviewedFullDayEntries: [
+        { accountId: "account-1", entryDay: "2026-07-30" },
+      ],
+      certifiedClosedAmounts: [
+        certified({ source: "historical_rollover_v1", amount: 9.62 }),
+      ],
     });
 
     expect(result.clients[0].closed).toMatchObject({
-      unissuedEstimate: 9.62,
-      supportedUnissued: 0,
-      needsEntryReview: 9.62,
-      supportedNotReceived: 0,
+      supportedUnissued: 9.62,
+      supportedNotReceived: 9.62,
       maximumNotReceived: 9.62,
+      periodCount: 1,
     });
-    expect(result.summary.clientsNeedingEntryReview).toBe(1);
   });
 
-  it("uses an immutable baseline when one exists and removes the ambiguity", () => {
+  it("uses immutable boundaries only for the provisional current cycle", () => {
     const result = position({
       starts: [
         {
           id: "start-1",
           accountId: "account-1",
-          googleLocalDate: "2026-07-30",
+          basis: "observed_google_counter",
+          googleLocalDate: "2026-08-03",
           baselineCostMicros: "40000000",
         },
       ],
-      ledgerRows: [
+      metricRows: [
         {
           accountId: "account-1",
-          occurredOn: "2026-07-30",
-          grossAmount: "100.000000",
-          currency: "EUR",
-          updatedAt: "2026-08-03T15:00:00.000Z",
+          day: "2026-08-03",
+          adSpend: 100,
+          computedAt: "2026-08-04T13:30:00.000Z",
         },
         {
           accountId: "account-1",
-          occurredOn: "2026-07-31",
-          grossAmount: "20.000000",
-          currency: "EUR",
-          updatedAt: "2026-08-03T15:00:00.000Z",
+          day: "2026-08-04",
+          adSpend: 20,
+          computedAt: "2026-08-04T13:30:00.000Z",
         },
       ],
     });
 
-    expect(result.clients[0].closed).toMatchObject({
-      unissuedEstimate: 8,
-      supportedUnissued: 8,
-      needsEntryReview: 0,
+    expect(result.clients[0].closed.supportedNotReceived).toBe(0);
+    expect(result.clients[0].current).toMatchObject({
+      grossSpend: 80,
+      accruedFee: 8,
       missingStartCount: 0,
     });
   });
 
-  it("does not count a week twice once an active invoice exists", () => {
+  it("marks an account without an immutable start for attention without inventing debt", () => {
     const result = position({
-      ledgerRows: [
-        {
-          accountId: "account-1",
-          occurredOn: "2026-07-31",
-          grossAmount: "100.000000",
-          currency: "EUR",
-          updatedAt: "2026-08-03T15:00:00.000Z",
-        },
+      accounts: [account({ createdAt: "2026-08-04T09:00:00.000Z" })],
+    });
+
+    expect(result.clients[0]).toMatchObject({
+      closed: {
+        supportedNotReceived: 0,
+        missingStartCount: 0,
+        needsAttentionCount: 1,
+      },
+      current: { missingStartCount: 1 },
+    });
+  });
+
+  it("merges durable blocked automation into one attention signal", () => {
+    const result = position({
+      reviewedFullDayEntries: [
+        { accountId: "account-1", entryDay: "2026-07-30" },
       ],
-      invoices: [
-        {
-          clientId: client.id,
-          periodStart: "2026-07-27",
-          status: "open",
-          amount: 10,
-          amountRemaining: 7.5,
-          issuedAt: "2026-08-03T16:00:00.000Z",
-          calculationVersion: "agency-fee-eur-v3-manual-referrals-google-boundaries",
-        },
-      ],
+      automationAttentionClientIds: [client.id, client.id],
+    });
+
+    expect(result.clients[0].closed.needsAttentionCount).toBe(1);
+    expect(result.summary.clientsNeedingAttention).toBe(1);
+  });
+
+  it("uses an issued open invoice's remaining balance instead of its certified week", () => {
+    const result = position({
+      certifiedClosedAmounts: [certified()],
+      invoices: [invoice({ amountRemaining: 7.5 })],
     });
 
     expect(result.clients[0].closed).toMatchObject({
@@ -195,76 +238,149 @@ describe("billing positions", () => {
     });
   });
 
-  it("ignores archived never-issued legacy voids when computing unissued fees", () => {
+  it("counts a payment-failed open invoice once and marks attention", () => {
     const result = position({
-      ledgerRows: [
-        {
-          accountId: "account-1",
-          occurredOn: "2026-07-31",
-          grossAmount: "100.000000",
-          currency: "EUR",
-          updatedAt: "2026-08-03T15:00:00.000Z",
-        },
-      ],
       invoices: [
-        {
-          clientId: client.id,
-          periodStart: "2026-07-27",
-          status: "void",
-          amount: 110,
-          amountRemaining: null,
-          issuedAt: null,
-          calculationVersion: "legacy",
-        },
+        invoice({
+          amountRemaining: 7.5,
+          paymentFailedAt: "2026-08-04T10:00:00.000Z",
+        }),
       ],
     });
 
-    expect(result.clients[0].closed.unissuedEstimate).toBe(10);
+    expect(result.clients[0].closed).toMatchObject({
+      issuedOutstanding: 7.5,
+      failedNotReceived: 0,
+      supportedNotReceived: 7.5,
+      needsAttentionCount: 1,
+    });
   });
 
-  it("keeps the audited live closed range and current estimate mathematically separate", () => {
-    const secondClient = {
+  it("requires proof input for a retryable draft", () => {
+    const draft = invoice({
+      status: "draft",
+      issuedAt: null,
+      amountRemaining: null,
+      issueError: "Stripe request timed out.",
+    });
+    const unsupported = position({ invoices: [draft] });
+    const certifiedDraft = position({
+      invoices: [draft],
+      certifiedClosedAmounts: [certified()],
+    });
+
+    expect(unsupported.clients[0].closed.supportedNotReceived).toBe(0);
+    expect(unsupported.clients[0].closed.needsAttentionCount).toBe(1);
+    expect(certifiedDraft.clients[0].closed.supportedNotReceived).toBe(10);
+  });
+
+  it("does not present a written-off uncollectible invoice as collectible", () => {
+    const result = position({
+      certifiedClosedAmounts: [certified()],
+      invoices: [
+        invoice({
+          status: "uncollectible",
+          amountRemaining: 7.5,
+        }),
+      ],
+    });
+
+    expect(result.clients[0].closed).toMatchObject({
+      issuedOutstanding: 0,
+      failedNotReceived: 0,
+      supportedNotReceived: 0,
+      needsAttentionCount: 1,
+    });
+  });
+
+  it("excludes a non-EUR open invoice from the EUR position", () => {
+    const result = position({
+      invoices: [invoice({ currency: "USD", amountRemaining: 8 })],
+    });
+
+    expect(result.clients[0].closed).toMatchObject({
+      issuedOutstanding: 0,
+      supportedNotReceived: 0,
+      needsAttentionCount: 1,
+    });
+  });
+
+  it("does not let an archived legacy void suppress the certified rollover", () => {
+    const result = position({
+      certifiedClosedAmounts: [
+        certified({ source: "historical_rollover_v1", amount: 10 }),
+      ],
+      invoices: [
+        invoice({
+          status: "void",
+          issuedAt: null,
+          amountRemaining: null,
+          amount: 110,
+          calculationVersion: "legacy",
+        }),
+      ],
+    });
+
+    expect(result.clients[0].closed.supportedNotReceived).toBe(10);
+  });
+
+  it("fails closed for conflicting certified sources on one client/week", () => {
+    expect(() =>
+      position({
+        certifiedClosedAmounts: [
+          certified(),
+          certified({ source: "historical_rollover_v1" }),
+        ],
+      }),
+    ).toThrow("more than one certified closed amount");
+  });
+
+  it.each([
+    certified({ currency: "USD" }),
+    certified({ amount: 10.001 }),
+    certified({ periodStart: "2026-07-28", periodEnd: "2026-08-03" }),
+    certified({ periodStart: "2026-08-03", periodEnd: "2026-08-09" }),
+  ])("fails closed for a malformed certification contract", (candidate) => {
+    expect(() =>
+      position({ certifiedClosedAmounts: [candidate] }),
+    ).toThrow("Invalid certified closed billing amount");
+  });
+
+  it("sums exact certified clients while keeping current estimates separate", () => {
+    const secondClient: BillingPositionClient = {
       id: "client-2",
       fullName: "Second Client",
       email: "second@example.com",
     };
-    const supportedAccount = account({
-      id: "supported-account",
-      createdAt: "2026-07-30T09:00:00.000Z",
-    });
-    const sundayAccount = account({
-      id: "sunday-account",
+    const firstAccount = account({ id: "first-account" });
+    const secondAccount = account({
+      id: "second-account",
       clientId: secondClient.id,
-      createdAt: "2026-08-02T13:38:00.000Z",
     });
     const result = position({
       clients: [client, secondClient],
-      accounts: [supportedAccount, sundayAccount],
-      ledgerRows: [
-        {
-          accountId: supportedAccount.id,
-          occurredOn: "2026-07-31",
-          grossAmount: "941.400000",
-          currency: "EUR",
-          updatedAt: "2026-08-03T15:00:00.000Z",
-        },
-        {
-          accountId: sundayAccount.id,
-          occurredOn: "2026-08-02",
-          grossAmount: "96.200000",
-          currency: "EUR",
-          updatedAt: "2026-08-03T15:00:00.000Z",
-        },
+      accounts: [firstAccount, secondAccount],
+      reviewedFullDayEntries: [
+        { accountId: firstAccount.id, entryDay: "2026-07-30" },
+        { accountId: secondAccount.id, entryDay: "2026-07-30" },
+      ],
+      certifiedClosedAmounts: [
+        certified({ clientId: client.id, amount: 94.14 }),
+        certified({
+          clientId: secondClient.id,
+          amount: 9.62,
+          source: "historical_rollover_v1",
+        }),
       ],
       metricRows: [
         {
-          accountId: supportedAccount.id,
+          accountId: firstAccount.id,
           day: "2026-08-04",
           adSpend: 196.54,
           computedAt: "2026-08-04T14:10:00.000Z",
         },
         {
-          accountId: sundayAccount.id,
+          accountId: secondAccount.id,
           day: "2026-08-04",
           adSpend: 64.84,
           computedAt: "2026-08-04T14:10:00.000Z",
@@ -273,10 +389,10 @@ describe("billing positions", () => {
     });
 
     expect(result.summary).toMatchObject({
-      closedSupportedUnissued: 94.14,
+      closedSupportedUnissued: 103.76,
       closedUnissuedEstimate: 103.76,
-      closedNeedsEntryReview: 9.62,
-      supportedNotReceived: 94.14,
+      closedNeedsEntryReview: 0,
+      supportedNotReceived: 103.76,
       maximumNotReceived: 103.76,
       currentGrossSpend: 261.38,
       currentAccruedFee: 26.13,

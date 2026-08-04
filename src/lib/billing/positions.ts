@@ -94,22 +94,22 @@ export type BillingPositionAccount = {
 export type BillingPositionStart = {
   id: string;
   accountId: string;
+  basis: "observed_google_counter" | "reviewed_full_day";
   googleLocalDate: string;
-  baselineCostMicros: string | number;
+  /** Null only for a reviewed full-day start, which has no Google counter. */
+  baselineCostMicros: string | number | null;
+};
+
+/** Immutable account-level proof from an approved historical rollover. */
+export type BillingPositionReviewedEntry = {
+  accountId: string;
+  entryDay: string;
 };
 
 export type BillingPositionEnd = {
   accountId: string;
   googleLocalDate: string;
   endCostMicros: string | number;
-};
-
-export type BillingPositionLedgerRow = {
-  accountId: string;
-  occurredOn: string;
-  grossAmount: string | number;
-  currency: string;
-  updatedAt: string;
 };
 
 export type BillingPositionMetricRow = {
@@ -122,11 +122,29 @@ export type BillingPositionMetricRow = {
 export type BillingPositionInvoice = {
   clientId: string;
   periodStart: string;
+  currency: string;
   status: "draft" | "open" | "paid" | "void" | "uncollectible" | "waived";
   amount: string | number;
   amountRemaining: string | number | null;
   issuedAt: string | null;
   calculationVersion: string;
+  issueError?: string | null;
+  paymentFailedAt?: string | null;
+};
+
+/**
+ * One exact, positive client/week receivable that passed its own immutable
+ * evidence contract. Raw Google ledger rows are deliberately not accepted by
+ * the position builder: a confirmed row can still belong to a partial sync.
+ */
+export type BillingPositionCertifiedClosedAmount = {
+  clientId: string;
+  periodStart: string;
+  periodEnd: string;
+  amount: string | number;
+  currency: string;
+  source: "automatic_v3" | "historical_rollover_v1";
+  certifiedAt: string;
 };
 
 export type BillingClientPosition = {
@@ -136,17 +154,20 @@ export type BillingClientPosition = {
   currency: typeof BILLING_CURRENCY;
   closed: {
     through: string;
-    /** Full-day upper estimate for every account whose opening counter is missing. */
+    /** Compatibility field; now equal to the exact certified unissued amount. */
     unissuedEstimate: number;
-    /** Portion that does not depend on an unresolved positive entry day. */
+    /** Exact certified closed amount not yet represented by an issued invoice. */
     supportedUnissued: number;
-    /** Difference between the full-day estimate and the supported lower bound. */
+    /** Compatibility field; unresolved rows never enter the closed balance. */
     needsEntryReview: number;
     issuedOutstanding: number;
+    /** Compatibility field; written-off balances are not collectible. */
+    failedNotReceived: number;
     supportedNotReceived: number;
     maximumNotReceived: number;
     periodCount: number;
     missingStartCount: number;
+    needsAttentionCount: number;
     lastLedgerUpdate: string | null;
   };
   current: {
@@ -166,11 +187,13 @@ export type BillingPositionSummary = {
   closedSupportedUnissued: number;
   closedNeedsEntryReview: number;
   issuedOutstanding: number;
+  failedNotReceived: number;
   supportedNotReceived: number;
   maximumNotReceived: number;
   currentGrossSpend: number;
   currentAccruedFee: number;
   clientsNeedingEntryReview: number;
+  clientsNeedingAttention: number;
 };
 
 export type BillingPositions = {
@@ -185,20 +208,14 @@ type PositionInput = {
   clients: BillingPositionClient[];
   accounts: BillingPositionAccount[];
   starts: BillingPositionStart[];
+  reviewedFullDayEntries?: BillingPositionReviewedEntry[];
   ends: BillingPositionEnd[];
-  ledgerRows: BillingPositionLedgerRow[];
+  certifiedClosedAmounts: BillingPositionCertifiedClosedAmount[];
   metricRows: BillingPositionMetricRow[];
   invoices: BillingPositionInvoice[];
   referralTermsByClient?: Map<string, BillingPositionReferralTerm[]>;
-};
-
-type AccountWeek = {
-  clientId: string;
-  accountId: string;
-  weekStart: string;
-  totalMicros: bigint;
-  unresolvedEntryDayMicros: bigint;
-  lastLedgerUpdate: string | null;
+  /** Durable non-terminal automatic client/week work, reduced to client scope. */
+  automationAttentionClientIds?: Iterable<string>;
 };
 
 function newest(left: string | null, right: string): string {
@@ -211,13 +228,57 @@ function euroNumber(micros: bigint): number {
   return Number(`${whole}.${fraction}`);
 }
 
-function activeCommercialInvoice(invoice: BillingPositionInvoice): boolean {
-  // The v3 cutover deliberately kept never-issued legacy drafts as void audit
-  // rows. They are not settlements and must not hide a still-unbilled week.
-  return !(
+function validPositionStart(
+  start: BillingPositionStart | undefined,
+): BillingPositionStart | null {
+  if (!start) return null;
+  if (start.basis === "reviewed_full_day") {
+    return start.baselineCostMicros === null ? start : null;
+  }
+  return start.baselineCostMicros !== null ? start : null;
+}
+
+function openingBaseline(start: BillingPositionStart | null): string | number {
+  return start?.basis === "observed_google_counter"
+    ? start.baselineCostMicros!
+    : 0;
+}
+
+function invoiceOccupiesCertifiedWeek(
+  invoice: BillingPositionInvoice,
+): boolean {
+  // The v3 cutover deliberately preserved never-issued legacy voids as audit
+  // rows. They neither settle nor suppress the one certified historical rollover.
+  if (
     invoice.status === "void" &&
     invoice.calculationVersion === "legacy" &&
     invoice.issuedAt === null
+  ) {
+    return false;
+  }
+  return (
+    (invoice.status === "open" && invoice.issuedAt !== null) ||
+    invoice.status === "paid" ||
+    invoice.status === "void" ||
+    invoice.status === "uncollectible" ||
+    invoice.status === "waived"
+  );
+}
+
+function exactClosedWeek(
+  periodStart: string,
+  periodEnd: string,
+  closedThrough: string,
+): boolean {
+  const parsed = new Date(`${periodStart}T00:00:00.000Z`);
+  return (
+    /^\d{4}-\d{2}-\d{2}$/.test(periodStart) &&
+    /^\d{4}-\d{2}-\d{2}$/.test(periodEnd) &&
+    !Number.isNaN(parsed.getTime()) &&
+    parsed.toISOString().slice(0, 10) === periodStart &&
+    parsed.getUTCDay() === 1 &&
+    periodEnd === addDays(periodStart, 6) &&
+    periodEnd <= closedThrough
   );
 }
 
@@ -229,11 +290,10 @@ function currentWeek(now: Date): { start: string; end: string } {
 /**
  * Build the admin's financial position without turning estimates into debts.
  *
- * Closed, unissued weeks use the six-decimal Google commission ledger. When a
- * historic account has no immutable opening counter, `createdAt` is only a
- * proposal: the whole first day is included in the upper estimate and split
- * out as `needsEntryReview`. Current-week values come from the dashboard's
- * latest daily Google read model and remain visibly provisional.
+ * Closed money enters only as a client/week snapshot certified by the exact
+ * automatic v3 proof or the isolated historical rollover. Confirmed Google rows are
+ * never sufficient by themselves. Current-week values still come from the
+ * dashboard's latest daily Google read model and remain visibly provisional.
  */
 export function buildBillingPositions(input: PositionInput): BillingPositions {
   if (!Number.isFinite(input.now.getTime())) {
@@ -245,72 +305,16 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
   const closedThrough = addDays(currentPeriod.start, -1);
   const accountById = new Map(input.accounts.map((account) => [account.id, account]));
   const startsByAccount = new Map(input.starts.map((start) => [start.accountId, start]));
+  const reviewedEntryByAccount = new Map(
+    (input.reviewedFullDayEntries ?? []).map((entry) => [entry.accountId, entry]),
+  );
   const endsByAccount = new Map(input.ends.map((end) => [end.accountId, end]));
   const termsByClient = input.referralTermsByClient ?? new Map();
-
-  const activeInvoiceWeeks = new Set(
+  const occupiedInvoiceWeeks = new Set(
     input.invoices
-      .filter(activeCommercialInvoice)
+      .filter(invoiceOccupiesCertifiedWeek)
       .map((invoice) => `${invoice.clientId}:${invoice.periodStart}`),
   );
-
-  const accountWeeks = new Map<string, AccountWeek>();
-  for (const row of input.ledgerRows) {
-    const account = accountById.get(row.accountId);
-    if (
-      !account ||
-      account.currency.toUpperCase() !== BILLING_CURRENCY ||
-      row.currency.toUpperCase() !== BILLING_CURRENCY
-    ) {
-      continue;
-    }
-    if (row.occurredOn > closedThrough) continue;
-
-    const start = startsByAccount.get(account.id);
-    const candidateStart = start?.googleLocalDate ?? isoDay(new Date(account.createdAt));
-    const end = endsByAccount.get(account.id);
-    if (
-      row.occurredOn < candidateStart ||
-      (end && row.occurredOn > end.googleLocalDate)
-    ) {
-      continue;
-    }
-
-    const rawMicros = decimalToMicros(row.grossAmount);
-    const billableMicros = billableGoogleMicros(
-      rawMicros,
-      row.occurredOn,
-      candidateStart,
-      start?.baselineCostMicros ?? "0",
-      end
-        ? {
-            googleLocalDate: end.googleLocalDate,
-            endCostMicros: end.endCostMicros,
-          }
-        : undefined,
-    );
-    if (billableMicros <= ZERO) continue;
-
-    const weekStart = mondayOf(new Date(`${row.occurredOn}T12:00:00.000Z`));
-    const key = `${account.clientId}:${account.id}:${weekStart}`;
-    const aggregate = accountWeeks.get(key) ?? {
-      clientId: account.clientId,
-      accountId: account.id,
-      weekStart,
-      totalMicros: ZERO,
-      unresolvedEntryDayMicros: ZERO,
-      lastLedgerUpdate: null,
-    };
-    aggregate.totalMicros += billableMicros;
-    if (!start && row.occurredOn === candidateStart) {
-      aggregate.unresolvedEntryDayMicros += billableMicros;
-    }
-    aggregate.lastLedgerUpdate = newest(
-      aggregate.lastLedgerUpdate,
-      row.updatedAt,
-    );
-    accountWeeks.set(key, aggregate);
-  }
 
   type MutablePosition = BillingClientPosition & {
     closedPeriodStarts: Set<string>;
@@ -328,10 +332,12 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
         supportedUnissued: 0,
         needsEntryReview: 0,
         issuedOutstanding: 0,
+        failedNotReceived: 0,
         supportedNotReceived: 0,
         maximumNotReceived: 0,
         periodCount: 0,
         missingStartCount: 0,
+        needsAttentionCount: 0,
         lastLedgerUpdate: null,
       },
       current: {
@@ -351,56 +357,127 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
   for (const account of input.accounts) {
     const position = positions.get(account.clientId);
     if (!position) continue;
-    const start = startsByAccount.get(account.id);
+    const storedStart = startsByAccount.get(account.id);
+    const start = validPositionStart(storedStart);
     const candidateStart = start?.googleLocalDate ?? isoDay(new Date(account.createdAt));
-    if (!start && candidateStart <= closedThrough) {
+    const reviewedEntry = reviewedEntryByAccount.get(account.id);
+    const hasReviewedFullDay =
+      !storedStart && reviewedEntry?.entryDay === candidateStart;
+    if (
+      !start &&
+      !hasReviewedFullDay &&
+      candidateStart <= closedThrough
+    ) {
       position.closed.missingStartCount += 1;
     }
-    if (!start && candidateStart <= today) {
+    if (
+      !start &&
+      !hasReviewedFullDay &&
+      candidateStart <= today
+    ) {
       position.current.missingStartCount += 1;
     }
   }
 
-  for (const week of accountWeeks.values()) {
-    const position = positions.get(week.clientId);
-    if (!position) continue;
-    if (activeInvoiceWeeks.has(`${week.clientId}:${week.weekStart}`)) continue;
-
-    const rate = manualReferralRateForDate(
-      week.weekStart,
-      termsByClient.get(week.clientId) ?? [],
-    );
-    const fullFee = agencyFee(euroNumber(week.totalMicros), rate);
-    const supportedFee = agencyFee(
-      euroNumber(week.totalMicros - week.unresolvedEntryDayMicros),
-      rate,
-    );
-    position.closed.unissuedEstimate = round2(
-      position.closed.unissuedEstimate + fullFee,
-    );
-    position.closed.supportedUnissued = round2(
-      position.closed.supportedUnissued + supportedFee,
-    );
-    position.closed.needsEntryReview = round2(
-      position.closed.needsEntryReview + fullFee - supportedFee,
-    );
-    position.closedPeriodStarts.add(week.weekStart);
-    if (week.lastLedgerUpdate) {
-      position.closed.lastLedgerUpdate = newest(
-        position.closed.lastLedgerUpdate,
-        week.lastLedgerUpdate,
+  for (const position of positions.values()) {
+    if (
+      position.closed.missingStartCount > 0 ||
+      position.current.missingStartCount > 0
+    ) {
+      // The compact dashboard needs one client-level attention signal, not a
+      // duplicate warning for every account and every period.
+      position.closed.needsAttentionCount = Math.max(
+        1,
+        position.closed.needsAttentionCount,
       );
     }
   }
 
+  for (const clientId of new Set(input.automationAttentionClientIds ?? [])) {
+    const position = positions.get(clientId);
+    if (position) {
+      position.closed.needsAttentionCount = Math.max(
+        1,
+        position.closed.needsAttentionCount,
+      );
+    }
+  }
+
+  const certifiedWeeks = new Set<string>();
+  for (const certified of input.certifiedClosedAmounts) {
+    const position = positions.get(certified.clientId);
+    if (!position) continue;
+    const key = `${certified.clientId}:${certified.periodStart}`;
+    if (certifiedWeeks.has(key)) {
+      throw new RangeError(
+        "A client/week cannot have more than one certified closed amount.",
+      );
+    }
+    certifiedWeeks.add(key);
+
+    const amount = Number(certified.amount);
+    if (
+      !["automatic_v3", "historical_rollover_v1"].includes(certified.source) ||
+      certified.currency.toUpperCase() !== BILLING_CURRENCY ||
+      !Number.isFinite(amount) ||
+      amount <= 0 ||
+      round2(amount) !== amount ||
+      !exactClosedWeek(
+        certified.periodStart,
+        certified.periodEnd,
+        closedThrough,
+      ) ||
+      !Number.isFinite(new Date(certified.certifiedAt).getTime())
+    ) {
+      throw new RangeError("Invalid certified closed billing amount.");
+    }
+    if (occupiedInvoiceWeeks.has(key)) continue;
+
+    position.closed.unissuedEstimate = round2(
+      position.closed.unissuedEstimate + amount,
+    );
+    position.closed.supportedUnissued = round2(
+      position.closed.supportedUnissued + amount,
+    );
+    position.closedPeriodStarts.add(certified.periodStart);
+    position.closed.lastLedgerUpdate = newest(
+      position.closed.lastLedgerUpdate,
+      certified.certifiedAt,
+    );
+  }
+
   for (const invoice of input.invoices) {
     const position = positions.get(invoice.clientId);
-    if (!position || invoice.status !== "open" || !invoice.issuedAt) continue;
+    if (!position) continue;
     const remaining = Number(invoice.amountRemaining ?? invoice.amount);
-    if (!Number.isFinite(remaining) || remaining < 0) continue;
-    position.closed.issuedOutstanding = round2(
-      position.closed.issuedOutstanding + remaining,
-    );
+    const isEur = invoice.currency.toUpperCase() === BILLING_CURRENCY;
+    if (!Number.isFinite(remaining) || remaining < 0) {
+      position.closed.needsAttentionCount = Math.max(
+        1,
+        position.closed.needsAttentionCount,
+      );
+      continue;
+    }
+
+    if (invoice.status === "open" && invoice.issuedAt && isEur) {
+      position.closed.issuedOutstanding = round2(
+        position.closed.issuedOutstanding + remaining,
+      );
+    }
+
+    if (
+      invoice.status === "draft" ||
+      invoice.status === "uncollectible" ||
+      (invoice.status === "open" && !isEur) ||
+      Boolean(invoice.issueError) ||
+      Boolean(invoice.paymentFailedAt) ||
+      (invoice.status === "open" && !invoice.issuedAt)
+    ) {
+      position.closed.needsAttentionCount = Math.max(
+        1,
+        position.closed.needsAttentionCount,
+      );
+    }
   }
 
   type CurrentAccount = {
@@ -423,8 +500,12 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
     ) {
       continue;
     }
-    const start = startsByAccount.get(account.id);
+    const storedStart = startsByAccount.get(account.id);
+    const start = validPositionStart(storedStart);
     const candidateStart = start?.googleLocalDate ?? isoDay(new Date(account.createdAt));
+    const reviewedEntry = reviewedEntryByAccount.get(account.id);
+    const hasReviewedFullDay =
+      !storedStart && reviewedEntry?.entryDay === candidateStart;
     const end = endsByAccount.get(account.id);
     if (
       row.day < candidateStart ||
@@ -437,7 +518,7 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
       rawMicros,
       row.day,
       candidateStart,
-      start?.baselineCostMicros ?? "0",
+      openingBaseline(start),
       end
         ? {
             googleLocalDate: end.googleLocalDate,
@@ -454,7 +535,11 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
       updatedAt: null,
     };
     aggregate.totalMicros += billableMicros;
-    if (!start && row.day === candidateStart) {
+    if (
+      !start &&
+      !hasReviewedFullDay &&
+      row.day === candidateStart
+    ) {
       aggregate.unresolvedEntryDayMicros += billableMicros;
     }
     aggregate.through = !aggregate.through || row.day > aggregate.through
@@ -503,10 +588,12 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
     .map(({ closedPeriodStarts, ...position }) => {
       position.closed.periodCount = closedPeriodStarts.size;
       position.closed.supportedNotReceived = round2(
-        position.closed.supportedUnissued + position.closed.issuedOutstanding,
+        position.closed.supportedUnissued +
+          position.closed.issuedOutstanding,
       );
       position.closed.maximumNotReceived = round2(
-        position.closed.unissuedEstimate + position.closed.issuedOutstanding,
+        position.closed.unissuedEstimate +
+          position.closed.issuedOutstanding,
       );
       return position;
     })
@@ -535,6 +622,9 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
       issuedOutstanding: sum(
         (position) => position.closed.issuedOutstanding,
       ),
+      failedNotReceived: sum(
+        (position) => position.closed.failedNotReceived,
+      ),
       supportedNotReceived: sum(
         (position) => position.closed.supportedNotReceived,
       ),
@@ -545,6 +635,9 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
       currentAccruedFee: sum((position) => position.current.accruedFee),
       clientsNeedingEntryReview: clients.filter(
         (position) => position.closed.needsEntryReview > 0,
+      ).length,
+      clientsNeedingAttention: clients.filter(
+        (position) => position.closed.needsAttentionCount > 0,
       ).length,
     },
     clients,

@@ -3,7 +3,7 @@
 import { ExternalLink, Info, TriangleAlert } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
-import { money } from "@/lib/format";
+import { longDate, money, shortDate } from "@/lib/format-intl";
 import { useI18n } from "@/lib/i18n/provider";
 import { fmt, type Dictionary } from "@/lib/i18n";
 import {
@@ -15,8 +15,8 @@ import { safeStripeUrl } from "@/lib/stripe/urls";
 import type { Invoice, InvoiceLine, InvoiceStatus } from "@/lib/supabase/types";
 
 /**
- * The client's Payments tab: one manually-issued agency-fee invoice per week,
- * what it is made of, and a Stripe-hosted link to pay it.
+ * The client's Payments tab: one automatically issued agency-fee invoice per
+ * closed week, what it is made of, and a Stripe-hosted link to pay it.
  *
  * Read-only by design — every figure comes from the ledger the dashboard
  * already shows, and the only action is paying. Nothing here can change what
@@ -114,14 +114,14 @@ function totalsByCurrency(
     });
 }
 
-function CurrencyTotals({ totals }: { totals: CurrencyTotal[] }) {
+function CurrencyTotals({ totals, intl }: { totals: CurrencyTotal[]; intl: string }) {
   const rows = totals.length > 0 ? totals : [{ currency: "EUR", amount: 0 }];
 
   return (
     <div className="mt-1 space-y-0.5">
       {rows.map((total) => (
         <p key={total.currency} className="metric-value !text-[24px] tabular-nums">
-          {money(total.amount, total.currency)}
+          {money(total.amount, intl, total.currency)}
         </p>
       ))}
     </div>
@@ -142,20 +142,22 @@ export function PaymentsView({ invoices }: { invoices: Invoice[] }) {
     outstanding,
     (invoice) => Number(invoice.amount_remaining ?? invoice.amount),
   );
+  const amountReceived = (invoice: Invoice) => {
+    const total = Number(invoice.amount);
+    if (invoice.status === "paid") return total;
+    const remaining = Number(invoice.amount_remaining ?? total);
+    return Math.max(0, Math.min(total, total - remaining));
+  };
   const paidByCurrency = totalsByCurrency(
-    invoices.filter((invoice) => invoice.status === "paid"),
-    (invoice) => Number(invoice.amount),
+    invoices.filter((invoice) => amountReceived(invoice) > 0),
+    amountReceived,
   );
 
   function period(invoice: Invoice) {
-    const format = (iso: string) => {
-      const [y, m, day] = iso.split("-").map(Number);
-      return new Date(y, m - 1, day).toLocaleDateString(intl, {
-        day: "2-digit",
-        month: "short",
-      });
-    };
-    return `${format(invoice.period_start)} – ${format(invoice.period_end)}`;
+    return `${shortDate(invoice.period_start, intl)} – ${shortDate(
+      invoice.period_end,
+      intl,
+    )}`;
   }
 
   const invoiceCount = (count: number) =>
@@ -199,14 +201,14 @@ export function PaymentsView({ invoices }: { invoices: Invoice[] }) {
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <div className="panel p-4">
           <p className="label-caps">{d.payments.outstanding}</p>
-          <CurrencyTotals totals={owedByCurrency} />
+          <CurrencyTotals totals={owedByCurrency} intl={intl} />
           <p className="mt-1 text-[11.5px] text-[var(--text-muted)]">
             {invoiceCount(outstanding.length)}
           </p>
         </div>
         <div className="panel p-4">
           <p className="label-caps">{d.payments.paidToDate}</p>
-          <CurrencyTotals totals={paidByCurrency} />
+          <CurrencyTotals totals={paidByCurrency} intl={intl} />
         </div>
       </div>
 
@@ -274,7 +276,9 @@ export function PaymentsView({ invoices }: { invoices: Invoice[] }) {
                       </p>
                       <p className="text-[11.5px] text-[var(--text-muted)]">
                         {invoice.due_date && invoice.status === "open"
-                          ? fmt(d.payments.due, { date: invoice.due_date })
+                          ? fmt(d.payments.due, {
+                              date: longDate(invoice.due_date, intl),
+                            })
                           : invoice.status === "waived" && invoice.issued_at
                             ? fmt(d.payments.waivedOn, {
                                 date: new Date(invoice.issued_at).toLocaleDateString(intl),
@@ -305,7 +309,11 @@ export function PaymentsView({ invoices }: { invoices: Invoice[] }) {
 
                     <div className="text-right">
                       <p className="text-[15px] font-semibold text-[var(--text-primary)] tabular-nums">
-                        {money(partiallyPaid ? amountRemaining : invoice.amount, invoice.currency)}
+                        {money(
+                          partiallyPaid ? amountRemaining : invoice.amount,
+                          intl,
+                          invoice.currency,
+                        )}
                       </p>
                       {partiallyPaid && (
                         <p className="mt-0.5 text-[10.5px] text-[var(--text-muted)]">
@@ -345,19 +353,19 @@ export function PaymentsView({ invoices }: { invoices: Invoice[] }) {
                       <div>
                         <dt className="label-caps">{d.payments.invoiceTotal}</dt>
                         <dd className="mt-1 text-[13px] font-medium text-[var(--text-primary)] tabular-nums">
-                          {money(invoiceTotal, invoice.currency)}
+                          {money(invoiceTotal, intl, invoice.currency)}
                         </dd>
                       </div>
                       <div>
                         <dt className="label-caps">{d.payments.amountPaid}</dt>
                         <dd className="mt-1 text-[13px] font-medium text-[var(--success-green)] tabular-nums">
-                          {money(amountPaid, invoice.currency)}
+                          {money(amountPaid, intl, invoice.currency)}
                         </dd>
                       </div>
                       <div>
                         <dt className="label-caps">{d.payments.amountRemaining}</dt>
                         <dd className="mt-1 text-[13px] font-semibold text-[var(--warning-orange)] tabular-nums">
-                          {money(amountRemaining, invoice.currency)}
+                          {money(amountRemaining, intl, invoice.currency)}
                         </dd>
                       </div>
                     </dl>
@@ -377,13 +385,21 @@ export function PaymentsView({ invoices }: { invoices: Invoice[] }) {
                                 <span className="mt-1 grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-0.5 text-[10.5px] text-[var(--text-muted)]">
                                   <span>{d.payments.lineReportedSpend}</span>
                                   <span className="text-right tabular-nums">
-                                    {money(line.sourceGrossAmount, invoice.currency)}
+                                    {money(
+                                      line.sourceGrossAmount,
+                                      intl,
+                                      invoice.currency,
+                                    )}
                                   </span>
                                   {line.baselineDeductionAmount != null && (
                                     <>
                                       <span>{d.payments.lineOpeningBaseline}</span>
                                       <span className="text-right tabular-nums">
-                                        −{money(line.baselineDeductionAmount, invoice.currency)}
+                                        −{money(
+                                          line.baselineDeductionAmount,
+                                          intl,
+                                          invoice.currency,
+                                        )}
                                       </span>
                                     </>
                                   )}
@@ -391,7 +407,11 @@ export function PaymentsView({ invoices }: { invoices: Invoice[] }) {
                                     <>
                                       <span>{d.payments.lineClosingDeduction}</span>
                                       <span className="text-right tabular-nums">
-                                        −{money(line.endDeductionAmount, invoice.currency)}
+                                        −{money(
+                                          line.endDeductionAmount,
+                                          intl,
+                                          invoice.currency,
+                                        )}
                                       </span>
                                     </>
                                   )}
@@ -399,13 +419,17 @@ export function PaymentsView({ invoices }: { invoices: Invoice[] }) {
                                     {d.payments.lineBillableSpend}
                                   </span>
                                   <span className="text-right font-medium text-[var(--text-secondary)] tabular-nums">
-                                    {money(line.baseAmount, invoice.currency)}
+                                    {money(line.baseAmount, intl, invoice.currency)}
                                   </span>
                                 </span>
                               ) : (
                                 <span className="mt-0.5 block text-[10.5px] text-[var(--text-muted)]">
                                   {fmt(d.payments.lineBaseAmount, {
-                                    amount: money(line.baseAmount, invoice.currency),
+                                    amount: money(
+                                      line.baseAmount,
+                                      intl,
+                                      invoice.currency,
+                                    ),
                                   })}
                                 </span>
                               )
@@ -433,6 +457,7 @@ export function PaymentsView({ invoices }: { invoices: Invoice[] }) {
                                     timeZone: line.billingTimeZone,
                                     amount: money(
                                       line.billingStartBaselineAmount,
+                                      intl,
                                       invoice.currency,
                                     ),
                                   })}
@@ -447,10 +472,12 @@ export function PaymentsView({ invoices }: { invoices: Invoice[] }) {
                                     timeZone: line.billingEndTimeZone,
                                     amount: money(
                                       line.billingEndCounterAmount,
+                                      intl,
                                       invoice.currency,
                                     ),
                                     deduction: money(
                                       line.endDeductionAmount ?? 0,
+                                      intl,
                                       invoice.currency,
                                     ),
                                   })}
@@ -458,7 +485,7 @@ export function PaymentsView({ invoices }: { invoices: Invoice[] }) {
                               )}
                           </div>
                           <span className="shrink-0 text-[var(--text-muted)] tabular-nums">
-                            {money(line.amount, invoice.currency)}
+                            {money(line.amount, intl, invoice.currency)}
                           </span>
                         </li>
                       ))}

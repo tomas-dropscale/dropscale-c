@@ -10,7 +10,7 @@ export type BillingIssueLeaseHandle = {
   leaseToken: string;
   fencingToken: number;
   periodStart: string;
-  issuedBy: string;
+  issuedBy: string | null;
   leaseExpiresAt: string;
 };
 
@@ -37,7 +37,7 @@ function parseLease(
     clientId: string;
     leaseToken: string;
     periodStart?: string;
-    issuedBy?: string;
+    issuedBy?: string | null;
     fencingToken?: number;
   },
 ): BillingIssueLeaseHandle {
@@ -94,7 +94,7 @@ export async function acquireBillingIssueLease(
   input: {
     clientId: string;
     periodStart: string;
-    issuedBy: string;
+    issuedBy: string | null;
     leaseToken?: string;
   },
 ): Promise<BillingIssueLeaseHandle | null> {

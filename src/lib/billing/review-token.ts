@@ -110,11 +110,17 @@ function stableLines(lines: InvoiceLine[]) {
       baseAmount: line.baseAmount ?? null,
       sourceGrossAmount: line.sourceGrossAmount ?? null,
       baselineDeductionAmount: line.baselineDeductionAmount ?? null,
+      billingStartBasis: line.billingStartBasis ?? null,
       billingStartBaselineAmount: line.billingStartBaselineAmount ?? null,
       billingStartId: line.billingStartId ?? null,
       billingStartDate: line.billingStartDate ?? null,
       billingStartedAt: line.billingStartedAt ?? null,
       billingTimeZone: line.billingTimeZone ?? null,
+      reviewedFullDayBoundaryId: line.reviewedFullDayBoundaryId ?? null,
+      billingPolicyVersion: line.billingPolicyVersion ?? null,
+      entryDate: line.entryDate ?? null,
+      entryTimeZone: line.entryTimeZone ?? null,
+      entryDayTreatment: line.entryDayTreatment ?? null,
       endDeductionAmount: line.endDeductionAmount ?? null,
       endingCapApplied: line.endingCapApplied ?? null,
       billingEndCounterAmount: line.billingEndCounterAmount ?? null,
@@ -132,7 +138,7 @@ function stableLines(lines: InvoiceLine[]) {
     );
 }
 
-/** Bind an admin confirmation to every value that can change an Invoice. */
+/** Bind an issuance attempt to every value that can change an Invoice. */
 export async function billingReviewToken(input: {
   clientId: string;
   week: { start: string; end: string };

@@ -6,8 +6,8 @@ import type { Database } from "@/lib/supabase/types";
 /**
  * A Supabase client that bypasses RLS. It is reserved for authenticated
  * server-only operations: signed Stripe webhooks, CRON_SECRET-protected jobs,
- * the atomic Google billing-start commit, and reviewed invoice issuance after
- * an admin session and the relevant source evidence have both been verified.
+ * the atomic Google billing-start commit, CRON_SECRET-protected automatic
+ * issuance, and emergency reviewed issuance after an admin session.
  *
  * Interactive requests still ride the viewer's own session. Returning null
  * when the service key is absent lets each machine route fail closed with a

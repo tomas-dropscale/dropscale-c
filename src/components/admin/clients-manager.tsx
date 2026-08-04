@@ -75,6 +75,26 @@ function formatGoogleDay(day: string) {
     : date.toLocaleDateString("en-GB", { dateStyle: "medium", timeZone: "UTC" });
 }
 
+function billingStartDescription(start: AdAccountBillingStart) {
+  const prefix = `Started ${formatGoogleDay(start.google_local_date)}`;
+  if (start.start_basis === "reviewed_full_day") {
+    if (start.baseline_cost_micros !== null) {
+      return `${prefix} · invalid reviewed evidence · ${start.google_time_zone}`;
+    }
+    return `${prefix} · full entry day included · ${start.google_time_zone}`;
+  }
+  if (start.start_basis === "observed_google_counter") {
+    if (start.baseline_cost_micros === null) {
+      return `${prefix} · invalid opening evidence · ${start.google_time_zone}`;
+    }
+    return `${prefix} · opening ${formatMicros(
+      String(start.baseline_cost_micros),
+      start.currency,
+    )} · ${start.google_time_zone}`;
+  }
+  return `${prefix} · invalid start evidence · ${start.google_time_zone}`;
+}
+
 /**
  * Admin-side client management. English-only for now (the rest of the admin
  * is EN/PT — translate when the flows settle).
@@ -551,12 +571,7 @@ export function ClientsManager({
                       <Badge variant="neutral">account {account.status}</Badge>
                     </div>
                     <p className="mt-1 text-[11.5px] leading-relaxed text-[var(--text-muted)]">
-                      Started {formatGoogleDay(account.billingStart.google_local_date)} · opening{" "}
-                      {formatMicros(
-                        String(account.billingStart.baseline_cost_micros),
-                        account.billingStart.currency,
-                      )}{" "}
-                      · {account.billingStart.google_time_zone}
+                      {billingStartDescription(account.billingStart)}
                     </p>
                     {ended ? (
                       <p className="mt-1 text-[11.5px] leading-relaxed text-[var(--text-secondary)]">

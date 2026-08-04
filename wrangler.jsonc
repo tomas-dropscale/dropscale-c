@@ -10,8 +10,8 @@
     "crons": [
       // Mondays 14:05 UTC - every Google account timezone has crossed into
       // Monday, with extra time for Sunday's delayed Google reporting. Capture
-      // the exact closed-week evidence and reconcile Stripe payment state;
-      // invoice issue remains manual in /admin/billing.
+      // the exact closed-week evidence, automatically issue eligible fee-only
+      // invoices and reconcile Stripe payment state.
       "5 14 * * 1",
       // Hourly on the hour, from midnight UTC — rebuild the metrics rollup the
       // client reports read, then the commission ledger the finance pages read.

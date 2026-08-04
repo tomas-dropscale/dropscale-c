@@ -22,6 +22,7 @@ const ROW: BillingIssueLease = {
   fencing_token: 7,
   period_start: "2026-07-20",
   issued_by: ADMIN,
+  issuer_kind: "admin",
   acquired_at: "2026-08-03T10:00:00.000Z",
   renewed_at: "2026-08-03T10:01:00.000Z",
   lease_expires_at: "2026-08-03T10:06:00.000Z",

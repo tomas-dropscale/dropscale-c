@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { stripeInvoiceRecoveryMode } from "./invoice-delivery";
+import {
+  automaticInvoiceAction,
+  stripeInvoiceRecoveryMode,
+} from "./invoice-delivery";
 
 const BASE = {
   status: "draft" as const,
@@ -64,5 +67,22 @@ describe("Stripe invoice delivery recovery", () => {
     for (const status of ["paid", "void", "uncollectible", "waived"] as const) {
       expect(stripeInvoiceRecoveryMode({ ...BASE, status })).toBeNull();
     }
+  });
+
+  it("keeps an unsent open invoice blocked and retryable instead of settling it", () => {
+    const unsentOpen = { ...BASE, status: "open" as const };
+
+    // `canIssue=false` represents a temporary Stripe/configuration failure.
+    expect(automaticInvoiceAction(unsentOpen, false)).toBe("blocked");
+    expect(automaticInvoiceAction(unsentOpen, true)).toBe("issue");
+    expect(
+      automaticInvoiceAction(
+        {
+          ...unsentOpen,
+          stripe_sent_at: "2026-08-03T09:00:00.000Z",
+        },
+        false,
+      ),
+    ).toBe("settled");
   });
 });

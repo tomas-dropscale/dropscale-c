@@ -13,7 +13,9 @@ import {
   billableMicrosSinceBaseline,
   decimalToMicros,
   microsToDecimal,
+  parseGoogleMicros,
 } from "@/lib/google-ads/billing-start";
+import type { BillingStartBasis } from "@/lib/supabase/types";
 import { createClient } from "@/lib/supabase/server";
 
 export const metadata: Metadata = { title: "Referral administration" };
@@ -82,7 +84,8 @@ type StartRow = {
   ad_account_id: string;
   google_ads_customer_id: string;
   google_local_date: string;
-  baseline_cost_micros: number | string;
+  start_basis: BillingStartBasis;
+  baseline_cost_micros: number | string | null;
 };
 type EndRow = { ad_account_id: string };
 type CommissionRow = {
@@ -194,6 +197,41 @@ function toNumber(value: number | string, field: string): number {
   if (!Number.isFinite(parsed))
     throw new Error(`Invalid ${field} in referral evidence.`);
   return parsed;
+}
+
+/** Validate the immutable start shape before it can support referral evidence. */
+function billingStartBaselineMicros(start: StartRow): bigint | null {
+  if (start.start_basis === "observed_google_counter") {
+    if (start.baseline_cost_micros === null) {
+      throw new Error(
+        "An observed Google billing start has no opening counter.",
+      );
+    }
+    return parseGoogleMicros(start.baseline_cost_micros);
+  }
+
+  if (start.start_basis === "reviewed_full_day") {
+    if (start.baseline_cost_micros !== null) {
+      throw new Error(
+        "A reviewed full-day Google billing start must not contain an opening counter.",
+      );
+    }
+    return null;
+  }
+
+  throw new Error("A Google billing start has an unsupported basis.");
+}
+
+function referralBillableMicros(
+  start: StartRow,
+  occurredOn: string,
+  rawMicros: bigint,
+): bigint {
+  const baselineMicros = billingStartBaselineMicros(start);
+  if (occurredOn !== start.google_local_date || baselineMicros === null) {
+    return rawMicros;
+  }
+  return billableMicrosSinceBaseline(rawMicros, baselineMicros);
 }
 
 function isTimestamp(value: string | null): value is string {
@@ -385,7 +423,7 @@ export default async function ReferralsPage() {
           session
             .from("ad_account_billing_starts")
             .select(
-              "id, ad_account_id, google_ads_customer_id, google_local_date, baseline_cost_micros",
+              "id, ad_account_id, google_ads_customer_id, google_local_date, start_basis, baseline_cost_micros",
               { count: "exact" },
             )
             .order("id", { ascending: true })
@@ -558,6 +596,9 @@ export default async function ReferralsPage() {
     const accountById = new Map(
       accounts.map((account) => [account.id, account]),
     );
+    // A malformed start must fail the complete referral audit even when no
+    // recent commission happens to exercise its entry-day calculation.
+    for (const start of starts) billingStartBaselineMicros(start);
     const startsByAccount = new Map(
       starts.map((start) => [start.ad_account_id, start]),
     );
@@ -737,13 +778,11 @@ export default async function ReferralsPage() {
                 return [];
               }
               const rawMicros = decimalToMicros(commission.gross_amount);
-              const billableMicros =
-                commission.occurred_on === start.google_local_date
-                  ? billableMicrosSinceBaseline(
-                      rawMicros,
-                      String(start.baseline_cost_micros),
-                    )
-                  : rawMicros;
+              const billableMicros = referralBillableMicros(
+                start,
+                commission.occurred_on,
+                rawMicros,
+              );
               return billableMicros > BigInt(0)
                 ? [{ account, start, commission, billableMicros }]
                 : [];

@@ -250,14 +250,20 @@ export type InvoiceLine = {
   endingCapApplied?: true;
   /** Full cumulative Google counter observed when tracking began. */
   billingStartBaselineAmount?: number;
+  /** Which immutable commercial boundary authorised the billing start. */
+  billingStartBasis?: "observed_google_counter" | "reviewed_full_day";
   /** Immutable billing-start record that authorised this line. */
   billingStartId?: string;
   /** Google-local day on which billing started for this store. */
   billingStartDate?: string;
-  /** UTC instant at which the opening Google counter was captured. */
+  /** UTC instant at which the opening Google counter was captured; observed starts only. */
   billingStartedAt?: string;
-  /** IANA timezone used by the Google Ads account for the opening day. */
+  /** IANA timezone used by the opening boundary. */
   billingTimeZone?: string;
+  /** Immutable account-level proof for a reviewed full-entry-day start. */
+  reviewedFullDayBoundaryId?: string;
+  /** Global policy version that authorised a reviewed full-day start. */
+  billingPolicyVersion?: string;
   /** Full cumulative Google counter observed when billing ended. */
   billingEndCounterAmount?: number;
   /** Immutable billing-end record that closed this line's commercial period. */
@@ -268,6 +274,15 @@ export type InvoiceLine = {
   billingEndedAt?: string;
   /** IANA timezone used by the Google Ads account for the closing day. */
   billingEndTimeZone?: string;
+  /** Historical rollover provenance; never presented as a live Google capture. */
+  entryDate?: string;
+  entryTimeZone?: string;
+  entryDayTreatment?: "full-day-inclusive";
+  periodStart?: string;
+  periodEnd?: string;
+  adSpendPassThroughAmount?: number;
+  revenueShareAmount?: number;
+  referralDiscountAmount?: number;
 };
 
 /** Exact legal/email identity reviewed for a v3 invoice and frozen at creation. */
@@ -290,11 +305,137 @@ export type BillingIssueLease = {
   client_id: string;
   fencing_token: number;
   period_start: string;
-  issued_by: string;
+  /** Null only for the CRON_SECRET-protected automatic issuer. */
+  issued_by: string | null;
+  issuer_kind: "admin" | "automation";
   acquired_at: string;
   renewed_at: string;
   lease_expires_at: string;
   released_at: string | null;
+};
+
+export type BillingAutomationRunStatus =
+  | "running"
+  | "succeeded"
+  | "partial"
+  | "failed";
+
+/** Durable aggregate receipt for one automatic billing invocation (0036). */
+export type BillingAutomationRun = {
+  id: string;
+  started_at: string;
+  finished_at: string | null;
+  status: BillingAutomationRunStatus;
+  issuance_enabled: boolean;
+  seeded_items: number;
+  claimed_items: number;
+  issued_items: number;
+  no_charge_items: number;
+  blocked_items: number;
+  historical_rollovers_checked: number;
+  exact_refresh_requested: number;
+  exact_refresh_completed: number;
+  reconciliation_checked: number;
+  reconciliation_updated: number;
+  error_count: number;
+};
+
+export type BillingAutomationItemState =
+  | "pending"
+  | "processing"
+  | "blocked"
+  | "issued"
+  | "no_charge";
+
+export type BillingAutomationItemStage =
+  | "discovered"
+  | "preview"
+  | "google_evidence"
+  | "stripe_issue"
+  | "complete";
+
+/** One fenced, retryable client/week work receipt (0036). */
+export type BillingAutomationItem = {
+  id: string;
+  client_id: string;
+  period_start: string;
+  period_end: string;
+  state: BillingAutomationItemState;
+  stage: BillingAutomationItemStage;
+  blocker_code: string | null;
+  safe_message: string | null;
+  invoice_id: string | null;
+  amount_snapshot: number | string | null;
+  billable_spend_snapshot: number | string | null;
+  evidence_account_count: number;
+  attempt_count: number;
+  first_seen_at: string;
+  last_attempted_at: string | null;
+  resolved_at: string | null;
+  last_run_id: string | null;
+  claimed_by_run_id: string | null;
+  claim_version: number;
+  claim_expires_at: string | null;
+  updated_at: string;
+};
+
+export type HistoricalBillingRollover = {
+  id: string;
+  client_id: string;
+  period_start: string;
+  period_end: string;
+  calculation_version: string;
+  currency: string;
+  fee_rate: number | string;
+  ad_spend_pass_through_rate: number | string;
+  revenue_share_rate: number | string;
+  referral_discount_rate: number | string;
+  source_gross_amount: number | string;
+  amount: number | string;
+  line_items: InvoiceLine[];
+  source_row_count: number;
+  account_count: number;
+  legacy_invoice_ids: string[];
+  source_fingerprint: string;
+  snapshot_created_at: string;
+  snapshot_created_by: string;
+};
+
+export type HistoricalBillingRolloverRow = {
+  rollover_id: string;
+  commission_id: string;
+  ad_account_id: string;
+  store_name: string;
+  account_created_at: string;
+  entry_day: string;
+  occurred_on: string;
+  source_gross_amount: number | string;
+  billable_gross_amount: number | string;
+  currency: string;
+  source_snapshot: Record<string, unknown>;
+  created_at: string;
+};
+
+export type HistoricalBillingRolloverIssuance = {
+  rollover_id: string;
+  invoice_id: string;
+  issuer_kind: "automation";
+  calculation_version: string;
+  billing_recipient: BillingRecipientSnapshot;
+  created_at: string;
+};
+
+export type HistoricalBillingRolloverReview = Omit<
+  HistoricalBillingRollover,
+  "id"
+> & {
+  rollover_id: string;
+  invoice_id: string | null;
+  invoice_status: InvoiceStatus | null;
+  invoice_issued_at: string | null;
+  invoice_issue_error: string | null;
+  issuer_kind: "automation" | null;
+  invoice_created_at: string | null;
 };
 
 /** A week's agency commission, billed to one portal client (migration 0013). */
@@ -317,6 +458,8 @@ export type Invoice = {
   amount_remaining: number | null;
   issued_at: string | null;
   issued_by: string | null;
+  /** Explicit human/system provenance for reviewed billing contracts. */
+  issuer_kind: "admin" | "automation" | null;
   /** Last safe-to-display error from the manual issue attempt. */
   issue_error: string | null;
   issue_attempted_at: string | null;
@@ -457,7 +600,14 @@ export type GoogleLedgerSyncWindow = {
   ledger_snapshot: GoogleLedgerSnapshotRow[];
 };
 
-/** Immutable opening Google Ads counter that starts financial tracking. */
+export type BillingStartBasis =
+  | "observed_google_counter"
+  | "reviewed_full_day";
+
+/**
+ * Immutable financial start. Only the observed branch carries Google capture
+ * fields; reviewed_full_day references a separate policy proof instead.
+ */
 export type AdAccountBillingStart = {
   id: string;
   ad_account_id: string;
@@ -465,14 +615,46 @@ export type AdAccountBillingStart = {
   google_local_date: string;
   google_time_zone: string;
   currency: string;
-  /** Integer micros. Read as a string whenever it participates in arithmetic. */
-  baseline_cost_micros: number | string;
-  capture_started_at: string;
-  captured_at: string;
-  capture_id: string;
-  source: string;
-  reviewed_by: string;
+  /** Integer micros for an observed start; null for reviewed_full_day. */
+  baseline_cost_micros: number | string | null;
+  capture_started_at: string | null;
+  captured_at: string | null;
+  capture_id: string | null;
+  source: "agency" | null;
+  reviewed_by: string | null;
+  start_basis: BillingStartBasis;
+  reviewed_full_day_boundary_id: string | null;
   created_at: string;
+};
+
+/**
+ * Immutable account-level proof for the reviewed pre-v3 policy. Commercial
+ * entry follows Lisbon; Google ledger dates follow the account's real zone.
+ */
+export type ReviewedFullDayBillingBoundary = {
+  id: string;
+  ad_account_id: string;
+  client_id: string;
+  google_ads_customer_id: string;
+  account_created_at: string;
+  entry_day: string;
+  entry_time_zone: "Europe/Lisbon";
+  google_local_date: string;
+  google_time_zone: string;
+  entry_day_treatment: "full-day-inclusive";
+  currency: "EUR";
+  cutover_monday: "2026-08-03";
+  policy_version:
+    "agency-billing-pre-v3-full-google-local-entry-day-commercial-lisbon-v2";
+  metadata_capture_id: string;
+  metadata_capture_started_at: string;
+  metadata_captured_at: string;
+  metadata_authority: "client_oauth";
+  metadata_contract: "google-customer-metadata-v1";
+  source_snapshot: Record<string, unknown>;
+  source_fingerprint: string;
+  sealed_at: string;
+  sealed_by: string;
 };
 
 /** Immutable closing Google Ads counter that ends financial tracking. */
@@ -977,6 +1159,7 @@ export type Database = {
           | "amount_remaining"
           | "issued_at"
           | "issued_by"
+          | "issuer_kind"
           | "issue_error"
           | "issue_attempted_at"
           | "calculation_version"
@@ -1031,6 +1214,153 @@ export type Database = {
             columns: ["issued_by"];
             isOneToOne: false;
             referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      billing_automation_runs: {
+        Row: Row<BillingAutomationRun>;
+        Insert: Insert<
+          BillingAutomationRun,
+          | "id"
+          | "started_at"
+          | "finished_at"
+          | "status"
+          | "seeded_items"
+          | "claimed_items"
+          | "issued_items"
+          | "no_charge_items"
+          | "blocked_items"
+          | "historical_rollovers_checked"
+          | "exact_refresh_requested"
+          | "exact_refresh_completed"
+          | "reconciliation_checked"
+          | "reconciliation_updated"
+          | "error_count"
+        >;
+        Update: Partial<BillingAutomationRun>;
+        Relationships: [];
+      };
+      billing_automation_items: {
+        Row: Row<BillingAutomationItem>;
+        Insert: Insert<
+          BillingAutomationItem,
+          | "id"
+          | "state"
+          | "stage"
+          | "blocker_code"
+          | "safe_message"
+          | "invoice_id"
+          | "amount_snapshot"
+          | "billable_spend_snapshot"
+          | "evidence_account_count"
+          | "attempt_count"
+          | "first_seen_at"
+          | "last_attempted_at"
+          | "resolved_at"
+          | "last_run_id"
+          | "claimed_by_run_id"
+          | "claim_version"
+          | "claim_expires_at"
+          | "updated_at"
+        >;
+        Update: Partial<BillingAutomationItem>;
+        Relationships: [
+          {
+            foreignKeyName: "billing_automation_items_client_id_fkey";
+            columns: ["client_id"];
+            isOneToOne: false;
+            referencedRelation: "portal_clients";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "billing_automation_items_invoice_id_fkey";
+            columns: ["invoice_id"];
+            isOneToOne: true;
+            referencedRelation: "invoices";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "billing_automation_items_last_run_id_fkey";
+            columns: ["last_run_id"];
+            isOneToOne: false;
+            referencedRelation: "billing_automation_runs";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "billing_automation_items_claimed_by_run_id_fkey";
+            columns: ["claimed_by_run_id"];
+            isOneToOne: false;
+            referencedRelation: "billing_automation_runs";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      historical_billing_rollovers: {
+        Row: Row<HistoricalBillingRollover>;
+        Insert: Insert<
+          HistoricalBillingRollover,
+          "id" | "legacy_invoice_ids" | "snapshot_created_at" | "snapshot_created_by"
+        >;
+        Update: Partial<HistoricalBillingRollover>;
+        Relationships: [
+          {
+            foreignKeyName: "historical_billing_rollovers_client_id_fkey";
+            columns: ["client_id"];
+            isOneToOne: false;
+            referencedRelation: "portal_clients";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      historical_billing_rollover_rows: {
+        Row: Row<HistoricalBillingRolloverRow>;
+        Insert: Insert<HistoricalBillingRolloverRow, "created_at">;
+        Update: Partial<HistoricalBillingRolloverRow>;
+        Relationships: [
+          {
+            foreignKeyName: "historical_billing_rollover_rows_rollover_id_fkey";
+            columns: ["rollover_id"];
+            isOneToOne: false;
+            referencedRelation: "historical_billing_rollovers";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "historical_billing_rollover_rows_commission_id_fkey";
+            columns: ["commission_id"];
+            isOneToOne: true;
+            referencedRelation: "commissions";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "historical_billing_rollover_rows_ad_account_id_fkey";
+            columns: ["ad_account_id"];
+            isOneToOne: false;
+            referencedRelation: "ad_accounts";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      historical_billing_rollover_issuances: {
+        Row: Row<HistoricalBillingRolloverIssuance>;
+        Insert: Insert<
+          HistoricalBillingRolloverIssuance,
+          "issuer_kind" | "created_at"
+        >;
+        Update: Partial<HistoricalBillingRolloverIssuance>;
+        Relationships: [
+          {
+            foreignKeyName: "historical_billing_rollover_issuances_rollover_id_fkey";
+            columns: ["rollover_id"];
+            isOneToOne: true;
+            referencedRelation: "historical_billing_rollovers";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "historical_billing_rollover_issuances_invoice_id_fkey";
+            columns: ["invoice_id"];
+            isOneToOne: true;
+            referencedRelation: "invoices";
             referencedColumns: ["id"];
           },
         ];
@@ -1238,7 +1568,10 @@ export type Database = {
       };
       ad_account_billing_starts: {
         Row: Row<AdAccountBillingStart>;
-        Insert: Insert<AdAccountBillingStart, "id" | "created_at">;
+        Insert: Insert<
+          AdAccountBillingStart,
+          "id" | "start_basis" | "reviewed_full_day_boundary_id" | "created_at"
+        >;
         Update: Partial<AdAccountBillingStart>;
         Relationships: [
           {
@@ -1253,6 +1586,51 @@ export type Database = {
             columns: ["reviewed_by"];
             isOneToOne: false;
             referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "ad_account_billing_starts_reviewed_boundary_fkey";
+            columns: [
+              "reviewed_full_day_boundary_id",
+              "ad_account_id",
+              "google_ads_customer_id",
+              "google_local_date",
+              "google_time_zone",
+              "currency",
+            ];
+            isOneToOne: true;
+            referencedRelation: "reviewed_full_day_billing_boundaries";
+            referencedColumns: [
+              "id",
+              "ad_account_id",
+              "google_ads_customer_id",
+              "google_local_date",
+              "google_time_zone",
+              "currency",
+            ];
+          },
+        ];
+      };
+      reviewed_full_day_billing_boundaries: {
+        Row: Row<ReviewedFullDayBillingBoundary>;
+        Insert: Insert<
+          ReviewedFullDayBillingBoundary,
+          "id" | "sealed_at" | "sealed_by"
+        >;
+        Update: Partial<ReviewedFullDayBillingBoundary>;
+        Relationships: [
+          {
+            foreignKeyName: "reviewed_full_day_billing_boundaries_ad_account_id_fkey";
+            columns: ["ad_account_id"];
+            isOneToOne: true;
+            referencedRelation: "ad_accounts";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "reviewed_full_day_billing_boundaries_client_id_fkey";
+            columns: ["client_id"];
+            isOneToOne: false;
+            referencedRelation: "portal_clients";
             referencedColumns: ["id"];
           },
         ];
@@ -1725,7 +2103,12 @@ export type Database = {
         ];
       };
     };
-    Views: Record<never, never>;
+    Views: {
+      historical_billing_rollover_review: {
+        Row: Row<HistoricalBillingRolloverReview>;
+        Relationships: [];
+      };
+    };
     Functions: {
       is_admin: {
         Args: Record<string, never>;
@@ -1769,7 +2152,7 @@ export type Database = {
           p_client_id: string;
           p_lease_token: string;
           p_period_start: string;
-          p_issued_by: string;
+          p_issued_by: string | null;
         };
         Returns: BillingIssueLease[];
       };
@@ -1801,6 +2184,73 @@ export type Database = {
           p_issue_error: string;
         };
         Returns: boolean;
+      };
+      /** Start one durable automatic-billing run receipt (0036). */
+      begin_billing_automation_run: {
+        Args: { p_issuance_enabled: boolean };
+        Returns: BillingAutomationRun[];
+      };
+      /** Seed all eligible post-cutover client/week work through a closed Sunday. */
+      seed_billing_automation_items: {
+        Args: { p_run_id: string; p_closed_through: string };
+        Returns: number;
+      };
+      /** Prove that every relevant account has exact evidence and zero billable spend. */
+      billing_automation_exact_zero_account_count: {
+        Args: {
+          p_client_id: string;
+          p_period_start: string;
+          p_period_end: string;
+        };
+        Returns: number;
+      };
+      /** Claim the oldest retryable client/week work with a fenced generation. */
+      claim_billing_automation_items: {
+        Args: { p_run_id: string; p_limit?: number };
+        Returns: BillingAutomationItem[];
+      };
+      /** Admin-only compact count of non-terminal work by client. */
+      billing_automation_attention_clients: {
+        Args: Record<string, never>;
+        Returns: { client_id: string; item_count: number }[];
+      };
+      /** Admin-only most recent automatic-billing run receipt. */
+      latest_billing_automation_run: {
+        Args: Record<string, never>;
+        Returns: BillingAutomationRun[];
+      };
+      /** Commit one fenced automatic item outcome (0036). */
+      record_billing_automation_item_result: {
+        Args: {
+          p_item_id: string;
+          p_run_id: string;
+          p_claim_version: number;
+          p_state: Extract<
+            BillingAutomationItemState,
+            "blocked" | "issued" | "no_charge"
+          >;
+          p_stage: Exclude<BillingAutomationItemStage, "discovered">;
+          p_code?: string | null;
+          p_invoice_id?: string | null;
+          p_amount?: number | null;
+          p_billable_spend?: number | null;
+          p_evidence_account_count?: number;
+        };
+        Returns: BillingAutomationItem[];
+      };
+      /** Finalise one automatic-billing run's aggregate counters (0036). */
+      finish_billing_automation_run: {
+        Args: {
+          p_run_id: string;
+          p_status: Exclude<BillingAutomationRunStatus, "running">;
+          p_historical_rollovers_checked: number;
+          p_exact_refresh_requested: number;
+          p_exact_refresh_completed: number;
+          p_reconciliation_checked: number;
+          p_reconciliation_updated: number;
+          p_error_count: number;
+        };
+        Returns: BillingAutomationRun[];
       };
       /** Atomically creates one manual invoice and consumes its Google ledger rows (0028). */
       create_manual_invoice: {
@@ -1835,9 +2285,14 @@ export type Database = {
           }[];
           p_billing_recipient: BillingRecipientSnapshot;
           p_referral_term_id: string | null;
-          p_issued_by: string;
+          p_issued_by: string | null;
           p_calculation_version: string;
         };
+        Returns: Invoice[];
+      };
+      /** Creates or returns the one automation draft for a sealed rollover. */
+      create_historical_rollover_invoice: {
+        Args: { p_rollover_id: string };
         Returns: Invoice[];
       };
       /** Fill one empty referral attribution after a verified admin review (0031). */
@@ -1914,6 +2369,25 @@ export type Database = {
           p_reviewed_by: string;
         };
         Returns: AdAccount[];
+      };
+      /**
+       * Service-only idempotent commit of live Google customer metadata for a
+       * reviewed pre-v3 start. It never changes OAuth or ad-account status.
+       */
+      commit_reviewed_full_day_billing_start: {
+        Args: {
+          p_account_id: string;
+          p_metadata_capture_id: string;
+          p_google_ads_customer_id: string;
+          p_google_local_date: string;
+          p_google_time_zone: string;
+          p_currency: "EUR";
+          p_metadata_capture_started_at: string;
+          p_metadata_captured_at: string;
+          p_metadata_authority: "client_oauth";
+          p_metadata_contract: "google-customer-metadata-v1";
+        };
+        Returns: AdAccountBillingStart[];
       };
       /** Service-only commit of an authoritative Google closing counter. */
       commit_google_ads_billing_end: {

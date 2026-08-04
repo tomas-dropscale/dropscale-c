@@ -15,6 +15,7 @@ import {
 } from "@/lib/billing/weekly";
 import { requireBillingRecipientSnapshot } from "@/lib/billing/review-token";
 import { createServiceClient } from "@/lib/supabase/service";
+import { stripeWebhookSecretSelection } from "@/lib/stripe/webhook-endpoint";
 
 type StripeWebhookEvent = {
   id: string;
@@ -70,8 +71,17 @@ function stripeRecipientExpectation(
  * durable event inbox makes retries safe and observable.
  */
 export async function POST(request: NextRequest) {
-  const secret = process.env.STRIPE_WEBHOOK_SECRET;
-  if (!secret) {
+  const signing = stripeWebhookSecretSelection(request.url, {
+    current: process.env.STRIPE_WEBHOOK_SECRET,
+    target: process.env.STRIPE_WEBHOOK_SECRET_NEXT,
+  });
+  if (signing.endpoint === "unknown") {
+    return NextResponse.json(
+      { error: "Unknown webhook endpoint version." },
+      { status: 404 },
+    );
+  }
+  if (!signing.secret) {
     return NextResponse.json(
       { error: "Webhook secret not configured." },
       { status: 500 },
@@ -82,7 +92,7 @@ export async function POST(request: NextRequest) {
   const valid = await verifyWebhookSignature(
     payload,
     request.headers.get("stripe-signature"),
-    secret,
+    signing.secret,
   );
   if (!valid) {
     return NextResponse.json({ error: "Invalid signature." }, { status: 400 });

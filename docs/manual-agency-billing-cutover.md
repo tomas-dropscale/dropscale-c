@@ -1,9 +1,10 @@
-# Manual agency billing cutover
+# Automatic agency billing cutover
 
-This runbook moves the live portal from legacy local drafts to review-first
-Google Ads agency billing. Clients continue to pay Google directly. Dropscale
-invoices only the reviewed agency fee, in EUR, through Stripe Hosted Invoice
-Pages.
+This runbook moves the live portal from legacy local drafts to automatic,
+evidence-backed Google Ads agency billing. Clients continue to pay Google
+directly. Dropscale invoices only the agency fee, in EUR, through Stripe Hosted
+Invoice Pages. Admin review is for exceptions and monitoring; a healthy weekly
+invoice does not require an admin click.
 
 ## Non-negotiable billing contract
 
@@ -14,21 +15,27 @@ Pages.
   billing-end counter is captured.
 - The list fee is 10% of Google-reported billable spend. A referral can change
   a future Monday-effective term only after a separate admin review.
-- Monday's scheduled job refreshes evidence and reconciles Stripe; it never
-  creates or sends an invoice.
+- Monday's scheduled job refreshes evidence, issues every eligible closed-week
+  invoice idempotently and reconciles Stripe.
 - Google evidence for the previous Sunday is not reviewable before Monday at
   14:05 UTC.
-- An authenticated admin must refresh, inspect and explicitly confirm one
-  client/week. The server recalculates and rejects a stale browser preview.
+- A client/week with incomplete or contradictory evidence is blocked and shown
+  to an admin; it is never estimated or issued from partial data.
+- A newly joined account is billable from its immutable Google start counter.
+  The reviewed historical cutover is the only exception: approved pre-cutover
+  accounts start at the beginning of their recorded entry day.
 - Clients see only rows with `issued_at` evidence. Payment happens on Stripe's
   hosted page; no saved card is charged automatically.
 
 ## Release gates
 
-Keep `BILLING_ISSUANCE_ENABLED` unset or set to anything other than the exact
-lowercase string `true` until every gate below is green. With the gate closed,
-`POST /api/billing/generate` returns 503 after admin authentication and before
-service-role or Stripe access.
+Keep both `BILLING_ISSUANCE_ENABLED` and `BILLING_AUTOMATION_ENABLED` unset or
+set to anything other than the exact lowercase string `true` until every gate
+below is green. Automatic issue requires both gates; this prevents a manual
+gate left enabled by an older deploy from arming the all-client worker. With
+either gate closed, `POST /api/billing/cron` refuses to create or send new
+invoices before Stripe access. Existing Stripe invoices can still be
+reconciled safely.
 
 The production cutover is ready only when all of the following are true:
 
@@ -36,18 +43,22 @@ The production cutover is ready only when all of the following are true:
    verified.
 2. Old app/cron billing writers are stopped for the complete multi-migration
    window.
-3. Every active or suspended non-admin account is EUR and has one canonical
-   10-digit Google Ads customer ID that the agency connection can read.
-4. The database migrations `0026` through `0033` have committed in order.
-5. Every active or suspended client Google account has a newly captured
-   immutable billing start.
+3. Every account carrying positive billable evidence is EUR, has one canonical
+   10-digit Google Ads customer ID and a valid per-client OAuth connection.
+   Unresolved accounts with no spend are isolated and visible to admins; they
+   do not block certified siblings or other clients.
+4. The database migrations `0026` through `0036` have committed in order.
+5. Every account carrying positive billable evidence has either an observed
+   Google start counter or the reviewed full-day cutover proof installed by
+   `0034`; any unresolved zero-spend account is explicitly recorded as an
+   isolated blocker.
 6. The deployed Worker has the live Stripe key, Stripe webhook signing secret,
    a server-only Supabase secret with RLS-bypass Data API access and the cron
    secret as encrypted secrets.
 7. The Stripe webhook endpoint is configured for the API version and events
    listed in `.env.local.example`, and a signed live event has been observed.
-8. One internal/pilot client has been previewed, issued, opened and reconciled
-   end to end before enabling the remaining clients.
+8. The complete eligible batch has been reviewed and consciously accepted;
+   there is no single-client pilot scope in the automatic worker.
 
 ## Preflight while issuance is disabled
 
@@ -113,9 +124,12 @@ an invoice and it aborts if the live state is more ambiguous than that audit.
 
 ## Database migration order
 
-Apply the following files in one controlled maintenance window, in filename
-order. Prefer the normal linked Supabase migration workflow. If SQL Editor is
-used, run one complete file at a time and stop immediately on the first error.
+Apply the following files in filename order. Prefer the normal linked Supabase
+migration workflow. The new rollout is deliberately phased: apply `0034`,
+commit the reviewed starts account by account from client-OAuth metadata, run
+the exact closed-week Google sync, and only then apply `0035` and `0036`. Never
+expose all three pending files to one blind `db push`. If SQL Editor is used,
+run one complete file at a time and stop immediately on the first error.
 
 1. `0026_one_source_per_store.sql`
 2. `0027_pre_v3_schema_repair.sql`
@@ -125,6 +139,9 @@ used, run one complete file at a time and stop immediately on the first error.
 6. `0031_manual_referral_attribution.sql`
 7. `0032_billing_issue_leases.sql`
 8. `0033_disable_direct_invoice_inserts.sql`
+9. `0034_reviewed_full_day_billing_starts.sql`
+10. `0035_historical_full_day_rollover.sql`
+11. `0036_billing_automation_receipts.sql`
 
 The sequence is intentional:
 
@@ -144,6 +161,22 @@ The sequence is intentional:
   closes the still-deployed legacy admin endpoint during application rollout;
   v3 creation remains available only through its validated SECURITY DEFINER
   transaction.
+- `0034` installs the reviewed full-day proof contract and its service-only,
+  per-account commit RPC. It creates no starts by itself and never invents a
+  Google counter. Each pre-cutover account remains unstarted until a valid
+  client-OAuth metadata read is committed. Accounts joining after the cutover
+  still require a real observed Google start.
+- `0035` seals the reviewed 27 July–2 August historical full-day rollover only
+  from starts and exact completed Google sync windows created after `0034`. It
+  preserves the calculation proof but does not create or send an invoice while
+  the migration is running.
+- `0036` installs the durable automatic-issuance queue, run receipts, fenced
+  claims and database proofs for legitimate zero-charge weeks. A failed item is
+  retried on a later run without blocking other clients.
+
+Recurring ledger reads preserve the portal's established per-client OAuth
+model. A disconnected or revoked client credential blocks only that account;
+the billing worker never substitutes the agency service account.
 
 All migration preflights fail closed. A failure means the live facts differ
 from the reviewed cutover contract and require investigation, not a broad SQL
@@ -151,9 +184,22 @@ workaround.
 
 ## Baseline activation
 
-After all migrations commit, deploy the application with issuance still
-disabled. In `/admin/clients`, use **Verify Google & start tracking** for every
-active or suspended client account that lacks a billing start.
+After `0034` commits, keep issuance disabled. For every explicitly approved
+pre-cutover account, read the non-secret customer ID, EUR currency and IANA
+timezone through that account's existing client OAuth and call
+`commit_reviewed_full_day_billing_start`. The RPC derives both the Lisbon
+commercial entry day and the separate Google-local start day from the stored
+account creation instant. It does not update status, OAuth, connection flags or
+the configured Google customer. A failed or revoked account remains unstarted
+without blocking independent accounts.
+
+Run a forced exact sync for 27 July–2 August after those starts exist. Confirm
+each positive account has one complete sync window whose canonical snapshot
+matches the six-decimal Google ledger. Only then apply `0035` and `0036` and
+deploy the application with issuance still disabled.
+
+For each newer active or suspended account that lacks a billing start, use
+**Verify Google & start tracking** in `/admin/clients`.
 
 That action performs this sequence atomically from the operator's perspective:
 
@@ -176,6 +222,7 @@ Set the production values as encrypted Worker secrets, never committed vars:
 - `SUPABASE_SERVICE_ROLE_KEY`
 - `CRON_SECRET`
 - `BILLING_ISSUANCE_ENABLED`
+- `BILLING_AUTOMATION_ENABLED`
 
 Use a current `sb_secret_…` server secret (preferred) or a legacy JWT whose
 payload role is genuinely `service_role`. A browser anon JWT, including one
@@ -196,45 +243,56 @@ The endpoint verifies the raw-body signature, rejects test/live mode mismatch,
 stores each event ID in a durable inbox and reconciles the current Stripe
 Invoice instead of trusting delivery order.
 
-## Pilot and enablement
+## Enablement
 
-1. Leave issuance disabled while the Monday evidence job runs or use the
-   explicit **Refresh ledger** action after the 14:05 UTC cutoff.
-2. Open `/admin/billing`, choose the closed week and inspect every blocker,
-   store line, baseline/end deduction, recipient and referral term.
-3. For the pilot, enable issuance with the exact value `true`, reopen the admin
-   page and confirm the expected amount in the review dialog.
-4. Verify that exactly one Stripe `send_invoice` Invoice exists, is in EUR,
-   contains only agency-fee lines, has a hosted URL and matches the local
-   invoice ID in metadata.
-5. Sign in as the pilot client, open Dashboard → Payments, follow **Pay now**
-   and complete payment on Stripe.
-6. Confirm the signed webhook changes the admin row to paid. Also run or wait
+1. Leave automatic issuance disabled while the Monday evidence job runs or use
+   the explicit **Refresh closed Google week** action after the 14:05 UTC
+   cutoff.
+2. Open `/admin/billing` and confirm the latest closed-week total, client
+   positions, blocked items, billing identities and referral terms.
+3. Use the read-only Stripe check to verify the live restricted key. Separately
+   confirm the required write permissions and the deployed webhook signing
+   secret; the read-only check cannot prove either by itself.
+4. Review every eligible historical recipient and amount. The current worker
+   has no single-client pilot mode: arming it processes the complete eligible
+   batch, not one selected client.
+5. Only after accepting that batch, set both gates to the exact value `true`
+   and invoke the protected billing cron. No admin confirmation dialog is part
+   of the normal issuance path.
+6. Verify that each expected Stripe `send_invoice` Invoice is in EUR, contains
+   only agency-fee lines, has a hosted URL and matches its local invoice ID in
+   metadata.
+7. Sign in as a client, open Dashboard → Payments, follow **Pay now** and
+   complete payment on Stripe.
+8. Confirm the signed webhook changes the admin row to paid. Also run or wait
    for `/api/billing/cron` reconciliation to prove missed-webhook recovery.
-7. Only then process the remaining clients one at a time.
 
-For an immediate stop, set `BILLING_ISSUANCE_ENABLED` back to a non-`true`
-value. This prevents new issue attempts but does not hide, cancel or mutate
-invoices already sent to Stripe.
+For an immediate automatic stop, set `BILLING_AUTOMATION_ENABLED` back to a
+non-`true` value. Set `BILLING_ISSUANCE_ENABLED` back as well to stop emergency
+manual issue. Neither action hides, cancels or mutates invoices already sent to
+Stripe.
 
 ## Normal weekly operation
 
-1. Monday 14:05 UTC: the Worker refreshes the closed week's Google ledger and
-   reconciles Stripe. No invoice is created.
-2. Admin opens `/admin/billing`, selects the previous Monday–Sunday week and
-   refreshes evidence if required.
-3. Admin reviews each client. Missing baseline, unsettled evidence, incomplete
-   billing identity, stale referral term, duplicate consumption or amount
-   mismatch blocks issue.
-4. Admin ticks the explicit confirmation and issues one client/week. The
-   server recalculates, compares the review token, acquires a fenced client
-   lease, creates/reuses the Stripe objects idempotently, finalises and sends.
+1. Monday 14:05 UTC: the Worker refreshes the complete Monday–Sunday Google
+   ledger, seeds all closed eligible client/weeks and starts the protected
+   billing run.
+2. The queue processes oldest weeks first. Each item is claimed with a fenced
+   lease; the server recalculates from immutable evidence, creates or reuses
+   Stripe objects idempotently, finalises and sends the invoice.
+3. Missing baseline, unsettled Google evidence, incomplete billing identity,
+   stale referral term, duplicate consumption or an amount mismatch blocks
+   only that client/week. A proved exact €0 week is recorded as `no_charge`.
+4. A daily 23:55 UTC run retries blocked work whose evidence is now complete
+   and reconciles Stripe. It cannot reclaim the same failed item repeatedly in
+   one run.
 5. The client sees the issued invoice under Dashboard → Payments and pays on
    Stripe's hosted page.
 6. Stripe webhooks update paid, open, failed, void or uncollectible state. The
    daily reconciliation job is the safety net for missed deliveries.
-7. Admin `/admin/billing` shows selected-week billed value, current-month
-   billed and paid totals, outstanding balance, failures and invoice history.
+7. Admin `/admin/billing` starts with latest-week billed, month billed, month
+   paid and outstanding totals, followed by one client-position list and a
+   compact needs-attention view. It is a control surface, not an issue button.
 
 Referral attribution and pricing are two separate admin decisions:
 

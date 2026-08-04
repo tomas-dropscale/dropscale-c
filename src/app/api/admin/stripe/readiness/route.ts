@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 
-import { billingIssuanceEnabled } from "@/lib/billing/issuance-gate";
+import {
+  automaticBillingIssuanceEnabled,
+  billingIssuanceEnabled,
+} from "@/lib/billing/issuance-gate";
 import { checkStripeReadiness } from "@/lib/stripe/client";
 import { getSessionProfile } from "@/lib/supabase/server";
 
@@ -26,6 +29,7 @@ export async function GET() {
     process.env.SUPABASE_SERVICE_ROLE_KEY?.trim(),
   );
   const issuanceEnabled = billingIssuanceEnabled();
+  const automationEnabled = automaticBillingIssuanceEnabled();
   const permissionsReady = Object.values(stripe.permissions).every(Boolean);
 
   return NextResponse.json(
@@ -40,6 +44,7 @@ export async function GET() {
       webhookSecretConfigured,
       serviceRoleConfigured,
       issuanceEnabled,
+      automationEnabled,
       permissions: stripe.permissions,
       limitations: stripe.limitations,
     },

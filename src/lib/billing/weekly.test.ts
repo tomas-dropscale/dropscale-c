@@ -9,9 +9,12 @@ import {
   billingEvidenceIsReady,
   billingEvidenceReadyAt,
   billingCurrency,
+  CALCULATION_VERSION,
   closedWeekStarting,
   closedWeeks,
   mondayOf,
+  HISTORICAL_ROLLOVER_CALCULATION_VERSION,
+  isManualAgencyCalculationVersion,
   referralFeeTerms,
   round2,
   storeLines,
@@ -92,6 +95,14 @@ describe("closed weeks", () => {
 });
 
 describe("the sealed agency fee", () => {
+  it("treats the sealed historical rollover as a fee-only agency invoice", () => {
+    expect(isManualAgencyCalculationVersion(CALCULATION_VERSION)).toBe(true);
+    expect(
+      isManualAgencyCalculationVersion(HISTORICAL_ROLLOVER_CALCULATION_VERSION),
+    ).toBe(true);
+    expect(isManualAgencyCalculationVersion("legacy")).toBe(false);
+  });
+
   it("starts at ten percent and rounds to euro cents", () => {
     expect(AGENCY_FEE_RATE).toBe(10);
     expect(agencyFee(4_000)).toBe(400);
@@ -150,6 +161,7 @@ describe("the sealed agency fee", () => {
           baselineDeduction: 80,
           openingBaselineApplied: true,
           billingStart: {
+            basis: "observed_google_counter",
             id: "start-1",
             date: "2026-08-06",
             capturedAt: "2026-08-06T14:30:00.123456Z",
@@ -171,6 +183,7 @@ describe("the sealed agency fee", () => {
         baseAmount: 170,
         sourceGrossAmount: 250,
         baselineDeductionAmount: 80,
+        billingStartBasis: "observed_google_counter",
         billingStartId: "start-1",
         billingStartDate: "2026-08-06",
         billingStartedAt: "2026-08-06T14:30:00.123456Z",
@@ -181,6 +194,54 @@ describe("the sealed agency fee", () => {
         amount: 17,
       },
     ]);
+  });
+
+  it("records a reviewed full entry day without inventing an opening counter", () => {
+    const lines = storeLines(
+      "acc-reviewed",
+      "Loja histórica",
+      totals({
+        spend: 96.2,
+        sourceSpend: 96.2,
+        reviewedFullDayApplied: true,
+        billingStart: {
+          basis: "reviewed_full_day",
+          id: "start-reviewed",
+          date: "2026-08-01",
+          timeZone: "America/New_York",
+          entryDate: "2026-08-02",
+          entryTimeZone: "Europe/Lisbon",
+          reviewedFullDayBoundaryId: "boundary-reviewed",
+          policyVersion:
+            "agency-billing-pre-v3-full-google-local-entry-day-commercial-lisbon-v2",
+          entryDayTreatment: "full-day-inclusive",
+        },
+        periodEnd: "2026-08-02",
+      }),
+    );
+
+    expect(lines).toEqual([
+      expect.objectContaining({
+        billingStartBasis: "reviewed_full_day",
+        billingStartId: "start-reviewed",
+        billingStartDate: "2026-08-01",
+        billingTimeZone: "America/New_York",
+        reviewedFullDayBoundaryId: "boundary-reviewed",
+        billingPolicyVersion:
+          "agency-billing-pre-v3-full-google-local-entry-day-commercial-lisbon-v2",
+        entryDate: "2026-08-02",
+        entryTimeZone: "Europe/Lisbon",
+        entryDayTreatment: "full-day-inclusive",
+        sourceGrossAmount: 96.2,
+        baseAmount: 96.2,
+        amount: 9.62,
+        label:
+          "Loja histórica - Google Ads agency fee (10% of captured Google-reported billable spend: EUR 96.200000; manual referral term: approved referral count 0; 10% - 0 percentage points = 10%; billing began under reviewed full-day policy agency-billing-pre-v3-full-google-local-entry-day-commercial-lisbon-v2; full America/New_York Google reporting day 2026-08-01 included; commercial entry 2026-08-02 in Europe/Lisbon; first billable period 2026-08-01 to 2026-08-02; Google-reported spend EUR 96.200000)",
+      }),
+    ]);
+    expect(lines[0]).not.toHaveProperty("billingStartedAt");
+    expect(lines[0]).not.toHaveProperty("billingStartBaselineAmount");
+    expect(lines[0]).not.toHaveProperty("baselineDeductionAmount");
   });
 
   it("derives the weekly rate only from the approved referral count", () => {
@@ -296,6 +357,7 @@ describe("the sealed agency fee", () => {
           openingBaselineApplied: true,
           endingCapApplied: true,
           billingStart: {
+            basis: "observed_google_counter",
             id: "start-1",
             date: "2026-08-06",
             capturedAt: "2026-08-06T09:00:00.111111Z",

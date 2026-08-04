@@ -222,6 +222,49 @@ describe("billing review token", () => {
     expect(changed).not.toBe(reviewed);
   });
 
+  it("binds a reviewed full-day line to its exact policy proof", async () => {
+    const common = {
+      clientId: "client-1",
+      week,
+      amount: 9.62,
+      ledgerRows: [],
+      referralTermId: null,
+      recipient,
+    };
+    const line = {
+      accountId: "store-reviewed",
+      kind: "fee" as const,
+      store: "Reviewed",
+      rate: 10,
+      baseAmount: 96.2,
+      sourceGrossAmount: 96.2,
+      billingStartBasis: "reviewed_full_day" as const,
+      billingStartId: "start-reviewed",
+      billingStartDate: "2026-08-02",
+      billingTimeZone: "Europe/Lisbon",
+      reviewedFullDayBoundaryId: "boundary-a",
+      billingPolicyVersion: "full-day-v1",
+      entryDate: "2026-08-02",
+      entryTimeZone: "Europe/Lisbon",
+      entryDayTreatment: "full-day-inclusive" as const,
+      label: "Reviewed fee",
+      amount: 9.62,
+    };
+
+    const reviewed = await billingReviewToken({ ...common, lines: [line] });
+    const changedProof = await billingReviewToken({
+      ...common,
+      lines: [{ ...line, reviewedFullDayBoundaryId: "boundary-b" }],
+    });
+    const changedPolicy = await billingReviewToken({
+      ...common,
+      lines: [{ ...line, billingPolicyVersion: "full-day-v2" }],
+    });
+
+    expect(changedProof).not.toBe(reviewed);
+    expect(changedPolicy).not.toBe(reviewed);
+  });
+
   it("binds the admin confirmation to the exact manual referral term", async () => {
     const common = {
       clientId: "client-1",

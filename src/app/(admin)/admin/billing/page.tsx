@@ -8,16 +8,12 @@ import { getServerDictionary } from "@/lib/i18n/server";
 export const metadata: Metadata = { title: "Billing" };
 
 /**
- * Read-only on render. Issuing an invoice and refreshing the ledger are both
- * explicit POST actions in the client component below.
+ * Read-only on render. The Monday worker issues eligible closed weeks; this
+ * page reports the resulting balances and keeps data refreshes explicit.
  */
-export default async function BillingPage({
-  searchParams,
-}: {
-  searchParams: Promise<{ week?: string }>;
-}) {
-  const [{ week }, { d }] = await Promise.all([searchParams, getServerDictionary()]);
-  const dashboard = await fetchAdminBillingDashboard(week);
+export default async function BillingPage() {
+  const { d } = await getServerDictionary();
+  const dashboard = await fetchAdminBillingDashboard();
 
   return (
     <PageContainer title={d.adminBilling.title} description={d.adminBilling.subtitle}>
