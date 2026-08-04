@@ -58,3 +58,7 @@ next-env.d.ts
 /prompts/
 *.key.json
 GOOGLE_ADS_SA_KEY_JSON*.txt
+
+# Supabase CLI link/cache metadata. The access token lives outside the repo in
+# ~/.supabase, but linked-project and pooler details must also remain local.
+/supabase/.temp/
