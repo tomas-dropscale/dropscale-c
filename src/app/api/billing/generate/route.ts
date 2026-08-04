@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getSessionProfile } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/service";
 import { BillingIssueError, issueClientWeek } from "@/lib/billing/invoices";
+import { billingIssuanceEnabled } from "@/lib/billing/issuance-gate";
 
 type IssueBody = {
   clientId?: unknown;
@@ -17,13 +18,12 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Forbidden." }, { status: 403 });
   }
 
-  // The browser proves who approved the invoice, but it never receives write
-  // access to Stripe/payment state. All financial mutations run through the
-  // server role after this explicit admin check.
-  const supabase = createServiceClient();
-  if (!supabase) {
+  // Keep the gate behind admin authentication so it does not disclose
+  // operational state publicly, but ahead of every service-role or Stripe-
+  // backed operation. Unset and malformed values fail closed in the helper.
+  if (!billingIssuanceEnabled()) {
     return NextResponse.json(
-      { error: "SUPABASE_SERVICE_ROLE_KEY is not configured." },
+      { error: "Billing issuance is disabled." },
       { status: 503 },
     );
   }
@@ -41,6 +41,17 @@ export async function POST(request: NextRequest) {
           "clientId, periodStart, numeric expectedAmount and expectedReviewToken are required.",
       },
       { status: 422 },
+    );
+  }
+
+  // The browser proves who approved the invoice, but it never receives write
+  // access to Stripe/payment state. All financial mutations run through the
+  // server role after this explicit admin check.
+  const supabase = createServiceClient();
+  if (!supabase) {
+    return NextResponse.json(
+      { error: "SUPABASE_SERVICE_ROLE_KEY is not configured." },
+      { status: 503 },
     );
   }
 

@@ -41,6 +41,7 @@ import type { BillingAdminDashboard } from "@/lib/billing/invoices";
 import { money, shortDate } from "@/lib/format-intl";
 import { fmt, type Dictionary } from "@/lib/i18n";
 import { useI18n } from "@/lib/i18n/provider";
+import { safeStripeUrl } from "@/lib/stripe/urls";
 import type { InvoiceStatus } from "@/lib/supabase/types";
 import { cn } from "@/lib/utils";
 
@@ -203,15 +204,18 @@ function InvoiceLinks({
   invoice: InvoiceHistoryItem;
   d: Dictionary;
 }) {
-  if (!invoice.stripe_hosted_url && !invoice.stripe_invoice_pdf) {
+  const stripeHostedUrl = safeStripeUrl(invoice.stripe_hosted_url);
+  const stripeInvoicePdf = safeStripeUrl(invoice.stripe_invoice_pdf);
+
+  if (!stripeHostedUrl && !stripeInvoicePdf) {
     return <span className="text-[var(--text-muted)]">—</span>;
   }
 
   return (
     <div className="flex flex-wrap items-center gap-2">
-      {invoice.stripe_hosted_url && (
+      {stripeHostedUrl && (
         <a
-          href={invoice.stripe_hosted_url}
+          href={stripeHostedUrl}
           target="_blank"
           rel="noopener noreferrer"
           className="transition-smooth inline-flex min-h-8 items-center gap-1.5 text-[12px] font-medium text-[var(--accent-gold-strong)] hover:text-[var(--text-primary)]"
@@ -220,9 +224,9 @@ function InvoiceLinks({
           {d.adminBilling.openStripe}
         </a>
       )}
-      {invoice.stripe_invoice_pdf && (
+      {stripeInvoicePdf && (
         <a
-          href={invoice.stripe_invoice_pdf}
+          href={stripeInvoicePdf}
           target="_blank"
           rel="noopener noreferrer"
           className="transition-smooth inline-flex min-h-8 items-center gap-1.5 text-[12px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
@@ -508,6 +512,12 @@ export function BillingAdminView({
                 (blocker) => blocker.severity === "warning",
               );
               const invoice = client.existingInvoice;
+              const stripeHostedUrl = safeStripeUrl(
+                invoice?.stripe_hosted_url,
+              );
+              const stripeInvoicePdf = safeStripeUrl(
+                invoice?.stripe_invoice_pdf,
+              );
               const issueBusy = issuingId === client.clientId;
               const amountDue = invoice
                 ? invoice.status === "open"
@@ -619,7 +629,7 @@ export function BillingAdminView({
                     </div>
 
                     <div className="flex w-full shrink-0 flex-col gap-2 lg:w-48">
-                      {invoice?.stripe_hosted_url && (
+                      {stripeHostedUrl && (
                         <Button
                           asChild
                           type="button"
@@ -627,7 +637,7 @@ export function BillingAdminView({
                           size="sm"
                         >
                           <a
-                            href={invoice.stripe_hosted_url}
+                            href={stripeHostedUrl}
                             target="_blank"
                             rel="noopener noreferrer"
                           >
@@ -636,10 +646,10 @@ export function BillingAdminView({
                           </a>
                         </Button>
                       )}
-                      {invoice?.stripe_invoice_pdf && (
+                      {stripeInvoicePdf && (
                         <Button asChild type="button" variant="ghost" size="sm">
                           <a
-                            href={invoice.stripe_invoice_pdf}
+                            href={stripeInvoicePdf}
                             target="_blank"
                             rel="noopener noreferrer"
                           >

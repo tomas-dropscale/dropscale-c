@@ -57,6 +57,8 @@ import {
   addDays,
   AGENCY_FEE_RATE,
   BILLING_CURRENCY,
+  billingEvidenceIsReady,
+  billingEvidenceReadyAt,
   CALCULATION_VERSION,
   closedWeeks,
   closedWeekStarting,
@@ -105,6 +107,7 @@ export type BillingBlockerCode =
   | "google_disconnected"
   | "ledger_missing"
   | "ledger_stale"
+  | "evidence_settling"
   | "recipient_invalid"
   | "referral_term_mismatch"
   | "pre_v3_cutover"
@@ -1076,6 +1079,17 @@ async function calculateWeek(
       : retryableInvoice
         ? []
         : stores.flatMap((store) => store.blockers);
+    if (!alreadyIssued && !billingEvidenceIsReady(week.end)) {
+      blockers.push(
+        blocker(
+          "evidence_settling",
+          `Google's Sunday spend is still settling. This week can be certified after ${billingEvidenceReadyAt(
+            week.end,
+          ).toISOString()}.`,
+          "error",
+        ),
+      );
+    }
     const cutoverBlocker = manualReferralCutoverPreviewBlocker(referralCutover);
     if (!alreadyIssued && cutoverBlocker) {
       blockers.push(cutoverBlocker);

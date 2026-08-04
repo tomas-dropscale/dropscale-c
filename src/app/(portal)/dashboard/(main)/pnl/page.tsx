@@ -9,6 +9,8 @@ import { fetchDailyMetrics } from "@/lib/metrics/queries";
 import { buildPnlSheet, monthDays } from "@/lib/portal/pnl";
 import { fetchManualReferralRateSchedule } from "@/lib/billing/referral-rate-schedule";
 import { manualReferralRateOnDay } from "@/lib/billing/referrals";
+import { currencyScope, displayCurrency } from "@/lib/portal/currency";
+import { MixedCurrencyNotice } from "@/components/portal/mixed-currency-notice";
 import { intlLocale } from "@/lib/i18n";
 import { getServerDictionary } from "@/lib/i18n/server";
 
@@ -47,6 +49,9 @@ export default async function PnlPage({
   // of the whole business.
   const selected = accounts.find((account) => account.id === params.store) ?? null;
   const scope = selected ? [selected] : accounts;
+  // Only the stores this sheet actually covers — picking one store makes the
+  // figures single-currency again even when the account as a whole is mixed.
+  const currencies = currencyScope(scope);
 
   const days = monthDays(year, month);
   const from = days[0];
@@ -100,11 +105,12 @@ export default async function PnlPage({
         ) : undefined
       }
     >
+      <MixedCurrencyNotice scope={currencies} className="mb-4" />
       <PnlSheetView
         d={d}
         intl={intl}
         sheet={sheet}
-        currency={scope[0]?.currency ?? "EUR"}
+        currency={displayCurrency(currencies)}
         year={year}
         month={month}
         years={years}

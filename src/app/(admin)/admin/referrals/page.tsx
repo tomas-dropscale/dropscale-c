@@ -103,6 +103,14 @@ type AttributionEventRow = {
   created_at: string;
   sealed_at: string | null;
 };
+type ClaimRequestRow = {
+  id: string;
+  referred_client_id: string;
+  referrer_client_id: string;
+  referral_code: string;
+  claim_source: string;
+  created_at: string;
+};
 
 type PageResult = {
   data: unknown[] | null;
@@ -288,6 +296,7 @@ export default async function ReferralsPage() {
   let accounts: AccountRow[];
   let starts: StartRow[];
   let ends: EndRow[];
+  let claimRequestRows: ClaimRequestRow[];
   let attributionEventRows: AttributionEventRow[];
   let commissions: CommissionRow[];
   try {
@@ -300,6 +309,7 @@ export default async function ReferralsPage() {
       loadedAccounts,
       loadedStarts,
       loadedEnds,
+      loadedClaimRequests,
       loadedAttributionEvents,
       sourceResult,
     ] = await Promise.all([
@@ -390,6 +400,16 @@ export default async function ReferralsPage() {
             .order("ad_account_id", { ascending: true })
             .range(from, to) as unknown as PromiseLike<PageResult>,
       ),
+      loadAllRows<ClaimRequestRow>(
+        "Referral claim requests",
+        (from, to) =>
+          session
+            .from("referral_claim_requests")
+            .select("*", { count: "exact" })
+            .order("created_at", { ascending: false })
+            .order("id", { ascending: true })
+            .range(from, to) as unknown as PromiseLike<PageResult>,
+      ),
       loadAllRows<AttributionEventRow>(
         "Referral attribution events",
         (from, to) =>
@@ -423,6 +443,7 @@ export default async function ReferralsPage() {
     accounts = loadedAccounts;
     starts = loadedStarts;
     ends = loadedEnds;
+    claimRequestRows = loadedClaimRequests;
     attributionEventRows = loadedAttributionEvents;
     const accountIds = accounts.map((account) => account.id);
     commissions =
@@ -478,6 +499,27 @@ export default async function ReferralsPage() {
 
     const clientById = new Map(clients.map((client) => [client.id, client]));
     const staffIds = new Set(staffProfiles.map((profile) => profile.id));
+    const claimRequestByClient = new Map<string, ClaimRequestRow>();
+    for (const request of claimRequestRows) {
+      if (
+        !UUID.test(request.id) ||
+        !UUID.test(request.referred_client_id) ||
+        !UUID.test(request.referrer_client_id) ||
+        request.referred_client_id === request.referrer_client_id ||
+        !clientById.has(request.referred_client_id) ||
+        !clientById.has(request.referrer_client_id) ||
+        !request.referral_code ||
+        request.referral_code.length > 128 ||
+        request.referral_code !== request.referral_code.trim().toUpperCase() ||
+        (request.claim_source !== "signup" &&
+          request.claim_source !== "client") ||
+        !isTimestamp(request.created_at) ||
+        claimRequestByClient.has(request.referred_client_id)
+      ) {
+        throw new Error("A pending referral claim request is malformed.");
+      }
+      claimRequestByClient.set(request.referred_client_id, request);
+    }
     const attributionEvents: ReferralAttributionEventSummary[] =
       attributionEventRows.map((event) => {
         const referredClient = clientById.get(event.referred_client_id);
@@ -813,6 +855,25 @@ export default async function ReferralsPage() {
         name: client.full_name,
         email: client.email,
         approvalStatus: client.approval_status,
+        claimSuggestion: (() => {
+          const request = claimRequestByClient.get(client.id);
+          if (!request) return null;
+          const referrer = clientById.get(request.referrer_client_id);
+          if (!referrer) {
+            throw new Error(
+              "A pending referral claim points to a missing referrer.",
+            );
+          }
+          return {
+            requestId: request.id,
+            referrerClientId: referrer.id,
+            referrerName: referrer.full_name,
+            referrerEmail: referrer.email,
+            referralCode: request.referral_code,
+            claimSource: request.claim_source as "signup" | "client",
+            createdAt: request.created_at,
+          };
+        })(),
       }))
       .sort(
         (left, right) =>

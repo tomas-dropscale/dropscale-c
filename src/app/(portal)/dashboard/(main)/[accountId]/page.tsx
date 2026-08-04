@@ -1,3 +1,4 @@
+import { UpdatedAt } from "@/components/portal/updated-at";
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { FileBarChart, Hourglass } from "lucide-react";
@@ -13,7 +14,7 @@ import {
 import { parseRange } from "@/lib/portal/range";
 import { fetchManualReferralRateSchedule } from "@/lib/billing/referral-rate-schedule";
 import { manualReferralRateOnDay } from "@/lib/billing/referrals";
-import { dateTime, multiplier } from "@/lib/format";
+import { multiplier } from "@/lib/format";
 import { Button } from "@/components/ui/button";
 import { MetricsGrid } from "@/components/portal/metric-card";
 import { RangePicker } from "@/components/portal/range-picker";
@@ -22,7 +23,7 @@ import { ConnectAdsBanner } from "@/components/portal/connect-ads-banner";
 import { CampaignsTable } from "@/components/portal/campaigns-table";
 import { PageContainer } from "@/components/ui/page-container";
 import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
-import { fmt } from "@/lib/i18n";
+
 import { getServerDictionary } from "@/lib/i18n/server";
 
 export const metadata: Metadata = { title: "Store performance" };
@@ -76,15 +77,15 @@ export default async function AccountPage({
     <PageContainer
       title={account.store_name}
       description={
-        updatedAt && nextUpdateAt
-          ? fmt(d.portal.storeSubtitle, {
-              time: dateTime(updatedAt),
-              next: new Date(nextUpdateAt).toLocaleTimeString("en-GB", {
-                hour: "2-digit",
-                minute: "2-digit",
-              }),
-            })
-          : d.portal.noData
+        updatedAt && nextUpdateAt ? (
+          <UpdatedAt
+            template={d.portal.storeSubtitle}
+            updatedAt={updatedAt}
+            nextUpdateAt={nextUpdateAt}
+          />
+        ) : (
+          d.portal.noData
+        )
       }
       actions={
         <>

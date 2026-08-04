@@ -13,6 +13,15 @@ import type { InvoiceLine } from "@/lib/supabase/types";
 /** How long a client has to pay a manually issued invoice. */
 export const DAYS_UNTIL_DUE = 7;
 
+/**
+ * Google can restate Sunday's spend for several hours after its calendar day
+ * closes. The scheduled evidence capture runs at this UTC time on Monday, so
+ * manual review uses the same lower bound instead of accepting a 00:01
+ * snapshot that merely happens to be on the next date.
+ */
+export const BILLING_EVIDENCE_READY_HOUR_UTC = 14;
+export const BILLING_EVIDENCE_READY_MINUTE_UTC = 5;
+
 /** Weeks offered to the admin for review, newest first. */
 export const BACKFILL_WEEKS = 8;
 
@@ -127,6 +136,39 @@ export function closedWeekStarting(
   }
   const end = addDays(periodStart, 6);
   return end < isoDay(now) ? { start: periodStart, end } : null;
+}
+
+/** Exact earliest instant at which a Sunday-ending week may be certified. */
+export function billingEvidenceReadyAt(periodEnd: string): Date {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(periodEnd)) {
+    throw new RangeError("Billing period end must be an ISO date.");
+  }
+  const [year, month, day] = periodEnd.split("-").map(Number);
+  const parsedEnd = new Date(Date.UTC(year, month - 1, day));
+  if (parsedEnd.toISOString().slice(0, 10) !== periodEnd) {
+    throw new RangeError("Billing period end is not a real date.");
+  }
+  const monday = addDays(periodEnd, 1);
+  const ready = new Date(
+    `${monday}T${String(BILLING_EVIDENCE_READY_HOUR_UTC).padStart(2, "0")}:${String(
+      BILLING_EVIDENCE_READY_MINUTE_UTC,
+    ).padStart(2, "0")}:00.000Z`,
+  );
+  if (
+    !Number.isFinite(ready.getTime()) ||
+    ready.toISOString().slice(0, 10) !== monday
+  ) {
+    throw new RangeError("Billing period end is not a real date.");
+  }
+  return ready;
+}
+
+/** Manual sync and issue both fail closed until Google's settling buffer ends. */
+export function billingEvidenceIsReady(
+  periodEnd: string,
+  now = new Date(),
+): boolean {
+  return now.getTime() >= billingEvidenceReadyAt(periodEnd).getTime();
 }
 
 // ---------------------------------------------------------------------------

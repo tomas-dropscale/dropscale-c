@@ -3,15 +3,19 @@ import { PGlite } from "@electric-sql/pglite";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 const BILLING_MIGRATION = readFileSync(
-  "supabase/migrations/0026_manual_agency_billing.sql",
+  "supabase/migrations/0028_manual_agency_billing.sql",
+  "utf8",
+);
+const CUTOVER_MIGRATION = readFileSync(
+  "supabase/migrations/0029_legacy_billing_cutover.sql",
   "utf8",
 );
 const REFERRAL_MIGRATION = readFileSync(
-  "supabase/migrations/0027_manual_referral_discounts.sql",
+  "supabase/migrations/0030_manual_referral_discounts.sql",
   "utf8",
 );
 const ATTRIBUTION_MIGRATION = readFileSync(
-  "supabase/migrations/0028_manual_referral_attribution.sql",
+  "supabase/migrations/0031_manual_referral_attribution.sql",
   "utf8",
 );
 
@@ -204,7 +208,7 @@ end
 $$;
 grant execute on function public.set_workspace_stripe_customer(uuid,text) to authenticated;
 
--- Objects from 0022-0025 that 0027 deliberately supersedes.
+-- Objects from 0022-0025 that 0030 deliberately supersedes.
 create or replace function public.referral_activity_days()
 returns integer language sql immutable as $$ select 7 $$;
 create or replace function public.active_referral_count(p_client_id uuid)
@@ -285,11 +289,10 @@ async function insertClient(
   await db.query("begin");
   try {
     if (referredBy) {
-      // Existing-attribution fixtures represent the sealed email/password
-      // signup path. Ordinary direct INSERTs are tested separately and must
-      // remain blocked by migration 0028.
+      // Existing-attribution fixtures represent an already reviewed admin
+      // decision. Ordinary direct INSERTs are tested separately and blocked.
       await db.query(
-        "select set_config('dropscale.referral_signup_insert', 'on', true)",
+        "select set_config('dropscale.manual_referral_attribution_rpc', 'on', true)",
       );
     }
     await db.query(
@@ -302,9 +305,15 @@ async function insertClient(
         `${name.toLowerCase()}@example.com`,
         status,
         name.toUpperCase(),
-        referredBy,
+        null,
       ],
     );
+    if (referredBy) {
+      await db.query(
+        "update public.portal_clients set referred_by = $1 where id = $2",
+        [referredBy, id],
+      );
+    }
     await db.query("commit");
   } catch (error) {
     await db.query("rollback");
@@ -817,6 +826,7 @@ beforeEach(async () => {
   await db.exec("drop schema if exists auth cascade;");
   await db.exec(PRELUDE);
   await db.exec(BILLING_MIGRATION);
+  await db.exec(CUTOVER_MIGRATION);
   await db.exec(REFERRAL_MIGRATION);
   await db.exec(ATTRIBUTION_MIGRATION);
   // The fixture exercises a post-cutover week. A separate assertion below
@@ -829,11 +839,12 @@ beforeEach(async () => {
 });
 
 describe("manual referral attribution", () => {
-  it("aborts installation when a legacy signup claim already formed a cycle", async () => {
+  it("aborts installation when a legacy claim fills referred_by between migrations", async () => {
     const preflightDb = await PGlite.create();
     try {
       await preflightDb.exec(PRELUDE);
       await preflightDb.exec(BILLING_MIGRATION);
+      await preflightDb.exec(CUTOVER_MIGRATION);
       await preflightDb.exec(REFERRAL_MIGRATION);
       await preflightDb.query(
         `insert into public.portal_clients (
@@ -853,14 +864,14 @@ describe("manual referral attribution", () => {
       expect(claim.rows[0].claim_referral_code).toBe("ok");
 
       await expect(preflightDb.exec(ATTRIBUTION_MIGRATION)).rejects.toThrow(
-        /existing referral graph contains a cycle/i,
+        /unreviewed permanent referral attribution/i,
       );
     } finally {
       await preflightDb.close();
     }
   });
 
-  it("refuses to seal staff or shared-workspace claims made between migrations", async () => {
+  it("refuses every unreviewed permanent claim made between migrations", async () => {
     const cases: Array<{
       label: string;
       seed: (preflightDb: PGlite) => Promise<void>;
@@ -908,12 +919,13 @@ describe("manual referral attribution", () => {
       try {
         await preflightDb.exec(PRELUDE);
         await preflightDb.exec(BILLING_MIGRATION);
+        await preflightDb.exec(CUTOVER_MIGRATION);
         await preflightDb.exec(REFERRAL_MIGRATION);
         await scenario.seed(preflightDb);
         await expect(
           preflightDb.exec(ATTRIBUTION_MIGRATION),
           scenario.label,
-        ).rejects.toThrow(/staff or shared-workspace/i);
+        ).rejects.toThrow(/unreviewed permanent referral attribution/i);
       } finally {
         await preflightDb.close();
       }
@@ -927,9 +939,47 @@ describe("manual referral attribution", () => {
       [ADMIN],
     );
     await insertClient(CLIENT, "Referrer");
+    await insertClient(STRANGER, "Other referrer");
     await insertClient(REFERRED, "Pending referred", null, "pending");
 
+    await actAs(REFERRED);
+    const claim = await db.query<{ claim_referral_code: string }>(
+      "select public.claim_referral_code('  referrer  ')",
+    );
+    expect(claim.rows[0].claim_referral_code).toBe("ok");
+    const exactRetry = await db.query<{ claim_referral_code: string }>(
+      "select public.claim_referral_code('REFERRER')",
+    );
+    expect(exactRetry.rows[0].claim_referral_code).toBe("ok");
+    const replacement = await db.query<{ claim_referral_code: string }>(
+      "select public.claim_referral_code('OTHER REFERRER')",
+    );
+    expect(replacement.rows[0].claim_referral_code).toBe("claim_pending");
+
     await actAsService();
+    const pending = await db.query<{
+      id: string;
+      referred_client_id: string;
+      referrer_client_id: string;
+      referral_code: string;
+      claim_source: string;
+    }>(
+      "select id, referred_client_id, referrer_client_id, referral_code, claim_source from public.referral_claim_requests",
+    );
+    expect(pending.rows).toEqual([
+      expect.objectContaining({
+        referred_client_id: REFERRED,
+        referrer_client_id: CLIENT,
+        referral_code: "REFERRER",
+        claim_source: "client",
+      }),
+    ]);
+    const stillUnassigned = await db.query<{ referred_by: string | null }>(
+      "select referred_by from public.portal_clients where id = $1",
+      [REFERRED],
+    );
+    expect(stillUnassigned.rows[0].referred_by).toBeNull();
+
     const first = await db.query<{
       id: string;
       decision_id: string;
@@ -1013,6 +1063,76 @@ describe("manual referral attribution", () => {
         [first.rows[0].id],
       ),
     ).rejects.toThrow(/append-only/i);
+    await expect(
+      db.query(
+        "update public.referral_claim_requests set referral_code = 'REWRITE' where id = $1",
+        [pending.rows[0].id],
+      ),
+    ).rejects.toThrow(/append-only/i);
+  });
+
+  it("turns a confirmed signup code into pending evidence, never referred_by", async () => {
+    await insertClient(CLIENT, "Signup referrer");
+    await actAsService();
+    await db.exec(`
+      create table auth.users (
+        id uuid primary key,
+        email text not null,
+        email_confirmed_at timestamptz,
+        raw_user_meta_data jsonb not null default '{}'::jsonb
+      );
+      create trigger test_new_portal_client
+        after insert on auth.users
+        for each row execute function public.handle_new_portal_client();
+    `);
+    await db.query(
+      `insert into auth.users (
+         id, email, email_confirmed_at, raw_user_meta_data
+       ) values ($1, 'signup@example.com', now(), $2::jsonb)`,
+      [
+        REFERRED,
+        JSON.stringify({
+          portal_signup: "true",
+          full_name: "Signup claimant",
+          referral_code: "signup referrer",
+        }),
+      ],
+    );
+
+    const client = await db.query<{
+      full_name: string;
+      approval_status: string;
+      referred_by: string | null;
+    }>(
+      "select full_name, approval_status, referred_by from public.portal_clients where id = $1",
+      [REFERRED],
+    );
+    expect(client.rows[0]).toEqual({
+      full_name: "Signup claimant",
+      approval_status: "pending",
+      referred_by: null,
+    });
+
+    const request = await db.query<{
+      referred_client_id: string;
+      referrer_client_id: string;
+      referral_code: string;
+      claim_source: string;
+    }>(
+      "select referred_client_id, referrer_client_id, referral_code, claim_source from public.referral_claim_requests",
+    );
+    expect(request.rows).toEqual([
+      {
+        referred_client_id: REFERRED,
+        referrer_client_id: CLIENT,
+        referral_code: "SIGNUP REFERRER",
+        claim_source: "signup",
+      },
+    ]);
+    const events = await db.query<{ count: number }>(
+      "select count(*)::int as count from public.referral_attribution_events",
+    );
+    expect(events.rows[0].count).toBe(0);
   });
 
   it("rejects browser callers, shared workspaces, rejected clients and referral cycles", async () => {
@@ -1220,7 +1340,7 @@ describe("manual referral attribution", () => {
 });
 
 describe("manual referral terms", () => {
-  it("aborts installation instead of silently erasing legacy referral pricing", async () => {
+  it("requires the explicit cutover before evaluating legacy referral pricing", async () => {
     const preflightDb = await PGlite.create();
     try {
       await preflightDb.exec(PRELUDE);
@@ -1240,7 +1360,7 @@ describe("manual referral terms", () => {
       );
 
       await expect(preflightDb.exec(REFERRAL_MIGRATION)).rejects.toThrow(
-        /explicit reviewed rollover/i,
+        /manual_billing_cutovers|explicit (?:legacy billing cutover|reviewed rollover)/i,
       );
       const terms = await preflightDb.query<{ exists: boolean }>(
         `select exists (
@@ -1255,7 +1375,7 @@ describe("manual referral terms", () => {
     }
   });
 
-  it("fails rollout for every detectable incompatible legacy contract", async () => {
+  it("fails closed before evaluating incompatible states without a cutover", async () => {
     const cases: Array<{
       label: string;
       seed: (preflightDb: PGlite) => Promise<void>;
@@ -1407,7 +1527,9 @@ describe("manual referral terms", () => {
         await expect(
           preflightDb.exec(REFERRAL_MIGRATION),
           scenario.label,
-        ).rejects.toThrow(/explicit reviewed rollover/i);
+        ).rejects.toThrow(
+          /manual_billing_cutovers|explicit (?:legacy billing cutover|reviewed rollover)/i,
+        );
       } finally {
         await preflightDb.close();
       }
@@ -1585,7 +1707,7 @@ describe("manual referral terms", () => {
     await expect(schedule()).rejects.toThrow(/share a workspace/i);
   });
 
-  it("keeps claims working but refuses every later attribution rewrite and referrer deletion", async () => {
+  it("keeps claims pending until admin review and refuses every attribution rewrite", async () => {
     await db.query(
       "insert into public.profiles (id, role) values ($1, 'admin')",
       [ADMIN],
@@ -1602,11 +1724,30 @@ describe("manual referral terms", () => {
     await actAs(ADMIN);
     await expect(
       db.query(
+        "update public.portal_clients set referred_by = $1 where id = $2",
+        [CLIENT, REFERRED],
+      ),
+    ).rejects.toThrow(/cannot be rewritten/i);
+
+    await actAsService();
+    await db.query(
+      `select * from public.assign_manual_referral_attribution(
+         $1, $2, $3, $4, $5
+       )`,
+      [
+        REFERRED,
+        CLIENT,
+        crypto.randomUUID(),
+        "Pending code independently reviewed",
+        ADMIN,
+      ],
+    );
+    await expect(
+      db.query(
         "update public.portal_clients set referred_by = null where id = $1",
         [REFERRED],
       ),
     ).rejects.toThrow(/cannot be rewritten/i);
-    await actAsService();
     await expect(
       db.query("delete from public.portal_clients where id = $1", [CLIENT]),
     ).rejects.toThrow(/foreign key/i);

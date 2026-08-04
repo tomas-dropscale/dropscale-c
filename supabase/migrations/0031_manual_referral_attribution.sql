@@ -1,19 +1,17 @@
 -- =============================================================================
--- 0028 - Admin-owned referral attribution.
+-- 0031 - Admin-owned referral attribution.
 --
--- A referral code entered during signup may still create the original claim,
--- but a missing claim must not prevent the team from recording a genuine
--- referral. This migration adds a second, service-only path through which a
--- verified admin may fill an empty attribution exactly once. Attribution and
--- pricing remain separate decisions: this RPC never grants the 0.5 pp fee
--- discount or changes an existing Monday-effective commercial term.
+-- A referral code entered during signup is evidence for an admin to review,
+-- never authority to create the permanent relationship. This migration keeps
+-- that signal in an append-only pending-request journal and makes the verified
+-- admin/service RPC the only path that may fill referred_by. Attribution and
+-- pricing remain separate decisions: the attribution RPC never grants the
+-- 0.5 pp fee discount or changes a Monday-effective commercial term.
 -- =============================================================================
 
--- The legacy claim path prevented self-referral but did not prevent longer
--- cycles, staff identities or fellow workspace members. 0027 and 0028 are
--- separate transactions, so a live 0025 claim can still arrive between them.
--- Do not seal an invalid relationship permanently: an operator must inspect
--- and repair it explicitly before installing the stricter writer.
+-- 0030 and 0031 are separate transactions, so the old automatic claim writer
+-- can still fill referred_by between them. Do not silently bless that edge as
+-- admin-reviewed or erase it: stop and require an explicit operator repair.
 do $$
 begin
   -- Drain old claim/profile/membership writers before validating. Otherwise a
@@ -26,51 +24,77 @@ begin
   in share row exclusive mode;
 
   if exists (
-    with recursive referral_walk(origin_id, node_id, path, has_cycle) as (
-      select client.id, client.id, array[client.id], false
-      from public.portal_clients client
-      where client.referred_by is not null
-
-      union all
-
-      select
-        walk.origin_id,
-        client.referred_by,
-        walk.path || client.referred_by,
-        client.referred_by = any(walk.path)
-      from referral_walk walk
-      join public.portal_clients client on client.id = walk.node_id
-      where client.referred_by is not null
-        and not walk.has_cycle
-    )
     select 1
-    from referral_walk
-    where has_cycle
+    from public.portal_clients client
+    where client.referred_by is not null
   ) then
     raise exception using
       errcode = 'P0001',
-      message = '0028 preflight: the existing referral graph contains a cycle and requires explicit repair before admin attribution can be installed.';
-  end if;
-
-  if exists (
-    select 1
-    from public.portal_clients referred_client
-    join public.portal_clients referrer
-      on referrer.id = referred_client.referred_by
-    where exists (
-      select 1
-      from public.profiles profile
-      where profile.id in (referred_client.id, referrer.id)
-        and profile.role = 'admin'
-    )
-       or public.clients_share_workspace(referred_client.id, referrer.id)
-  ) then
-    raise exception using
-      errcode = 'P0001',
-      message = '0028 preflight: a legacy referral involves staff or shared-workspace identities and requires explicit repair before attribution can be sealed.';
+      message = '0031 preflight: an unreviewed permanent referral attribution was created after 0030 and requires explicit repair before admin-only attribution can be installed.';
   end if;
 end
 $$;
+
+create table public.referral_claim_requests (
+  id uuid primary key default gen_random_uuid(),
+  referred_client_id uuid not null unique
+    references public.portal_clients (id) on delete restrict,
+  referrer_client_id uuid not null
+    references public.portal_clients (id) on delete restrict,
+  referral_code text not null
+    constraint referral_claim_requests_code_present
+    check (btrim(referral_code) <> '' and length(referral_code) <= 128),
+  claim_source text not null
+    constraint referral_claim_requests_source
+    check (claim_source in ('signup', 'client')),
+  created_at timestamptz not null default now(),
+  constraint referral_claim_requests_not_self
+    check (referred_client_id <> referrer_client_id)
+);
+
+comment on table public.referral_claim_requests is
+  'Append-only referral-code signals awaiting independent admin attribution review; a row never changes referred_by or commercial pricing.';
+comment on column public.referral_claim_requests.referred_client_id is
+  'One immutable first claim per client. Pending status is derived from portal_clients.referred_by remaining null.';
+comment on column public.referral_claim_requests.referral_code is
+  'Uppercase, trimmed code supplied by the claimant; retained as review evidence.';
+
+create index referral_claim_requests_referrer_idx
+  on public.referral_claim_requests (referrer_client_id, created_at desc);
+
+alter table public.referral_claim_requests enable row level security;
+revoke insert, update, delete on public.referral_claim_requests
+  from public, authenticated, anon, service_role;
+grant select on public.referral_claim_requests
+  to authenticated, service_role;
+
+create policy referral_claim_requests_admin_read
+  on public.referral_claim_requests for select
+  using (public.is_admin());
+
+create or replace function public.guard_referral_claim_request()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if tg_op = 'INSERT'
+     and coalesce(
+       current_setting('dropscale.referral_claim_request_write', true),
+       ''
+     ) = 'on' then
+    return new;
+  end if;
+
+  raise exception 'A referral claim request is append-only.'
+    using errcode = '22023';
+end
+$$;
+
+create trigger referral_claim_requests_guard_append_only
+  before insert or update or delete on public.referral_claim_requests
+  for each row execute function public.guard_referral_claim_request();
 
 create table public.referral_attribution_events (
   id uuid primary key default gen_random_uuid(),
@@ -134,51 +158,71 @@ create trigger referral_attribution_events_guard_append_only
   before insert or update or delete on public.referral_attribution_events
   for each row execute function public.guard_referral_attribution_event();
 
--- Signup claims and admin assignments share the same serialisation domain.
--- The older claim function checked only self-referral; two reciprocal claims,
--- or a claim racing an admin assignment, could therefore create a cycle.
-create or replace function public.claim_referral_code(p_code text)
+-- Resolve and append one referral-code signal without changing attribution.
+-- A first valid signal is immutable. Retrying the same code is idempotent;
+-- submitting a different code returns claim_pending and cannot replace it.
+create or replace function public.record_referral_claim_request(
+  p_referred_client_id uuid,
+  p_code text,
+  p_claim_source text
+)
 returns text
 language plpgsql
 security definer
 set search_path = public
 as $$
 declare
-  claimant_id uuid := auth.uid();
   referral_code_text text := upper(trim(coalesce(p_code, '')));
   referrer_id uuid;
-  existing_referrer_id uuid;
+  referred_client public.portal_clients%rowtype;
+  existing_request public.referral_claim_requests%rowtype;
 begin
-  if claimant_id is null then
+  if p_referred_client_id is null then
     return 'not_signed_in';
   end if;
   if referral_code_text = '' then
     return 'empty';
   end if;
-  if exists (
-    select 1
-    from public.profiles profile
-    where profile.id = claimant_id
-      and profile.role = 'admin'
-  ) then
-    return 'staff_account';
+  if p_claim_source is null
+     or p_claim_source not in ('signup', 'client') then
+    raise exception 'Invalid referral claim source.'
+      using errcode = '22023';
   end if;
 
-  -- The admin RPC takes the same lock before inspecting either relationship.
-  -- SECURITY DEFINER lets the function owner take it without granting browser
-  -- users any direct table-lock or event-write privilege.
-  lock table public.referral_attribution_events in share row exclusive mode;
+  -- The admin attribution RPC takes the same lock before inspecting or filling
+  -- referred_by. A claim that wins the race is visible to that review; an
+  -- attribution that wins makes the later claim return already_referred.
+  lock table public.referral_claim_requests in share row exclusive mode;
 
-  select client.referred_by into existing_referrer_id
+  select * into referred_client
   from public.portal_clients client
-  where client.id = claimant_id
+  where client.id = p_referred_client_id
   for update;
 
   if not found then
     return 'not_a_client';
   end if;
-  if existing_referrer_id is not null then
+  if referred_client.referred_by is not null then
     return 'already_referred';
+  end if;
+  if exists (
+    select 1
+    from public.profiles profile
+    where profile.id = p_referred_client_id
+      and profile.role = 'admin'
+  ) then
+    return 'staff_account';
+  end if;
+
+  select * into existing_request
+  from public.referral_claim_requests request
+  where request.referred_client_id = p_referred_client_id;
+
+  if found then
+    if existing_request.referral_code = referral_code_text then
+      return 'ok';
+    end if;
+    return 'claim_pending';
   end if;
 
   select client.id into referrer_id
@@ -196,11 +240,11 @@ begin
   if referrer_id is null then
     return 'unknown_code';
   end if;
-  if referrer_id = claimant_id then
+  if referrer_id = p_referred_client_id then
     return 'own_code';
   end if;
 
-  if public.clients_share_workspace(claimant_id, referrer_id) then
+  if public.clients_share_workspace(p_referred_client_id, referrer_id) then
     return 'shared_workspace';
   end if;
 
@@ -215,31 +259,48 @@ begin
     )
     select 1
     from referrer_ancestry
-    where id = claimant_id
+    where id = p_referred_client_id
   ) then
     return 'cycle';
   end if;
 
-  perform set_config('dropscale.referral_claim', 'on', true);
-  update public.portal_clients
-  set referred_by = referrer_id
-  where id = claimant_id
-    and referred_by is null;
+  perform set_config('dropscale.referral_claim_request_write', 'on', true);
+  insert into public.referral_claim_requests (
+    referred_client_id,
+    referrer_client_id,
+    referral_code,
+    claim_source
+  ) values (
+    p_referred_client_id,
+    referrer_id,
+    referral_code_text,
+    p_claim_source
+  );
 
-  if not found then
-    return 'already_referred';
-  end if;
   return 'ok';
+end
+$$;
+
+revoke all on function public.record_referral_claim_request(uuid, text, text)
+  from public, authenticated, anon, service_role;
+
+create or replace function public.claim_referral_code(p_code text)
+returns text
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  return public.record_referral_claim_request(auth.uid(), p_code, 'client');
 end
 $$;
 
 revoke all on function public.claim_referral_code(text) from public, anon;
 grant execute on function public.claim_referral_code(text) to authenticated;
 
--- Preserve the signup-claim path introduced in 0025, add one tightly scoped
--- admin path, and seal INSERT as well as UPDATE. The previous trigger ran only
--- on UPDATE, so an authenticated admin INSERT could forge referred_by without
--- a reviewed decision or receipt.
+-- Only the service-only admin attribution RPC may write referred_by. Seal
+-- INSERT as well as UPDATE: signup and client code claims now write only the
+-- separate pending-request journal.
 create or replace function public.guard_referral_fields()
 returns trigger
 language plpgsql
@@ -249,13 +310,6 @@ as $$
 begin
   if tg_op = 'INSERT' then
     if new.referred_by is null then
-      return new;
-    end if;
-
-    if coalesce(
-         current_setting('dropscale.referral_signup_insert', true),
-         ''
-       ) = 'on' then
       return new;
     end if;
 
@@ -269,13 +323,6 @@ begin
   end if;
 
   if new.referred_by is distinct from old.referred_by then
-    if coalesce(current_setting('dropscale.referral_claim', true), '') = 'on'
-       and old.referred_by is null
-       and new.referred_by is not null
-       and auth.uid() = old.id then
-      return new;
-    end if;
-
     if coalesce(
          current_setting('dropscale.manual_referral_attribution_rpc', true),
          ''
@@ -299,10 +346,10 @@ create trigger portal_clients_guard_referral
   before insert or update on public.portal_clients
   for each row execute function public.guard_referral_fields();
 
--- Email/password signup is the only legitimate INSERT that may arrive with a
--- referral already resolved. Keep the original confirmed-email semantics, but
--- mark only this transaction and exclude internal staff identities as referral
--- sources. OAuth clients are inserted without attribution and may claim later.
+-- Keep the confirmed email/password signup semantics, but insert every client
+-- without attribution. A valid code becomes pending append-only evidence only;
+-- unknown, self, staff, shared-workspace and cyclic suggestions remain
+-- non-fatal. OAuth clients may record the same evidence in the callback RPC.
 create or replace function public.handle_new_portal_client()
 returns trigger
 language plpgsql
@@ -311,7 +358,6 @@ set search_path = public
 as $$
 declare
   referral_code_text text;
-  referrer_id uuid;
 begin
   if coalesce(new.raw_user_meta_data ->> 'portal_signup', '') <> 'true' then
     return new;
@@ -325,27 +371,12 @@ begin
     new.raw_user_meta_data ->> 'referral_code',
     ''
   )));
-  if referral_code_text <> '' then
-    select client.id into referrer_id
-    from public.portal_clients client
-    where upper(client.referral_code) = referral_code_text
-      and client.approval_status = 'approved'
-      and client.id <> new.id
-      and not exists (
-        select 1
-        from public.profiles profile
-        where profile.id = client.id
-          and profile.role = 'admin'
-      );
-  end if;
 
-  perform set_config('dropscale.referral_signup_insert', 'on', true);
   insert into public.portal_clients (
     id,
     full_name,
     email,
-    approval_status,
-    referred_by
+    approval_status
   ) values (
     new.id,
     coalesce(
@@ -353,10 +384,17 @@ begin
       split_part(new.email, '@', 1)
     ),
     new.email,
-    'pending',
-    referrer_id
+    'pending'
   )
   on conflict (id) do nothing;
+
+  if referral_code_text <> '' then
+    perform public.record_referral_claim_request(
+      new.id,
+      referral_code_text,
+      'signup'
+    );
+  end if;
 
   return new;
 end
@@ -406,6 +444,11 @@ begin
     raise exception 'A verified admin reviewer is required for a referral attribution.'
       using errcode = '42501';
   end if;
+
+  -- Share the first lock with signup/client claim creation. The admin may
+  -- accept or override a pending suggestion, but the evidence visible when the
+  -- decision serialises is deterministic and no later claim can race it.
+  lock table public.referral_claim_requests in share row exclusive mode;
 
   -- Attribution volume is tiny. Serialising this append-only journal makes an
   -- exact decision-id retry deterministic even if the first HTTP response is

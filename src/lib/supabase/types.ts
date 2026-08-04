@@ -284,7 +284,7 @@ export type BillingRecipientSnapshot = {
   addressCountry: string | null;
 };
 
-/** One immutable generation of the per-client Stripe issue lease (0029). */
+/** One immutable generation of the per-client Stripe issue lease (0032). */
 export type BillingIssueLease = {
   lease_token: string;
   client_id: string;
@@ -359,10 +359,20 @@ export type InvoiceCommissionRow = {
 
 export type ReferralDiscountAction = "grant" | "revoke";
 
-/** Immutable singleton that bounds which weeks v3 may price (migration 0027). */
+/** Immutable singleton that bounds which weeks v3 may price (migration 0030). */
 export type ManualReferralBillingConfig = {
   singleton: boolean;
   v3_cutover_monday: string;
+  created_at: string;
+};
+
+/** Immutable referral-code signal awaiting independent admin review. */
+export type ReferralClaimRequest = {
+  id: string;
+  referred_client_id: string;
+  referrer_client_id: string;
+  referral_code: string;
+  claim_source: "signup" | "client";
   created_at: string;
 };
 
@@ -484,7 +494,7 @@ export type AdAccountBillingEnd = {
   created_at: string;
 };
 
-/** Durable, de-duplicated Stripe webhook inbox (migration 0026). */
+/** Durable, de-duplicated Stripe webhook inbox (migration 0028). */
 export type StripeWebhookEvent = {
   id: string;
   type: string;
@@ -1068,6 +1078,27 @@ export type Database = {
         >;
         Update: Partial<ManualReferralBillingConfig>;
         Relationships: [];
+      };
+      referral_claim_requests: {
+        Row: Row<ReferralClaimRequest>;
+        Insert: Insert<ReferralClaimRequest, "id" | "created_at">;
+        Update: Partial<ReferralClaimRequest>;
+        Relationships: [
+          {
+            foreignKeyName: "referral_claim_requests_referred_client_id_fkey";
+            columns: ["referred_client_id"];
+            isOneToOne: true;
+            referencedRelation: "portal_clients";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "referral_claim_requests_referrer_client_id_fkey";
+            columns: ["referrer_client_id"];
+            isOneToOne: false;
+            referencedRelation: "portal_clients";
+            referencedColumns: ["id"];
+          },
+        ];
       };
       referral_discount_terms: {
         Row: Row<ReferralDiscountTerm>;
@@ -1732,7 +1763,7 @@ export type Database = {
         Args: Record<string, never>;
         Returns: number;
       };
-      /** Acquire the only active Stripe-issue generation for one client (0029). */
+      /** Acquire the only active Stripe-issue generation for one client (0032). */
       acquire_billing_issue_lease: {
         Args: {
           p_client_id: string;
@@ -1742,7 +1773,7 @@ export type Database = {
         };
         Returns: BillingIssueLease[];
       };
-      /** Heartbeat and fence-check one active Stripe-issue generation (0029). */
+      /** Heartbeat and fence-check one active Stripe-issue generation (0032). */
       renew_billing_issue_lease: {
         Args: {
           p_client_id: string;
@@ -1751,7 +1782,7 @@ export type Database = {
         };
         Returns: BillingIssueLease[];
       };
-      /** Release only the still-current Stripe-issue generation (0029). */
+      /** Release only the still-current Stripe-issue generation (0032). */
       release_billing_issue_lease: {
         Args: {
           p_client_id: string;
@@ -1760,7 +1791,7 @@ export type Database = {
         };
         Returns: boolean;
       };
-      /** Record an issue error only while the exact fence is still current (0029). */
+      /** Record an issue error only while the exact fence is still current (0032). */
       record_billing_issue_error: {
         Args: {
           p_client_id: string;
@@ -1771,7 +1802,7 @@ export type Database = {
         };
         Returns: boolean;
       };
-      /** Atomically creates one manual invoice and consumes its Google ledger rows (0026). */
+      /** Atomically creates one manual invoice and consumes its Google ledger rows (0028). */
       create_manual_invoice: {
         Args: {
           p_client_id: string;
@@ -1789,7 +1820,7 @@ export type Database = {
         };
         Returns: Invoice[];
       };
-      /** V3 issue/waive transaction with a sealed manual-referral term (0027). */
+      /** V3 issue/waive transaction with a sealed manual-referral term (0030). */
       create_manual_referral_invoice: {
         Args: {
           p_client_id: string;
@@ -1809,7 +1840,7 @@ export type Database = {
         };
         Returns: Invoice[];
       };
-      /** Fill one empty referral attribution after a verified admin review (0028). */
+      /** Fill one empty referral attribution after a verified admin review (0031). */
       assign_manual_referral_attribution: {
         Args: {
           p_referred_client_id: string;
@@ -1902,10 +1933,10 @@ export type Database = {
         Returns: AdAccountBillingEnd[];
       };
       /**
-       * Links the caller to whoever owns that affiliate code (migration 0022).
-       * Returns a status string — 'ok', 'unknown_code', 'own_code',
-       * 'already_referred', 'not_a_client', 'empty' or 'not_signed_in' — never
-       * the referrer, so a code cannot be used to probe for other clients.
+       * Appends one pending referral-code signal without changing referred_by.
+       * 'ok' also covers an exact retry; 'claim_pending' means a different
+       * immutable first claim already exists. The RPC never returns a client
+       * identity, and only the reviewed admin attribution RPC seals the link.
        */
       claim_referral_code: {
         Args: { p_code: string };

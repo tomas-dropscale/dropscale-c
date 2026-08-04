@@ -1,5 +1,5 @@
 /**
- * The affiliate deal's public numbers, sealed financially by migration 0027.
+ * The affiliate deal's public numbers, sealed financially by migration 0030.
  *
  * A claimed code is attribution only. It never changes a bill. An admin must
  * validate the referred client and schedule an immutable Monday-effective

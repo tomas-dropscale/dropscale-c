@@ -15,7 +15,13 @@ export function PageContainer({
   className,
 }: {
   title: string;
-  description?: string;
+  /**
+   * ReactNode, not string: subtitles that contain a TIME have to render that
+   * part on the client, in the reader's timezone — see components/portal/
+   * updated-at.tsx. A plain string forced the formatting onto the server, which
+   * is UTC on Cloudflare.
+   */
+  description?: React.ReactNode;
   actions?: React.ReactNode;
   children: React.ReactNode;
   className?: string;

@@ -1,5 +1,5 @@
 -- =============================================================================
--- 0027 - Manual, week-bound referral discounts.
+-- 0030 - Manual, week-bound referral discounts.
 --
 -- A referral code is a claim, not permission to change a client's price. An
 -- admin reviews one referred client at a time and schedules a full commercial
@@ -7,7 +7,7 @@
 -- any other day start the following Monday. Past weeks are never repriced.
 --
 -- The invoice contract introduced here is deliberately a new v3 RPC. The v2
--- fixed-10% function from 0026 remains untouched for immutable historic rows.
+-- fixed-10% function from 0028 remains untouched for immutable historic rows.
 -- =============================================================================
 
 -- Former billing state is commercial evidence, not disposable cache. There is
@@ -17,6 +17,15 @@
 -- includes referral relationships whose cached rate happens to be back at 10%:
 -- that current cache cannot prove what an unissued historic week was owed.
 do $$
+declare
+  expected_cutover_monday date :=
+    (now() at time zone 'Europe/Lisbon')::date
+      - (
+          extract(
+            isodow from (now() at time zone 'Europe/Lisbon')::date
+          )::integer - 1
+        );
+  reviewed_cutover_monday date;
 begin
   -- A snapshot-only preflight is racy with the old app: an attribution, ledger
   -- sync or invoice INSERT may be uncommitted when SELECT runs and commit while
@@ -28,8 +37,22 @@ begin
     public.revenue_sources,
     public.commissions,
     public.invoices,
-    public.ad_account_billing_starts
+    public.ad_account_billing_starts,
+    public.manual_billing_cutovers,
+    public.manual_billing_cutover_commission_snapshots
   in share row exclusive mode;
+
+  select cutover.cutover_monday
+    into reviewed_cutover_monday
+  from public.manual_billing_cutovers cutover
+  where cutover.singleton;
+
+  if reviewed_cutover_monday is null
+     or reviewed_cutover_monday <> expected_cutover_monday then
+    raise exception using
+      errcode = 'P0001',
+      message = '0030 preflight: the explicit legacy billing cutover is missing or belongs to a different Lisbon week.';
+  end if;
 
   if exists (
     select 1
@@ -45,9 +68,15 @@ begin
     select 1
     from public.commissions commission
     join public.revenue_sources source on source.id = commission.source_id
+    left join public.manual_billing_cutover_commission_snapshots snapshot
+      on snapshot.commission_id = commission.id
     where source.name = 'Google Ads Management'
       and commission.ad_account_id is not null
       and commission.rate is distinct from 10::numeric
+      and (
+        snapshot.commission_id is null
+        or snapshot.snapshot is distinct from to_jsonb(commission)
+      )
   ) or exists (
     select 1
     from public.invoices invoice
@@ -56,12 +85,11 @@ begin
   ) or exists (
     select 1
     from public.ad_account_billing_starts billing_start
-    where billing_start.google_local_date
-      < date_trunc('week', now() at time zone 'Europe/Lisbon')::date
+    where billing_start.google_local_date < reviewed_cutover_monday
   ) then
     raise exception using
       errcode = 'P0001',
-      message = '0027 preflight: legacy referrals, pre-cutover billing starts, non-10% Google rows, custom rates, revenue share or unissued drafts require an explicit reviewed rollover before manual 10%-fee referral billing can be installed.';
+      message = '0030 preflight: legacy referrals, pre-cutover billing starts, non-10% Google rows, custom rates, revenue share or unissued drafts require an explicit reviewed rollover before manual 10%-fee referral billing can be installed.';
   end if;
 end
 $$;
@@ -117,13 +145,9 @@ create table public.manual_referral_billing_config (
 );
 
 insert into public.manual_referral_billing_config (singleton, v3_cutover_monday)
-select
-  true,
-  business_day
-    - (extract(isodow from business_day)::integer - 1)
-from (
-  select (now() at time zone 'Europe/Lisbon')::date as business_day
-) calendar;
+select true, cutover.cutover_monday
+from public.manual_billing_cutovers cutover
+where cutover.singleton;
 
 comment on table public.manual_referral_billing_config is
   'Immutable rollout boundary: v3 may never infer a 10% price for an unissued pre-cutover week.';
@@ -1468,7 +1492,7 @@ as $$
   select trim(trailing '.' from trim(trailing '0' from to_char(p_rate, 'FM990.00')))
 $$;
 
--- New commercial formula: Google boundaries still come entirely from 0026;
+-- New commercial formula: Google boundaries still come entirely from 0028;
 -- only the immutable, client-wide rate snapshot is new. The separate function
 -- name prevents a v2 caller from accidentally changing meaning after deploy.
 create or replace function public.create_manual_referral_invoice(
@@ -1552,8 +1576,12 @@ begin
 
   if p_period_end <> p_period_start + 6
      or extract(isodow from p_period_start) <> 1
-     or p_period_end >= business_day then
-    raise exception 'Only a fully closed Monday-to-Sunday week can be settled.'
+     or p_period_end >= business_day
+     or now() < (
+       ((p_period_end + 1)::timestamp at time zone 'UTC')
+         + interval '14 hours 5 minutes'
+     ) then
+    raise exception 'Only a fully closed and Google-settled Monday-to-Sunday week can be settled.'
       using errcode = '22023';
   end if;
 

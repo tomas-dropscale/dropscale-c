@@ -1,5 +1,5 @@
 -- =============================================================================
--- 0026 - Manual, review-first agency billing.
+-- 0028 - Manual, review-first agency billing.
 --
 -- Clients pay Google directly. A Dropscale invoice contains only the fixed 10%
 -- agency fee, is always EUR, and is issued only by an explicit admin action.

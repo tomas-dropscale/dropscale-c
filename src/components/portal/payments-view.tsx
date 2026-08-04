@@ -11,6 +11,7 @@ import {
   isManualAgencyCalculationVersion,
 } from "@/lib/billing/weekly";
 import { cn } from "@/lib/utils";
+import { safeStripeUrl } from "@/lib/stripe/urls";
 import type { Invoice, InvoiceLine, InvoiceStatus } from "@/lib/supabase/types";
 
 /**
@@ -244,6 +245,8 @@ export function PaymentsView({ invoices }: { invoices: Invoice[] }) {
             {invoices.map((invoice) => {
               const overdue = isLate(invoice, today);
               const paymentFailed = invoice.status === "open" && Boolean(invoice.payment_failed_at);
+              const stripeHostedUrl = safeStripeUrl(invoice.stripe_hosted_url);
+              const stripeInvoicePdf = safeStripeUrl(invoice.stripe_invoice_pdf);
               const invoiceTotal = Number(invoice.amount);
               const amountRemaining =
                 invoice.status === "open"
@@ -312,9 +315,9 @@ export function PaymentsView({ invoices }: { invoices: Invoice[] }) {
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2">
-                      {invoice.status === "open" && invoice.stripe_hosted_url && (
+                      {invoice.status === "open" && stripeHostedUrl && (
                         <a
-                          href={invoice.stripe_hosted_url}
+                          href={stripeHostedUrl}
                           target="_blank"
                           rel="noopener noreferrer"
                           className="transition-smooth inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-full bg-[var(--accent-gold)] px-3.5 py-1.5 text-[12px] font-semibold text-[#1a1409] hover:opacity-90"
@@ -323,9 +326,9 @@ export function PaymentsView({ invoices }: { invoices: Invoice[] }) {
                           <ExternalLink className="size-3.5" />
                         </a>
                       )}
-                      {invoice.stripe_invoice_pdf && (
+                      {stripeInvoicePdf && (
                         <a
-                          href={invoice.stripe_invoice_pdf}
+                          href={stripeInvoicePdf}
                           target="_blank"
                           rel="noopener noreferrer"
                           className="transition-smooth inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-full border border-[var(--border-subtle)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-secondary)] hover:border-[var(--border-strong)] hover:text-[var(--text-primary)]"

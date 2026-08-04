@@ -8,7 +8,12 @@ import {
   syncRevenueShareLedger,
 } from "@/lib/admin/commission-sync";
 import { syncHstCommission, type HstSyncResult } from "@/lib/admin/hst";
-import { closedWeeks, closedWeekStarting } from "@/lib/billing/weekly";
+import {
+  billingEvidenceIsReady,
+  billingEvidenceReadyAt,
+  closedWeeks,
+  closedWeekStarting,
+} from "@/lib/billing/weekly";
 
 /**
  * POST — book every ledger NOW, ignoring the page-load throttles.
@@ -45,6 +50,15 @@ export async function POST(request: NextRequest) {
       const period = closedWeeks()[0];
       if (!period) {
         return NextResponse.json({ error: "No closed billing week is available." }, { status: 422 });
+      }
+      if (!billingEvidenceIsReady(period.end)) {
+        return NextResponse.json(
+          {
+            error: "Google's Sunday spend is still inside the settling window.",
+            readyAt: billingEvidenceReadyAt(period.end).toISOString(),
+          },
+          { status: 409 },
+        );
       }
       // Monday's machine job captures Google's latest available snapshot for
       // the just-closed Monday-to-Sunday week. It still cannot issue an
@@ -83,6 +97,16 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         { error: "Select a fully closed Monday-to-Sunday billing week." },
         { status: 422 },
+      );
+    }
+    if (!billingEvidenceIsReady(period.end)) {
+      return NextResponse.json(
+        {
+          error:
+            "Google's Sunday spend is still settling. Refresh this billing week after the evidence cutoff.",
+          readyAt: billingEvidenceReadyAt(period.end).toISOString(),
+        },
+        { status: 409 },
       );
     }
     return run({ force: true, client: supabase, period }, true);

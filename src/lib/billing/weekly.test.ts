@@ -2,8 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   AGENCY_FEE_RATE,
   BACKFILL_WEEKS,
+  BILLING_EVIDENCE_READY_HOUR_UTC,
+  BILLING_EVIDENCE_READY_MINUTE_UTC,
   BILLING_CURRENCY,
   agencyFee,
+  billingEvidenceIsReady,
+  billingEvidenceReadyAt,
   billingCurrency,
   closedWeekStarting,
   closedWeeks,
@@ -63,6 +67,27 @@ describe("closed weeks", () => {
     expect(closedWeekStarting("2026-07-14", now)).toBeNull();
     expect(closedWeekStarting("2026-07-20", now)).toBeNull();
     expect(closedWeekStarting("2026-02-30", now)).toBeNull();
+  });
+
+  it("waits for the Monday Google-settling cutoff before certifying Sunday", () => {
+    expect(BILLING_EVIDENCE_READY_HOUR_UTC).toBe(14);
+    expect(BILLING_EVIDENCE_READY_MINUTE_UTC).toBe(5);
+    expect(billingEvidenceReadyAt("2026-08-02").toISOString()).toBe(
+      "2026-08-03T14:05:00.000Z",
+    );
+    expect(
+      billingEvidenceIsReady(
+        "2026-08-02",
+        new Date("2026-08-03T14:04:59.999Z"),
+      ),
+    ).toBe(false);
+    expect(
+      billingEvidenceIsReady(
+        "2026-08-02",
+        new Date("2026-08-03T14:05:00.000Z"),
+      ),
+    ).toBe(true);
+    expect(() => billingEvidenceReadyAt("2026-02-30")).toThrow(/real date/i);
   });
 });
 

@@ -1,5 +1,5 @@
 -- =============================================================================
--- 0029 - Fenced per-client billing issuance leases and delivery evidence.
+-- 0032 - Fenced per-client billing issuance leases and delivery evidence.
 --
 -- Stripe copies mutable Customer identity onto an Invoice when it is finalised.
 -- Two different weeks for the same client must therefore never update that
@@ -32,7 +32,7 @@ begin
   ) then
     raise exception using
       errcode = 'P0001',
-      message = '0029 preflight: Stripe-linked local drafts require explicit delivery reconciliation before automatic issue recovery can be installed.';
+      message = '0032 preflight: Stripe-linked local drafts require explicit delivery reconciliation before automatic issue recovery can be installed.';
   end if;
 end
 $$;

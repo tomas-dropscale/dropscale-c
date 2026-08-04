@@ -96,6 +96,17 @@ export type ReferralAttributionClientSummary = {
   name: string;
   email: string;
   approvalStatus: string;
+  claimSuggestion: ReferralClaimSuggestionSummary | null;
+};
+
+export type ReferralClaimSuggestionSummary = {
+  requestId: string;
+  referrerClientId: string;
+  referrerName: string;
+  referrerEmail: string;
+  referralCode: string;
+  claimSource: "signup" | "client";
+  createdAt: string;
 };
 
 export type ReferralAttributionReferrerSummary = {
@@ -268,6 +279,17 @@ export function ReferralsAdminView({
     availableAttributionReferrers.find(
       (referrer) => referrer.clientId === attributionReferrerId,
     ) ?? null;
+  const selectedClaimSuggestion =
+    selectedAttributionClient?.claimSuggestion ?? null;
+  const suggestedReferrerAvailable = selectedClaimSuggestion
+    ? availableAttributionReferrers.some(
+        (referrer) =>
+          referrer.clientId === selectedClaimSuggestion.referrerClientId,
+      )
+    : false;
+  const pendingClaimCount = dashboard.unassignedClients.filter(
+    (client) => client.claimSuggestion !== null,
+  ).length;
 
   const scheduledGrantCount = dashboard.referrers.reduce(
     (sum, referrer) => sum + termCount(referrer.scheduledTerm),
@@ -553,6 +575,7 @@ export function ReferralsAdminView({
             <div className="flex shrink-0 items-center gap-2 text-[11.5px] text-[var(--text-muted)]">
               <Link2 className="size-3.5 text-[var(--accent-gold)]" aria-hidden />
               {dashboard.unassignedClients.length} unassigned ·{" "}
+              {pendingClaimCount} pending claims ·{" "}
               {dashboard.attributionEvents.length} sealed events
             </div>
           </div>
@@ -591,9 +614,7 @@ export function ReferralsAdminView({
                 value={attributionClientId || undefined}
                 onValueChange={(value) => {
                   setAttributionClientId(value);
-                  if (value === attributionReferrerId) {
-                    setAttributionReferrerId("");
-                  }
+                  setAttributionReferrerId("");
                   reviseAttributionDecision();
                 }}
                 disabled={
@@ -609,6 +630,10 @@ export function ReferralsAdminView({
                   {dashboard.unassignedClients.map((client) => (
                     <SelectItem key={client.clientId} value={client.clientId}>
                       {client.name} · {client.email} · {client.approvalStatus}
+                      {client.claimSuggestion
+                        ? " · claimed " +
+                          client.claimSuggestion.referrerName
+                        : ""}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -653,6 +678,50 @@ export function ReferralsAdminView({
               </p>
             </div>
           </div>
+
+          {selectedClaimSuggestion && (
+            <div className="flex flex-col gap-3 rounded-xl border border-[var(--accent-gold)]/25 bg-[var(--accent-gold-dim)] p-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge variant="gold">Pending code claim</Badge>
+                  <span className="font-mono text-[10px] text-[var(--text-muted)]">
+                    {shortId(selectedClaimSuggestion.requestId)}
+                  </span>
+                </div>
+                <p className="mt-2 text-[12.5px] text-[var(--text-primary)]">
+                  Suggested referrer: {selectedClaimSuggestion.referrerName} ·{" "}
+                  {selectedClaimSuggestion.referrerEmail}
+                </p>
+                <p className="mt-1 text-[10.5px] leading-relaxed text-[var(--text-muted)]">
+                  Code {selectedClaimSuggestion.referralCode} was submitted via{" "}
+                  {selectedClaimSuggestion.claimSource === "signup"
+                    ? "email/password signup"
+                    : "the signed-in claim callback"}{" "}
+                  on {formatTimestamp(selectedClaimSuggestion.createdAt)}. This
+                  is immutable evidence only, not attribution or discount
+                  approval.
+                </p>
+              </div>
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                className="w-full shrink-0 sm:w-auto"
+                disabled={attributionBusy || !suggestedReferrerAvailable}
+                onClick={() => {
+                  setAttributionReferrerId(
+                    selectedClaimSuggestion.referrerClientId,
+                  );
+                  reviseAttributionDecision();
+                }}
+              >
+                <UserRoundCheck />
+                {suggestedReferrerAvailable
+                  ? "Use suggestion"
+                  : "Suggestion unavailable"}
+              </Button>
+            </div>
+          )}
 
           <div className="space-y-1.5">
             <Label htmlFor="attribution-reason">Required audit reason</Label>

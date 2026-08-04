@@ -69,7 +69,16 @@ export function AdAccountSettingsCard({ account }: { account: AdAccount }) {
     setSaving(false);
 
     if (updateError) {
-      setError(updateError.message);
+      // The unique index from migration 0026 surfaces as a Postgres 23505. Its
+      // raw message names an index, which tells a client nothing; what they
+      // need to know is that the ad account is already in use somewhere else.
+      setError(
+        updateError.code === "23505"
+          ? "That Google Ads account is already linked to another store. One Google " +
+            "Ads account can only belong to one store — otherwise its spend would be " +
+            "counted twice."
+          : updateError.message,
+      );
       return;
     }
 

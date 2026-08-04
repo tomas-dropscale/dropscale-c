@@ -19,6 +19,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { decryptToken } from "@/lib/google-ads/crypto";
 import { googleRoas } from "@/lib/admin/google-attribution";
+import { currencyScope, displayCurrency } from "@/lib/portal/currency";
 import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
 import { fetchLiveCampaignsDetailed } from "@/lib/google-ads/portal";
 import { sumMetrics, type DailyMetricRow } from "@/lib/metrics/queries";
@@ -137,6 +138,14 @@ export type ReportClient = {
 export type DailyReport = {
   data: string;
   moeda: string;
+  /**
+   * The report spans more than one currency. Amounts are NOT converted, so
+   * anything summed across clients or stores in this state is a sum of unlike
+   * quantities. Per-store figures remain correct in their own currency.
+   */
+  moedas_mistas: boolean;
+  /** Every currency present, sorted. Empty when nothing is set. */
+  moedas: string[];
   fuso_horario: string;
   clientes: ReportClient[];
 };
@@ -164,7 +173,14 @@ export async function buildDailyReport(
 
   const { data: clients } = await clientQuery;
   if (!clients || clients.length === 0) {
-    return { data: day, moeda: "EUR", fuso_horario: "loja", clientes: [] };
+    return {
+      data: day,
+      moeda: "EUR",
+      moedas_mistas: false,
+      moedas: [],
+      fuso_horario: "loja",
+      clientes: [],
+    };
   }
 
   const clientIds = clients.map((client) => client.id);
@@ -319,9 +335,18 @@ export async function buildDailyReport(
       };
     });
 
+  // Across EVERY client in the report, so mixed currencies are likelier here
+  // than anywhere in the portal. The consumer is told rather than left to
+  // assume one symbol covers the lot.
+  const currencies = currencyScope(accounts);
+
   return {
     data: day,
-    moeda: accounts[0]?.currency ?? "EUR",
+    moeda: displayCurrency(currencies),
+    /** True when the report spans more than one currency; amounts are NOT
+     *  converted, so cross-client totals should not be added up. */
+    moedas_mistas: currencies.mixed,
+    moedas: currencies.currencies,
     // Not Europe/Lisbon, and saying so is the point: the day boundary is
     // whatever timezone each Google Ads account and Shopify store reports in.
     fuso_horario: "conta de anúncios / loja",

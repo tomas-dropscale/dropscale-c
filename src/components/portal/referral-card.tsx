@@ -9,7 +9,7 @@ import { fmt } from "@/lib/i18n";
 import { useI18n } from "@/lib/i18n/provider";
 
 /**
- * The manual decision state returned by migration 0027. Eligibility can put a
+ * The manual decision state returned by migration 0030. Eligibility can put a
  * referral in the admin review queue, but only a sealed `approved` item changes
  * the client's current fee.
  */
