@@ -34,6 +34,10 @@
     "nodejs_compat_populate_process_env",
     "global_fetch_strictly_public"
   ],
+  // Version preview URLs stay off: historical uploaded versions still contain
+  // the retired one-use billing bridge, and a plain `wrangler deploy` would
+  // otherwise re-enable their preview hostnames.
+  "preview_urls": false,
   "assets": {
     "directory": ".open-next/assets",
     "binding": "ASSETS"
