@@ -226,6 +226,42 @@ describe("Stripe finalised recipient binding", () => {
     ).not.toThrow();
   });
 
+  it("treats Stripe's empty-string address fields as absent, like the local nulls", () => {
+    // Stripe stores never-provided address fields as "" on some customers.
+    // A local snapshot with null address must match — a strict compare here
+    // stranded the 2026-08-04 recovered invoice one step before /send.
+    const blankRecipient = {
+      ...recipient,
+      taxId: null,
+      address: {
+        line1: null,
+        line2: null,
+        city: null,
+        postal_code: null,
+        state: null,
+        country: null,
+      },
+    };
+    const blankRemote = {
+      ...remote,
+      custom_fields: [],
+      customer_address: {
+        line1: "",
+        line2: "",
+        city: "",
+        postal_code: "",
+        state: "",
+        country: "",
+      },
+    };
+    expect(() =>
+      assertStripeInvoiceMatchesLocal(blankRemote, {
+        ...expected,
+        recipient: blankRecipient,
+      }),
+    ).not.toThrow();
+  });
+
   it("fails closed when email, name, address or VAT identity differs", () => {
     const mismatches = [
       { ...remote, customer_email: "other@example.com" },

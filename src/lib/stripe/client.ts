@@ -679,9 +679,15 @@ export function assertStripeInvoiceRecipientMatches(
     );
   }
 
+  // Stripe stores never-provided address fields as empty strings on some
+  // customers and as null on others; the local snapshot always uses null.
+  // Both spellings mean "no value", so the comparison must not tell them
+  // apart — a strict compare here stranded a recovered invoice in send-only.
+  const blankAsNull = (value: string | null | undefined): string | null =>
+    value ? value : null;
   const expectedAddress = expected.address;
   const expectedHasAddress = Object.values(expectedAddress).some(
-    (value) => value !== null,
+    (value) => blankAsNull(value) !== null,
   );
   const remoteAddress = invoice.customer_address;
   if (!remoteAddress) {
@@ -702,7 +708,7 @@ export function assertStripeInvoiceRecipientMatches(
     "state",
     "country",
   ] as const) {
-    if ((remoteAddress[key] ?? null) !== expectedAddress[key]) {
+    if (blankAsNull(remoteAddress[key]) !== blankAsNull(expectedAddress[key])) {
       throw new StripeError(
         `Stripe invoice ${invoice.id} has a different customer address snapshot.`,
         409,
