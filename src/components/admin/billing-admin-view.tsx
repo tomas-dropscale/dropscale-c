@@ -255,33 +255,35 @@ export function BillingAdminView({
   const failedDetail = `${fmt(d.adminBilling.failedCount, {
     count: dashboard.summary.failedCount,
   })} · ${money(dashboard.summary.failed, intl, dashboard.currency)}`;
-  const outstandingDetail =
+  // The Outstanding card carries the full not-received closed balance —
+  // certified money not yet in the bank — broken into not-yet-issued versus
+  // invoiced-awaiting-payment, plus overdue and failed portions when present.
+  const outstandingDetail = [
+    fmt(d.adminBilling.unissuedAndOpen, {
+      unissued: money(
+        dashboard.positions.summary.closedSupportedUnissued,
+        intl,
+        dashboard.currency,
+      ),
+      open: money(
+        dashboard.positions.summary.issuedOutstanding,
+        intl,
+        dashboard.currency,
+      ),
+    }),
     dashboard.positions.summary.overdueOutstanding > 0
-      ? `${fmt(d.adminBilling.overdueDetail, {
+      ? fmt(d.adminBilling.overdueDetail, {
           amount: money(
             dashboard.positions.summary.overdueOutstanding,
             intl,
             dashboard.currency,
           ),
-        })} · ${failedDetail}`
-      : failedDetail;
-  // "Not received" is the superset: certified closed money not yet in the
-  // bank. Its breakdown makes the relation to the Outstanding card explicit —
-  // Outstanding is only the already-invoiced part.
-  const notReceivedDetail = `${fmt(d.adminBilling.unissuedAndOpen, {
-    unissued: money(
-      dashboard.positions.summary.closedSupportedUnissued,
-      intl,
-      dashboard.currency,
-    ),
-    open: money(
-      dashboard.positions.summary.issuedOutstanding,
-      intl,
-      dashboard.currency,
-    ),
-  })} · ${fmt(d.adminBilling.closedThrough, {
-    date: shortDate(dashboard.positions.closedThrough, intl),
-  })}`;
+        })
+      : null,
+    dashboard.summary.failedCount > 0 ? failedDetail : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
   const automation = dashboard.automation;
   const automationStatus = automation
     ? automationStatusLabel(automation.status, d)
@@ -417,6 +419,15 @@ export function BillingAdminView({
         </div>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <SummaryCard
+            label={d.adminBilling.currentMonthBilled}
+            value={money(
+              dashboard.summary.currentMonthBilled,
+              intl,
+              dashboard.currency,
+            )}
+            icon={FileCheck2}
+          />
+          <SummaryCard
             label={d.adminBilling.selectedWeekBilled}
             value={money(
               dashboard.summary.selectedWeekBilled,
@@ -431,15 +442,6 @@ export function BillingAdminView({
               count: dashboard.summary.invoiceCount,
             })}`}
             icon={CalendarDays}
-          />
-          <SummaryCard
-            label={d.adminBilling.currentMonthBilled}
-            value={money(
-              dashboard.summary.currentMonthBilled,
-              intl,
-              dashboard.currency,
-            )}
-            icon={FileCheck2}
           />
           <SummaryCard
             label={d.adminBilling.currentMonthPaid}
@@ -457,12 +459,17 @@ export function BillingAdminView({
           <SummaryCard
             label={d.adminBilling.outstanding}
             value={money(
-              dashboard.summary.outstanding,
+              dashboard.positions.summary.supportedNotReceived,
               intl,
               dashboard.currency,
             )}
             detail={outstandingDetail}
-            tone={dashboard.summary.failedCount > 0 ? "warning" : "gold"}
+            tone={
+              dashboard.summary.failedCount > 0 ||
+              dashboard.positions.summary.overdueOutstanding > 0
+                ? "warning"
+                : "gold"
+            }
             icon={
               dashboard.summary.failedCount > 0
                 ? FileWarning
@@ -514,19 +521,7 @@ export function BillingAdminView({
         )}
       </section>
 
-      <section className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-        <SummaryCard
-          label={d.adminBilling.notReceived}
-          value={money(
-            dashboard.positions.summary.supportedNotReceived,
-            intl,
-            dashboard.currency,
-          )}
-          detail={notReceivedDetail}
-          icon={CircleDollarSign}
-          className="w-full sm:max-w-sm"
-        />
-
+      <section className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-end">
         <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
           <Button
             type="button"
