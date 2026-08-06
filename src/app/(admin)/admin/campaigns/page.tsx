@@ -10,7 +10,10 @@ import { ClientDashboardDialog } from "@/components/admin/client-dashboard-dialo
 import { RangePicker } from "@/components/portal/range-picker";
 import { fetchAdminCampaigns } from "@/lib/admin/campaigns";
 import { daysRunning, parseRange } from "@/lib/portal/range";
-import { collectionHandleFromUrl } from "@/lib/finance/rev-share";
+import {
+  collectionHandleFromUrl,
+  parseRevShareCampaign,
+} from "@/lib/finance/rev-share";
 import { money, percent } from "@/lib/format-intl";
 import { multiplier } from "@/lib/format";
 import { getServerDictionary } from "@/lib/i18n/server";
@@ -297,14 +300,39 @@ export default async function AdminCampaignsPage({
                                 <span className="block truncate">{campaign.name}</span>
                                 {/* The collection this campaign advertises, read
                                     out of its own name — the same parse that
-                                    attributes revenue share. Shown because "how
-                                    long has this been running" is a question
-                                    about the collection, not about the string. */}
-                                {collectionHandleFromUrl(campaign.name) && (
-                                  <span className="block truncate text-[11px] text-[var(--accent-gold)]">
-                                    /collections/{collectionHandleFromUrl(campaign.name)}
-                                  </span>
-                                )}
+                                    attributes revenue share. A trailing "N%"
+                                    makes it a deal: the chip shows the rate,
+                                    and turns orange when the account never
+                                    opted into tracking — a deal in the name
+                                    that bills nothing is exactly the silent
+                                    gap this page must surface. */}
+                                {(() => {
+                                  const deal = parseRevShareCampaign(campaign.name);
+                                  const handle =
+                                    deal?.handle ?? collectionHandleFromUrl(campaign.name);
+                                  if (!handle) return null;
+                                  const tracked =
+                                    Number(entry.account.revenue_share_rate) > 0;
+                                  return (
+                                    <span className="mt-0.5 flex min-w-0 items-center gap-1.5">
+                                      <span className="truncate text-[11px] text-[var(--accent-gold)]">
+                                        /collections/{handle}
+                                      </span>
+                                      {deal && (
+                                        <span
+                                          className={
+                                            tracked
+                                              ? "inline-flex shrink-0 items-center rounded-full bg-[var(--accent-gold)]/10 px-1.5 py-0.5 text-[10.5px] leading-none font-medium text-[var(--accent-gold)]"
+                                              : "inline-flex shrink-0 items-center rounded-full bg-[var(--warning-orange)]/15 px-1.5 py-0.5 text-[10.5px] leading-none font-medium text-[var(--warning-orange)]"
+                                          }
+                                        >
+                                          {deal.rate}% rev share
+                                          {tracked ? "" : " — not tracked"}
+                                        </span>
+                                      )}
+                                    </span>
+                                  );
+                                })()}
                               </td>
                               <td className="py-2.5 pr-4">
                                 <Badge variant={STATUS_BADGE[campaign.status].variant}>
