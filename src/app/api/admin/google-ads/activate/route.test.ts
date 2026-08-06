@@ -274,3 +274,112 @@ describe("admin Google billing activation", () => {
     );
   });
 });
+
+describe("deferred acceptance when the agency has no Google access yet", () => {
+  function serviceWithBuilder() {
+    const maybeSingle = vi.fn(async () => ({
+      data: { id: ACCOUNT_ID, store_name: "Store", status: "active" },
+      error: null,
+    }));
+    const builder: Record<string, unknown> = {};
+    for (const method of ["update", "insert", "eq", "select"]) {
+      builder[method] = vi.fn(() => builder);
+    }
+    builder.maybeSingle = maybeSingle;
+    // account_requests approval ends the chain on eq(); make it awaitable.
+    builder.then = undefined;
+    const from = vi.fn(() => builder);
+    const service = { rpc: mocks.rpc, from };
+    return { service, from, builder, maybeSingle };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("accepts a pending account and defers the baseline on USER_PERMISSION_DENIED", async () => {
+    mocks.createClient.mockResolvedValue(
+      session({
+        account: {
+          id: ACCOUNT_ID,
+          store_name: "Store",
+          google_ads_customer_id: "1234567890",
+          status: "pending",
+        },
+      }),
+    );
+    const { service } = serviceWithBuilder();
+    mocks.createServiceClient.mockReturnValue(service);
+    mocks.capture.mockRejectedValue(
+      new Error(
+        'Google Ads query failed for 1234567890 (403): {"authorizationError":"USER_PERMISSION_DENIED"}',
+      ),
+    );
+
+    const response = await POST(request({ accountId: ACCOUNT_ID }));
+    const payload = (await response.json()) as {
+      ok?: boolean;
+      deferred?: boolean;
+      billingStart?: unknown;
+    };
+
+    expect(response.status).toBe(200);
+    expect(payload.ok).toBe(true);
+    expect(payload.deferred).toBe(true);
+    expect(payload.billingStart).toBeUndefined();
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+
+  it("still refuses an already-active account, naming the missing access", async () => {
+    mocks.createClient.mockResolvedValue(
+      session({
+        account: {
+          id: ACCOUNT_ID,
+          store_name: "Store",
+          google_ads_customer_id: "1234567890",
+          status: "active",
+        },
+      }),
+    );
+    const { service, from } = serviceWithBuilder();
+    mocks.createServiceClient.mockReturnValue(service);
+    mocks.capture.mockRejectedValue(
+      new Error("(403): USER_PERMISSION_DENIED"),
+    );
+
+    const response = await POST(request({ accountId: ACCOUNT_ID }));
+    const payload = (await response.json()) as { error?: string };
+
+    expect(response.status).toBe(502);
+    expect(payload.error).toMatch(/grant the agency access/i);
+    expect(from).not.toHaveBeenCalled();
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+
+  it("rejects a customer id Google says does not exist, accepting nothing", async () => {
+    mocks.createClient.mockResolvedValue(
+      session({
+        account: {
+          id: ACCOUNT_ID,
+          store_name: "Store",
+          google_ads_customer_id: "1234567890",
+          status: "pending",
+        },
+      }),
+    );
+    const { service, from } = serviceWithBuilder();
+    mocks.createServiceClient.mockReturnValue(service);
+    mocks.capture.mockRejectedValue(
+      new Error('(401): {"authenticationError":"CUSTOMER_NOT_FOUND"}'),
+    );
+
+    const response = await POST(request({ accountId: ACCOUNT_ID }));
+    const payload = (await response.json()) as { error?: string };
+
+    expect(response.status).toBe(422);
+    expect(payload.error).toMatch(/does not exist/i);
+    expect(from).not.toHaveBeenCalled();
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+});
+

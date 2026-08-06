@@ -80,6 +80,8 @@ export async function POST(request: NextRequest) {
 
   let googleAdsCustomerId: string | null = null;
   let storeName = "Google Ads account";
+  let accountStatus: string | null = null;
+  let requestClientId: string | null = null;
 
   if (target.kind === "account") {
     const { data: account, error } = await session
@@ -121,10 +123,11 @@ export async function POST(request: NextRequest) {
 
     googleAdsCustomerId = canonicalCustomerId(account.google_ads_customer_id);
     storeName = account.store_name;
+    accountStatus = account.status;
   } else {
     const { data: accountRequest, error } = await session
       .from("account_requests")
-      .select("id, request_type, google_ads_customer_id, store_name, status")
+      .select("id, client_id, request_type, google_ads_customer_id, store_name, status")
       .eq("id", target.id)
       .maybeSingle();
 
@@ -149,6 +152,7 @@ export async function POST(request: NextRequest) {
 
     googleAdsCustomerId = canonicalCustomerId(accountRequest.google_ads_customer_id);
     storeName = accountRequest.store_name?.trim() || storeName;
+    requestClientId = accountRequest.client_id;
   }
 
   if (!googleAdsCustomerId) {
@@ -193,11 +197,109 @@ export async function POST(request: NextRequest) {
   try {
     captured = await captureGoogleBillingStartAsAgency(googleAdsCustomerId);
   } catch (error) {
+    const detail = error instanceof Error ? error.message : "Unknown Google Ads error";
     console.error("Google billing-start capture failed:", {
       targetKind: target.kind,
       targetId: target.id,
-      message: error instanceof Error ? error.message : "Unknown Google Ads error",
+      message: detail,
     });
+
+    if (/CUSTOMER_NOT_FOUND/.test(detail)) {
+      return NextResponse.json(
+        {
+          error: `Google says customer ${googleAdsCustomerId} does not exist. Fix the customer ID and verify again; nothing was accepted.`,
+        },
+        { status: 422 },
+      );
+    }
+
+    if (/USER_PERMISSION_DENIED|PERMISSION_DENIED/.test(detail)) {
+      // The agency simply has no Google access yet. That must not block the
+      // platform connection: accept the account, keep it OUT of billing (no
+      // immutable opening counter exists), and let the tracking-gaps list
+      // capture the baseline once access is granted.
+      if (target.kind === "account") {
+        if (accountStatus !== "pending") {
+          return NextResponse.json(
+            {
+              error: `Google refused agency access to customer ${googleAdsCustomerId} (USER_PERMISSION_DENIED). Grant the agency access in Google Ads and verify again; the account stays connected but unbilled until its opening counter is captured.`,
+            },
+            { status: 502 },
+          );
+        }
+        const { data: accepted, error: acceptError } = await service
+          .from("ad_accounts")
+          .update({ status: "active", currency: "EUR" })
+          .eq("id", target.id)
+          .eq("status", "pending")
+          .select("id, store_name, status")
+          .maybeSingle();
+        if (acceptError || !accepted) {
+          return NextResponse.json(
+            { error: "The account changed while it was being accepted; try again." },
+            { status: 409 },
+          );
+        }
+        return NextResponse.json({
+          ok: true,
+          deferred: true,
+          account: {
+            id: accepted.id,
+            storeName: accepted.store_name || storeName,
+            status: accepted.status,
+          },
+        });
+      }
+
+      if (!requestClientId) {
+        return NextResponse.json(
+          { error: "The account request is missing its client; nothing was accepted." },
+          { status: 500 },
+        );
+      }
+      const { data: createdAccount, error: createError } = await service
+        .from("ad_accounts")
+        .insert({
+          client_id: requestClientId,
+          store_name: storeName,
+          google_ads_customer_id: googleAdsCustomerId,
+          status: "active",
+          currency: "EUR",
+          list_commission_rate: 10,
+          revenue_share_enabled: false,
+        })
+        .select("id, store_name, status")
+        .maybeSingle();
+      if (createError || !createdAccount) {
+        return NextResponse.json(
+          { error: createError?.message ?? "Could not create the ad account." },
+          { status: 500 },
+        );
+      }
+      const { error: approveError } = await service
+        .from("account_requests")
+        .update({ status: "approved" })
+        .eq("id", target.id)
+        .eq("status", "pending");
+      if (approveError) {
+        // The account exists; surface the half-approved request loudly rather
+        // than pretending nothing happened.
+        console.error("Account request approval failed after acceptance:", {
+          requestId: target.id,
+          message: approveError.message,
+        });
+      }
+      return NextResponse.json({
+        ok: true,
+        deferred: true,
+        account: {
+          id: createdAccount.id,
+          storeName: createdAccount.store_name || storeName,
+          status: createdAccount.status,
+        },
+      });
+    }
+
     return NextResponse.json(
       {
         error:

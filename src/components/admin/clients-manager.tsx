@@ -147,6 +147,7 @@ export function ClientsManager({
   const [error, setError] = React.useState<string | null>(null);
   const [busy, setBusy] = React.useState<string | null>(null);
   const [receipt, setReceipt] = React.useState<BillingStartReceipt | null>(null);
+  const [deferredNote, setDeferredNote] = React.useState<string | null>(null);
   const [endReceipt, setEndReceipt] = React.useState<BillingEndReceipt | null>(null);
   const [endTarget, setEndTarget] = React.useState<BillingAccount | null>(null);
   const [endConfirmed, setEndConfirmed] = React.useState(false);
@@ -181,6 +182,7 @@ export function ClientsManager({
     setBusy(key);
     setError(null);
     setReceipt(null);
+    setDeferredNote(null);
 
     try {
       const response = await fetch("/api/admin/google-ads/activate", {
@@ -191,6 +193,7 @@ export function ClientsManager({
       const payload = (await response.json().catch(() => null)) as
         | {
             error?: unknown;
+            deferred?: unknown;
             account?: { storeName?: unknown };
             billingStart?: {
               googleAdsCustomerId?: unknown;
@@ -212,6 +215,11 @@ export function ClientsManager({
       }
 
       const account = payload?.account;
+      if (payload?.deferred === true && typeof account?.storeName === "string") {
+        setDeferredNote(account.storeName);
+        router.refresh();
+        return;
+      }
       const start = payload?.billingStart;
       if (
         typeof account?.storeName !== "string" ||
@@ -326,6 +334,14 @@ export function ClientsManager({
   return (
     <div className="space-y-8">
       {error && <FormAlert>{error}</FormAlert>}
+      {deferredNote && (
+        <FormAlert tone="success">
+          <span className="font-semibold">{deferredNote} connected.</span> Google has not granted
+          the agency access to this customer yet, so its opening counter is still pending: the
+          account stays out of agency billing until the baseline is captured. Grant the agency
+          access in Google Ads, then use Verify again from the tracking-gaps list below.
+        </FormAlert>
+      )}
       {receipt && (
         <FormAlert tone="success">
           <span className="font-semibold">Google tracking baseline saved for {receipt.storeName}.</span>{" "}
@@ -457,7 +473,7 @@ export function ClientsManager({
                   }
                 >
                   <Check />
-                  Verify Google &amp; start tracking
+                  Verify &amp; Connect
                 </Button>
               </li>
             ))}
@@ -524,7 +540,7 @@ export function ClientsManager({
                   }
                 >
                   <Check />
-                  Verify Google &amp; start tracking
+                  Verify &amp; Connect
                 </Button>
               </li>
             ))}
@@ -661,7 +677,7 @@ export function ClientsManager({
                   >
                     <Check />
                     {request.request_type === "google_ads"
-                      ? "Approve & start tracking"
+                      ? "Verify & Connect"
                       : "Approve"}
                   </Button>
                   <Button
