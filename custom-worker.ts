@@ -60,6 +60,12 @@ const worker = {
      * whatever the last page view happened to capture, which is exactly the
      * staleness the countdown in the report now promises is bounded.
      */
+    // One scheduled invocation shares ONE external-subrequest budget across
+    // every leg it runs (50 on the Workers Free plan), so the hourly tick
+    // alternates its two syncs instead of running both — each is internally
+    // bounded to a stalest-first batch and the rotation converges across
+    // hours. The daily close puts billing FIRST: issuing an invoice matters
+    // more than one metrics pass, and metrics get 23 other slots a day.
     const job: { name: string; paths: string[] } =
       event.cron === "5 14 * * 1"
         ? {
@@ -72,11 +78,14 @@ const worker = {
         : event.cron === "55 23 * * *"
           ? {
               name: "daily close",
-              paths: ["/api/admin/sync-metrics", "/api/billing/cron"],
+              paths: ["/api/billing/cron", "/api/admin/sync-metrics"],
             }
           : {
               name: "hourly refresh",
-              paths: ["/api/admin/sync-metrics", "/api/admin/sync-ledgers"],
+              paths:
+                new Date().getUTCHours() % 2 === 0
+                  ? ["/api/admin/sync-metrics"]
+                  : ["/api/admin/sync-ledgers"],
             };
 
     // Only the path is ever used for routing; the origin just has to be a valid
