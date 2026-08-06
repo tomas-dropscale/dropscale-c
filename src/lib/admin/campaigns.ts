@@ -242,7 +242,17 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
           // failed" forever and only the server logs say why.
           authRevoked = await markIfAuthRevoked(supabase, account.id, error);
           if (!authRevoked) {
-            console.error(`Admin campaigns failed for ${account.id}:`, error);
+            // DOMExceptions (Web Crypto) and some fetch failures stringify
+            // to a bare stack with no message line; name+message first
+            // makes the observability logs actually say what broke.
+            const described =
+              error instanceof Error
+                ? `${error.name}: ${error.message || "(no message)"}`
+                : String(error);
+            console.error(
+              `Admin campaigns failed for ${account.id} (${described})`,
+              error,
+            );
           }
         }
       }
