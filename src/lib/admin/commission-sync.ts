@@ -73,11 +73,12 @@ const THROTTLE_MS = 2 * 60 * 1000;
 /**
  * How many accounts a routine (non-forced) ledger sync covers per invocation.
  * The Workers Free plan allows 50 external subrequests per invocation and one
- * account costs roughly 6-8 of them, so four keeps a whole run — including its
- * fleet-level reads — safely inside the budget. The stalest-first rotation
- * makes the hourly cron converge over the full fleet within a few hours.
+ * account costs up to ~20 of them (token refresh, metadata, a 7-day spend
+ * window and its per-day ledger writes), so two accounts plus the fleet-level
+ * reads is what reliably fits. The stalest-first rotation makes the hourly
+ * cron converge over the full fleet within a workday.
  */
-const MAX_ROUTINE_SYNC_ACCOUNTS = 4;
+const MAX_ROUTINE_SYNC_ACCOUNTS = 2;
 
 type Supa = Awaited<ReturnType<typeof createClient>>;
 
@@ -338,12 +339,34 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
       return;
     }
 
+    // The immutable start is the commercial boundary. It either carries a real
+    // Google opening counter or references the sealed pre-v3 full-day policy;
+    // status/created_at alone are never used as a runtime substitute.
+    const { data: billingStartRows, error: billingStartsError } = await supabase
+      .from("ad_account_billing_starts")
+      .select(
+        "id, ad_account_id, google_ads_customer_id, google_local_date, google_time_zone, " +
+          "currency, baseline_cost_micros, captured_at, start_basis, " +
+          "reviewed_full_day_boundary_id",
+      )
+      .in("ad_account_id", billable.map((account) => account.id));
+    if (billingStartsError) throw billingStartsError;
+    const billingStartByAccount = new Map(
+      ((billingStartRows ?? []) as unknown as BillingStartRow[]).map((row) => [
+        row.ad_account_id,
+        row,
+      ]),
+    );
+
     // The Workers Free plan caps an invocation at 50 external subrequests, and
     // a full-fleet Google sync no longer fits. The routine path therefore acts
     // as a durable queue: each run syncs only the accounts whose last COMPLETE
-    // window is oldest, and the hourly cron rotates through the rest. A forced
-    // sync (billing evidence for an exact period) still covers every account —
-    // certification must never silently observe a partial fleet.
+    // window is oldest, and the hourly cron rotates through the rest. Accounts
+    // with no immutable start yet are left out — they cannot sync at all, and
+    // as permanent "never synced" entries they would head the stalest queue on
+    // every run and starve the real work. A forced sync (billing evidence for
+    // an exact period) still covers every account — certification must never
+    // silently observe a partial fleet.
     let syncTargets = billable;
     if (!opts?.force) {
       const { data: lastWindows, error: lastWindowsError } = await supabase
@@ -359,38 +382,22 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
           lastCompleteByAccount.set(row.ad_account_id, row.synced_at);
         }
       }
-      syncTargets = [...billable]
+      const startable = billable.filter((account) =>
+        billingStartByAccount.has(account.id),
+      );
+      syncTargets = [...startable]
         .sort((left, right) =>
           (lastCompleteByAccount.get(left.id) ?? "").localeCompare(
             lastCompleteByAccount.get(right.id) ?? "",
           ),
         )
         .slice(0, MAX_ROUTINE_SYNC_ACCOUNTS);
-      if (syncTargets.length < billable.length) {
+      if (syncTargets.length < startable.length) {
         console.log(
-          `Ledger sync queued ${billable.length - syncTargets.length} accounts for later runs.`,
+          `Ledger sync queued ${startable.length - syncTargets.length} accounts for later runs.`,
         );
       }
     }
-
-    // The immutable start is the commercial boundary. It either carries a real
-    // Google opening counter or references the sealed pre-v3 full-day policy;
-    // status/created_at alone are never used as a runtime substitute.
-    const { data: billingStartRows, error: billingStartsError } = await supabase
-      .from("ad_account_billing_starts")
-      .select(
-        "id, ad_account_id, google_ads_customer_id, google_local_date, google_time_zone, " +
-          "currency, baseline_cost_micros, captured_at, start_basis, " +
-          "reviewed_full_day_boundary_id",
-      )
-      .in("ad_account_id", syncTargets.map((account) => account.id));
-    if (billingStartsError) throw billingStartsError;
-    const billingStartByAccount = new Map(
-      ((billingStartRows ?? []) as unknown as BillingStartRow[]).map((row) => [
-        row.ad_account_id,
-        row,
-      ]),
-    );
 
     const { data: billingEndRows, error: billingEndsError } = await supabase
       .from("ad_account_billing_ends")
