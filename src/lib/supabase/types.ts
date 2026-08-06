@@ -751,6 +751,12 @@ export type AdAccount = {
   // Agency revenue share (migration 0010); admin-only via the same guard.
   // Rate is not stored here — it lives in the Google Ads campaign name.
   revenue_share_enabled: boolean;
+  /**
+   * Tracked collection revenue share, percent. Positive opts the account into
+   * metrics/finance tracking only — unlike `revenue_share_enabled`, it never
+   * blocks automatic weekly fee billing.
+   */
+  revenue_share_rate: string | number;
 };
 
 export type AccountRequest = {
@@ -1833,6 +1839,7 @@ export type Database = {
           | "payment_fee_fixed"
           | "shipping_cost_per_order"
           | "revenue_share_enabled"
+          | "revenue_share_rate"
         >;
         Update: Partial<AdAccount>;
         Relationships: [

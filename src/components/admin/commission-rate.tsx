@@ -11,10 +11,14 @@ export function CommissionRate({
   rate,
   listRate,
   revenueShareEnabled = false,
+  revenueShareRate = 0,
 }: {
   rate: number;
   listRate: number;
+  /** Legacy pricing flag — hard-blocks automatic weekly fee billing. */
   revenueShareEnabled?: boolean;
+  /** Tracked collection revenue share; billed separately, never blocks fees. */
+  revenueShareRate?: number;
 }) {
   const discount = Math.max(0, listRate - rate);
   const legacyContract = listRate !== 10 || revenueShareEnabled;
@@ -31,6 +35,11 @@ export function CommissionRate({
         )}
         {rate}% agency fee
       </span>
+      {revenueShareRate > 0 && (
+        <span className="inline-flex items-center gap-1 rounded-full bg-[var(--accent-gold)]/10 px-1.5 py-0.5 text-[10.5px] leading-none font-medium text-[var(--accent-gold)]">
+          +{revenueShareRate}% rev share
+        </span>
+      )}
       <span
         className={cn(
           "inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10.5px] leading-none font-medium",

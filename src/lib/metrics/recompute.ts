@@ -218,8 +218,12 @@ async function syncAccountWindow(
     // Deals come from the Google Ads campaign NAMES (collection URL + rate);
     // attribution is by collection membership or landing page. Fully isolated:
     // a failure here never blocks the revenue/COGS rollup.
+    // Keyed on the RATE, not on `revenue_share_enabled`: the boolean is the
+    // legacy pricing flag that hard-blocks v3 weekly fee billing, while a
+    // positive rate only opts the account into TRACKING collection revenue
+    // share here — invoiced separately, never by the automatic fee engine.
     if (
-      account.revenue_share_enabled &&
+      Number(account.revenue_share_rate) > 0 &&
       result.orders.length > 0 &&
       hasGoogleAdsEnv() &&
       account.google_ads_connected &&

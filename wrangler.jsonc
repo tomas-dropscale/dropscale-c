@@ -38,6 +38,13 @@
   // the retired one-use billing bridge, and a plain `wrangler deploy` would
   // otherwise re-enable their preview hostnames.
   "preview_urls": false,
+  // Workers Logs (available on the Paid plan): every console.error from the
+  // sync legs and page renders becomes queryable instead of vanishing —
+  // before this, per-account Google failures were diagnosable only by
+  // reproducing them from outside.
+  "observability": {
+    "enabled": true
+  },
   "assets": {
     "directory": ".open-next/assets",
     "binding": "ASSETS"

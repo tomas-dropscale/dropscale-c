@@ -265,6 +265,7 @@ export default async function AdminCampaignsPage({
                       rate={Number(entry.account.commission_rate)}
                       listRate={Number(entry.account.list_commission_rate)}
                       revenueShareEnabled={entry.account.revenue_share_enabled}
+                      revenueShareRate={Number(entry.account.revenue_share_rate)}
                     />
                     <StoreName
                       accountId={entry.account.id}
