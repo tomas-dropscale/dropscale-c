@@ -364,11 +364,14 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
     // window is oldest, and the hourly cron rotates through the rest. Accounts
     // with no immutable start yet are left out — they cannot sync at all, and
     // as permanent "never synced" entries they would head the stalest queue on
-    // every run and starve the real work. A forced sync (billing evidence for
-    // an exact period) still covers every account — certification must never
+    // every run and starve the real work. An exact-period sync (billing
+    // evidence/healing) still covers every account — certification must never
     // silently observe a partial fleet.
+    // Bounded whenever no exact period was requested: `force` only means
+    // "skip the throttles" (the cron and the Sync-now button), while a period
+    // means billing evidence — the one caller that must observe every account.
     let syncTargets = billable;
-    if (!opts?.force) {
+    if (!opts?.period) {
       const { data: lastWindows, error: lastWindowsError } = await supabase
         .from("google_ledger_sync_windows")
         .select("ad_account_id, synced_at")
