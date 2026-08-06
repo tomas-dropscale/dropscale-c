@@ -20,6 +20,7 @@ import {
   storeLines,
   sumGoogleSpend,
   type StoreTotals,
+  revenueShareLine,
 } from "./weekly";
 
 function totals(over: Partial<StoreTotals> = {}): StoreTotals {
@@ -413,3 +414,39 @@ describe("billingCurrency", () => {
     expect(billingCurrency(new Set())).toBeNull();
   });
 });
+
+describe("revenueShareLine", () => {
+  it("builds the settlement line from integer micros, half-up to cents", () => {
+    const line = revenueShareLine(
+      "acc-1",
+      "Zatisi Morava",
+      5,
+      BigInt(205_750_000),
+      BigInt(10_290_000),
+    );
+    expect(line).toMatchObject({
+      accountId: "acc-1",
+      kind: "rev_share",
+      store: "Zatisi Morava",
+      rate: 5,
+      baseAmount: 205.75,
+      amount: 10.29,
+    });
+    expect(line?.label).toBe(
+      "Zatisi Morava - Collection revenue share (5% deals on " +
+        "attributed collection revenue: EUR 205.75; computed share EUR 10.29)",
+    );
+  });
+
+  it("rounds the half cent up exactly like the SQL contract", () => {
+    const line = revenueShareLine("acc-1", "Store", 5, BigInt(0), BigInt(10_285_000));
+    expect(line?.amount).toBe(10.29);
+  });
+
+  it("returns null without a positive rate or a positive computed share", () => {
+    expect(revenueShareLine("acc-1", "Store", 0, BigInt(1_000_000), BigInt(1_000_000))).toBeNull();
+    expect(revenueShareLine("acc-1", "Store", 5, BigInt(1_000_000), BigInt(0))).toBeNull();
+    expect(revenueShareLine("acc-1", "Store", 5, BigInt(1_000_000), BigInt(4_000))).toBeNull();
+  });
+});
+

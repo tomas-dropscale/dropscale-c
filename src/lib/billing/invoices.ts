@@ -72,6 +72,7 @@ import {
   mondayOf,
   referralFeeTerms,
   round2,
+  revenueShareLine,
   storeLines,
 } from "@/lib/billing/weekly";
 import {
@@ -287,6 +288,7 @@ type BillingAccount = Pick<
   | "commission_rate"
   | "list_commission_rate"
   | "revenue_share_enabled"
+  | "revenue_share_rate"
 >;
 
 type BillingStart = AdAccountBillingStart;
@@ -548,7 +550,7 @@ async function calculateWeek(
   const { data: accountRows, error: accountsError } = await supabase
     .from("ad_accounts")
     .select(
-      "id, client_id, store_name, currency, google_ads_customer_id, commission_rate, list_commission_rate, revenue_share_enabled",
+      "id, client_id, store_name, currency, google_ads_customer_id, commission_rate, list_commission_rate, revenue_share_enabled, revenue_share_rate",
     )
     .in("client_id", clientIds)
     // A suspended account can still owe its last approved week. Pending rows
@@ -615,6 +617,41 @@ async function calculateWeek(
   const endByAccount = new Map(
     billingEnds.map((end) => [end.ad_account_id, end]),
   );
+
+  // Tracked collection revenue share for the week, from the daily_metrics
+  // rollup the campaign-name deal engine writes. Summed in integer micros so
+  // the line this produces reconstructs identically inside
+  // create_manual_referral_invoice's SQL validation.
+  const revShareByAccount = new Map<
+    string,
+    { baseMicros: bigint; amountMicros: bigint; day: string }[]
+  >();
+  const revShareAccountIds = allAccounts
+    .filter((account) => Number(account.revenue_share_rate) > 0)
+    .map((account) => account.id);
+  if (revShareAccountIds.length > 0) {
+    const { data: revShareRows, error: revShareError } = await supabase
+      .from("daily_metrics")
+      .select("ad_account_id, day, revenue_share_base, revenue_share_amount")
+      .in("ad_account_id", revShareAccountIds)
+      .gte("day", week.start)
+      .lte("day", week.end)
+      .gt("revenue_share_amount", 0);
+    if (revShareError) {
+      throw new Error(
+        `Could not load collection revenue share: ${revShareError.message}`,
+      );
+    }
+    for (const row of revShareRows ?? []) {
+      const entries = revShareByAccount.get(row.ad_account_id) ?? [];
+      entries.push({
+        baseMicros: decimalToMicros(String(row.revenue_share_base ?? 0)),
+        amountMicros: decimalToMicros(String(row.revenue_share_amount ?? 0)),
+        day: row.day,
+      });
+      revShareByAccount.set(row.ad_account_id, entries);
+    }
+  }
   // A known start after the selected week means this account did not yet
   // belong to that bill. A legacy active account with no start must remain in
   // view and block the client rather than being silently omitted.
@@ -1044,6 +1081,39 @@ async function calculateWeek(
             })
           : [];
       lines.push(...storeInvoiceLines);
+
+      // Collection revenue share rides the same weekly settlement: only for
+      // accounts that opted into tracking, only inside the immutable billing
+      // boundaries, and only in EUR weeks the fee engine itself accepts.
+      if (
+        accountCurrency === BILLING_CURRENCY &&
+        Number(account.revenue_share_rate) > 0 &&
+        start
+      ) {
+        const windowStart =
+          start.google_local_date > week.start
+            ? start.google_local_date
+            : week.start;
+        const windowEnd =
+          end && end.google_local_date < week.end
+            ? end.google_local_date
+            : week.end;
+        let baseMicros = BigInt(0);
+        let amountMicros = BigInt(0);
+        for (const entry of revShareByAccount.get(account.id) ?? []) {
+          if (entry.day < windowStart || entry.day > windowEnd) continue;
+          baseMicros += entry.baseMicros;
+          amountMicros += entry.amountMicros;
+        }
+        const shareLine = revenueShareLine(
+          account.id,
+          account.store_name,
+          Number(account.revenue_share_rate),
+          baseMicros,
+          amountMicros,
+        );
+        if (shareLine) lines.push(shareLine);
+      }
       claimedRows.push(...rows);
 
       stores.push({

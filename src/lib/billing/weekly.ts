@@ -473,6 +473,43 @@ export function storeLines(accountId: string, store: string, totals: StoreTotals
   ];
 }
 
+/**
+ * The collection revenue-share settlement line for one store's closed week.
+ *
+ * The amounts come from the daily_metrics rollup — the campaign-name deal
+ * engine's output — summed in integer micros so this label and the SQL
+ * contract's reconstruction agree to the digit. `null` when the week carries
+ * no computed share. Mirrors create_manual_referral_invoice exactly; change
+ * either side only together with the other.
+ */
+export function revenueShareLine(
+  accountId: string,
+  store: string,
+  rate: number,
+  baseMicros: bigint,
+  amountMicros: bigint,
+): InvoiceLine | null {
+  if (!(rate > 0)) return null;
+  const centsOf = (micros: bigint) =>
+    (micros + BigInt(5000)) / BigInt(10000);
+  const amountCents = centsOf(amountMicros);
+  if (amountCents <= BigInt(0)) return null;
+  const twoDp = (cents: bigint) => (Number(cents) / 100).toFixed(2);
+  const base = twoDp(centsOf(baseMicros));
+  const amount = twoDp(amountCents);
+  return {
+    accountId,
+    kind: "rev_share",
+    store,
+    rate,
+    baseAmount: Number(twoDp(centsOf(baseMicros))),
+    label:
+      `${store} - Collection revenue share (${exactRate(rate)}% deals on ` +
+      `attributed collection revenue: EUR ${base}; computed share EUR ${amount})`,
+    amount: Number(amount),
+  };
+}
+
 /** EUR is mandatory; a fallback would silently relabel foreign spend. */
 export function billingCurrency(currencies: Set<string>): typeof BILLING_CURRENCY | null {
   const normalised = new Set([...currencies].map((currency) => currency.toUpperCase()));

@@ -18,6 +18,14 @@ const ATTRIBUTION_MIGRATION = readFileSync(
   "supabase/migrations/0031_manual_referral_attribution.sql",
   "utf8",
 );
+const LIVE_SNAPSHOT = readFileSync(
+  "src/lib/billing/manual-referrals.live-snapshot.sql",
+  "utf8",
+);
+const REVSHARE_MIGRATION = readFileSync(
+  "supabase/migrations/0037_collection_revenue_share_billing.sql",
+  "utf8",
+);
 
 const ADMIN = "10000000-0000-4000-8000-000000000001";
 const CLIENT = "10000000-0000-4000-8000-000000000002";
@@ -140,7 +148,16 @@ create table public.ad_accounts (
   commission_rate numeric not null default 10,
   list_commission_rate numeric not null default 10,
   revenue_share_enabled boolean not null default false,
+  revenue_share_rate numeric not null default 0,
   created_at timestamptz not null default now()
+);
+
+create table public.daily_metrics (
+  ad_account_id uuid not null references public.ad_accounts(id),
+  day date not null,
+  revenue_share_base numeric not null default 0,
+  revenue_share_amount numeric not null default 0,
+  primary key (ad_account_id, day)
 );
 
 create table public.account_requests (
@@ -624,6 +641,8 @@ async function issueV3(options?: {
   termId?: string | null;
   ledgerIds?: string[];
   linePatch?: Record<string, unknown>;
+  /** Appended verbatim after the reconstructed fee lines (e.g. rev_share). */
+  extraLines?: Record<string, unknown>[];
   amount?: number;
   recipientPatch?: Record<string, unknown>;
 }) {
@@ -762,6 +781,7 @@ async function issueV3(options?: {
       baseAmount: Number(row.billable_rounded),
       sourceGrossAmount: Number(row.source_rounded),
       billingStartBaselineAmount: Number(row.start_baseline),
+      billingStartBasis: "observed_google_counter",
       billingStartId: row.billing_start_id,
       billingStartDate: row.billing_start_date,
       billingStartedAt: new Date(row.billing_started_at).toISOString(),
@@ -783,7 +803,18 @@ async function issueV3(options?: {
       ...options?.linePatch,
     };
   });
-  const amount = options?.amount ?? calculatedAmount;
+  (lines as Record<string, unknown>[]).push(...(options?.extraLines ?? []));
+  const amount =
+    options?.amount ??
+    Number(
+      (
+        calculatedAmount +
+        (options?.extraLines ?? []).reduce(
+          (total, line) => total + Number(line.amount ?? 0),
+          0,
+        )
+      ).toFixed(2),
+    );
   const recipient = {
     email: "referrer@example.com",
     fallbackName: "Referrer",
@@ -829,6 +860,8 @@ beforeEach(async () => {
   await db.exec(CUTOVER_MIGRATION);
   await db.exec(REFERRAL_MIGRATION);
   await db.exec(ATTRIBUTION_MIGRATION);
+  await db.exec(LIVE_SNAPSHOT);
+  await db.exec(REVSHARE_MIGRATION);
   // The fixture exercises a post-cutover week. A separate assertion below
   // proves that weeks before this immutable production boundary fail closed.
   await db.query(
@@ -2301,3 +2334,105 @@ describe("v3 manual referral invoices", () => {
     ).rejects.toThrow(/without positive billable Google spend/i);
   });
 });
+
+describe("collection revenue share settlement lines", () => {
+  const SHARE_DAY = END;
+
+  async function seedShare(rate = 5, base = 205.75, amount = 10.29) {
+    await seedInvoiceWeek();
+    await actAsService();
+    await db.query(
+      "update public.ad_accounts set revenue_share_rate = $2 where id = $1",
+      [CLIENT_ACCOUNT, rate],
+    );
+    await db.query(
+      "insert into public.daily_metrics " +
+        "(ad_account_id, day, revenue_share_base, revenue_share_amount) " +
+        "values ($1, $2, $3, $4)",
+      [CLIENT_ACCOUNT, SHARE_DAY, base, amount],
+    );
+  }
+
+  async function shareLine(base = "205.75", amount = "10.29", rate = 5) {
+    const { rows } = await db.query<{ store_name: string }>(
+      "select store_name from public.ad_accounts where id = $1",
+      [CLIENT_ACCOUNT],
+    );
+    const store = rows[0].store_name;
+    return {
+      accountId: CLIENT_ACCOUNT,
+      kind: "rev_share",
+      store,
+      rate,
+      baseAmount: Number(base),
+      amount: Number(amount),
+      label:
+        `${store} - Collection revenue share (${rate}% deals on ` +
+        `attributed collection revenue: EUR ${base}; computed share EUR ${amount})`,
+    };
+  }
+
+  it("settles the tracked share beside the agency fee", async () => {
+    await seedShare();
+    const line = await shareLine();
+    const issued = await issueV3({ extraLines: [line] });
+    const invoice = issued.rows[0] as {
+      amount: string | number;
+      line_items: { kind?: string; amount: number }[];
+    };
+    expect(invoice.line_items.map((item) => item.kind)).toContain("rev_share");
+    const total = invoice.line_items.reduce(
+      (sum, item) => sum + Number(item.amount),
+      0,
+    );
+    expect(Number(invoice.amount)).toBeCloseTo(Number(total.toFixed(2)), 2);
+    const share = invoice.line_items.find((item) => item.kind === "rev_share");
+    expect(share?.amount).toBe(10.29);
+  });
+
+  it("refuses a settlement that omits the tracked share", async () => {
+    await seedShare();
+    await expect(issueV3()).rejects.toThrow(
+      /Revenue share lines do not match/i,
+    );
+  });
+
+  it("refuses a share line whose amount drifts from the rollup", async () => {
+    await seedShare();
+    const line = await shareLine("205.75", "10.30");
+    await expect(issueV3({ extraLines: [line] })).rejects.toThrow(
+      /Revenue share lines do not match/i,
+    );
+  });
+
+  it("refuses a share line for an account that never opted in", async () => {
+    await seedInvoiceWeek();
+    const line = await shareLine();
+    await expect(issueV3({ extraLines: [line] })).rejects.toThrow(
+      /Revenue share lines do not match/i,
+    );
+  });
+
+  it("still settles fee-only when the tracked account had no share this week", async () => {
+    await seedInvoiceWeek();
+    await actAsService();
+    await db.query(
+      "update public.ad_accounts set revenue_share_rate = 5 where id = $1",
+      [CLIENT_ACCOUNT],
+    );
+    const issued = await issueV3();
+    expect(Number((issued.rows[0] as { amount: string | number }).amount)).toBeGreaterThan(0);
+  });
+
+  it("refuses a line of unknown kind", async () => {
+    await seedInvoiceWeek();
+    await expect(
+      issueV3({
+        extraLines: [
+          { accountId: CLIENT_ACCOUNT, kind: "mystery", label: "x", amount: 1 },
+        ],
+      }),
+    ).rejects.toThrow(/unknown kind/i);
+  });
+});
+
