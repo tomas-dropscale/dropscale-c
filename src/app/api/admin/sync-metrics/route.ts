@@ -6,6 +6,13 @@ import { recomputeDailyMetrics } from "@/lib/metrics/recompute";
 import type { AdAccount } from "@/lib/supabase/types";
 
 /**
+ * How many accounts one run recomputes. Each costs several Google/Shopify
+ * subrequests; five keeps the run inside the Workers Free 50-subrequest
+ * budget. The stalest-first rotation converges over the fleet across runs.
+ */
+const MAX_ACCOUNTS_PER_RUN = 5;
+
+/**
  * POST — close the day: pull every account's Google spend and Shopify revenue
  * into `daily_metrics` now, ignoring the 15-minute throttle.
  *
@@ -44,15 +51,38 @@ export async function POST(request: NextRequest) {
     // The cron's service client, or the admin's own session.
     const db = supabase ?? (await createClient());
 
-    // Every account, not just one client's: this is the nightly close.
+    // Every account is eligible, but the Workers Free plan caps an invocation
+    // at 50 external subrequests — a full-fleet recompute no longer fits. Each
+    // run therefore takes the stalest accounts and lets the hourly cron rotate
+    // through the rest, a durable queue ordered by last recompute.
     const { data } = await db.from("ad_accounts").select("*");
     const accounts = (data as AdAccount[] | null) ?? [];
 
-    await recomputeDailyMetrics(accounts, { force: true, client: db });
+    const { data: recentMetrics } = await db
+      .from("daily_metrics")
+      .select("ad_account_id, computed_at")
+      .order("computed_at", { ascending: false })
+      .limit(500);
+    const lastComputeByAccount = new Map<string, string>();
+    for (const row of recentMetrics ?? []) {
+      if (!lastComputeByAccount.has(row.ad_account_id)) {
+        lastComputeByAccount.set(row.ad_account_id, row.computed_at);
+      }
+    }
+    const batch = [...accounts]
+      .sort((left, right) =>
+        (lastComputeByAccount.get(left.id) ?? "").localeCompare(
+          lastComputeByAccount.get(right.id) ?? "",
+        ),
+      )
+      .slice(0, MAX_ACCOUNTS_PER_RUN);
+
+    await recomputeDailyMetrics(batch, { force: true, client: db });
 
     return NextResponse.json({
       ok: true,
-      accounts: accounts.length,
+      accounts: batch.length,
+      queued: accounts.length - batch.length,
       syncedAt: new Date().toISOString(),
     });
   } catch (error) {

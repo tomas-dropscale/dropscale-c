@@ -70,6 +70,14 @@ const SPEND_WINDOW_DAYS = 7;
  * the Sync now button and the cron — skips it entirely for an exact match.
  */
 const THROTTLE_MS = 2 * 60 * 1000;
+/**
+ * How many accounts a routine (non-forced) ledger sync covers per invocation.
+ * The Workers Free plan allows 50 external subrequests per invocation and one
+ * account costs roughly 6-8 of them, so four keeps a whole run — including its
+ * fleet-level reads — safely inside the budget. The stalest-first rotation
+ * makes the hourly cron converge over the full fleet within a few hours.
+ */
+const MAX_ROUTINE_SYNC_ACCOUNTS = 4;
 
 type Supa = Awaited<ReturnType<typeof createClient>>;
 
@@ -330,6 +338,41 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
       return;
     }
 
+    // The Workers Free plan caps an invocation at 50 external subrequests, and
+    // a full-fleet Google sync no longer fits. The routine path therefore acts
+    // as a durable queue: each run syncs only the accounts whose last COMPLETE
+    // window is oldest, and the hourly cron rotates through the rest. A forced
+    // sync (billing evidence for an exact period) still covers every account —
+    // certification must never silently observe a partial fleet.
+    let syncTargets = billable;
+    if (!opts?.force) {
+      const { data: lastWindows, error: lastWindowsError } = await supabase
+        .from("google_ledger_sync_windows")
+        .select("ad_account_id, synced_at")
+        .eq("status", "complete")
+        .in("ad_account_id", billable.map((account) => account.id));
+      if (lastWindowsError) throw lastWindowsError;
+      const lastCompleteByAccount = new Map<string, string>();
+      for (const row of lastWindows ?? []) {
+        const previous = lastCompleteByAccount.get(row.ad_account_id);
+        if (!previous || row.synced_at > previous) {
+          lastCompleteByAccount.set(row.ad_account_id, row.synced_at);
+        }
+      }
+      syncTargets = [...billable]
+        .sort((left, right) =>
+          (lastCompleteByAccount.get(left.id) ?? "").localeCompare(
+            lastCompleteByAccount.get(right.id) ?? "",
+          ),
+        )
+        .slice(0, MAX_ROUTINE_SYNC_ACCOUNTS);
+      if (syncTargets.length < billable.length) {
+        console.log(
+          `Ledger sync queued ${billable.length - syncTargets.length} accounts for later runs.`,
+        );
+      }
+    }
+
     // The immutable start is the commercial boundary. It either carries a real
     // Google opening counter or references the sealed pre-v3 full-day policy;
     // status/created_at alone are never used as a runtime substitute.
@@ -340,7 +383,7 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
           "currency, baseline_cost_micros, captured_at, start_basis, " +
           "reviewed_full_day_boundary_id",
       )
-      .in("ad_account_id", billable.map((account) => account.id));
+      .in("ad_account_id", syncTargets.map((account) => account.id));
     if (billingStartsError) throw billingStartsError;
     const billingStartByAccount = new Map(
       ((billingStartRows ?? []) as unknown as BillingStartRow[]).map((row) => [
@@ -355,7 +398,7 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
         "id, ad_account_id, billing_start_id, google_ads_customer_id, google_local_date, " +
           "google_time_zone, currency, end_cost_micros, captured_at",
       )
-      .in("ad_account_id", billable.map((account) => account.id));
+      .in("ad_account_id", syncTargets.map((account) => account.id));
     if (billingEndsError) throw billingEndsError;
     const billingEndByAccount = new Map(
       ((billingEndRows ?? []) as unknown as BillingEndRow[]).map((row) => [
@@ -373,7 +416,7 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
     const { data: portalClients, error: portalClientsError } = await supabase
       .from("portal_clients")
       .select("id, crm_client_id, full_name")
-      .in("id", [...new Set(billable.map((account) => account.client_id))]);
+      .in("id", [...new Set(syncTargets.map((account) => account.client_id))]);
     if (portalClientsError) throw portalClientsError;
     const crmByLogin = new Map(
       (portalClients ?? []).map((row) => [row.id, row.crm_client_id]),
@@ -381,12 +424,12 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
     const nameByLogin = new Map((portalClients ?? []).map((row) => [row.id, row.full_name]));
     const referralTermsByClient = await manualReferralTermsByClient(
       supabase,
-      [...new Set(billable.map((account) => account.client_id))],
+      [...new Set(syncTargets.map((account) => account.client_id))],
     );
 
     const failures: string[] = [];
     await Promise.all(
-      billable.map(async (account) => {
+      syncTargets.map(async (account) => {
         let marker:
           | {
               runId: string;

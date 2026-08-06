@@ -36,6 +36,12 @@ export type AdminAccountCampaigns = {
    * retry their way out of it, the account has to be reconnected.
    */
   authRevoked: boolean;
+  /**
+   * Live Google was unavailable (budget or transient error) and the figures
+   * fall back to the daily_metrics rollup for the same range — correct totals,
+   * just without the live campaign list.
+   */
+  cached: boolean;
   spend: number;
   commission: number;
 };
@@ -169,6 +175,44 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
     ]),
   );
 
+  // Rollup rows come first: they price the revenue strip below AND provide the
+  // fallback figures when a live Google query cannot run (the Workers Free
+  // plan caps external subrequests per invocation, and the whole fleet no
+  // longer fits in one page render).
+  const metricRows = await fetchDailyMetrics(
+    accounts.map((account) => account.id),
+    range.from,
+    range.to,
+  );
+  const rollupSpendByAccount = new Map<string, number>();
+  for (const row of metricRows) {
+    rollupSpendByAccount.set(
+      row.ad_account_id,
+      (rollupSpendByAccount.get(row.ad_account_id) ?? 0) + Number(row.ad_spend),
+    );
+  }
+
+  // One batched read instead of one SELECT per account: every saved
+  // subrequest is budget the live Google queries below get to keep.
+  const connectedIds = accounts
+    .filter(
+      (account) =>
+        configured && account.google_ads_connected && Boolean(account.google_ads_customer_id),
+    )
+    .map((account) => account.id);
+  const tokenByAccount = new Map<string, string>();
+  if (connectedIds.length > 0) {
+    const { data: tokenRows } = await supabase
+      .from("ad_accounts")
+      .select("id, google_ads_refresh_token")
+      .in("id", connectedIds);
+    for (const row of tokenRows ?? []) {
+      if (row.google_ads_refresh_token) {
+        tokenByAccount.set(row.id, row.google_ads_refresh_token);
+      }
+    }
+  }
+
   const perAccount = await Promise.all(
     accounts.map(async (account): Promise<AdminAccountCampaigns> => {
       const connected =
@@ -180,12 +224,7 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
 
       if (connected) {
         try {
-          const { data } = await supabase
-            .from("ad_accounts")
-            .select("google_ads_refresh_token")
-            .eq("id", account.id)
-            .maybeSingle();
-          const cipher = data?.google_ads_refresh_token;
+          const cipher = tokenByAccount.get(account.id);
           if (!cipher) throw new Error("token row missing");
 
           campaigns = await fetchLiveCampaignsDetailed(
@@ -208,7 +247,13 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
         }
       }
 
-      const spend = campaigns.reduce((sum, campaign) => sum + campaign.spend, 0);
+      // A failed live query falls back to the rollup's spend for the range —
+      // the totals stay right even when Google is out of subrequest budget.
+      const rollupSpend = rollupSpendByAccount.get(account.id) ?? 0;
+      const cached = failed && !authRevoked && rollupSpend > 0;
+      const spend = cached
+        ? rollupSpend
+        : campaigns.reduce((sum, campaign) => sum + campaign.spend, 0);
       return {
         account,
         campaigns,
@@ -216,6 +261,7 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
         connected: connected && !authRevoked,
         failed,
         authRevoked,
+        cached,
         spend,
         commission: (spend * Number(account.commission_rate)) / 100,
       };
@@ -231,6 +277,7 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
       configured && account.google_ads_connected && Boolean(account.google_ads_customer_id),
     failed: false,
     authRevoked: false,
+    cached: false,
     spend: 0,
     commission: 0,
   }));
@@ -253,11 +300,6 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
    * as the denominator for rollup revenue would be worse — two sources, one
    * ratio, and a number that moves when neither the revenue nor the spend did.
    */
-  const metricRows = await fetchDailyMetrics(
-    accounts.map((account) => account.id),
-    range.from,
-    range.to,
-  );
   const rollup = sumMetrics(metricRows);
   const revenue = rollup.attributedRevenue;
 

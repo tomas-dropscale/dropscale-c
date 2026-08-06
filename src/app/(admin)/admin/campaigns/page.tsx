@@ -244,7 +244,10 @@ export default async function AdminCampaignsPage({
                         </Badge>
                       )
                     )}
-                    {entry.failed && !entry.authRevoked && (
+                    {entry.cached && (
+                      <Badge variant="neutral">Cached totals</Badge>
+                    )}
+                    {entry.failed && !entry.authRevoked && !entry.cached && (
                       <Badge variant="danger">Query failed</Badge>
                     )}
                     <span className="text-[12.5px] text-[var(--text-secondary)]">
