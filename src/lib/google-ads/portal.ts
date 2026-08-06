@@ -67,7 +67,7 @@ export async function fetchLiveCampaignsDetailed(
       campaign.id,
       campaign.name,
       campaign.status,
-      campaign.start_date,
+      campaign.start_date_time,
       campaign_budget.amount_micros,
       metrics.cost_micros,
       metrics.impressions,
@@ -103,7 +103,9 @@ export async function fetchLiveCampaignsDetailed(
       cpc: micros(metrics.averageCpc),
       daily_budget: budget.amountMicros != null ? micros(budget.amountMicros) : null,
       updated_at: new Date().toISOString(),
-      startDate: campaign.startDate ? String(campaign.startDate) : null,
+      startDate: campaign.startDateTime
+        ? String(campaign.startDateTime).slice(0, 10)
+        : null,
       conversions: num(metrics.conversions),
     };
   });

@@ -183,13 +183,25 @@ export default async function AdminCampaignsPage({
                   const rates = [
                     ...new Set(client.accounts.map((e) => Number(e.account.commission_rate))),
                   ];
-                  const revShare = client.accounts.some((e) => e.account.revenue_share_enabled);
+                  const shareRates = [
+                    ...new Set(
+                      client.accounts
+                        .map((e) => Number(e.account.revenue_share_rate))
+                        .filter((rate) => rate > 0),
+                    ),
+                  ];
                   return (
                     <>
                       <Badge variant="neutral">
                         {rates.length === 1 ? `${rates[0]}% ad spend` : "mixed ad spend %"}
                       </Badge>
-                      {revShare && <Badge variant="success">+ rev share</Badge>}
+                      {shareRates.length > 0 && (
+                        <Badge variant="success">
+                          {shareRates.length === 1
+                            ? `+${shareRates[0]}% rev share`
+                            : "+ rev share"}
+                        </Badge>
+                      )}
                     </>
                   );
                 })()}
