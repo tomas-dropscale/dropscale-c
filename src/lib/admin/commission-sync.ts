@@ -72,13 +72,13 @@ const SPEND_WINDOW_DAYS = 7;
 const THROTTLE_MS = 2 * 60 * 1000;
 /**
  * How many accounts a routine (non-forced) ledger sync covers per invocation.
- * The Workers Free plan allows 50 external subrequests per invocation and one
- * account costs up to ~20 of them (token refresh, metadata, a 7-day spend
- * window and its per-day ledger writes), so two accounts plus the fleet-level
- * reads is what reliably fits. The stalest-first rotation makes the hourly
- * cron converge over the full fleet within a workday.
+ * One account costs up to ~20 external subrequests (token refresh, metadata,
+ * a 7-day spend window and its per-day ledger writes). On the Workers Paid
+ * plan (10,000 subrequests per invocation) this bound covers the whole fleet
+ * in one run; it stays as a runaway guard so fleet growth degrades into the
+ * stalest-first rotation instead of a mid-run budget kill.
  */
-const MAX_ROUTINE_SYNC_ACCOUNTS = 2;
+const MAX_ROUTINE_SYNC_ACCOUNTS = 25;
 
 type Supa = Awaited<ReturnType<typeof createClient>>;
 

@@ -7,10 +7,11 @@ import type { AdAccount } from "@/lib/supabase/types";
 
 /**
  * How many accounts one run recomputes. Each costs several Google/Shopify
- * subrequests; five keeps the run inside the Workers Free 50-subrequest
- * budget. The stalest-first rotation converges over the fleet across runs.
+ * subrequests; on the Workers Paid plan (10,000 per invocation) this bound
+ * covers the whole fleet in one run and stays as a runaway guard — fleet
+ * growth degrades into the stalest-first rotation, never a mid-run kill.
  */
-const MAX_ACCOUNTS_PER_RUN = 5;
+const MAX_ACCOUNTS_PER_RUN = 25;
 
 /**
  * POST — close the day: pull every account's Google spend and Shopify revenue
