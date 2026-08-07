@@ -2,6 +2,7 @@ import "server-only";
 
 import { createClient as createSupabaseClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/supabase/types";
+import { fetchWithReadRetry } from "@/lib/supabase/fetch-retry";
 
 /**
  * A Supabase client that bypasses RLS. It is reserved for authenticated
@@ -20,5 +21,6 @@ export function createServiceClient(): SupabaseClient<Database> | null {
 
   return createSupabaseClient<Database>(url, key, {
     auth: { persistSession: false, autoRefreshToken: false },
+    global: { fetch: fetchWithReadRetry },
   });
 }
