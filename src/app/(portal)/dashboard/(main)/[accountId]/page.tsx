@@ -12,8 +12,6 @@ import {
   sumMetrics,
 } from "@/lib/metrics/queries";
 import { parseRange } from "@/lib/portal/range";
-import { fetchManualReferralRateSchedule } from "@/lib/billing/referral-rate-schedule";
-import { manualReferralRateOnDay } from "@/lib/billing/referrals";
 import { multiplier } from "@/lib/format";
 import { Button } from "@/components/ui/button";
 import { MetricsGrid } from "@/components/portal/metric-card";
@@ -52,20 +50,19 @@ export default async function AccountPage({
   await ensureDailyCoverage([account], range.from);
   await recomputeDailyMetrics([account]);
 
-  const [rows, campaigns, referralRateSchedule, { d }] = await Promise.all([
+  const [rows, campaigns, { d }] = await Promise.all([
     fetchDailyMetrics([account.id], range.from, range.to),
     fetchCampaigns(account, range),
-    fetchManualReferralRateSchedule(account.client_id),
     getServerDictionary(),
   ]);
 
-  const referralRateForDay = (day: string) =>
-    Number(account.list_commission_rate) === 10 && !account.revenue_share_enabled
-      ? manualReferralRateOnDay(day, referralRateSchedule)
-      : Number(account.commission_rate);
-  const metrics = metricSetFromRows(rows, (row) => referralRateForDay(row.day));
-  const historicalRates = new Set(rows.map((row) => referralRateForDay(row.day)));
-  const uniformFeeRate = historicalRates.size === 1 ? [...historicalRates][0] : null;
+  // Deliberately NO manual-referral schedule fetch here: this page hides its
+  // fee card (showFee=false below — the fee belongs to the whole-client
+  // dashboard and the invoice), and the unconditional schedule RPC was the
+  // page's only remaining throw path — one transient Supabase blip rendered
+  // the entire store page as a 500 for the client.
+  const uniformFeeRate = Number(account.commission_rate);
+  const metrics = metricSetFromRows(rows, uniformFeeRate);
   const totals = sumMetrics(rows);
   // This store's own return: its Shopify revenue over its own ad spend.
   const storeRoas = totals.mer;

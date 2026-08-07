@@ -89,13 +89,34 @@ export const getWorkspaceContext = cache(async function getWorkspaceContext(): P
   const supabase = await createClient();
   const {
     data: { user },
+    error: authError,
   } = await supabase.auth.getUser();
+  // A network-level auth failure is not a signed-out visitor: treating it as
+  // one bounced logged-in clients to /login (or 404) on a transient blip.
+  // Real auth verdicts (no session, invalid session) still fall through.
+  if (!user && authError?.name === "AuthRetryableFetchError") {
+    throw new Error(`Could not verify the session: ${authError.message}`);
+  }
   if (!user) return EMPTY;
 
-  const [{ data: viewer }, { data: memberships }] = await Promise.all([
+  const [viewerResult, membershipsResult] = await Promise.all([
     supabase.from("portal_clients").select("*").eq("id", user.id).maybeSingle(),
     supabase.from("client_members").select("client_id").eq("member_id", user.id),
   ]);
+  // Both reads are authorization-shaped: a failure here must throw, because
+  // "no viewer row" renders not-a-client and "no memberships" silently flips
+  // a socio to their own empty workspace — which is how a member's store list
+  // vanished and their store pages 404'd during Supabase blips.
+  if (viewerResult.error) {
+    throw new Error(`Could not load the viewer: ${viewerResult.error.message}`);
+  }
+  if (membershipsResult.error) {
+    throw new Error(
+      `Could not load workspace memberships: ${membershipsResult.error.message}`,
+    );
+  }
+  const viewer = viewerResult.data;
+  const memberships = membershipsResult.data;
 
   if (!viewer) return { ...EMPTY, user };
 
@@ -105,7 +126,13 @@ export const getWorkspaceContext = cache(async function getWorkspaceContext(): P
   // thanks to shares_client_workspace() in migration 0015.
   const owners: Client[] = [];
   if (ownerIds.length > 0) {
-    const { data } = await supabase.from("portal_clients").select("*").in("id", ownerIds);
+    const { data, error } = await supabase
+      .from("portal_clients")
+      .select("*")
+      .in("id", ownerIds);
+    if (error) {
+      throw new Error(`Could not load workspace owners: ${error.message}`);
+    }
     owners.push(...((data as Client[] | null) ?? []));
   }
 

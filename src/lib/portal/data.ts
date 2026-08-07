@@ -62,12 +62,16 @@ export async function fetchAccounts(): Promise<AdAccount[]> {
   if (!clientId) return [];
 
   const supabase = await createClient();
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("ad_accounts")
     .select(ACCOUNT_COLUMNS)
     .eq("client_id", clientId)
     .order("created_at", { ascending: true });
-  return (data as AdAccount[] | null) ?? [];
+  // A failed query must surface as an error, never as an authoritative empty
+  // store list: transient Worker->Supabase failures ("Network connection
+  // lost") were rendering the real onboarding empty state to real clients.
+  if (error) throw new Error(`Could not load the workspace stores: ${error.message}`);
+  return (data as unknown as AdAccount[] | null) ?? [];
 }
 
 /**
@@ -79,13 +83,16 @@ export async function fetchAccount(accountId: string): Promise<AdAccount | null>
   if (!clientId) return null;
 
   const supabase = await createClient();
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("ad_accounts")
     .select(ACCOUNT_COLUMNS)
     .eq("id", accountId)
     .eq("client_id", clientId)
     .maybeSingle();
-  return (data as AdAccount | null) ?? null;
+  // Only a SUCCESSFUL zero-row read may 404: a failed query rendered
+  // "this page doesn't exist" for stores the viewer legitimately owns.
+  if (error) throw new Error(`Could not load the store: ${error.message}`);
+  return (data as unknown as AdAccount | null) ?? null;
 }
 
 /** Connected = the client authorised Google Ads and the API is configured. */
