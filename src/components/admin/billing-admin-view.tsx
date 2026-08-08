@@ -20,6 +20,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type { BillingAdminDashboard } from "@/lib/billing/invoices";
 import type { BillingClosedWeekEntry } from "@/lib/billing/positions";
+import { BillingCycleSkips } from "@/components/admin/billing-cycle-skips";
 import { money, shortDate } from "@/lib/format-intl";
 import { fmt, type Dictionary } from "@/lib/i18n";
 import { useI18n } from "@/lib/i18n/provider";
@@ -99,6 +100,8 @@ function weekStateLabel(state: BillingClosedWeekEntry["state"], d: Dictionary) {
       return d.adminBilling.statusOpen;
     case "failed":
       return d.adminBilling.statusUncollectible;
+    case "skipped":
+      return "Skipped";
   }
 }
 
@@ -969,6 +972,15 @@ export function BillingAdminView({
           </>
         )}
       </section>
+
+      <BillingCycleSkips
+        dashboard={dashboard}
+        cycleLabel={formatPeriod(
+          dashboard.skipCycle.start,
+          dashboard.skipCycle.end,
+          intl,
+        )}
+      />
     </div>
   );
 }

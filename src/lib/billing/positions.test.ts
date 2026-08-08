@@ -518,3 +518,66 @@ describe("pending closed weeks and overdue balances", () => {
     ).toEqual(["2026-07-20", "2026-07-27"]);
   });
 });
+
+describe("skipped billing cycles", () => {
+  const KEY = `${client.id}:2026-07-27`;
+
+  it("stops a skipped week being owed, while keeping it visible", () => {
+    const result = position({
+      certifiedClosedAmounts: [certified({ amount: 42.17 })],
+      skippedWeeks: [KEY],
+    });
+
+    expect(result.clients[0].closed).toMatchObject({
+      unissuedEstimate: 0,
+      supportedUnissued: 0,
+      supportedNotReceived: 0,
+    });
+    expect(result.summary.supportedNotReceived).toBe(0);
+    // The certified amount stays on the week as evidence of what was forgiven.
+    expect(result.clients[0].closed.weeks).toEqual([
+      {
+        periodStart: "2026-07-27",
+        periodEnd: "2026-08-02",
+        amount: 42.17,
+        state: "skipped",
+        overdueDays: 0,
+      },
+    ]);
+  });
+
+  it("leaves other clients' weeks owed", () => {
+    const other = { id: "client-2", fullName: "Other", email: "o@example.com" };
+    const result = buildBillingPositions({
+      now: new Date("2026-08-04T14:00:00.000Z"),
+      clients: [client, other],
+      accounts: [account()],
+      starts: [],
+      ends: [],
+      certifiedClosedAmounts: [
+        certified({ amount: 10 }),
+        certified({ clientId: other.id, amount: 25 }),
+      ],
+      metricRows: [],
+      invoices: [],
+      skippedWeeks: [KEY],
+    });
+
+    const byId = new Map(result.clients.map((p) => [p.clientId, p]));
+    expect(byId.get(client.id)?.closed.supportedNotReceived).toBe(0);
+    expect(byId.get(other.id)?.closed.supportedNotReceived).toBe(25);
+    expect(result.summary.supportedNotReceived).toBe(25);
+  });
+
+  it("never suppresses an already-issued week's outstanding balance", () => {
+    // A skip only forgives money that has not been invoiced; an open invoice
+    // is Stripe's, and the database refuses to skip such a week anyway.
+    const result = position({
+      invoices: [invoice({ amountRemaining: 16.86 })],
+      skippedWeeks: [KEY],
+    });
+
+    expect(result.clients[0].closed.issuedOutstanding).toBe(16.86);
+    expect(result.clients[0].closed.supportedNotReceived).toBe(16.86);
+  });
+});

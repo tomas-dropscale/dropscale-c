@@ -143,7 +143,7 @@ export type BillingClosedWeekEntry = {
   periodStart: string;
   periodEnd: string;
   amount: number;
-  state: "unissued" | "draft" | "open" | "failed";
+  state: "unissued" | "draft" | "open" | "failed" | "skipped";
   /** Whole days past the invoice due date; 0 unless state is "open". */
   overdueDays: number;
 };
@@ -238,6 +238,8 @@ type PositionInput = {
   referralTermsByClient?: Map<string, BillingPositionReferralTerm[]>;
   /** Durable non-terminal automatic client/week work, reduced to client scope. */
   automationAttentionClientIds?: Iterable<string>;
+  /** `clientId:periodStart` weeks an admin decided are not owed. */
+  skippedWeeks?: Iterable<string>;
 };
 
 function newest(left: string | null, right: string): string {
@@ -332,6 +334,7 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
   );
   const endsByAccount = new Map(input.ends.map((end) => [end.accountId, end]));
   const termsByClient = input.referralTermsByClient ?? new Map();
+  const skippedWeeks = new Set(input.skippedWeeks ?? []);
   const occupiedInvoiceWeeks = new Set(
     input.invoices
       .filter(invoiceOccupiesCertifiedWeek)
@@ -462,6 +465,23 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
       throw new RangeError("Invalid certified closed billing amount.");
     }
     if (occupiedInvoiceWeeks.has(key)) continue;
+
+    // Skipped: the certified amount stays visible as evidence of what the
+    // week was worth, but it is not money anyone still owes.
+    if (skippedWeeks.has(key)) {
+      position.unissuedWeeks.set(certified.periodStart, {
+        periodStart: certified.periodStart,
+        periodEnd: certified.periodEnd,
+        amount: round2(
+          (position.unissuedWeeks.get(certified.periodStart)?.amount ?? 0) +
+            amount,
+        ),
+        state: "skipped",
+        overdueDays: 0,
+      });
+      position.closedPeriodStarts.add(certified.periodStart);
+      continue;
+    }
 
     position.closed.unissuedEstimate = round2(
       position.closed.unissuedEstimate + amount,

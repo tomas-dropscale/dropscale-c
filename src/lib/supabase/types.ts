@@ -759,6 +759,16 @@ export type AdAccount = {
   revenue_share_rate: string | number;
 };
 
+export type BillingCycleSkip = {
+  id: string;
+  client_id: string;
+  period_start: string;
+  period_end: string;
+  reason: string | null;
+  created_by: string;
+  created_at: string;
+};
+
 export type AccountRequest = {
   id: string;
   client_id: string;
@@ -1245,6 +1255,12 @@ export type Database = {
           | "error_count"
         >;
         Update: Partial<BillingAutomationRun>;
+        Relationships: [];
+      };
+      billing_cycle_skips: {
+        Row: Row<BillingCycleSkip>;
+        Insert: Insert<BillingCycleSkip, "id" | "reason" | "created_at">;
+        Update: Partial<Insert<BillingCycleSkip, "id" | "reason" | "created_at">>;
         Relationships: [];
       };
       billing_automation_items: {
@@ -2193,6 +2209,26 @@ export type Database = {
         Returns: boolean;
       };
       /** Start one durable automatic-billing run receipt (0036). */
+      /** Record that a client owes nothing for one closed-week period. */
+      skip_billing_cycle: {
+        Args: {
+          p_client_id: string;
+          p_period_start: string;
+          p_period_end: string;
+          p_reason: string | null;
+          p_created_by: string;
+        };
+        Returns: BillingCycleSkip[];
+      };
+      /** Undo a skip that has not been acted on. */
+      remove_billing_cycle_skip: {
+        Args: {
+          p_client_id: string;
+          p_period_start: string;
+          p_removed_by: string;
+        };
+        Returns: boolean;
+      };
       begin_billing_automation_run: {
         Args: { p_issuance_enabled: boolean };
         Returns: BillingAutomationRun[];

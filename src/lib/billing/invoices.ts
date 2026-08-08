@@ -145,6 +145,7 @@ export type BillingBlockerCode =
   | "pre_v3_cutover"
   | "referral_cutover_unavailable"
   | "legacy_commercial_terms"
+  | "cycle_skipped"
   | "already_issued"
   | "issue_in_progress"
   | "stripe_not_configured";
@@ -228,6 +229,8 @@ export type BillingClientPreview = {
   stores: BillingStorePreview[];
   blockers: BillingBlocker[];
   canIssue: boolean;
+  /** An admin decided this client owes nothing for this week. */
+  skipped: boolean;
   /** SHA-256 of the exact commercial snapshot shown to the admin. */
   reviewToken: string;
   existingInvoice: Invoice | null;
@@ -254,6 +257,16 @@ export type BillingAdminSummary = {
   failedCount: number;
 };
 
+/** One recorded "this client owes nothing this week" decision. */
+export type BillingCycleSkipRow = {
+  clientId: string;
+  clientName: string;
+  periodStart: string;
+  periodEnd: string;
+  reason: string | null;
+  createdAt: string;
+};
+
 export type BillingAdminDashboard = {
   generatedAt: string;
   currency: typeof BILLING_CURRENCY;
@@ -263,6 +276,10 @@ export type BillingAdminDashboard = {
   summary: BillingAdminSummary;
   /** Closed receivables and the current in-progress cycle, never mixed. */
   positions: BillingPositions;
+  /** The cycle the skip control acts on: the one being tracked right now. */
+  skipCycle: { start: string; end: string };
+  /** Skips already recorded for that cycle. */
+  skips: BillingCycleSkipRow[];
   /** Latest durable automatic-run receipt visible to an admin. */
   automation: BillingAutomationRun | null;
   invoices: BillingInvoiceHistoryRow[];
@@ -546,6 +563,21 @@ async function calculateWeek(
   const referralCutover = await loadManualReferralCutoverGate(
     supabase,
     week.start,
+  );
+
+  // Weeks an admin decided are not owed. A skip forgives the fee only: the
+  // Google evidence, the ledger rows and the boundaries below are computed
+  // exactly as usual, so the audit trail still shows what the week was worth.
+  const { data: skipRows, error: skipsError } = await supabase
+    .from("billing_cycle_skips")
+    .select("client_id")
+    .eq("period_start", week.start)
+    .in("client_id", clientIds);
+  if (skipsError) {
+    throw new Error(`Could not load billing cycle skips: ${skipsError.message}`);
+  }
+  const skippedClientIds = new Set(
+    (skipRows ?? []).map((row) => row.client_id),
   );
   const { data: accountRows, error: accountsError } = await supabase
     .from("ad_accounts")
@@ -1390,6 +1422,19 @@ async function calculateWeek(
     }
 
     const uniqueDays = new Set(claimedRows.map((row) => row.occurred_on));
+    // A skip is a decision, not a fault: it is a warning-severity blocker so
+    // it never makes a week look broken, and it never queues an exact refresh.
+    const skipped = skippedClientIds.has(client.id) && !alreadyIssued;
+    if (skipped) {
+      blockers.unshift(
+        blocker(
+          "cycle_skipped",
+          "This week was skipped: the client owes nothing for it.",
+          "warning",
+        ),
+      );
+    }
+
     const preview: BillingClientPreview = {
       clientId: client.id,
       clientName: client.full_name,
@@ -1423,9 +1468,11 @@ async function calculateWeek(
       stores: displayStores,
       blockers,
       canIssue:
+        !skipped &&
         !alreadyIssued &&
         hasBillableSpend &&
         !blockers.some((item) => item.severity === "error"),
+      skipped,
       reviewToken: "",
       existingInvoice,
     };
@@ -1905,6 +1952,17 @@ async function fetchAdminBillingPositions(
     throw new Error(`Could not load billing position clients: ${clientsError.message}`);
   }
   const adminIds = new Set((adminRows ?? []).map((row) => row.id));
+  const { data: skipRows, error: positionSkipsError } = await supabase
+    .from("billing_cycle_skips")
+    .select("client_id, period_start");
+  if (positionSkipsError) {
+    throw new Error(
+      `Could not load billing cycle skips: ${positionSkipsError.message}`,
+    );
+  }
+  const skippedWeeks = (skipRows ?? []).map(
+    (row) => `${row.client_id}:${row.period_start}`,
+  );
   const clients: BillingPositionClient[] = (clientRows ?? [])
     .filter((client) => !adminIds.has(client.id))
     .map((client) => ({
@@ -2003,6 +2061,7 @@ async function fetchAdminBillingPositions(
     invoices,
     referralTermsByClient,
     automationAttentionClientIds,
+    skippedWeeks,
   });
 }
 
@@ -2040,6 +2099,30 @@ export async function fetchAdminBillingDashboard(
   const clientById = new Map(
     (clientRows ?? []).map((client) => [client.id, client]),
   );
+
+  // The skip control acts on the cycle currently being tracked — the one that
+  // the next Monday run will invoice. Skipping a closed week that was already
+  // invoiced is refused by the database, so this is the only useful target.
+  const skipCycle = {
+    start: positions.currentPeriod.start,
+    end: positions.currentPeriod.end,
+  };
+  const { data: cycleSkipRows, error: cycleSkipsError } = await supabase
+    .from("billing_cycle_skips")
+    .select("client_id, period_start, period_end, reason, created_at")
+    .eq("period_start", skipCycle.start);
+  if (cycleSkipsError) {
+    throw new Error(`Could not load billing cycle skips: ${cycleSkipsError.message}`);
+  }
+  const skips: BillingCycleSkipRow[] = (cycleSkipRows ?? []).map((row) => ({
+    clientId: row.client_id,
+    clientName: clientById.get(row.client_id)?.full_name ?? "Unknown client",
+    periodStart: row.period_start,
+    periodEnd: row.period_end,
+    reason: row.reason,
+    createdAt: row.created_at,
+  }));
+
   // Drafts join the visible history only — every summary metric below is
   // computed from invoiceRows, so an unissued draft can never count as billed
   // or outstanding.
@@ -2125,6 +2208,8 @@ export async function fetchAdminBillingDashboard(
       failedCount: failed.length,
     },
     positions,
+    skipCycle,
+    skips,
     automation,
     invoices,
   };
@@ -2542,6 +2627,15 @@ export async function issueClientWeek(input: {
         preview,
       );
     }
+  }
+
+  if (preview.skipped) {
+    throw new BillingIssueError(
+      "This week was skipped: the client owes nothing for it. Remove the skip first if that was a mistake.",
+      409,
+      "cycle_skipped",
+      preview,
+    );
   }
 
   try {
@@ -3236,7 +3330,10 @@ export async function issueAutomaticClosedWeeks(
         continue;
       }
       if (automaticAction === "blocked") {
-        if (target && exactZeroSpend(preview)) {
+        // A skipped week is a decision, not pending work: it settles as
+        // "no charge" so it never lingers as attention and no retry can
+        // resurrect it into an invoice.
+        if (target && (preview.skipped || exactZeroSpend(preview))) {
           result.noCharge += 1;
           result.outcomes.push({
             ...automaticOutcomeBase(target, preview),
