@@ -515,15 +515,6 @@ export function HstView({ overview }: { overview: HstOverview }) {
                 />
               </div>
               <div className="space-y-1.5 sm:col-span-2">
-                <Label htmlFor="hst-covers">Covers commission through</Label>
-                <Input
-                  id="hst-covers"
-                  type="date"
-                  value={coversThrough}
-                  onChange={(event) => setCoversThrough(event.target.value)}
-                />
-              </div>
-              <div className="space-y-1.5 sm:col-span-2">
                 <Label htmlFor="hst-notes">Notes</Label>
                 <Input
                   id="hst-notes"
