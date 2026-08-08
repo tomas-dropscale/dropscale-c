@@ -744,15 +744,33 @@ export function BillingAdminView({
                   </p>
                 </div>
 
-                <div className="rounded-xl border border-[var(--warning-orange)]/25 bg-[var(--warning-orange)]/5 p-3">
+                <div
+                  className={cn(
+                    "rounded-xl border p-3",
+                    position.current.skipped
+                      ? "border-[var(--border-subtle)] bg-[var(--bg-base)]"
+                      : "border-[var(--warning-orange)]/25 bg-[var(--warning-orange)]/5",
+                  )}
+                >
                   <div className="flex items-start justify-between gap-3">
                     <p className="label-caps">{d.adminBilling.currentCycle}</p>
-                    <Clock3
-                      className="size-4 shrink-0 text-[var(--warning-orange)]"
-                      aria-hidden
-                    />
+                    {position.current.skipped ? (
+                      <Badge variant="neutral">Skipped</Badge>
+                    ) : (
+                      <Clock3
+                        className="size-4 shrink-0 text-[var(--warning-orange)]"
+                        aria-hidden
+                      />
+                    )}
                   </div>
-                  <p className="mt-1 text-[17px] font-semibold text-[var(--warning-orange)] tabular-nums">
+                  <p
+                    className={cn(
+                      "mt-1 text-[17px] font-semibold tabular-nums",
+                      position.current.skipped
+                        ? "text-[var(--text-muted)]"
+                        : "text-[var(--warning-orange)]",
+                    )}
+                  >
                     {money(
                       position.current.accruedFee,
                       intl,
@@ -760,16 +778,18 @@ export function BillingAdminView({
                     )}
                   </p>
                   <p className="mt-1 text-[11px] text-[var(--text-muted)]">
-                    {position.current.through
-                      ? fmt(d.adminBilling.buildingThrough, {
-                          date: shortDate(position.current.through, intl),
-                          spend: money(
-                            position.current.grossSpend,
-                            intl,
-                            position.currency,
-                          ),
-                        })
-                      : d.adminBilling.noCurrentData}
+                    {position.current.skipped
+                      ? `${money(position.current.grossSpend, intl, position.currency)} Google spend · not billed this cycle`
+                      : position.current.through
+                        ? fmt(d.adminBilling.buildingThrough, {
+                            date: shortDate(position.current.through, intl),
+                            spend: money(
+                              position.current.grossSpend,
+                              intl,
+                              position.currency,
+                            ),
+                          })
+                        : d.adminBilling.noCurrentData}
                   </p>
                 </div>
               </div>

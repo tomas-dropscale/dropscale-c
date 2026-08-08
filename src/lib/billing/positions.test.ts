@@ -581,3 +581,54 @@ describe("skipped billing cycles", () => {
     expect(result.clients[0].closed.supportedNotReceived).toBe(16.86);
   });
 });
+
+describe("a skipped current cycle", () => {
+  it("stops accruing a fee while keeping the Google spend visible", () => {
+    const result = position({
+      reviewedFullDayEntries: [
+        { accountId: "account-1", entryDay: "2026-07-30" },
+      ],
+      metricRows: [
+        {
+          accountId: "account-1",
+          day: "2026-08-03",
+          adSpend: 744.3,
+          computedAt: "2026-08-04T13:30:00.000Z",
+        },
+      ],
+      skippedWeeks: [`${client.id}:2026-08-03`],
+    });
+
+    expect(result.clients[0].current).toMatchObject({
+      periodStart: "2026-08-03",
+      skipped: true,
+      accruedFee: 0,
+      grossSpend: 744.3,
+      needsEntryReview: 0,
+    });
+    expect(result.summary.currentAccruedFee).toBe(0);
+  });
+
+  it("leaves an unskipped client's current cycle accruing normally", () => {
+    const result = position({
+      reviewedFullDayEntries: [
+        { accountId: "account-1", entryDay: "2026-07-30" },
+      ],
+      metricRows: [
+        {
+          accountId: "account-1",
+          day: "2026-08-03",
+          adSpend: 100,
+          computedAt: "2026-08-04T13:30:00.000Z",
+        },
+      ],
+      // A skip on a DIFFERENT week must not touch the current cycle.
+      skippedWeeks: [`${client.id}:2026-07-27`],
+    });
+
+    expect(result.clients[0].current).toMatchObject({
+      skipped: false,
+      accruedFee: 10,
+    });
+  });
+});

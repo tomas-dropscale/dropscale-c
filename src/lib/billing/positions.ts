@@ -196,6 +196,8 @@ export type BillingClientPosition = {
     through: string | null;
     grossSpend: number;
     accruedFee: number;
+    /** The team decided this in-flight cycle will not be billed. */
+    skipped: boolean;
     needsEntryReview: number;
     missingStartCount: number;
     updatedAt: string | null;
@@ -377,6 +379,7 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
         through: null,
         grossSpend: 0,
         accruedFee: 0,
+        skipped: false,
         needsEntryReview: 0,
         missingStartCount: 0,
         updatedAt: null,
@@ -694,6 +697,13 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
 
   const clients = [...positions.values()]
     .map(({ closedPeriodStarts, invoiceWeeks, unissuedWeeks, ...position }) => {
+      // A skipped in-flight cycle accrues nothing: the Google spend stays
+      // visible because it really happened, but there is no fee to bill.
+      if (skippedWeeks.has(`${position.clientId}:${currentPeriod.start}`)) {
+        position.current.skipped = true;
+        position.current.accruedFee = 0;
+        position.current.needsEntryReview = 0;
+      }
       position.closed.periodCount = closedPeriodStarts.size;
       position.closed.supportedNotReceived = round2(
         position.closed.supportedUnissued +
