@@ -80,8 +80,8 @@ export async function POST(request: NextRequest) {
 
   let googleAdsCustomerId: string | null = null;
   let storeName = "Google Ads account";
-  let accountStatus: string | null = null;
   let requestClientId: string | null = null;
+  let accountStatus: string | null = null;
 
   if (target.kind === "account") {
     const { data: account, error } = await session
@@ -213,42 +213,34 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (/USER_PERMISSION_DENIED|PERMISSION_DENIED/.test(detail)) {
-      // The agency simply has no Google access yet. That must not block the
-      // platform connection: accept the account, keep it OUT of billing (no
-      // immutable opening counter exists), and let the tracking-gaps list
-      // capture the baseline once access is granted.
+    if (/PERMISSION_DENIED/.test(detail)) {
+      // The opening Google counter is AGENCY-captured evidence: the billing
+      // start row is constrained to source='agency', and the database refuses
+      // to make an account billable without one. A missing grant therefore
+      // cannot be accepted around — an earlier attempt to flip the account to
+      // active regardless was rejected by that invariant and surfaced as a
+      // meaningless "the account changed" error.
+      //
+      // Google also answers PERMISSION_DENIED for agency-side misconfiguration
+      // (wrong login-customer-id, unapproved developer token), so the message
+      // names both remediations rather than blaming the client outright.
+      const grantAccess =
+        `Google refused access to customer ${googleAdsCustomerId}. ` +
+        "Add the agency as a manager of that account in Google Ads " +
+        "(Admin \u2192 Access and security) \u2014 or, if other accounts verify " +
+        "fine, check the agency's own Google Ads access \u2014 then verify again.";
+
       if (target.kind === "account") {
-        if (accountStatus !== "pending") {
-          return NextResponse.json(
-            {
-              error: `Google refused agency access to customer ${googleAdsCustomerId} (USER_PERMISSION_DENIED). Grant the agency access in Google Ads and verify again; the account stays connected but unbilled until its opening counter is captured.`,
-            },
-            { status: 502 },
-          );
-        }
-        const { data: accepted, error: acceptError } = await service
-          .from("ad_accounts")
-          .update({ status: "active", currency: "EUR" })
-          .eq("id", target.id)
-          .eq("status", "pending")
-          .select("id, store_name, status")
-          .maybeSingle();
-        if (acceptError || !accepted) {
-          return NextResponse.json(
-            { error: "The account changed while it was being accepted; try again." },
-            { status: 409 },
-          );
-        }
-        return NextResponse.json({
-          ok: true,
-          deferred: true,
-          account: {
-            id: accepted.id,
-            storeName: accepted.store_name || storeName,
-            status: accepted.status,
-          },
-        });
+        // Nothing is mutated: the account keeps whatever status it already
+        // has, and saying which one is what tells the admin where to find it.
+        const placement =
+          accountStatus === "pending"
+            ? "The store stays pending and keeps its place in the list"
+            : "The store stays connected but unbilled until its opening counter is captured";
+        return NextResponse.json(
+          { error: `${grantAccess} ${placement} \u2014 nothing was lost.` },
+          { status: 502 },
+        );
       }
 
       if (!requestClientId) {
@@ -257,46 +249,81 @@ export async function POST(request: NextRequest) {
           { status: 500 },
         );
       }
-      const { data: createdAccount, error: createError } = await service
+
+      // Idempotent by customer id: ad_accounts_google_customer_uq makes a
+      // blind insert fail with a raw constraint error on any retry, and a
+      // retry is exactly what an admin does after a half-completed attempt.
+      const { data: existingAccount, error: existingError } = await service
         .from("ad_accounts")
-        .insert({
-          client_id: requestClientId,
-          store_name: storeName,
-          google_ads_customer_id: googleAdsCustomerId,
-          status: "active",
-          currency: "EUR",
-          list_commission_rate: 10,
-          revenue_share_enabled: false,
-        })
         .select("id, store_name, status")
+        .eq("google_ads_customer_id", googleAdsCustomerId)
         .maybeSingle();
-      if (createError || !createdAccount) {
+      if (existingError) {
         return NextResponse.json(
-          { error: createError?.message ?? "Could not create the ad account." },
+          { error: `Could not check for an existing store: ${existingError.message}` },
           { status: 500 },
         );
       }
+
+      let account = existingAccount;
+      if (!account) {
+        const { data: createdAccount, error: createError } = await service
+          .from("ad_accounts")
+          .insert({
+            client_id: requestClientId,
+            store_name: storeName,
+            google_ads_customer_id: googleAdsCustomerId,
+            // Pending is the only status the database accepts for an account
+            // with no committed billing start, and it is the honest one: the
+            // store exists and the client can see it, but it is not billable.
+            status: "pending",
+            currency: "EUR",
+            list_commission_rate: 10,
+            revenue_share_enabled: false,
+          })
+          .select("id, store_name, status")
+          .maybeSingle();
+        if (createError || !createdAccount) {
+          return NextResponse.json(
+            { error: createError?.message ?? "Could not create the ad account." },
+            { status: 500 },
+          );
+        }
+        account = createdAccount;
+      }
+
+      // Approve LAST and report its failure: leaving the request pending while
+      // the account exists is a half-state the admin has to know about, and a
+      // green banner over it would send them into a duplicate retry.
       const { error: approveError } = await service
         .from("account_requests")
         .update({ status: "approved" })
         .eq("id", target.id)
         .eq("status", "pending");
       if (approveError) {
-        // The account exists; surface the half-approved request loudly rather
-        // than pretending nothing happened.
         console.error("Account request approval failed after acceptance:", {
           requestId: target.id,
           message: approveError.message,
         });
+        return NextResponse.json(
+          {
+            error:
+              `The store was created as pending, but its request could not be closed: ${approveError.message}. ` +
+              "Verify again to finish it; the store will not be duplicated.",
+          },
+          { status: 500 },
+        );
       }
+
       return NextResponse.json({
         ok: true,
         deferred: true,
         account: {
-          id: createdAccount.id,
-          storeName: createdAccount.store_name || storeName,
-          status: createdAccount.status,
+          id: account.id,
+          storeName: account.store_name || storeName,
+          status: account.status,
         },
+        message: grantAccess,
       });
     }
 

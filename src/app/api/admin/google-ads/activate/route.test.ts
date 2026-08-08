@@ -275,99 +275,190 @@ describe("admin Google billing activation", () => {
   });
 });
 
-describe("deferred acceptance when the agency has no Google access yet", () => {
-  function serviceWithBuilder() {
-    const maybeSingle = vi.fn(async () => ({
-      data: { id: ACCOUNT_ID, store_name: "Store", status: "active" },
-      error: null,
-    }));
-    const builder: Record<string, unknown> = {};
-    for (const method of ["update", "insert", "eq", "select"]) {
-      builder[method] = vi.fn(() => builder);
-    }
-    builder.maybeSingle = maybeSingle;
-    // account_requests approval ends the chain on eq(); make it awaitable.
-    builder.then = undefined;
-    const from = vi.fn(() => builder);
-    const service = { rpc: mocks.rpc, from };
-    return { service, from, builder, maybeSingle };
+describe("when the agency has no Google access yet", () => {
+  const denied = new Error(
+    'Google Ads query failed for 1234567890 (403): {"authorizationError":"USER_PERMISSION_DENIED"}',
+  );
+
+  /**
+   * Table-aware PostgREST double. The previous version shared one builder for
+   * every table and was not awaitable, so the approval write silently resolved
+   * to the builder itself and its failure branch was untestable.
+   */
+  function serviceDouble(options: {
+    existingAccount?: Record<string, unknown> | null;
+    insertResult?: { data: Record<string, unknown> | null; error: { message: string } | null };
+    approveError?: { message: string } | null;
+  } = {}) {
+    const calls = {
+      insertedInto: [] as string[],
+      inserted: [] as Record<string, unknown>[],
+      approvedRequests: [] as Record<string, unknown>[],
+      selectedAccountBy: [] as string[],
+    };
+
+    const from = vi.fn((table: string) => {
+      const chain: Record<string, unknown> = {};
+      const self = () => chain;
+
+      chain.select = vi.fn(self);
+      chain.eq = vi.fn((column: string, value: unknown) => {
+        if (table === "ad_accounts" && column === "google_ads_customer_id") {
+          calls.selectedAccountBy.push(String(value));
+        }
+        return chain;
+      });
+      chain.insert = vi.fn((row: Record<string, unknown>) => {
+        calls.insertedInto.push(table);
+        calls.inserted.push(row);
+        return chain;
+      });
+      chain.update = vi.fn((row: Record<string, unknown>) => {
+        if (table === "account_requests") calls.approvedRequests.push(row);
+        return chain;
+      });
+      chain.maybeSingle = vi.fn(async () => {
+        if (calls.inserted.length > 0 && table === "ad_accounts") {
+          return (
+            options.insertResult ?? {
+              data: { id: ACCOUNT_ID, store_name: "New Store", status: "pending" },
+              error: null,
+            }
+          );
+        }
+        return { data: options.existingAccount ?? null, error: null };
+      });
+      // The approval write ends on .eq() and is awaited directly.
+      chain.then = (resolve: (value: unknown) => unknown) =>
+        Promise.resolve({ error: options.approveError ?? null }).then(resolve);
+      return chain;
+    });
+
+    return { service: { rpc: mocks.rpc, from }, from, calls };
+  }
+
+  function accountSession(status: string) {
+    return session({
+      account: {
+        id: ACCOUNT_ID,
+        store_name: "Store",
+        google_ads_customer_id: "1234567890",
+        status,
+      },
+    });
+  }
+
+  function requestSession() {
+    return session({
+      accountRequest: {
+        id: REQUEST_ID,
+        client_id: "00000000-0000-4000-8000-0000000000aa",
+        request_type: "google_ads",
+        google_ads_customer_id: "1234567890",
+        store_name: "New Store",
+        status: "pending",
+      },
+    });
   }
 
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it("accepts a pending account and defers the baseline on USER_PERMISSION_DENIED", async () => {
-    mocks.createClient.mockResolvedValue(
-      session({
-        account: {
-          id: ACCOUNT_ID,
-          store_name: "Store",
-          google_ads_customer_id: "1234567890",
-          status: "pending",
-        },
-      }),
-    );
-    const { service } = serviceWithBuilder();
+  it("never forces a pending account active without its agency-captured counter", async () => {
+    mocks.createClient.mockResolvedValue(accountSession("pending"));
+    const { service, from } = serviceDouble();
     mocks.createServiceClient.mockReturnValue(service);
-    mocks.capture.mockRejectedValue(
-      new Error(
-        'Google Ads query failed for 1234567890 (403): {"authorizationError":"USER_PERMISSION_DENIED"}',
-      ),
-    );
-
-    const response = await POST(request({ accountId: ACCOUNT_ID }));
-    const payload = (await response.json()) as {
-      ok?: boolean;
-      deferred?: boolean;
-      billingStart?: unknown;
-    };
-
-    expect(response.status).toBe(200);
-    expect(payload.ok).toBe(true);
-    expect(payload.deferred).toBe(true);
-    expect(payload.billingStart).toBeUndefined();
-    expect(mocks.rpc).not.toHaveBeenCalled();
-  });
-
-  it("still refuses an already-active account, naming the missing access", async () => {
-    mocks.createClient.mockResolvedValue(
-      session({
-        account: {
-          id: ACCOUNT_ID,
-          store_name: "Store",
-          google_ads_customer_id: "1234567890",
-          status: "active",
-        },
-      }),
-    );
-    const { service, from } = serviceWithBuilder();
-    mocks.createServiceClient.mockReturnValue(service);
-    mocks.capture.mockRejectedValue(
-      new Error("(403): USER_PERMISSION_DENIED"),
-    );
+    mocks.capture.mockRejectedValue(denied);
 
     const response = await POST(request({ accountId: ACCOUNT_ID }));
     const payload = (await response.json()) as { error?: string };
 
     expect(response.status).toBe(502);
-    expect(payload.error).toMatch(/grant the agency access/i);
+    expect(payload.error).toMatch(/1234567890/);
+    expect(payload.error).toMatch(/stays pending/i);
     expect(from).not.toHaveBeenCalled();
     expect(mocks.rpc).not.toHaveBeenCalled();
   });
 
+  it("tells an active account it stays connected, not pending", async () => {
+    mocks.createClient.mockResolvedValue(accountSession("active"));
+    const { service } = serviceDouble();
+    mocks.createServiceClient.mockReturnValue(service);
+    mocks.capture.mockRejectedValue(denied);
+
+    const response = await POST(request({ accountId: ACCOUNT_ID }));
+    const payload = (await response.json()) as { error?: string };
+
+    expect(response.status).toBe(502);
+    expect(payload.error).toMatch(/stays connected but unbilled/i);
+    expect(payload.error).not.toMatch(/stays pending/i);
+  });
+
+  it("turns a stuck request into a PENDING account and closes the request", async () => {
+    mocks.createClient.mockResolvedValue(requestSession());
+    const { service, calls } = serviceDouble();
+    mocks.createServiceClient.mockReturnValue(service);
+    mocks.capture.mockRejectedValue(denied);
+
+    const response = await POST(request({ requestId: REQUEST_ID }));
+    const payload = (await response.json()) as {
+      ok?: boolean;
+      deferred?: boolean;
+      message?: string;
+      account?: { status?: string };
+    };
+
+    expect(response.status).toBe(200);
+    expect(payload.ok).toBe(true);
+    expect(payload.deferred).toBe(true);
+    expect(payload.message).toMatch(/refused access/i);
+    expect(payload.account?.status).toBe("pending");
+    // The database rejects any other status without a committed billing start.
+    expect(calls.insertedInto).toEqual(["ad_accounts"]);
+    expect(calls.inserted[0]).toMatchObject({ status: "pending" });
+    // The request must actually be closed, or it reappears and the admin
+    // retries into a duplicate-key error.
+    expect(calls.approvedRequests).toEqual([{ status: "approved" }]);
+  });
+
+  it("reuses an existing store for the same customer id instead of duplicating it", async () => {
+    mocks.createClient.mockResolvedValue(requestSession());
+    const { service, calls } = serviceDouble({
+      existingAccount: { id: ACCOUNT_ID, store_name: "Existing", status: "pending" },
+    });
+    mocks.createServiceClient.mockReturnValue(service);
+    mocks.capture.mockRejectedValue(denied);
+
+    const response = await POST(request({ requestId: REQUEST_ID }));
+    const payload = (await response.json()) as { ok?: boolean; account?: { storeName?: string } };
+
+    expect(response.status).toBe(200);
+    expect(payload.ok).toBe(true);
+    expect(payload.account?.storeName).toBe("Existing");
+    expect(calls.selectedAccountBy).toContain("1234567890");
+    expect(calls.inserted).toEqual([]);
+    expect(calls.approvedRequests).toEqual([{ status: "approved" }]);
+  });
+
+  it("reports a half-finished acceptance instead of showing a success banner", async () => {
+    mocks.createClient.mockResolvedValue(requestSession());
+    const { service } = serviceDouble({ approveError: { message: "row locked" } });
+    mocks.createServiceClient.mockReturnValue(service);
+    mocks.capture.mockRejectedValue(denied);
+
+    const response = await POST(request({ requestId: REQUEST_ID }));
+    const payload = (await response.json()) as { ok?: boolean; error?: string };
+
+    expect(response.status).toBe(500);
+    expect(payload.ok).toBeUndefined();
+    expect(payload.error).toMatch(/could not be closed/i);
+    expect(payload.error).toMatch(/will not be duplicated/i);
+  });
+
   it("rejects a customer id Google says does not exist, accepting nothing", async () => {
-    mocks.createClient.mockResolvedValue(
-      session({
-        account: {
-          id: ACCOUNT_ID,
-          store_name: "Store",
-          google_ads_customer_id: "1234567890",
-          status: "pending",
-        },
-      }),
-    );
-    const { service, from } = serviceWithBuilder();
+    mocks.createClient.mockResolvedValue(accountSession("pending"));
+    const { service, from } = serviceDouble();
     mocks.createServiceClient.mockReturnValue(service);
     mocks.capture.mockRejectedValue(
       new Error('(401): {"authenticationError":"CUSTOMER_NOT_FOUND"}'),
@@ -382,4 +473,3 @@ describe("deferred acceptance when the agency has no Google access yet", () => {
     expect(mocks.rpc).not.toHaveBeenCalled();
   });
 });
-

@@ -147,7 +147,9 @@ export function ClientsManager({
   const [error, setError] = React.useState<string | null>(null);
   const [busy, setBusy] = React.useState<string | null>(null);
   const [receipt, setReceipt] = React.useState<BillingStartReceipt | null>(null);
-  const [deferredNote, setDeferredNote] = React.useState<string | null>(null);
+  const [deferredNote, setDeferredNote] = React.useState<
+    { storeName: string; message: string } | null
+  >(null);
   const [endReceipt, setEndReceipt] = React.useState<BillingEndReceipt | null>(null);
   const [endTarget, setEndTarget] = React.useState<BillingAccount | null>(null);
   const [endConfirmed, setEndConfirmed] = React.useState(false);
@@ -194,6 +196,7 @@ export function ClientsManager({
         | {
             error?: unknown;
             deferred?: unknown;
+            message?: unknown;
             account?: { storeName?: unknown };
             billingStart?: {
               googleAdsCustomerId?: unknown;
@@ -216,7 +219,13 @@ export function ClientsManager({
 
       const account = payload?.account;
       if (payload?.deferred === true && typeof account?.storeName === "string") {
-        setDeferredNote(account.storeName);
+        setDeferredNote({
+          storeName: account.storeName,
+          message:
+            typeof payload.message === "string"
+              ? payload.message
+              : "Google has not granted the agency access to this customer yet.",
+        });
         router.refresh();
         return;
       }
@@ -336,10 +345,11 @@ export function ClientsManager({
       {error && <FormAlert>{error}</FormAlert>}
       {deferredNote && (
         <FormAlert tone="success">
-          <span className="font-semibold">{deferredNote} connected.</span> Google has not granted
-          the agency access to this customer yet, so its opening counter is still pending: the
-          account stays out of agency billing until the baseline is captured. Grant the agency
-          access in Google Ads, then use Verify again from the tracking-gaps list below.
+          <span className="font-semibold">
+            {deferredNote.storeName} added to the platform.
+          </span>{" "}
+          {deferredNote.message} Until then the store stays pending: the client can see it, and it
+          is deliberately not billable without its opening Google counter.
         </FormAlert>
       )}
       {receipt && (
