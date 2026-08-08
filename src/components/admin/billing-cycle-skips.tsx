@@ -141,7 +141,10 @@ export function BillingCycleSkips({
             className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-base)] px-3 py-2 text-[13px] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-muted)] focus:border-[var(--accent-gold)]"
           />
           {open && (
-            <ul className="absolute z-20 mt-1 max-h-64 w-full overflow-y-auto rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-panel)] py-1 shadow-lg">
+            /* Upward: this control lives at the foot of the page, so a
+               downward list would stretch the document and push the whole
+               view into extra scroll for a menu. */
+            <ul className="absolute bottom-full z-20 mb-1 max-h-64 w-full overflow-y-auto rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-panel)] py-1 shadow-lg">
               {matches.length === 0 ? (
                 <li className="px-3 py-2 text-[12.5px] text-[var(--text-muted)]">
                   No client matches.
