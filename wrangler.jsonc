@@ -47,6 +47,10 @@
   },
   "assets": {
     "directory": ".open-next/assets",
-    "binding": "ASSETS"
+    "binding": "ASSETS",
+    // Cloudflare answers asset requests without waking the Worker, which would
+    // bypass the middleware that keeps the research corpus behind an admin
+    // session. These paths must reach the Worker first.
+    "run_worker_first": ["/research/*"]
   }
 }

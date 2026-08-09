@@ -14,7 +14,9 @@ export const dynamic = "force-dynamic";
 
 /**
  * Start a joint-scale market comparison — the one research action that spends
- * money. A cached combination is returned instead of being re-run.
+ * money. A cached combination is returned instead of being re-run, and the
+ * database row is claimed BEFORE Apify is called so two admins clicking at
+ * once cannot buy the same comparison twice.
  */
 export async function POST(request: NextRequest) {
   const { profile } = await getSessionProfile();
@@ -40,6 +42,7 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  const timeframe = typeof body.timeframe === "string" ? body.timeframe : undefined;
   const kws = (body.kws ?? {}) as Record<string, unknown>;
   const pairs: ComparePair[] = geos.map((geo) => ({
     geo,
@@ -57,14 +60,19 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const key = await cacheKey(id, geos);
+  const key = await cacheKey(id, geos, timeframe);
   const { data: cached } = await supabase
     .from("research_comparisons")
-    .select("status, payload")
+    .select("status, payload, run_id")
     .eq("key", key)
     .maybeSingle();
   if (cached?.status === "done" && cached.payload) {
     return NextResponse.json({ cached: true, result: cached.payload });
+  }
+  // Someone already paid for this exact comparison and it is still running:
+  // join their run rather than buying a second one.
+  if (cached?.status === "running" && cached.run_id) {
+    return NextResponse.json({ runId: cached.run_id }, { status: 202 });
   }
 
   const token = await readApifyToken();
@@ -75,35 +83,62 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  // Claim the combination BEFORE spending. The primary key makes this atomic:
+  // a racing request finds the row and joins the run instead of starting one.
+  const { data: claimed, error: claimError } = await supabase
+    .from("research_comparisons")
+    .insert({
+      key,
+      concept_id: id,
+      geos,
+      pairs,
+      status: "running",
+      created_by: profile.id,
+    })
+    .select("key")
+    .maybeSingle();
+  if (claimError) {
+    if (claimError.code === "23505") {
+      const { data: winner } = await supabase
+        .from("research_comparisons")
+        .select("run_id, status, payload")
+        .eq("key", key)
+        .maybeSingle();
+      if (winner?.status === "done" && winner.payload) {
+        return NextResponse.json({ cached: true, result: winner.payload });
+      }
+      if (winner?.run_id) {
+        return NextResponse.json({ runId: winner.run_id }, { status: 202 });
+      }
+    }
+    return NextResponse.json(
+      { error: `Could not claim the comparison: ${claimError.message}` },
+      { status: 500 },
+    );
+  }
+  if (!claimed) {
+    return NextResponse.json(
+      { error: "Could not claim the comparison; try again." },
+      { status: 500 },
+    );
+  }
+
   let started: { runId: string; url: string };
   try {
-    started = await startCompareRun(
-      pairs,
-      token,
-      typeof body.timeframe === "string" ? body.timeframe : undefined,
-    );
+    started = await startCompareRun(pairs, token, timeframe);
   } catch (error) {
+    // Nothing was spent, so the claim must not block a retry.
+    await supabase.from("research_comparisons").delete().eq("key", key);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Apify refused the run." },
       { status: 502 },
     );
   }
 
-  const { error: saveError } = await supabase.from("research_comparisons").upsert(
-    {
-      key,
-      concept_id: id,
-      geos,
-      run_id: started.runId,
-      pairs,
-      status: "running",
-      payload: null,
-      error: null,
-      created_by: profile.id,
-      updated_at: new Date().toISOString(),
-    },
-    { onConflict: "key" },
-  );
+  const { error: saveError } = await supabase
+    .from("research_comparisons")
+    .update({ run_id: started.runId, updated_at: new Date().toISOString() })
+    .eq("key", key);
   if (saveError) {
     // The run is already paid for; surface its id so nothing is silently lost.
     console.error("Could not record the comparison run:", saveError.message);

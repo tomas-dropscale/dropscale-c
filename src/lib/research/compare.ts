@@ -71,8 +71,14 @@ async function apify<T>(path: string, token: string, body?: unknown): Promise<T>
 }
 
 /** Stable cache identity: same concept and same markets, in any order. */
-export async function cacheKey(id: string, geos: string[]): Promise<string> {
-  const source = `${id}|${[...geos].sort().join(",")}`;
+export async function cacheKey(
+  id: string,
+  geos: string[],
+  timeframe?: string,
+): Promise<string> {
+  // The timeframe changes the paid query, so it changes the cache identity —
+  // without it, a five-year run would be served for a twelve-month request.
+  const source = `${id}|${[...geos].sort().join(",")}|${timeframe ?? TIMEFRAME_DEFAULT}`;
   const digest = await crypto.subtle.digest(
     "SHA-1",
     new TextEncoder().encode(source),

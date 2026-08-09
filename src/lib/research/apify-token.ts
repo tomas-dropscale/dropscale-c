@@ -14,18 +14,18 @@ export const APIFY_SECRET_KEY = "apify_token";
  * carries the token before anyone saves one in the dashboard.
  */
 export async function readApifyToken(): Promise<string | null> {
-  const fromEnv = process.env.APIFY_TOKEN?.trim();
-  if (fromEnv) return fromEnv;
-
+  // The saved token wins. The environment value is only a bootstrap for a
+  // deployment that has never had one saved — reading it first made the
+  // dashboard's "replace token" silently do nothing.
   const supabase = createServiceClient();
-  if (!supabase) return null;
+  if (!supabase) return process.env.APIFY_TOKEN?.trim() || null;
 
   const { data, error } = await supabase
     .from("app_secrets")
     .select("ciphertext")
     .eq("key", APIFY_SECRET_KEY)
     .maybeSingle();
-  if (error || !data?.ciphertext) return null;
+  if (error || !data?.ciphertext) return process.env.APIFY_TOKEN?.trim() || null;
 
   try {
     return await decryptToken(data.ciphertext);
@@ -33,7 +33,7 @@ export async function readApifyToken(): Promise<string | null> {
     // A token encrypted under a retired key is unusable, not a crash: the UI
     // reports "not configured" and the operator saves it again.
     console.error("The stored Apify token could not be decrypted.");
-    return null;
+    return process.env.APIFY_TOKEN?.trim() || null;
   }
 }
 
@@ -42,19 +42,21 @@ export async function fetchApifyTokenStatus(): Promise<{
   configured: boolean;
   hint: string | null;
 }> {
-  if (process.env.APIFY_TOKEN?.trim()) {
-    return { configured: true, hint: process.env.APIFY_TOKEN.trim().slice(-4) };
-  }
-
+  const envToken = process.env.APIFY_TOKEN?.trim();
   const supabase = createServiceClient();
-  if (!supabase) return { configured: false, hint: null };
-
-  const { data } = await supabase
-    .from("app_secrets")
-    .select("hint")
-    .eq("key", APIFY_SECRET_KEY)
-    .maybeSingle();
-  return { configured: Boolean(data), hint: data?.hint ?? null };
+  if (supabase) {
+    const { data } = await supabase
+      .from("app_secrets")
+      .select("hint")
+      .eq("key", APIFY_SECRET_KEY)
+      .maybeSingle();
+    // Mirrors readApifyToken's precedence, so the page never claims a token is
+    // in use that the comparison would not actually spend with.
+    if (data) return { configured: true, hint: data.hint ?? null };
+  }
+  return envToken
+    ? { configured: true, hint: envToken.slice(-4) }
+    : { configured: false, hint: null };
 }
 
 /** Encrypt and store a new token. Returns the hint the UI shows back. */
