@@ -5,6 +5,9 @@ import {
   BarChart3,
   BadgePercent,
   Clapperboard,
+  Globe2,
+  LineChart,
+  Scale,
   FileText,
   LayoutGrid,
   Receipt,
@@ -64,6 +67,25 @@ const NAV_GROUPS: Group[] = [
       { href: "/admin/analytics", icon: BarChart3, label: (d) => d.nav.analytics },
     ],
   },
+  {
+    // Demand research: what the market is searching for, before it shows up in
+    // anyone's ad account. Its own group because it answers a different
+    // question from every screen above — what to sell, not how the selling went.
+    label: (d) => d.nav.groupResearch,
+    items: [
+      { href: "/admin/research", icon: Globe2, label: (d) => d.nav.marketsOverview },
+      {
+        href: "/admin/research/keywords",
+        icon: LineChart,
+        label: (d) => d.nav.keywordsByMarket,
+      },
+      {
+        href: "/admin/research/compare",
+        icon: Scale,
+        label: (d) => d.nav.marketComparison,
+      },
+    ],
+  },
 ];
 
 /**
@@ -91,7 +113,11 @@ export function Sidebar({
   // "/admin" only lights up on an exact match, otherwise every nested
   // route would mark it active too. "/dashboard" never matches in here.
   const isActive = (href: string) =>
-    href === "/admin" ? pathname === href : pathname.startsWith(href);
+    // Parents of nested sections match exactly, or a child route would light
+    // up two entries at once.
+    href === "/admin" || href === "/admin/research"
+      ? pathname === href
+      : pathname.startsWith(href);
 
   // Counts live on the screen that clears them: approvals on Clients, unreviewed
   // submissions on Creatives.
