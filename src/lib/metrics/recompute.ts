@@ -410,12 +410,25 @@ export async function recomputeDailyMetrics(
           await syncAccountWindow(supabase, account, secrets.get(account.id), from, to);
           lastRunByAccount.set(account.id, Date.now());
         } catch (error) {
-          console.error(`daily_metrics recompute failed for ${account.id}:`, error);
+          // Name the failure: a bare stack told us an account had been
+          // failing for days without saying why, while its report read zero.
+          const described =
+            error instanceof Error
+              ? `${error.name}: ${error.message || "(no message)"}`
+              : String(error);
+          console.error(
+            `daily_metrics recompute failed for ${account.store_name} (${account.id}) — ${described}`,
+            error,
+          );
         }
       }),
     );
   } catch (error) {
-    console.error("daily_metrics recompute failed:", error);
+    const described =
+      error instanceof Error
+        ? `${error.name}: ${error.message || "(no message)"}`
+        : String(error);
+    console.error(`daily_metrics recompute failed — ${described}`, error);
   }
 }
 
