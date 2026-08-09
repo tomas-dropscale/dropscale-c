@@ -42,6 +42,16 @@ function celEpoca(r) {
     ((r.janelas || []).length > 1 ? `<span class="ep-mais" title="tem ${r.janelas.length} janelas">+${r.janelas.length - 1}</span>` : '');
   return '<span style="color:var(--muted)">—</span>';
 }
+const fmtN = (n) => n == null ? '—' : (n >= 1e6 ? (n / 1e6).toFixed(1).replace('.0', '') + 'M'
+                    : n >= 1e3 ? Math.round(n / 1e3) + 'k' : String(Math.round(n)));
+const fmtCpc = (lo, hi) => (lo == null && hi == null) ? '—'
+  : `$${(lo ?? hi).toFixed(2)}–${(hi ?? lo).toFixed(2)}`;
+const MES2N = { Jan: 1, Feb: 2, Mar: 3, Apr: 4, May: 5, Jun: 6, Jul: 7, Aug: 8, Sep: 9, Oct: 10, Nov: 11, Dec: 12 };
+const mesData = (s) => { const [m, y] = String(s).split(' '); return `${y}-${String(MES2N[m] || 1).padStart(2, '0')}-01`; };
+// Topo de eixo "bonito": 201k lê-se mal, 250k lê-se de relance.
+const nice = (v) => { if (!v || v <= 0) return 100;
+  const e = Math.pow(10, Math.floor(Math.log10(v))), f = v / e;
+  return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * e; };
 const $ = (s) => document.querySelector(s);
 // Dados vindos de scraping: uma keyword com < ou & parte a linha inteira. Escapa-se sempre.
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -66,17 +76,19 @@ function chart(el, series, opts = {}) {
   el.innerHTML = '';
   const live = series.filter((s) => s.points && s.points.length > 1);
   if (!live.length) { el.innerHTML = '<p class="empty">sem série para mostrar</p>'; return; }
-  const W = 1200, H = opts.h || 250, ml = 34, mr = 168, mt = 18, mb = 22;
+  const W = 1200, H = opts.h || 250, ml = opts.ml || 44, mr = opts.mr || 200, mt = 30, mb = 22;
   const iw = W - ml - mr, ih = H - mt - mb;
   let t0 = Infinity, t1 = -Infinity;
   for (const s of live) { t0 = Math.min(t0, T(s.points[0][0])); t1 = Math.max(t1, T(s.points[s.points.length - 1][0])); }
-  const X = (t) => ml + iw * (t - t0) / (t1 - t0), Y = (v) => mt + ih * (1 - v / 100);
+  const yMax = opts.yMax || 100;   // já vem arredondado por nice() quando é escala real
+  const X = (t) => ml + iw * (t - t0) / (t1 - t0), Y = (v) => mt + ih * (1 - v / yMax);
+  const fmtV = opts.fmt || ((v) => v);
   tip.style.display = 'none';                     // nunca sobreviver a um redesenho
   let sv = `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(opts.label || 'série')}">`;
-  for (const g of [0, 50, 100])
+  for (const g of [0, yMax / 2, yMax])
     sv += `<line x1="${ml}" y1="${Y(g)}" x2="${W - mr}" y2="${Y(g)}" stroke="var(--border)"/>` +
-          `<text x="${ml - 6}" y="${Y(g) + 4}" fill="var(--muted)" font-size="var(--fs-svg)" font-family="var(--mono)" text-anchor="end">${g}</text>`;
-  sv += `<text x="${ml}" y="${mt - 1}" fill="var(--muted)" font-size="var(--fs-svg)" font-family="var(--mono)">índice Google Trends · 100 = pico da própria série</text>`;
+          `<text x="${ml - 6}" y="${Y(g) + 4}" fill="var(--muted)" font-size="var(--fs-svg)" font-family="var(--mono)" text-anchor="end">${fmtV(g)}</text>`;
+  sv += `<text x="0" y="10" fill="var(--muted)" font-size="var(--fs-svg)" font-family="var(--mono)">${esc(opts.yTitle || 'índice Google Trends · 100 = pico da própria série')}</text>`;
   // divisórias de ano: dão a noção temporal sem legenda por baixo
   for (let y = new Date(t0).getUTCFullYear() + 1; y <= new Date(t1).getUTCFullYear(); y++) {
     const t = Date.UTC(y, 0, 1); if (t <= t0 || t >= t1) continue;
@@ -88,7 +100,7 @@ function chart(el, series, opts = {}) {
     sv += `<path d="${s.points.map((p, j) => `${j ? 'L' : 'M'}${X(T(p[0])).toFixed(1)},${Y(p[1]).toFixed(1)}`).join('')}" fill="none" stroke="${c}" stroke-width="2" stroke-linejoin="round"/>`;
   });
   // etiquetas diretas à direita: a identidade nunca depende só da cor
-  const fit = (t) => (t.length > 24 ? t.slice(0, 23) + '…' : t);
+  const fit = (t) => (t.length > 30 ? t.slice(0, 29) + '…' : t);
   const labs = live.map((s, i) => ({ t: fit(s.label), c: s.color || COLORS[i % COLORS.length], y: Y(s.points[s.points.length - 1][1]) + 4 }))
                    .sort((a, b) => a.y - b.y);
   // Duas passagens presas ao plot: só empurrar para baixo fazia as 6 séries que acabam
@@ -120,7 +132,7 @@ function chart(el, series, opts = {}) {
       v: at[i][date] !== undefined ? at[i][date] : null,   // ausência é "—", nunca zero
     })).sort((a, b) => (b.v ?? -1) - (a.v ?? -1));
     tip.innerHTML = `<div class="t-d">${fmtD(date)}</div>` + rows.map((r) =>
-      `<div class="t-r"><span class="sw" style="background:${r.c}"></span>${esc(r.l)}<b>${r.v ?? '—'}</b></div>`).join('');
+      `<div class="t-r"><span class="sw" style="background:${r.c}"></span>${esc(r.l)}<b>${r.v == null ? '—' : fmtV(r.v)}</b></div>`).join('');
     tip.style.display = 'block';
     const tw = tip.offsetWidth, th = tip.offsetHeight;
     tip.style.left = Math.min(e.clientX + 16, innerWidth - tw - 10) + 'px';
@@ -142,6 +154,21 @@ function openColFilter(btn, page) {
   inp.focus(); inp.select();
 }
 function closeColFilter() { $('#colfilter').classList.remove('on'); }
+
+/* Barras do intervalo de CPC por mercado. O Planner dá UM intervalo por keyword/mercado
+   (não uma série), por isso aqui não há eixo temporal — é uma comparação de níveis. */
+function barrasCpc(el, linhas) {
+  const vivos = linhas.filter((l) => l.cpcHigh != null);   // já vem ordenado por volume
+  if (!vivos.length) { el.innerHTML = '<p class="empty">sem CPC para este conceito</p>'; return; }
+  const max = Math.max(...vivos.map((l) => l.cpcHigh));
+  el.innerHTML = '<div class="bars">' + vivos.map((l) => {
+    const lo = ((l.cpcLow ?? 0) / max) * 100, hi = (l.cpcHigh / max) * 100;
+    return `<div class="bar"><span class="bl">${esc(l.geo)}</span>` +
+      `<span class="bt"><i style="left:${lo}%;width:${Math.max(hi - lo, 1.5)}%;background:${l.color}"></i></span>` +
+      `<span class="bv">${fmtCpc(l.cpcLow, l.cpcHigh)}</span>` +
+      `<span class="bx">${l.vol ? fmtN(l.vol) + '/mês' : ''}${l.comp ? ' · ' + esc(l.comp) : ''}</span></div>`;
+  }).join('') + '</div>';
+}
 
 /* ── tabela genérica com ordenação por coluna ── */
 function renderTable(tbl, cols, rows, sortKey, dir, onSort, onClick, selId) {
@@ -260,7 +287,7 @@ function renderKeywords() {
   const rows = S.idx.concepts
     .filter((c) => !cq || c.en.toLowerCase().includes(cq))
     .filter((c) => !q || c.en.toLowerCase().includes(q) || (c.category || '').toLowerCase().includes(q))
-    .map((c) => ({ ...c, _id: c.id, _label: `${c.en}, ${c.nActive} mercados com volume` }))
+    .map((c) => ({ ...c, _id: c.id, _label: `${c.en}, volume ${c.volTotal ?? '—'}` }))
     .sort((a, b) => {
       const va = a[S.sortK], vb = b[S.sortK];
       if (typeof va === 'string') return S.dirK * va.localeCompare(vb, 'pt');
@@ -273,23 +300,21 @@ function renderKeywords() {
     [S.idx.concepts.filter((c) => c.nActive >= 10).length, 'com volume em 10+ mercados', 'good'],
     [S.idx.concepts.filter((c) => c.hot.length).length, 'a disparar/aquecer nalgum mercado', 'warn'],
   ].map(([v, l, cls]) => `<div class="kpi ${cls}"><div class="v">${v}</div><div class="l">${l}</div></div>`).join('');
-  $('#note-keywords').innerHTML = 'Cada linha é um conceito; as etiquetas à direita são os mercados onde tem procura real (índice ≥ 8) — ' +
-    'se aparecerem todos, é porque tem procura em todos. <strong style="color:var(--muted-bright)">Clica</strong> para comparar os 5 anos de todos os mercados no mesmo gráfico. ' +
-    '<strong style="color:var(--muted-bright)">Atenção às duas escalas:</strong> as colunas de índice medem procura SUSTENTADA (0–70 na prática); ' +
-    'o gráfico mostra o índice cru do Google Trends, em que cada série toca 100 no seu próprio pico. Por isso um conceito com índice 66,8 aparece a chegar a 100 no gráfico — são medidas diferentes.';
+  $('#note-keywords').innerHTML = 'Volume e CPC vêm do <strong style="color:var(--muted-bright)">Keyword Planner</strong> — são pesquisas por mês reais e o lance no topo da página, em USD. ' +
+    'As etiquetas são os 3 maiores mercados: <strong style="color:var(--muted-bright)">passa o rato</strong> para veres volume, CPC e concorrência. ' +
+    '<strong style="color:var(--muted-bright)">Clica na linha</strong> e o gráfico abre com duas tabs: <em>Tendência</em> (5 anos do Trends, para ver a forma e a sazonalidade de cada país) e <em>Volume real</em> (12 meses em pesquisas absolutas, a única escala verdadeiramente comparável entre mercados).';
   renderTable($('#tbl-keywords'), [
     { k: 'en', t: 'Keyword (EN)', cls: 'kw', find: true, f: (r) => esc(r.en) + (r.core ? ' <span class="flagbv">core</span>' : '') },
     { k: 'category', t: 'Categoria', cls: 'cat', f: (r) => esc(r.category) },
-    { k: 'nActive', t: 'Mercados', num: true, title: 'mercados com volume real (índice ≥ 8)', f: (r) => `${r.nActive}/${r.nMarkets}` },
-    { k: 'avgVolume', t: 'Vol. médio', num: true, title: 'volume sustentado médio nos mercados com dados', f: (r) => num(r.avgVolume, 1) },
-    { k: 'maxVolume', t: 'Vol. sus.', num: true, title: 'volume sustentado do melhor mercado — NÃO é o pico da série (o gráfico usa a escala crua do Trends, onde cada série toca 100 no seu pico)',
-      f: (r) => num(r.maxVolume, 1) },
-    { k: 'active', t: 'Onde tem volume', f: (r) => r.active.length
-        ? r.active.slice(0, 14).map((a) => {
-            const hot = r.hot.includes(a.geo);
-            return `<span class="tag${hot ? (a.status === 'disparado' ? ' hot' : ' warm') : ''}">${a.geo}<b>${num(a.volume)}</b></span>`;
-          }).join('') + (r.active.length > 14 ? `<span class="tag">+${r.active.length - 14}</span>` : '')
-        : '<span style="color:var(--muted)">— sem volume em nenhum mercado</span>' },
+    { k: 'volTotal', t: 'Volume total', num: true, title: 'pesquisas/mês somadas nos mercados com dados (Keyword Planner)',
+      f: (r) => r.volTotal == null ? '—' : `<b style="color:var(--text)">${fmtN(r.volTotal)}</b>` },
+    { k: 'cpcMed', t: 'CPC mediano', num: true, title: 'mediana do lance no topo da página (limite alto), em USD',
+      f: (r) => r.cpcMed == null ? '—' : `$${r.cpcMed.toFixed(2)}` },
+    { k: 'nActive', t: 'Mercados', num: true, title: 'mercados com procura medida', f: (r) => `${r.nActive}/${r.nMarkets}` },
+    { k: 'bestVol', t: 'Top 3 mercados', title: 'os 3 maiores por volume — passa o rato para ver volume e CPC',
+      f: (r) => (r.top3 || []).length
+        ? r.top3.map((t) => `<span class="tag t3" title="${esc(t.geo)} · ${fmtN(t.vol)} pesquisas/mês · CPC ${fmtCpc(t.cpcLow, t.cpcHigh)}${t.comp ? ' · concorrência ' + esc(t.comp) : ''}">${esc(t.geo)}<b>${fmtN(t.vol)}</b></span>`).join('')
+        : '<span style="color:var(--muted)">—</span>' },
   ], rows, S.sortK, S.dirK,
     (k) => { S.dirK = (S.sortK === k) ? -S.dirK : -1; S.sortK = k; renderKeywords(); },
     (id, tr) => openConcept(id, tr));
@@ -308,19 +333,37 @@ async function openConcept(id, tr) {
   if (!S.on.size) S.on = new Set(c.markets.slice(0, MAXSERIES).map((m) => m.geo));
   $('#detail').classList.add('on');
   $('#d-title').textContent = c.en;
-  $('#d-sub').innerHTML = `${c.category} · ${c.markets.length} mercados com dados · cada série normalizada à sua própria escala — compara a <em>forma</em>, não o nível · máx ${MAXSERIES} séries visíveis`;
+  $('#d-sub').innerHTML = `${esc(c.category)} · ${c.markets.length} mercados com dados · máx ${MAXSERIES} séries visíveis` +
+    (c.volTotal ? ` · <strong style="color:var(--muted-bright)">${fmtN(c.volTotal)}</strong> pesquisas/mês no total` : '') +
+    (c.cpcMed ? ` · CPC mediano $${c.cpcMed.toFixed(2)}` : '');
   $('#d-rising').innerHTML = '';
+  S.tab = S.tab || 'trend';
   drawConcept();
 }
+const TABS = [
+  ['trend', 'Tendência', '5 anos · forma e sazonalidade (índice do Trends, cada série normalizada a si própria)'],
+  ['vol', 'Volume', '12 meses · pesquisas por mês reais — a única escala comparável entre mercados'],
+  ['cpc', 'CPC', 'intervalo do lance no topo da página, por mercado (USD)'],
+  ['ratio', 'Volume por $', 'pesquisas por mês ÷ CPC — procura alcançável por dólar gasto'],
+];
 function drawConcept() {
   const c = S.concept; if (!c) return;
   const colorOf = {}; [...S.on].forEach((g, i) => colorOf[g] = COLORS[i % COLORS.length]);
+  // Uma só ordem em todas as tabs — volume real, com a persistência como desempate
+  // para os mercados sem dados do Planner. A posição de um mercado não muda ao trocar de
+  // tab: só muda o que a barra/linha mostra.
+  c.markets.sort((a, b) => (b.vol ?? -1) - (a.vol ?? -1) || (b.volume ?? -1) - (a.volume ?? -1));
+  // A pastilha mostra a métrica da TAB aberta — mostrar persistência enquanto o gráfico
+  // fala de volume era o caminho mais curto para uma leitura errada.
+  const metrica = (m) => S.tab === 'cpc' ? (m.cpcHigh ? `$${m.cpcHigh.toFixed(2)}` : '—')
+    : S.tab === 'trend' ? num(m.volume)
+    : (m.vol ? fmtN(m.vol) : '—');
   $('#d-legend').innerHTML = c.markets.map((m) => {
     const on = S.on.has(m.geo);
     return `<button type="button" class="lg" data-geo="${esc(m.geo)}" data-on="${on}" ` +
-      `aria-pressed="${on}" title="${esc(m.kw)}">` +
+      `aria-pressed="${on}" title="${esc(m.kw)}${m.vol ? ` · ${fmtN(m.vol)}/mês` : ''}${m.cpcHigh ? ` · CPC ${fmtCpc(m.cpcLow, m.cpcHigh)}` : ''}">` +
       `<span class="sw" style="background:${on ? colorOf[m.geo] : 'var(--idle)'}"></span>${esc(m.geo)}` +
-      `<span class="vol">${num(m.volume)}</span></button>`;
+      `<span class="vol">${metrica(m)}</span></button>`;
   }).join('');
   $('#d-legend').querySelectorAll('.lg').forEach((el) => el.addEventListener('click', () => {
     const g = el.dataset.geo;
@@ -328,9 +371,45 @@ function drawConcept() {
     else { if (S.on.size >= MAXSERIES) { el.animate([{ opacity: .3 }, { opacity: 1 }], 260); return; } S.on.add(g); }
     drawConcept();
   }));
-  const series = c.markets.filter((m) => S.on.has(m.geo))
-    .map((m) => ({ label: `${m.geo} · ${m.kw}`, points: m.series, color: colorOf[m.geo] }));   // esc no render
-  chart($('#d-chart'), series, { h: 260, label: c.en });
+  const sel = c.markets.filter((m) => S.on.has(m.geo));
+  const rot = (m) => S.tab === 'trend'
+    ? `${m.geo} · ${m.kw}${m.vol ? ` · ${fmtN(m.vol)}` : ''}`
+    : `${m.geo} · ${fmtN(m.vol)}${m.cpcHigh ? ` · $${m.cpcHigh.toFixed(2)}` : ''}`;
+  const el = $('#d-chart');
+  el.innerHTML = `<div class="ctabs">${TABS.map(([k, t, d]) =>
+    `<button type="button" class="ctab" data-t="${k}" aria-pressed="${S.tab === k}" title="${esc(d)}">${t}</button>`).join('')}` +
+    `<span class="ctab-help">${esc((TABS.find((x) => x[0] === S.tab) || TABS[0])[2])}</span></div><div id="d-canvas"></div>`;
+  el.querySelectorAll('.ctab').forEach((b) => b.addEventListener('click', () => {
+    S.tab = b.dataset.t;
+    history.replaceState(null, '', `#keywords/${S.concept.id}/${S.tab}`);
+    drawConcept();
+  }));
+  const cv = $('#d-canvas');
+
+  if (S.tab === 'cpc') {
+    barrasCpc(cv, sel.map((m) => ({ geo: m.geo, vol: m.vol, cpcLow: m.cpcLow, cpcHigh: m.cpcHigh,
+                                    comp: m.comp, color: colorOf[m.geo] })));
+    return;
+  }
+  if (S.tab === 'trend') {
+    chart(cv, sel.map((m) => ({ label: rot(m), points: m.series, color: colorOf[m.geo] })),
+      { h: 250, label: c.en, ml: 34 });
+    return;
+  }
+  // Volume e Volume por $: os 12 meses do Planner, em pesquisas ABSOLUTAS
+  const ratio = S.tab === 'ratio';
+  const series = sel.map((m) => ({
+    label: rot(m), color: colorOf[m.geo],
+    points: (m.meses || []).filter((x) => x.n != null)
+      .map((x) => [mesData(x.m), ratio ? (m.cpcHigh ? x.n / m.cpcHigh : null) : x.n])
+      .filter((p) => p[1] != null),
+  })).filter((x) => x.points.length > 1);
+  if (!series.length) { cv.innerHTML = '<p class="empty">sem dados do Keyword Planner para estes mercados</p>'; return; }
+  const max = Math.max(...series.flatMap((x) => x.points.map((p) => p[1])));
+  chart(cv, series, { h: 250, label: c.en, yMax: nice(max),
+    fmt: (v) => ratio ? Math.round(v).toLocaleString('pt-PT') : fmtN(v),
+    yTitle: ratio ? 'pesquisas/mês ÷ CPC — procura por dólar (o CPC é anual, logo a forma é a do volume; o que muda é a ORDEM entre mercados)'
+                  : 'pesquisas por mês (Keyword Planner) — absolutas e comparáveis entre mercados' });
 }
 
 /* ── vista 3: Market Comparison ──
@@ -345,7 +424,6 @@ function renderCompare() {
   // Duas condições: o CONCEITO é de uma palavra (senão a lista mente ao prometer
   // "uma só palavra") E há pelo menos 2 mercados cujo termo local também é.
   const list = S.idx.concepts
-    .filter((c) => !c.en.trim().includes(' '))
     .filter((c) => (c.cmp || []).length >= 2)
     .filter((c) => !q || c.en.toLowerCase().includes(q) || (c.category || '').toLowerCase().includes(q))
     .slice(0, 300);
@@ -389,7 +467,8 @@ function renderCompare() {
   $('#cmp-go').textContent = S.cmp.busy ? 'a correr no Google Trends…' : `Correr comparação${n ? ` (${n} mercados)` : ''}`;
   $('#cmp-cost').textContent = !c ? '' : n < 2 ? 'escolhe pelo menos 2 mercados'
     : 'compra dados novos ao Google · ~$0.05 · fica em cache';
-  $('#note-compare').innerHTML = 'Aqui só aparecem conceitos e mercados cujo termo local seja de <strong style="color:var(--muted-bright)">uma só palavra</strong>: com termos de várias palavras o Google devolve vazio e a tentativa é cobrada à mesma (medido em 5 corridas). ' +
+  $('#note-compare').innerHTML = 'A comparação usa a <strong style="color:var(--muted-bright)">forma curta</strong> de cada termo local (<em>gabardina</em>, não <em>gabardina mujer</em>): é a única que o modo de comparação do Trends aceita — com várias palavras devolve vazio e cobra à mesma. ' +
+    'Sem o modificador de género mede-se procura <strong style="color:var(--muted-bright)">unissexo</strong>, o que aqui é até mais consistente entre países. ' +
     'As outras vistas usam dados guardados, em que <strong style="color:var(--muted-bright)">cada série é normalizada à sua própria escala</strong> — por isso mostram forma e timing, nunca qual é maior. ' +
     'Aqui corre-se uma pesquisa nova no modo de <strong style="color:var(--muted-bright)">comparação</strong> do Google Trends, que devolve até 5 mercados na <strong style="color:var(--muted-bright)">mesma escala</strong>: o resultado é comparável de verdade. ' +
     'É a única parte da ferramenta que gasta dinheiro (~$0.05 por consulta) e cada combinação fica guardada — repetir é grátis.';
@@ -403,7 +482,8 @@ async function runCompare() {
   res.innerHTML = `<div class="cmp-card"><h3>${esc(c.en)}</h3><div class="cmp-meta">a pedir ${geos.join(', ')} ao Google Trends… demora 1-3 minutos</div></div>`;
   try {
     const conc = await getJSON(`/research/data/concept/${c.id}.json`);
-    const kws = Object.fromEntries(conc.markets.filter((m) => geos.includes(m.geo)).map((m) => [m.geo, m.kw]));
+    // forma curta (uma palavra): é a única que o modo de comparação do Trends aceita
+    const kws = Object.fromEntries(conc.markets.filter((m) => geos.includes(m.geo)).map((m) => [m.geo, m.cmpKw || m.kw]));
     const r = await fetch('/api/admin/research/compare/start', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id: c.id, geos, kws }) });
     const j = await r.json();
@@ -504,6 +584,7 @@ const getJSON = async (u) => {   // falhar alto: um 404 silencioso deixava a cas
   // carrega a seguir e não pode invalidar o conceito — daí o loadMarket ficar no fim.
   loadMarket(geo0);   // arranca ANTES do await: assim não pode ultrapassar uma escolha
   if (hash[0] === 'keywords' && hash[1]) {              // de mercado feita entretanto
+    if (hash[2]) S.tab = hash[2];    // #keywords/<id>/<tab> abre logo na vista pedida
     await openConcept(hash[1], document.querySelector(`#tbl-keywords tbody tr[data-id="${CSS.escape(hash[1])}"]`));
   }
 })();

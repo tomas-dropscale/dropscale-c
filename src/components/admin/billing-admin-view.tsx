@@ -999,36 +999,42 @@ export function BillingAdminView({
           aria-label="Restated after invoicing"
         >
           <h2 className="text-[15px] font-semibold text-[var(--text-primary)]">
-            Google restated {dashboard.restatements.length}{" "}
-            {dashboard.restatements.length === 1 ? "day" : "days"} after invoicing
+            Google revised {dashboard.restatements.length}{" "}
+            {dashboard.restatements.length === 1 ? "settlement" : "settlements"} after
+            invoicing
           </h2>
           <p className="mt-1 max-w-3xl text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
-            These days now report more spend than the invoice that settled them.
-            An invoice is immutable and each ledger row is consumed once, so the
-            fee on the difference will not be billed on its own — decide whether
-            to charge it separately.
+            Google now reports more spend for days these invoices already
+            settled. An invoice is immutable and each ledger row is consumed
+            once, so the fee on the difference will not be billed on its own.
+            The figure is the net movement in reported spend, not the fee — that
+            depends on the invoice&apos;s own boundaries and sealed rate.
           </p>
           <ul className="mt-3 space-y-1.5">
-            {dashboard.restatements.map((row) => (
-              <li
-                key={`${row.clientName}-${row.storeName}-${row.day}`}
-                className="flex items-center justify-between gap-3 text-[12.5px]"
-              >
-                <span className="min-w-0 truncate text-[var(--text-primary)]">
-                  {row.clientName}
-                  <span className="ml-2 text-[11.5px] text-[var(--text-muted)]">
-                    {row.storeName} · {shortDate(row.day, intl)}
+            {dashboard.restatements.map((row) => {
+              const client = dashboard.positions.clients.find(
+                (position) => position.clientId === row.clientId,
+              );
+              return (
+                <li
+                  key={row.invoiceId}
+                  className="flex items-center justify-between gap-3 text-[12.5px]"
+                >
+                  <span className="min-w-0 truncate text-[var(--text-primary)]">
+                    {client?.clientName ?? "Unknown client"}
+                    <span className="ml-2 text-[11.5px] text-[var(--text-muted)]">
+                      {row.stores} · {row.days}{" "}
+                      {row.days === 1 ? "day" : "days"} between{" "}
+                      {shortDate(row.firstDay, intl)} and{" "}
+                      {shortDate(row.lastDay, intl)}
+                    </span>
                   </span>
-                </span>
-                <span className="shrink-0 tabular-nums text-[var(--text-secondary)]">
-                  {money(row.invoicedGross, intl, dashboard.currency)} →{" "}
-                  {money(row.currentGross, intl, dashboard.currency)}
-                  <span className="ml-2 font-medium text-[var(--warning-orange)]">
-                    +{money(row.delta, intl, dashboard.currency)} spend
+                  <span className="shrink-0 font-medium text-[var(--warning-orange)] tabular-nums">
+                    +{money(row.delta, intl, dashboard.currency)} reported spend
                   </span>
-                </span>
-              </li>
-            ))}
+                </li>
+              );
+            })}
           </ul>
         </section>
       )}

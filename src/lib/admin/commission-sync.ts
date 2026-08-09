@@ -18,7 +18,7 @@ import {
   REV_SHARE_NOTE_PREFIX,
 } from "@/lib/finance/config";
 import {
-  backfilledWindowStart,
+  backfilledWindow,
   billableGoogleSpendWindow,
   manualReferralRateForDate,
   matchesAuthoritativeGoogleSpend,
@@ -453,21 +453,20 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
     // Earliest day already proven by a completed window, per account. A day
     // before this and at or after the immutable start has never been asked of
     // Google, and the rolling window alone would never ask again.
-    const coveredFromByAccount = new Map<string, string>();
+    const coveredByAccount = new Map<string, { from: string; to: string }[]>();
     // An exact-period sync states its own window, so coverage is irrelevant to
     // it — and asking would spend a request the certification run does not need.
     if (!opts?.period) {
       const { data: coveredRows, error: coveredError } = await supabase
         .from("google_ledger_sync_windows")
-        .select("ad_account_id, period_start")
+        .select("ad_account_id, period_start, period_end")
         .eq("status", "complete")
         .in("ad_account_id", syncTargets.map((account) => account.id));
       if (coveredError) throw coveredError;
       for (const row of coveredRows ?? []) {
-        const current = coveredFromByAccount.get(row.ad_account_id);
-        if (!current || row.period_start < current) {
-          coveredFromByAccount.set(row.ad_account_id, row.period_start);
-        }
+        const spans = coveredByAccount.get(row.ad_account_id) ?? [];
+        spans.push({ from: row.period_start, to: row.period_end });
+        coveredByAccount.set(row.ad_account_id, spans);
       }
     }
 
@@ -547,15 +546,23 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
           // Monday/Sunday labels, but are not certifiable until local Monday.
           const runStartedAt = new Date();
           const localToday = googleLocalDate(runStartedAt, start.google_time_zone);
-          const to = opts?.period?.end ?? localToday;
+          let to = opts?.period?.end ?? localToday;
           let from = opts?.period?.start ?? addIsoDays(to, -(SPEND_WINDOW_DAYS - 1));
           if (!opts?.period) {
-            from = backfilledWindowStart({
+            const window = backfilledWindow({
               rollingFrom: from,
-              coveredFrom: coveredFromByAccount.get(account.id),
+              rollingTo: to,
+              covered: coveredByAccount.get(account.id),
               billingStart: start.google_local_date,
               maxBackfillDays: BACKFILL_DAYS_PER_RUN,
             });
+            from = window.from;
+            to = window.to;
+            if (window.backfilling) {
+              console.log(
+                `Ledger backfill for ${account.store_name}: reading ${from} to ${to}.`,
+              );
+            }
           }
           // A closed account has no evidence in a wholly later window. Keeping
           // it out of the marker table also keeps hourly syncs from touching

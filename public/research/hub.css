@@ -9,8 +9,6 @@
   --live:var(--accent-gold); --focus:var(--accent-gold); --focus-bright:var(--accent-gold-strong);
   --good:var(--success-green); --warn:var(--warning-orange); --bad:var(--danger-red);
   --idle:var(--text-muted);
-  /* Six series colours led by the brand gold; six and no more, past that the
-     eye stops separating them. */
   --c1:#d4a86a; --c2:#6fae7a; --c3:#d98d54; --c4:#a98cd9; --c5:#c46a5f; --c6:#5fa8b8;
   --wash-sky:rgba(212,168,106,.12);  --wash-good:rgba(111,174,122,.12);
   --wash-warn:rgba(217,141,84,.12);  --wash-bad:rgba(196,106,95,.12);
@@ -272,3 +270,20 @@
 .research-hub .tend{font-size:var(--fs-meta)}
 .research-hub .t-cresce{color:var(--live)} .t-cai{color:var(--bad)} .t-estavel{color:var(--muted)}
 .research-hub .cmp-fora{width:100%;margin-top:6px;font:400 var(--fs-meta)/16px var(--mono);color:var(--muted)}
+
+/* ── tabs internas do gráfico ── */
+.research-hub .ctabs{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:2px 0 8px}
+.research-hub .ctab{height:24px;padding:0 11px;border:1px solid var(--border);border-radius:var(--r-sm);background:none;
+  color:var(--muted-bright);font:500 var(--fs-meta)/1 var(--mono);cursor:pointer}
+.research-hub .ctab:hover{border-color:var(--control-border);color:var(--text)}
+.research-hub .ctab[aria-pressed="true"]{color:var(--text);border-color:var(--focus);background:var(--wash-sky)}
+.research-hub .ctab-help{font:400 var(--fs-meta)/16px var(--sans);color:var(--muted);margin-left:6px}
+/* barras de CPC: o dado é o intervalo, por isso a barra é um segmento e não uma coluna */
+.research-hub .bars{display:flex;flex-direction:column;gap:5px;padding:4px 0}
+.research-hub .bar{display:flex;align-items:center;gap:10px;font:400 var(--fs-tbl)/18px var(--mono)}
+.research-hub .bar .bl{width:34px;color:var(--text);font-weight:600}
+.research-hub .bar .bt{position:relative;flex:1;height:8px;border-radius:4px;background:var(--panel-2)}
+.research-hub .bar .bt i{position:absolute;top:0;height:100%;border-radius:4px;display:block}
+.research-hub .bar .bv{width:104px;text-align:right;color:var(--muted-bright)}
+.research-hub .bar .bx{width:150px;color:var(--muted);font-size:var(--fs-meta)}
+.research-hub .tag.t3{cursor:help}

@@ -179,40 +179,93 @@ export type BillableGoogleSpendDay = {
 };
 
 /** Clip a Google window to the immutable start and apply its same-day counter. */
+export type CoveredWindow = { from: string; to: string };
+
+/** Merge overlapping or touching proven windows into ordered, disjoint spans. */
+function mergeCovered(windows: CoveredWindow[]): CoveredWindow[] {
+  const sorted = [...windows]
+    .filter((window) => window.from <= window.to)
+    .sort((left, right) => left.from.localeCompare(right.from));
+  const merged: CoveredWindow[] = [];
+  for (const window of sorted) {
+    const last = merged[merged.length - 1];
+    // Touching counts as continuous: [1..7] and [8..14] leave no unread day.
+    if (last && window.from <= addIsoDays(last.to, 1)) {
+      if (window.to > last.to) last.to = window.to;
+      continue;
+    }
+    merged.push({ ...window });
+  }
+  return merged;
+}
+
+/** Whole days between two ISO dates, left inclusive. */
+function daysBetween(from: string, to: string): number {
+  return Math.round(
+    (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000,
+  );
+}
+
 /**
- * Where a routine sync should start reading, given the rolling healing window
- * and what has actually been proven so far.
+ * The window a routine sync should actually read.
  *
- * The rolling window alone only ever asked for the last few days, so any day
+ * The rolling window alone only ever asked for the last few days, so a day
  * already older than it when the first successful sync ran was never requested
  * again — an account onboarded a week before its first sync silently lost that
- * week. This reaches back towards the immutable start while uncovered days
- * remain, bounded per run so a long gap heals across several runs instead of
- * one oversized request.
+ * week. Coverage is therefore computed from the PROVEN windows, merged: the
+ * earliest completed window's start says nothing about a hole in the middle of
+ * the covered range, and treating it as proof let such a hole survive forever.
+ *
+ * A gap that fits the per-run budget is folded into the ordinary window, so the
+ * common onboarding case heals in one run without losing today's numbers. A
+ * longer gap is read as its own older chunk instead: the frontier then advances
+ * by a whole budget each run, which is what actually converges — anchoring the
+ * floor to "today minus the budget" moved forward with the calendar and never
+ * reached the missing days at all.
  */
-export function backfilledWindowStart(input: {
+export function backfilledWindow(input: {
   /** Start of the ordinary rolling window (today minus the healing days). */
   rollingFrom: string;
-  /** Earliest day already proven by a completed window, if any. */
-  coveredFrom?: string | null;
-  /** The account's immutable billing start; nothing before it is ever billable. */
+  /** End of the ordinary rolling window, normally the account's local today. */
+  rollingTo: string;
+  /** Windows already proven complete for this account. */
+  covered?: CoveredWindow[];
+  /** The account's immutable billing start; nothing before it is billable. */
   billingStart: string;
   maxBackfillDays: number;
-}): string {
-  const { rollingFrom, coveredFrom, billingStart, maxBackfillDays } = input;
-  if (!Number.isSafeInteger(maxBackfillDays) || maxBackfillDays < 0) {
-    throw new RangeError("The backfill budget must be a whole number of days.");
+}): { from: string; to: string; backfilling: boolean } {
+  const { rollingFrom, rollingTo, covered = [], billingStart, maxBackfillDays } = input;
+  if (!Number.isSafeInteger(maxBackfillDays) || maxBackfillDays < 1) {
+    throw new RangeError("The backfill budget must be a positive whole number of days.");
   }
-  // Days before this are already proven; with nothing proven, only the
-  // rolling window can be assumed.
-  const provenFrom = coveredFrom ?? rollingFrom;
-  // Coverage already reaches the immutable start: there is no billable hole.
-  if (provenFrom <= billingStart) return rollingFrom;
-  // Nothing billable is older than the start, and the rolling window already
-  // covers everything after it.
-  if (billingStart >= rollingFrom) return rollingFrom;
-  const floor = addIsoDays(rollingFrom, -maxBackfillDays);
-  return billingStart > floor ? billingStart : floor;
+  const rolling = { from: rollingFrom, to: rollingTo, backfilling: false };
+  // Nothing before the start is billable, and the rolling window already holds
+  // everything after it.
+  if (billingStart >= rollingFrom) return rolling;
+
+  // The first billable day no proven window covers.
+  let day = billingStart;
+  for (const span of mergeCovered(covered)) {
+    if (span.to < day) continue;
+    if (span.from > day) break;
+    day = addIsoDays(span.to, 1);
+  }
+  if (day >= rollingFrom) return rolling;
+
+  if (daysBetween(day, rollingFrom) <= maxBackfillDays) {
+    // Small hole: widen the ordinary window so today still gets refreshed.
+    return { from: day, to: rollingTo, backfilling: true };
+  }
+
+  // Long hole: read one older chunk. Recent days are refreshed by the other
+  // runs of the day, and each run moves the frontier a whole budget forward.
+  const chunkEnd = addIsoDays(day, maxBackfillDays - 1);
+  const stopBefore = addIsoDays(rollingFrom, -1);
+  return {
+    from: day,
+    to: chunkEnd < stopBefore ? chunkEnd : stopBefore,
+    backfilling: true,
+  };
 }
 
 export function billableGoogleSpendWindow(

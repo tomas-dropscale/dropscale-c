@@ -276,11 +276,15 @@ export type BillingCycleSkipRow = {
  * counted and shown, and the team decides whether to bill the difference.
  */
 export type BillingRestatement = {
-  clientName: string;
-  storeName: string;
-  day: string;
-  invoicedGross: number;
-  currentGross: number;
+  invoiceId: string;
+  clientId: string;
+  /** Every store whose days moved inside this one settlement. */
+  stores: string;
+  /** How many of the invoice's days moved, in either direction. */
+  days: number;
+  firstDay: string;
+  lastDay: string;
+  /** NET movement in Google's raw reported spend, euros. Positive only. */
   delta: number;
 };
 
@@ -2269,52 +2273,99 @@ export async function fetchAdminInvoiceRecord(): Promise<
 }
 
 /**
- * Invoiced days whose Google value has moved since. Only upward moves are
- * reported: those are unbilled fee. A downward revision means the client was
- * charged on the evidence of the day, which the immutable invoice already
- * settles.
+ * Invoices whose Google evidence has moved since they were issued.
+ *
+ * An invoice is immutable and each ledger row is consumed once, so a net
+ * upward revision is fee the agency earned and will never bill by itself. Two
+ * disciplines matter here: the scan must be COMPLETE — a silent slice would
+ * hide money as the ledger grows — and the movement must be NETTED per
+ * invoice, because a day up three euros beside a day down three euros is not
+ * an underbill.
+ *
+ * What is reported is the movement in Google's raw reported spend, not a fee:
+ * the fee depends on that invoice's boundaries and sealed rate, so naming a
+ * euro amount of fee here would be a guess. It points a human at the invoice.
  */
 async function fetchBillingRestatements(
   supabase: Supabase,
 ): Promise<BillingRestatement[]> {
-  const { data, error } = await supabase
-    .from("invoice_commission_rows")
-    .select(
-      "gross_amount, commissions!inner(occurred_on, gross_amount, ad_accounts!inner(store_name, portal_clients!inner(full_name)))",
-    )
-    .limit(500);
-  if (error) {
-    // A reporting extra must never take the whole billing page down with it.
-    console.error("Could not load billing restatements:", error.message);
-    return [];
-  }
-
   type Row = {
+    invoice_id: string;
+    commission_id: string;
     gross_amount: string | number;
     commissions: {
       occurred_on: string;
       gross_amount: string | number;
-      ad_accounts: {
-        store_name: string;
-        portal_clients: { full_name: string };
-      };
-    };
+      ad_accounts: { store_name: string; client_id: string } | null;
+    } | null;
   };
 
-  return ((data ?? []) as unknown as Row[])
-    .map((row) => {
-      const invoicedGross = round2(Number(row.gross_amount));
-      const currentGross = round2(Number(row.commissions.gross_amount));
-      return {
-        clientName: row.commissions.ad_accounts.portal_clients.full_name,
-        storeName: row.commissions.ad_accounts.store_name,
-        day: row.commissions.occurred_on,
-        invoicedGross,
-        currentGross,
-        delta: round2(currentGross - invoicedGross),
-      };
-    })
-    .filter((row) => row.delta >= 0.01)
+  const rows: Row[] = [];
+  const pageSize = 1_000;
+  let afterId: string | null = null;
+  // Paginate deterministically: an exception monitor that quietly stops at a
+  // page boundary is worse than no monitor at all.
+  for (;;) {
+    let query = supabase
+      .from("invoice_commission_rows")
+      .select(
+        "invoice_id, commission_id, gross_amount, commissions!inner(occurred_on, gross_amount, ad_accounts!inner(store_name, client_id))",
+      )
+      .order("commission_id", { ascending: true })
+      .limit(pageSize);
+    if (afterId) query = query.gt("commission_id", afterId);
+    const { data, error } = await query;
+    if (error) {
+      // A reporting extra must never take the whole billing page down.
+      console.error("Could not load billing restatements:", error.message);
+      return [];
+    }
+    const page = (data ?? []) as unknown as Row[];
+    rows.push(...page);
+    if (page.length < pageSize) break;
+    afterId = page.at(-1)?.commission_id ?? null;
+    if (!afterId) break;
+  }
+
+  type Bucket = {
+    invoiceId: string;
+    clientId: string;
+    storeNames: Set<string>;
+    days: string[];
+    delta: number;
+  };
+  const byInvoice = new Map<string, Bucket>();
+  for (const row of rows) {
+    const commission = row.commissions;
+    const account = commission?.ad_accounts;
+    if (!commission || !account) continue;
+    const movement =
+      round2(Number(commission.gross_amount)) - round2(Number(row.gross_amount));
+    if (Math.abs(movement) < 0.01) continue;
+    const bucket = byInvoice.get(row.invoice_id) ?? {
+      invoiceId: row.invoice_id,
+      clientId: account.client_id,
+      storeNames: new Set<string>(),
+      days: [],
+      delta: 0,
+    };
+    bucket.storeNames.add(account.store_name);
+    bucket.days.push(commission.occurred_on);
+    bucket.delta = round2(bucket.delta + movement);
+    byInvoice.set(row.invoice_id, bucket);
+  }
+
+  return [...byInvoice.values()]
+    .filter((bucket) => bucket.delta >= 0.01)
+    .map((bucket) => ({
+      invoiceId: bucket.invoiceId,
+      clientId: bucket.clientId,
+      stores: [...bucket.storeNames].sort().join(", "),
+      days: bucket.days.length,
+      firstDay: bucket.days.slice().sort()[0],
+      lastDay: bucket.days.slice().sort().at(-1) ?? bucket.days[0],
+      delta: bucket.delta,
+    }))
     .sort((left, right) => right.delta - left.delta);
 }
 

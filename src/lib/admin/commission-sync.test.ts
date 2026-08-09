@@ -4,7 +4,7 @@ vi.mock("server-only", () => ({}));
 vi.mock("../google-ads/client", () => ({ searchGoogleAdsAsAgency: vi.fn() }));
 
 import {
-  backfilledWindowStart,
+  backfilledWindow,
   billableGoogleMicros,
   billableGoogleSpendWindow,
   billingBoundaryMicros,
@@ -411,75 +411,120 @@ describe("matchesAuthoritativeGoogleSpend", () => {
   });
 });
 
-describe("backfilledWindowStart", () => {
+describe("backfilledWindow", () => {
   const rollingFrom = "2026-08-03";
+  const rollingTo = "2026-08-09";
+  const base = { rollingFrom, rollingTo, maxBackfillDays: 21 };
 
-  it("reaches back to the immutable start when nothing has been proven yet", () => {
-    // An account onboarded a week before its first successful sync: the
-    // rolling window alone would never ask for those days again.
+  it("folds a small first-sync hole into the ordinary window", () => {
+    // The onboarding case: the account started a week before its first sync,
+    // and the rolling window alone would never ask for those days again.
     expect(
-      backfilledWindowStart({
-        rollingFrom,
-        coveredFrom: null,
-        billingStart: "2026-07-23",
-        maxBackfillDays: 21,
-      }),
-    ).toBe("2026-07-23");
+      backfilledWindow({ ...base, billingStart: "2026-07-23", covered: [] }),
+    ).toEqual({ from: "2026-07-23", to: rollingTo, backfilling: true });
   });
 
-  it("stops at the budget instead of asking for an unbounded history", () => {
+  it("advances the frontier by a whole budget on a long hole, run after run", () => {
+    // This is the convergence the first attempt only claimed: anchoring the
+    // floor to "today minus the budget" moved forward with the calendar and
+    // never reached the missing days.
+    const first = backfilledWindow({
+      ...base,
+      billingStart: "2026-01-01",
+      covered: [],
+    });
+    expect(first).toEqual({
+      from: "2026-01-01",
+      to: "2026-01-21",
+      backfilling: true,
+    });
+
+    // Next run, one day later, with the first chunk now proven.
+    const second = backfilledWindow({
+      rollingFrom: "2026-08-04",
+      rollingTo: "2026-08-10",
+      maxBackfillDays: 21,
+      billingStart: "2026-01-01",
+      covered: [{ from: first.from, to: first.to }],
+    });
+    expect(second.from).toBe("2026-01-22");
+    expect(second.to).toBe("2026-02-11");
+  });
+
+  it("finds a hole in the MIDDLE of proven coverage", () => {
+    // An account synced in January, went quiet for months, then reconnected:
+    // the earliest proven start says nothing about the months in between.
     expect(
-      backfilledWindowStart({
-        rollingFrom,
-        coveredFrom: null,
+      backfilledWindow({
+        ...base,
         billingStart: "2026-01-01",
-        maxBackfillDays: 21,
+        covered: [
+          { from: "2026-01-01", to: "2026-01-07" },
+          { from: "2026-08-03", to: "2026-08-09" },
+        ],
       }),
-    ).toBe("2026-07-13");
+    ).toMatchObject({ from: "2026-01-08", backfilling: true });
   });
 
-  it("closes the hole in front of proven coverage", () => {
+  it("treats touching windows as continuous", () => {
     expect(
-      backfilledWindowStart({
-        rollingFrom,
-        coveredFrom: "2026-07-27",
-        billingStart: "2026-07-23",
-        maxBackfillDays: 21,
+      backfilledWindow({
+        ...base,
+        billingStart: "2026-07-20",
+        covered: [
+          { from: "2026-07-20", to: "2026-07-26" },
+          { from: "2026-07-27", to: "2026-08-02" },
+        ],
       }),
-    ).toBe("2026-07-23");
+    ).toEqual({ from: rollingFrom, to: rollingTo, backfilling: false });
   });
 
-  it("leaves the rolling window alone once the start is already covered", () => {
+  it("leaves the ordinary window alone once everything billable is proven", () => {
     expect(
-      backfilledWindowStart({
-        rollingFrom,
-        coveredFrom: "2026-07-20",
+      backfilledWindow({
+        ...base,
         billingStart: "2026-07-23",
-        maxBackfillDays: 21,
+        covered: [{ from: "2026-07-20", to: "2026-08-02" }],
       }),
-    ).toBe(rollingFrom);
+    ).toEqual({ from: rollingFrom, to: rollingTo, backfilling: false });
   });
 
   it("never reads before the immutable start", () => {
-    // Nothing before the start is billable, so asking would only spend
-    // requests and invite pre-start rows back into the ledger.
     expect(
-      backfilledWindowStart({
-        rollingFrom,
-        coveredFrom: "2026-07-25",
+      backfilledWindow({
+        ...base,
         billingStart: "2026-08-05",
-        maxBackfillDays: 21,
+        covered: [{ from: "2026-07-25", to: "2026-07-31" }],
       }),
-    ).toBe(rollingFrom);
+    ).toEqual({ from: rollingFrom, to: rollingTo, backfilling: false });
+  });
+
+  it("keeps an older backfill chunk clear of the rolling window", () => {
+    // Only the long-hole branch reads an older chunk; a small hole folds into
+    // the ordinary window on purpose, so today still gets refreshed.
+    const chunk = backfilledWindow({
+      ...base,
+      billingStart: "2026-01-01",
+      covered: [{ from: "2026-01-01", to: "2026-01-31" }],
+    });
+    expect(chunk).toEqual({
+      from: "2026-02-01",
+      to: "2026-02-21",
+      backfilling: true,
+    });
+    expect(chunk.to < rollingFrom).toBe(true);
+
+    const small = backfilledWindow({
+      ...base,
+      billingStart: "2026-01-01",
+      covered: [{ from: "2026-01-01", to: "2026-07-30" }],
+    });
+    expect(small).toEqual({ from: "2026-07-31", to: rollingTo, backfilling: true });
   });
 
   it("rejects a nonsensical budget rather than guessing", () => {
     expect(() =>
-      backfilledWindowStart({
-        rollingFrom,
-        billingStart: "2026-07-23",
-        maxBackfillDays: -1,
-      }),
-    ).toThrow(/whole number of days/i);
+      backfilledWindow({ ...base, billingStart: "2026-07-23", maxBackfillDays: 0 }),
+    ).toThrow(/positive whole number/i);
   });
 });
