@@ -836,6 +836,17 @@ describe("reviewed full-day recurring billing starts", () => {
         "alter table public.ad_accounts enable trigger ad_accounts_guard_billing_identity",
       );
 
+      // Migration 0029 derives the cutover Monday from the clock at install
+      // time, so replaying the production chain in a later week would seed a
+      // different Monday and 0034's guard would reject it. Production sealed
+      // 2026-08-03; pin it so this test keeps asserting the deployed reality
+      // instead of failing every Monday.
+      // The cutover audit row is deliberately immutable, so only the derived
+      // configuration is pinned — which is exactly what 0034's guard reads.
+      await db.exec(
+        `update public.manual_referral_billing_config set v3_cutover_monday = '2026-08-03' where singleton`,
+      );
+
       await db.exec(MIGRATION);
       await commitReviewedStart(db, {
         accountId: PRE_ACCOUNT,
