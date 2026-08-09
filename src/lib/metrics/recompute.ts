@@ -69,6 +69,13 @@ function isoDay(offsetDays: number): string {
   return date.toISOString().slice(0, 10);
 }
 
+function nextDay(iso: string): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  const date = new Date(Date.UTC(y, m - 1, d));
+  date.setUTCDate(date.getUTCDate() + 1);
+  return date.toISOString().slice(0, 10);
+}
+
 function dayBefore(iso: string): string {
   const [y, m, d] = iso.split("-").map(Number);
   const date = new Date(Date.UTC(y, m - 1, d));
@@ -137,6 +144,9 @@ async function syncAccountWindow(
       // other Google failure still throws: it may be transient, and swallowing
       // it would let the carry-forward below quietly stand in for real data.
       if (!(await markIfAuthRevoked(supabase, account.id, error))) throw error;
+      console.error(
+        `daily_metrics: Google authorisation revoked for ${account.store_name} (${account.id}); its ad figures now carry forward until it is reconnected.`,
+      );
     }
   }
 
@@ -274,11 +284,25 @@ async function syncAccountWindow(
     }
   }
 
-  if (google.length === 0 && sales.length === 0) return;
+  if (google.length === 0 && sales.length === 0) {
+    // Neither provider returned a single day. That is how a store's report sat
+    // at zero for a week while its ledger showed real spend: no rows written,
+    // no error raised, nothing to see. It may be legitimate (a genuinely idle
+    // window) but it must never again be silent.
+    console.warn(
+      `daily_metrics: no provider data for ${account.store_name} (${account.id}) between ${from} and ${to} — google connected: ${account.google_ads_connected}, shopify connected: ${account.shopify_connected}`,
+    );
+    return;
+  }
 
   const salesByDay = new Map(sales.map((day) => [day.date, day]));
   const googleByDay = new Map(google.map((day) => [day.date, day]));
-  const days = [...new Set([...salesByDay.keys(), ...googleByDay.keys()])];
+  // Every requested day, not only the ones a provider volunteered: a day
+  // Google reports as zero while Shopify sold is still a real day, and
+  // building the list from returned keys alone left such days unwritten — so
+  // the report showed nothing rather than showing the sales.
+  const days: string[] = [];
+  for (let day = from; day <= to; day = nextDay(day)) days.push(day);
 
   /**
    * Ad figures already stored for this window, read ONLY when Google didn't
