@@ -18,6 +18,7 @@ import {
   REV_SHARE_NOTE_PREFIX,
 } from "@/lib/finance/config";
 import {
+  backfilledWindowStart,
   billableGoogleSpendWindow,
   manualReferralRateForDate,
   matchesAuthoritativeGoogleSpend,
@@ -60,6 +61,18 @@ const SOURCE_NAME = "Google Ads Management";
  * response per account per sync.
  */
 const SPEND_WINDOW_DAYS = 7;
+/**
+ * How far back a single run may reach BEYOND the healing window to close a
+ * hole between the account's immutable start and its first synced day.
+ *
+ * The rolling window only ever asked for the last seven days, so any day that
+ * was already older than that when the first successful sync ran was never
+ * requested again — an account onboarded on the 23rd and first synced on the
+ * 30th silently lost its first week. Each run now also claims up to this many
+ * uncovered older days, so a gap converges over a few runs instead of never,
+ * without one account swallowing the invocation's request budget.
+ */
+const BACKFILL_DAYS_PER_RUN = 21;
 /**
  * How stale a non-forced caller will tolerate the ledger being.
  *
@@ -437,6 +450,27 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
       [...new Set(syncTargets.map((account) => account.client_id))],
     );
 
+    // Earliest day already proven by a completed window, per account. A day
+    // before this and at or after the immutable start has never been asked of
+    // Google, and the rolling window alone would never ask again.
+    const coveredFromByAccount = new Map<string, string>();
+    // An exact-period sync states its own window, so coverage is irrelevant to
+    // it — and asking would spend a request the certification run does not need.
+    if (!opts?.period) {
+      const { data: coveredRows, error: coveredError } = await supabase
+        .from("google_ledger_sync_windows")
+        .select("ad_account_id, period_start")
+        .eq("status", "complete")
+        .in("ad_account_id", syncTargets.map((account) => account.id));
+      if (coveredError) throw coveredError;
+      for (const row of coveredRows ?? []) {
+        const current = coveredFromByAccount.get(row.ad_account_id);
+        if (!current || row.period_start < current) {
+          coveredFromByAccount.set(row.ad_account_id, row.period_start);
+        }
+      }
+    }
+
     const failures: string[] = [];
     await Promise.all(
       syncTargets.map(async (account) => {
@@ -514,7 +548,15 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
           const runStartedAt = new Date();
           const localToday = googleLocalDate(runStartedAt, start.google_time_zone);
           const to = opts?.period?.end ?? localToday;
-          const from = opts?.period?.start ?? addIsoDays(to, -(SPEND_WINDOW_DAYS - 1));
+          let from = opts?.period?.start ?? addIsoDays(to, -(SPEND_WINDOW_DAYS - 1));
+          if (!opts?.period) {
+            from = backfilledWindowStart({
+              rollingFrom: from,
+              coveredFrom: coveredFromByAccount.get(account.id),
+              billingStart: start.google_local_date,
+              maxBackfillDays: BACKFILL_DAYS_PER_RUN,
+            });
+          }
           // A closed account has no evidence in a wholly later window. Keeping
           // it out of the marker table also keeps hourly syncs from touching
           // Google forever after its final billable week has healed.

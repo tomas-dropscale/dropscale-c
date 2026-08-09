@@ -993,6 +993,46 @@ export function BillingAdminView({
         )}
       </section>
 
+      {dashboard.restatements.length > 0 && (
+        <section
+          className="panel border-[var(--warning-orange)]/25 bg-[var(--warning-orange)]/5 p-4 sm:p-5"
+          aria-label="Restated after invoicing"
+        >
+          <h2 className="text-[15px] font-semibold text-[var(--text-primary)]">
+            Google restated {dashboard.restatements.length}{" "}
+            {dashboard.restatements.length === 1 ? "day" : "days"} after invoicing
+          </h2>
+          <p className="mt-1 max-w-3xl text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
+            These days now report more spend than the invoice that settled them.
+            An invoice is immutable and each ledger row is consumed once, so the
+            fee on the difference will not be billed on its own — decide whether
+            to charge it separately.
+          </p>
+          <ul className="mt-3 space-y-1.5">
+            {dashboard.restatements.map((row) => (
+              <li
+                key={`${row.clientName}-${row.storeName}-${row.day}`}
+                className="flex items-center justify-between gap-3 text-[12.5px]"
+              >
+                <span className="min-w-0 truncate text-[var(--text-primary)]">
+                  {row.clientName}
+                  <span className="ml-2 text-[11.5px] text-[var(--text-muted)]">
+                    {row.storeName} · {shortDate(row.day, intl)}
+                  </span>
+                </span>
+                <span className="shrink-0 tabular-nums text-[var(--text-secondary)]">
+                  {money(row.invoicedGross, intl, dashboard.currency)} →{" "}
+                  {money(row.currentGross, intl, dashboard.currency)}
+                  <span className="ml-2 font-medium text-[var(--warning-orange)]">
+                    +{money(row.delta, intl, dashboard.currency)} spend
+                  </span>
+                </span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
       <BillingCycleSkips
         dashboard={dashboard}
         cycleLabel={formatPeriod(

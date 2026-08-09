@@ -34,7 +34,11 @@ function shifted(days: number): string {
 }
 
 export function presetSelection(key: RangePreset): RangeSelection {
-  const today = isoDay(new Date());
+  // UTC by deliberate choice, and it must stay declared wherever a range is
+// shown: client Google accounts live in their own timezones, so a single
+// calendar day for the whole portfolio can only be one clock's. The billing
+// ledger never uses this — it records each account's Google-local day.
+const today = isoDay(new Date());
   switch (key) {
     case "today":
       return { key, from: today, to: today };

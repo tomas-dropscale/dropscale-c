@@ -51,7 +51,11 @@ export default async function AdminCampaignsPage({
   return (
     <PageContainer
       title={d.placeholder.campaigns.title}
-      description={`All client campaigns and agency commissions · ${range.from} → ${range.to}`}
+      // Dates are UTC, and saying so matters: client Google accounts run in
+      // their own timezones (Hong Kong, New York, Lisbon), so "today" here and
+      // "today" in a client's Google Ads UI can be different days. The billing
+      // ledger is unaffected — it always uses each account's Google-local day.
+      description={`All client campaigns and agency commissions · ${range.from} → ${range.to} (UTC)`}
       actions={<RangePicker current={range} />}
     >
       {/* ---- what the book of business did ----

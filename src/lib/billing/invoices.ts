@@ -267,6 +267,23 @@ export type BillingCycleSkipRow = {
   createdAt: string;
 };
 
+/**
+ * Google restating a day AFTER its week was invoiced.
+ *
+ * An invoice is immutable and each ledger row can only be consumed once, so an
+ * upward revision is fee the agency earned and will never bill by itself. It
+ * is small and rare, and silence is exactly how it would be lost — so it is
+ * counted and shown, and the team decides whether to bill the difference.
+ */
+export type BillingRestatement = {
+  clientName: string;
+  storeName: string;
+  day: string;
+  invoicedGross: number;
+  currentGross: number;
+  delta: number;
+};
+
 export type BillingAdminDashboard = {
   generatedAt: string;
   currency: typeof BILLING_CURRENCY;
@@ -280,6 +297,8 @@ export type BillingAdminDashboard = {
   skipCycle: { start: string; end: string };
   /** Skips already recorded for that cycle. */
   skips: BillingCycleSkipRow[];
+  /** Days Google revised upward after their week was invoiced. */
+  restatements: BillingRestatement[];
   /** Latest durable automatic-run receipt visible to an admin. */
   automation: BillingAutomationRun | null;
   invoices: BillingInvoiceHistoryRow[];
@@ -2093,6 +2112,7 @@ export async function fetchAdminBillingDashboard(
       fetchUnissuedDraftInvoices(supabase),
       supabase.from("portal_clients").select("id, full_name, email"),
     ]);
+  const restatements = await fetchBillingRestatements(supabase);
   if (clientsError)
     throw new Error(`Could not load invoice clients: ${clientsError.message}`);
 
@@ -2210,6 +2230,7 @@ export async function fetchAdminBillingDashboard(
     positions,
     skipCycle,
     skips,
+    restatements,
     automation,
     invoices,
   };
@@ -2245,6 +2266,56 @@ export async function fetchAdminInvoiceRecord(): Promise<
       clientEmail: clientById.get(invoice.client_id)?.email ?? "",
       outstandingAmount: outstandingAmount(invoice),
     }));
+}
+
+/**
+ * Invoiced days whose Google value has moved since. Only upward moves are
+ * reported: those are unbilled fee. A downward revision means the client was
+ * charged on the evidence of the day, which the immutable invoice already
+ * settles.
+ */
+async function fetchBillingRestatements(
+  supabase: Supabase,
+): Promise<BillingRestatement[]> {
+  const { data, error } = await supabase
+    .from("invoice_commission_rows")
+    .select(
+      "gross_amount, commissions!inner(occurred_on, gross_amount, ad_accounts!inner(store_name, portal_clients!inner(full_name)))",
+    )
+    .limit(500);
+  if (error) {
+    // A reporting extra must never take the whole billing page down with it.
+    console.error("Could not load billing restatements:", error.message);
+    return [];
+  }
+
+  type Row = {
+    gross_amount: string | number;
+    commissions: {
+      occurred_on: string;
+      gross_amount: string | number;
+      ad_accounts: {
+        store_name: string;
+        portal_clients: { full_name: string };
+      };
+    };
+  };
+
+  return ((data ?? []) as unknown as Row[])
+    .map((row) => {
+      const invoicedGross = round2(Number(row.gross_amount));
+      const currentGross = round2(Number(row.commissions.gross_amount));
+      return {
+        clientName: row.commissions.ad_accounts.portal_clients.full_name,
+        storeName: row.commissions.ad_accounts.store_name,
+        day: row.commissions.occurred_on,
+        invoicedGross,
+        currentGross,
+        delta: round2(currentGross - invoicedGross),
+      };
+    })
+    .filter((row) => row.delta >= 0.01)
+    .sort((left, right) => right.delta - left.delta);
 }
 
 export class BillingIssueError extends Error {

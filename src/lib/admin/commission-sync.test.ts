@@ -4,6 +4,7 @@ vi.mock("server-only", () => ({}));
 vi.mock("../google-ads/client", () => ({ searchGoogleAdsAsAgency: vi.fn() }));
 
 import {
+  backfilledWindowStart,
   billableGoogleMicros,
   billableGoogleSpendWindow,
   billingBoundaryMicros,
@@ -407,5 +408,78 @@ describe("matchesAuthoritativeGoogleSpend", () => {
         "EUR",
       ),
     ).toBe(false);
+  });
+});
+
+describe("backfilledWindowStart", () => {
+  const rollingFrom = "2026-08-03";
+
+  it("reaches back to the immutable start when nothing has been proven yet", () => {
+    // An account onboarded a week before its first successful sync: the
+    // rolling window alone would never ask for those days again.
+    expect(
+      backfilledWindowStart({
+        rollingFrom,
+        coveredFrom: null,
+        billingStart: "2026-07-23",
+        maxBackfillDays: 21,
+      }),
+    ).toBe("2026-07-23");
+  });
+
+  it("stops at the budget instead of asking for an unbounded history", () => {
+    expect(
+      backfilledWindowStart({
+        rollingFrom,
+        coveredFrom: null,
+        billingStart: "2026-01-01",
+        maxBackfillDays: 21,
+      }),
+    ).toBe("2026-07-13");
+  });
+
+  it("closes the hole in front of proven coverage", () => {
+    expect(
+      backfilledWindowStart({
+        rollingFrom,
+        coveredFrom: "2026-07-27",
+        billingStart: "2026-07-23",
+        maxBackfillDays: 21,
+      }),
+    ).toBe("2026-07-23");
+  });
+
+  it("leaves the rolling window alone once the start is already covered", () => {
+    expect(
+      backfilledWindowStart({
+        rollingFrom,
+        coveredFrom: "2026-07-20",
+        billingStart: "2026-07-23",
+        maxBackfillDays: 21,
+      }),
+    ).toBe(rollingFrom);
+  });
+
+  it("never reads before the immutable start", () => {
+    // Nothing before the start is billable, so asking would only spend
+    // requests and invite pre-start rows back into the ledger.
+    expect(
+      backfilledWindowStart({
+        rollingFrom,
+        coveredFrom: "2026-07-25",
+        billingStart: "2026-08-05",
+        maxBackfillDays: 21,
+      }),
+    ).toBe(rollingFrom);
+  });
+
+  it("rejects a nonsensical budget rather than guessing", () => {
+    expect(() =>
+      backfilledWindowStart({
+        rollingFrom,
+        billingStart: "2026-07-23",
+        maxBackfillDays: -1,
+      }),
+    ).toThrow(/whole number of days/i);
   });
 });
