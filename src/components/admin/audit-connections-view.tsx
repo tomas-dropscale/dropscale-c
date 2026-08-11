@@ -63,10 +63,10 @@ function setupIssueMessage(connection: AuditConnectionDTO): string {
     return "This setup link is locked after 10 unsuccessful attempts. Generate a replacement link.";
   }
   if (connection.lastErrorCode === "missing_scopes") {
-    return "The merchant's latest attempt was missing one or more required audit scopes.";
+    return "A previous attempt was blocked by the retired exact-scope rule. The merchant can retry the same link now.";
   }
   if (connection.lastErrorCode === "extra_scopes_not_allowed") {
-    return "The merchant's latest attempt did not match the exact audit scope profile.";
+    return "A previous attempt was blocked by the retired exact-scope rule. The merchant can retry the same link now.";
   }
   if (connection.lastErrorCode === "invalid_credentials") {
     return "Shopify rejected the Client ID or Client Secret in the latest attempt.";

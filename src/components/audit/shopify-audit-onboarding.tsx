@@ -201,8 +201,9 @@ export function ShopifyAuditOnboarding({ connectionId }: { connectionId: string 
           Store connected successfully
         </h1>
         <p className="mx-auto mt-2 max-w-md text-[13px] leading-relaxed text-[var(--text-secondary)]">
-          Dropscale verified {connectedStore.name} ({connectedStore.domain}) and the complete audit
-          permission profile. You can close this page; the team has been notified in Connections.
+          Dropscale verified {connectedStore.name} ({connectedStore.domain}) and recorded the
+          permissions Shopify actually granted. You can close this page; the team has been notified
+          in Connections.
         </p>
         <div className="mt-5 flex items-center justify-center gap-2 text-[12px] text-[var(--text-secondary)]">
           <ShieldCheck className="size-4 text-[var(--success-green)]" aria-hidden />
@@ -225,9 +226,9 @@ export function ShopifyAuditOnboarding({ connectionId }: { connectionId: string 
               Connect your Shopify store
             </h1>
             <p className="mt-2 max-w-2xl text-[13px] leading-relaxed text-[var(--text-secondary)]">
-              This creates a connection for full store audits. The requested profile includes the
-              complete set of permissions supplied by Dropscale, including sensitive read and write
-              access.
+              This creates a connection for full store audits and authorised fixes. The clearance
+              profile covers catalogue, files, themes, content, Markets, channels, feeds, reporting
+              and storefront configuration, including read and write access.
             </p>
           </div>
         </div>
@@ -235,8 +236,11 @@ export function ShopifyAuditOnboarding({ connectionId }: { connectionId: string 
           <AlertTriangle className="mt-0.5 size-4 shrink-0 text-[var(--warning-orange)]" aria-hidden />
           <p className="text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
             Only continue if you are authorised to grant this access. These credentials can
-            technically modify store data. This connection step verifies and encrypts them; it does
-            not itself perform any Shopify mutation.
+            read recent order details and modify catalogue, storefront and tracking configuration.
+            Direct customer-account management, raw customer-event streams, payment and banking
+            data, gift cards, store credit, order mutations and fulfilment operations are excluded.
+            This connection step verifies and encrypts the credentials; it performs no Shopify
+            mutation.
           </p>
         </div>
       </section>
@@ -284,7 +288,7 @@ export function ShopifyAuditOnboarding({ connectionId }: { connectionId: string 
             <span key="two">
               In the app setup, remove the
               <strong className="font-medium text-[var(--text-primary)]"> embedded app URL</strong>. Add
-              exactly every scope shown below, then finish creating the app.
+              every scope in the full-clearance profile below, then finish creating the app.
             </span>,
             <span key="three">
               Before installing, open
@@ -314,7 +318,7 @@ export function ShopifyAuditOnboarding({ connectionId }: { connectionId: string 
 
         <details className="mt-5 rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)]">
           <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-3 text-[13px] font-medium text-[var(--text-primary)]">
-            Exact audit scopes
+            Full-clearance audit scopes
             <ChevronDown className="size-4 text-[var(--text-muted)]" aria-hidden />
           </summary>
           <div className="border-t border-[var(--border-subtle)] p-3">
@@ -342,7 +346,8 @@ export function ShopifyAuditOnboarding({ connectionId }: { connectionId: string 
           </h2>
           <p className="mt-1 text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
             The Client Secret is encrypted before storage. The temporary Shopify access token is not
-            stored, and the complete permission profile is checked against Shopify&apos;s response.
+            stored. Dropscale records the exact permissions returned by Shopify; a store can connect
+            even when Shopify grants more or fewer scopes than the profile above.
           </p>
         </div>
 

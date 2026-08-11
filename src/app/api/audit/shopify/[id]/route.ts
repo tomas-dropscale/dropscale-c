@@ -180,30 +180,6 @@ export async function POST(
       clientSecret: body.clientSecret,
     });
 
-    if (shop.scopes.missing.length > 0) {
-      await recordAuditConnectionFailure(invitation, "missing_scopes");
-      return response(
-        {
-          error: "The Shopify app is missing required audit scopes.",
-          code: "missing_scopes",
-          missingScopes: shop.scopes.missing,
-        },
-        422,
-      );
-    }
-    if (shop.scopes.unexpectedScopes.length > 0) {
-      await recordAuditConnectionFailure(invitation, "extra_scopes_not_allowed");
-      return response(
-        {
-          error:
-            "This app has permissions outside the exact audit profile. Keep only the scopes shown in the setup guide.",
-          code: "extra_scopes_not_allowed",
-          extraScopes: shop.scopes.unexpectedScopes,
-        },
-        422,
-      );
-    }
-
     await completeAuditConnection({
       invitation,
       shop,

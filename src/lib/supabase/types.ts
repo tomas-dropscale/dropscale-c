@@ -801,7 +801,7 @@ export type AuditShopifyConnection = {
   shopify_client_id: string | null;
   credential_hint: string | null;
   granted_scopes: string[];
-  scope_profile: "store-audit-full-v1";
+  scope_profile: "store-audit-full-v1" | "store-audit-clearance-v2";
   created_by: string;
   created_at: string;
   updated_at: string;

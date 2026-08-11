@@ -162,7 +162,10 @@ export async function exchangeAuditClientCredentials({
   try {
     response = await fetchWithTimeout(`https://${domain}/admin/oauth/access_token`, {
       method: "POST",
-      redirect: "error",
+      // Do not follow redirects carrying the merchant secret. `manual` keeps
+      // the response classifiable as a credentials/install problem instead of
+      // turning Shopify's redirect into a generic network exception.
+      redirect: "manual",
       cache: "no-store",
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: form.toString(),

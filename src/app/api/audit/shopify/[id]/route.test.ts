@@ -151,44 +151,50 @@ describe("public audit Shopify connection route", () => {
     expect(mocks.completeAuditConnection).toHaveBeenCalledOnce();
   });
 
-  it("returns the missing scope list without consuming the invitation", async () => {
+  it("connects and records Shopify's grant when requested scopes are missing", async () => {
+    const shop = verifiedShop({
+      scopes: {
+        granted: [],
+        missing: ["read_products"],
+        writeScopes: [],
+        unexpectedScopes: [],
+        valid: true,
+      },
+    });
     mocks.verifyAuditClientCredentials.mockResolvedValue(
-      verifiedShop({
-        scopes: {
-          granted: [],
-          missing: ["read_products"],
-          writeScopes: [],
-          unexpectedScopes: [],
-          valid: false,
-        },
-      }),
+      shop,
     );
     const result = await POST(request(), context());
-    expect(result.status).toBe(422);
-    await expect(result.json()).resolves.toMatchObject({
-      code: "missing_scopes",
-      missingScopes: ["read_products"],
+    expect(result.status).toBe(200);
+    expect(mocks.completeAuditConnection).toHaveBeenCalledWith({
+      invitation: { id: ID, tokenHash: "a".repeat(64) },
+      shop,
+      clientId: BODY.clientId,
+      clientSecret: BODY.clientSecret,
     });
-    expect(mocks.completeAuditConnection).not.toHaveBeenCalled();
+    expect(mocks.recordAuditConnectionFailure).not.toHaveBeenCalled();
   });
 
-  it("rejects scopes outside the published audit profile", async () => {
+  it("connects and records scopes Shopify granted outside the published profile", async () => {
+    const shop = verifiedShop({
+      scopes: {
+        granted: ["read_products", "root_store_access"],
+        missing: [],
+        writeScopes: [],
+        unexpectedScopes: ["root_store_access"],
+        valid: true,
+      },
+    });
     mocks.verifyAuditClientCredentials.mockResolvedValue(
-      verifiedShop({
-        scopes: {
-          granted: ["read_products", "root_store_access"],
-          missing: [],
-          writeScopes: [],
-          unexpectedScopes: ["root_store_access"],
-          valid: false,
-        },
-      }),
+      shop,
     );
     const result = await POST(request(), context());
-    expect(result.status).toBe(422);
-    await expect(result.json()).resolves.toMatchObject({
-      code: "extra_scopes_not_allowed",
-      extraScopes: ["root_store_access"],
+    expect(result.status).toBe(200);
+    expect(mocks.completeAuditConnection).toHaveBeenCalledWith({
+      invitation: { id: ID, tokenHash: "a".repeat(64) },
+      shop,
+      clientId: BODY.clientId,
+      clientSecret: BODY.clientSecret,
     });
   });
 
