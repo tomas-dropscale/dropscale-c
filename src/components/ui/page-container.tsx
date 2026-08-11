@@ -37,7 +37,7 @@ export function PageContainer({
             <p className="mt-1 text-[13px] text-[var(--text-secondary)]">{description}</p>
           )}
         </div>
-        {actions && <div className="flex items-center gap-2">{actions}</div>}
+        {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
       </div>
 
       {children}

@@ -51,7 +51,73 @@ export function CampaignsTable({
         </h2>
       </header>
 
-      <div className="overflow-x-auto">
+      {/* Phones get cards, not a sideways table: eight columns need 860px, so
+          on a phone the scroll container showed the campaign name and hid every
+          number the page exists to report. */}
+      <ul className="divide-y divide-[var(--border-subtle)] md:hidden">
+        {campaigns.map((campaign) => (
+          <li key={campaign.id} className="px-4 py-3.5">
+            <div className="flex items-start justify-between gap-3">
+              <p className="min-w-0 flex-1 truncate text-[13.5px] font-medium text-[var(--text-primary)]">
+                {campaign.name}
+              </p>
+              <Badge variant={STATUS_VARIANT[campaign.status]}>
+                {statusLabel[campaign.status]}
+              </Badge>
+            </div>
+            <dl className="mt-2.5 grid grid-cols-3 gap-x-3 gap-y-2.5 text-[12.5px]">
+              {(
+                [
+                  [d.campaigns.spend, money(campaign.spend, currency)],
+                  [d.campaigns.impressions, compact(campaign.impressions)],
+                  [d.campaigns.clicks, integer(campaign.clicks)],
+                  [d.campaigns.ctr, percent(Number(campaign.ctr))],
+                  [d.campaigns.cpc, money(campaign.cpc, currency)],
+                  [
+                    d.campaigns.dailyBudget,
+                    campaign.daily_budget != null
+                      ? money(campaign.daily_budget, currency)
+                      : "—",
+                  ],
+                ] as const
+              ).map(([label, value]) => (
+                <div key={label}>
+                  <dt className="label-caps mb-0.5">{label}</dt>
+                  <dd className="whitespace-nowrap text-[var(--text-primary)]">{value}</dd>
+                </div>
+              ))}
+            </dl>
+          </li>
+        ))}
+
+        <li className="bg-[var(--bg-panel-hover)] px-4 py-3.5">
+          <p className="text-[13.5px] font-semibold text-[var(--text-primary)]">
+            {d.campaigns.total}
+          </p>
+          <dl className="mt-2.5 grid grid-cols-3 gap-x-3 gap-y-2.5 text-[12.5px] font-semibold">
+            {(
+              [
+                [d.campaigns.spend, money(totals.spend, currency)],
+                [d.campaigns.impressions, compact(totals.impressions)],
+                [d.campaigns.clicks, integer(totals.clicks)],
+                [d.campaigns.ctr, percent(totalCtr)],
+                [d.campaigns.cpc, money(totalCpc, currency)],
+                [
+                  d.campaigns.dailyBudget,
+                  totals.budget > 0 ? money(totals.budget, currency) : "—",
+                ],
+              ] as const
+            ).map(([label, value]) => (
+              <div key={label}>
+                <dt className="label-caps mb-0.5 font-normal">{label}</dt>
+                <dd className="whitespace-nowrap text-[var(--text-primary)]">{value}</dd>
+              </div>
+            ))}
+          </dl>
+        </li>
+      </ul>
+
+      <div className="hidden overflow-x-auto md:block">
         <table className="w-full min-w-[860px] border-collapse text-[13px]">
           <thead>
             <tr className="border-b border-[var(--border-subtle)]">

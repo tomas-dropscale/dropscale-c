@@ -9,10 +9,9 @@ import { PendingApproval } from "@/components/auth/pending-approval";
 /**
  * The portal's security gate. Every /dashboard/* route renders through here.
  *
- * No middleware/proxy on purpose: OpenNext for Cloudflare rejects Node
- * middleware outright. This layout plus RLS gives the same guarantee: the
- * layout decides what renders, RLS decides what data can ever leave the
- * database.
+ * The gate is the layout, not the middleware: this layout decides what renders,
+ * RLS decides what data can ever leave the database. src/middleware.ts only
+ * refreshes the session cookie before this runs — it grants nothing.
  *
  * Who lands where:
  *   at least one open workspace   → the portal (regardless of any staff role)

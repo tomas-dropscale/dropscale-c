@@ -178,7 +178,14 @@ export function DateRangePicker({
         <ChevronDown className="size-3.5 text-[var(--text-muted)]" />
       </DropdownMenuTrigger>
 
-      <DropdownMenuContent align={align} className="p-0">
+      {/* The cap is what makes flex-wrap mean anything: a dropdown is sized by
+          its content, so without it the preset row laid itself out on one line
+          and ran off the side of a phone instead of wrapping. */}
+      <DropdownMenuContent
+        align={align}
+        collisionPadding={8}
+        className="max-w-[calc(100vw-1rem)] p-0"
+      >
         <div className="flex flex-col sm:flex-row">
           {/* Presets */}
           <div className="flex flex-row flex-wrap gap-0.5 border-b border-[var(--border-subtle)] p-2 sm:w-[150px] sm:flex-col sm:border-r sm:border-b-0">
@@ -211,7 +218,9 @@ export function DateRangePicker({
 
           {/* Two-month calendar */}
           <div className="p-3">
-            <div className="relative flex gap-5">
+            {/* Centred while only one month shows, so the single 224px grid
+                doesn't sit off to one side of a full-width phone panel. */}
+            <div className="relative flex justify-center gap-5 sm:justify-start">
               <button
                 type="button"
                 onClick={() => shift(-1)}
@@ -229,27 +238,31 @@ export function DateRangePicker({
                 <ChevronRight className="size-4" />
               </button>
 
-              <Month
-                year={view.year}
-                month={view.month}
-                draft={draft}
-                today={today}
-                intl={intl}
-                onPick={pick}
-              />
+              {/* The EARLIER month is the one that drops on mobile. Hiding the
+                  later one instead left a phone opened on 11 August showing
+                  only July — the current month is what a single-month view has
+                  to be. */}
               <div className="hidden sm:block">
                 <Month
-                  year={view.month === 11 ? view.year + 1 : view.year}
-                  month={(view.month + 1) % 12}
+                  year={view.year}
+                  month={view.month}
                   draft={draft}
                   today={today}
                   intl={intl}
                   onPick={pick}
                 />
               </div>
+              <Month
+                year={view.month === 11 ? view.year + 1 : view.year}
+                month={(view.month + 1) % 12}
+                draft={draft}
+                today={today}
+                intl={intl}
+                onPick={pick}
+              />
             </div>
 
-            <div className="mt-3 flex items-center justify-end gap-2 border-t border-[var(--border-subtle)] pt-3">
+            <div className="mt-3 flex flex-wrap items-center justify-end gap-2 border-t border-[var(--border-subtle)] pt-3">
               {footer && (
                 <span className="mr-auto text-[11px] font-medium tracking-[0.08em] text-[var(--text-secondary)] uppercase">
                   {footer}

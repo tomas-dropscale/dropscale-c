@@ -43,7 +43,7 @@ export function StoreSelector({
 
   return (
     <Select value={current ?? ALL} onValueChange={apply}>
-      <SelectTrigger className="h-9 w-[190px]">
+      <SelectTrigger className="h-9 w-[150px] sm:w-[190px]">
         <span className="flex min-w-0 items-center gap-2">
           <Store className="size-3.5 shrink-0 text-[var(--text-secondary)]" aria-hidden />
           <span className="truncate">
