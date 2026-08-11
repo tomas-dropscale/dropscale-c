@@ -275,34 +275,32 @@ export function ShopifyAuditOnboarding({ connectionId }: { connectionId: string 
         <ol className="mt-5 space-y-4">
           {[
             <span key="one">
-              Sign in to the Shopify organisation that owns this store with app-development
-              permission. In <strong className="font-medium text-[var(--text-primary)]">Apps</strong>, choose
-              <strong className="font-medium text-[var(--text-primary)]"> Create app</strong>, then
-              <strong className="font-medium text-[var(--text-primary)]"> Start from Dev Dashboard</strong>.
-              Name it <strong className="font-medium text-[var(--text-primary)]">Dropscale Audit</strong>.
+              In the Shopify Dev Dashboard, click
+              <strong className="font-medium text-[var(--text-primary)]"> Create app</strong>, give it a
+              name such as
+              <strong className="font-medium text-[var(--text-primary)]"> Dropscale Audit</strong>, and
+              continue.
             </span>,
             <span key="two">
-              Open <strong className="font-medium text-[var(--text-primary)]">Versions</strong> and create a
-              version. For an API-only app, use
-              <code className="mx-1 rounded bg-[var(--bg-base)] px-1.5 py-0.5 text-[11px] text-[var(--accent-gold-strong)]">
-                https://shopify.dev/apps/default-app-home
-              </code>
-              as the App URL and select the newest Webhooks API version.
+              In the app setup, remove the
+              <strong className="font-medium text-[var(--text-primary)]"> embedded app URL</strong>. Add
+              exactly every scope shown below, then finish creating the app.
             </span>,
             <span key="three">
-              Add exactly every scope below, release the version, then install the app on the correct
-              store. Shopify may require extra approval for protected or specialised permissions.
+              Before installing, open
+              <strong className="font-medium text-[var(--text-primary)]"> Settings</strong> and copy the
+              <strong className="font-medium text-[var(--text-primary)]"> Client ID</strong> and
+              <strong className="font-medium text-[var(--text-primary)]"> Client Secret</strong> somewhere
+              secure. Do this first because installation redirects you out of the Dev Dashboard.
             </span>,
             <span key="four">
-              After releasing the version, open <strong className="font-medium text-[var(--text-primary)]">Home</strong>,
-              choose <strong className="font-medium text-[var(--text-primary)]"> Install app</strong>, select the
-              correct store, and confirm <strong className="font-medium text-[var(--text-primary)]">Install</strong>.
+              Open <strong className="font-medium text-[var(--text-primary)]">Versions</strong>, click the
+              latest version, then install the app on the correct store and confirm the installation.
             </span>,
             <span key="five">
-              In the app&apos;s <strong className="font-medium text-[var(--text-primary)]">Settings</strong>, copy
-              the <strong className="font-medium text-[var(--text-primary)]">Client ID</strong> and
-              <strong className="font-medium text-[var(--text-primary)]"> Client Secret</strong>, then enter
-              them below.
+              After Shopify confirms the installation, return here and enter the store&apos;s
+              <strong className="font-medium text-[var(--text-primary)]"> .myshopify.com URL</strong>, the
+              Client ID, and the Client Secret.
             </span>,
           ].map((content, index) => (
             <li key={index} className="flex gap-3 text-[13px] leading-relaxed text-[var(--text-secondary)]">
@@ -362,12 +360,22 @@ export function ShopifyAuditOnboarding({ connectionId }: { connectionId: string 
               value={shopDomain}
               onChange={(event) => setShopDomain(event.target.value)}
               placeholder="your-store.myshopify.com"
+              aria-describedby="shop-domain-help"
               inputMode="url"
               autoCapitalize="none"
               spellCheck={false}
               maxLength={255}
               required
             />
+            <p
+              id="shop-domain-help"
+              className="text-[11.5px] leading-relaxed text-[var(--text-secondary)]"
+            >
+              Example: <code>your-store.myshopify.com</code> or
+              <code className="ml-1">https://your-store.myshopify.com</code>. Use the permanent
+              <code className="mx-1">.myshopify.com</code> address, not the public storefront
+              domain.
+            </p>
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="client-id">Client ID</Label>
