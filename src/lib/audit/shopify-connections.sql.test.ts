@@ -4,10 +4,15 @@ import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { REQUIRED_AUDIT_SHOPIFY_SCOPES } from "./shopify-scopes";
 
-const MIGRATION = readFileSync(
+const MIGRATION_0040 = readFileSync(
   "supabase/migrations/0040_audit_shopify_connections.sql",
   "utf8",
 );
+const MIGRATION_0041 = readFileSync(
+  "supabase/migrations/0041_audit_shopify_scope_clearance.sql",
+  "utf8",
+);
+const MIGRATIONS = `${MIGRATION_0040}\n${MIGRATION_0041}`;
 
 const ADMIN = "40000000-0000-4000-8000-000000000001";
 const MEMBER = "40000000-0000-4000-8000-000000000002";
@@ -94,7 +99,7 @@ beforeEach(async () => {
   await db.exec("drop schema if exists public cascade; create schema public;");
   await db.exec("drop schema if exists auth cascade;");
   await db.exec(PRELUDE);
-  await db.exec(MIGRATION);
+  await db.exec(MIGRATIONS);
   await db.query(
     "insert into public.profiles (id, role) values ($1, 'admin'), ($2, 'member')",
     [ADMIN, MEMBER],
@@ -111,13 +116,15 @@ describe("audit Shopify connection migration", () => {
       status: string;
       invite_token_hash: string;
       shopify_domain: string | null;
+      scope_profile: string;
     }>(
-      "select status, invite_token_hash, shopify_domain from public.audit_shopify_connections",
+      "select status, invite_token_hash, shopify_domain, scope_profile from public.audit_shopify_connections",
     );
     expect(connection.rows[0]).toEqual({
       status: "pending",
       invite_token_hash: TOKEN_HASH,
       shopify_domain: null,
+      scope_profile: "store-audit-clearance-v2",
     });
 
     const events = await db.query<{ event_type: string; details: unknown }>(
@@ -158,27 +165,101 @@ describe("audit Shopify connection migration", () => {
     expect(Number(count.rows[0].count)).toBe(1);
   });
 
-  it("fails closed for any missing or unexpected audit scope", async () => {
+  it("accepts a partial or extended grant and stores normalized valid handles", async () => {
     await createPending();
-    await expect(
-      complete(REQUIRED_SCOPES.filter((scope) => scope !== "read_products")),
-    ).rejects.toThrow(/missing/i);
-    await expect(
-      complete(REQUIRED_SCOPES.filter((scope) => scope !== "write_products")),
-    ).rejects.toThrow(/missing/i);
-    await expect(complete([...REQUIRED_SCOPES, "root_store_access"])).rejects.toThrow(
-      /unexpected scopes/i,
-    );
+    await complete([
+      " WRITE_PRODUCTS ",
+      "root_store_access",
+      "READ_PRODUCTS",
+      "read_products",
+      "",
+      "bad-scope",
+    ]);
 
-    const row = await db.query<{ status: string }>(
-      "select status from public.audit_shopify_connections where id = $1",
+    const row = await db.query<{
+      status: string;
+      granted_scopes: string[];
+      scope_profile: string;
+    }>(
+      "select status, granted_scopes, scope_profile from public.audit_shopify_connections where id = $1",
       [CONNECTION],
     );
-    expect(row.rows[0].status).toBe("pending");
+    expect(row.rows[0]).toEqual({
+      status: "connected",
+      granted_scopes: ["read_products", "root_store_access", "write_products"],
+      scope_profile: "store-audit-clearance-v2",
+    });
     const credentials = await db.query<{ count: string }>(
       "select count(*) as count from public.audit_shopify_credentials",
     );
-    expect(Number(credentials.rows[0].count)).toBe(0);
+    expect(Number(credentials.rows[0].count)).toBe(1);
+  });
+
+  it("moves pending v1 invitations to v2 without rewriting connected history", async () => {
+    await db.exec("drop schema if exists public cascade; create schema public;");
+    await db.exec("drop schema if exists auth cascade;");
+    await db.exec(PRELUDE);
+    await db.exec(MIGRATION_0040);
+    await db.query(
+      "insert into public.profiles (id, role) values ($1, 'admin'), ($2, 'member')",
+      [ADMIN, MEMBER],
+    );
+    await actAs(null, "service_role");
+
+    await db.query(
+      `insert into public.audit_shopify_connections (
+        id, store_label, status, shopify_shop_id, shopify_name, shopify_domain,
+        shopify_client_id, credential_hint, created_by, connected_at
+      ) values (
+        $1, 'Connected history', 'connected', 'gid://shopify/Shop/legacy',
+        'Connected history', 'legacy-store.myshopify.com', 'legacy-client',
+        'cdef', $2, now()
+      )`,
+      [CONNECTION, ADMIN],
+    );
+
+    const pendingId = "40000000-0000-4000-8000-000000000004";
+    await createPending(pendingId, "b".repeat(64));
+    await db.query(
+      `update public.audit_shopify_connections
+       set failed_attempts = 10,
+           last_attempt_at = now(),
+           last_error_code = 'missing_scopes'
+       where id = $1`,
+      [pendingId],
+    );
+    await db.exec(MIGRATION_0041);
+
+    const profiles = await db.query<{
+      id: string;
+      status: string;
+      scope_profile: string;
+      failed_attempts: number;
+      last_attempt_at: Date | null;
+      last_error_code: string | null;
+    }>(
+      `select id, status, scope_profile, failed_attempts, last_attempt_at, last_error_code
+       from public.audit_shopify_connections
+       order by status`,
+    );
+    expect(profiles.rows).toEqual([
+      {
+        id: CONNECTION,
+        status: "connected",
+        scope_profile: "store-audit-full-v1",
+        failed_attempts: 0,
+        last_attempt_at: null,
+        last_error_code: null,
+      },
+      {
+        id: pendingId,
+        status: "pending",
+        scope_profile: "store-audit-clearance-v2",
+        failed_attempts: 0,
+        last_attempt_at: null,
+        last_error_code: null,
+      },
+    ]);
   });
 
   it("keeps lifecycle RPCs service-only and ciphertext unavailable to browsers", async () => {

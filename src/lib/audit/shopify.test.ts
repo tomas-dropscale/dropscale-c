@@ -40,7 +40,7 @@ describe("audit Shopify domain boundary", () => {
 });
 
 describe("audit Shopify client credentials exchange", () => {
-  it("uses a fresh form-urlencoded exchange with redirects disabled", async () => {
+  it("uses a fresh form-urlencoded exchange without following redirects", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(
         JSON.stringify({ access_token: "temporary-access-token-123", expires_in: 86_399 }),
@@ -60,7 +60,7 @@ describe("audit Shopify client credentials exchange", () => {
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("https://example.myshopify.com/admin/oauth/access_token");
     expect(init.method).toBe("POST");
-    expect(init.redirect).toBe("error");
+    expect(init.redirect).toBe("manual");
     expect(init.cache).toBe("no-store");
     expect(init.headers).toEqual({
       "content-type": "application/x-www-form-urlencoded",
@@ -100,6 +100,26 @@ describe("audit Shopify client credentials exchange", () => {
     } catch (error) {
       expect(String(error)).not.toContain("client-secret-value-123456");
     }
+  });
+
+  it("classifies a Shopify redirect as a credentials or installation problem", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(null, {
+          status: 302,
+          headers: { location: "https://admin.shopify.com/store/example/apps" },
+        }),
+      ),
+    );
+
+    await expect(
+      exchangeAuditClientCredentials({
+        shopDomain: "example.myshopify.com",
+        clientId: "client-id-123456",
+        clientSecret: "client-secret-value-123456",
+      }),
+    ).rejects.toMatchObject({ code: "invalid_credentials", retryable: false });
   });
 });
 
