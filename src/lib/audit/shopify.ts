@@ -226,7 +226,11 @@ export async function verifyAuditShop({
       `https://${domain}/admin/api/${AUDIT_SHOPIFY_API_VERSION}/graphql.json`,
       {
         method: "POST",
-        redirect: "error",
+        // Cloudflare Workers only implement `follow` and `manual`; `error`
+        // rejects before the request is sent. Keep redirects manual so the
+        // temporary access token is never forwarded to another URL, then
+        // reject any redirect explicitly below.
+        redirect: "manual",
         cache: "no-store",
         headers: {
           "content-type": "application/json",
@@ -237,6 +241,13 @@ export async function verifyAuditShop({
     );
   } catch (error) {
     throw unavailable(error);
+  }
+
+  if (response.status >= 300 && response.status < 400) {
+    throw new ShopifyAuditError(
+      "invalid_shop_response",
+      "Shopify returned an unexpected redirect while verifying the store.",
+    );
   }
 
   if (response.status === 429) {
