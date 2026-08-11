@@ -127,6 +127,7 @@ export const en = {
     creatives: "Creatives",
     leads: "Leads",
     analytics: "Analytics",
+    connections: "Connections",
     settings: "Settings",
     clientArea: "Client area",
     openMenu: "Open menu",
@@ -135,6 +136,7 @@ export const en = {
     groupWork: "Work",
     groupFinance: "Finance",
     groupGrowth: "Growth",
+    groupAudit: "Audit",
   },
 
   adminBilling: {
@@ -1355,6 +1357,7 @@ export const pt: Dictionary = {
     creatives: "Criativos",
     leads: "Leads",
     analytics: "Análises",
+    connections: "Ligações",
     settings: "Definições",
     clientArea: "Área de cliente",
     openMenu: "Abrir menu",
@@ -1363,6 +1366,7 @@ export const pt: Dictionary = {
     groupWork: "Trabalho",
     groupFinance: "Finanças",
     groupGrowth: "Crescimento",
+    groupAudit: "Auditoria",
   },
 
   adminBilling: {
@@ -2565,6 +2569,7 @@ export const ptBR: Dictionary = {
     creatives: "Criativos",
     leads: "Leads",
     analytics: "Análises",
+    connections: "Conexões",
     settings: "Configurações",
     clientArea: "Área do cliente",
     openMenu: "Abrir menu",
@@ -2573,6 +2578,7 @@ export const ptBR: Dictionary = {
     groupWork: "Trabalho",
     groupFinance: "Financeiro",
     groupGrowth: "Crescimento",
+    groupAudit: "Auditoria",
   },
 
   adminBilling: {
@@ -3772,6 +3778,7 @@ export const es: Dictionary = {
     creatives: "Creativos",
     leads: "Leads",
     analytics: "Analítica",
+    connections: "Conexiones",
     settings: "Ajustes",
     clientArea: "Área de cliente",
     openMenu: "Abrir menú",
@@ -3780,6 +3787,7 @@ export const es: Dictionary = {
     groupWork: "Trabajo",
     groupFinance: "Finanzas",
     groupGrowth: "Crecimiento",
+    groupAudit: "Auditoría",
   },
 
   adminBilling: {
@@ -4982,6 +4990,7 @@ export const fr: Dictionary = {
     creatives: "Créatifs",
     leads: "Leads",
     analytics: "Analyses",
+    connections: "Connexions",
     settings: "Paramètres",
     clientArea: "Espace client",
     openMenu: "Ouvrir le menu",
@@ -4990,6 +4999,7 @@ export const fr: Dictionary = {
     groupWork: "Travail",
     groupFinance: "Finances",
     groupGrowth: "Croissance",
+    groupAudit: "Audit",
   },
 
   adminBilling: {

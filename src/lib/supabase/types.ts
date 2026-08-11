@@ -571,6 +571,67 @@ export type AdAccount = {
   revenue_share_enabled: boolean;
 };
 
+export type AuditShopifyConnectionStatus = "pending" | "connected" | "revoked";
+
+/**
+ * A Shopify store linked only for internal compliance audits (migration 0040).
+ * It is intentionally unrelated to ad_accounts and never enters metrics,
+ * revenue, COGS, Google Ads or agency billing.
+ */
+export type AuditShopifyConnection = {
+  id: string;
+  store_label: string;
+  status: AuditShopifyConnectionStatus;
+  /** SHA-256 digest of a one-time bearer; service-role only and never a DTO. */
+  invite_token_hash: string | null;
+  invite_expires_at: string | null;
+  failed_attempts: number;
+  last_attempt_at: string | null;
+  shopify_shop_id: string | null;
+  shopify_name: string | null;
+  shopify_domain: string | null;
+  primary_domain: string | null;
+  shopify_currency: string | null;
+  shopify_client_id: string | null;
+  credential_hint: string | null;
+  granted_scopes: string[];
+  scope_profile: "store-audit-full-v1";
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  connected_at: string | null;
+  last_verified_at: string | null;
+  reviewed_at: string | null;
+  reviewed_by: string | null;
+  revoked_at: string | null;
+  last_error_code: string | null;
+};
+
+/** Ciphertext vault: no anon/authenticated policies, including for admins. */
+export type AuditShopifyCredential = {
+  connection_id: string;
+  client_secret_ciphertext: string;
+  updated_at: string;
+};
+
+export type AuditShopifyConnectionEvent = {
+  id: string;
+  connection_id: string;
+  event_type:
+    | "invitation_created"
+    | "invitation_rotated"
+    | "invitation_revoked"
+    | "credentials_rejected"
+    | "store_connected"
+    | "connection_reviewed"
+    | "connection_revoked"
+    | "verification_failed";
+  actor_type: "admin" | "invite" | "system";
+  actor_profile_id: string | null;
+  details: Record<string, unknown>;
+  created_at: string;
+};
+
 export type AccountRequest = {
   id: string;
   client_id: string;
@@ -1029,6 +1090,88 @@ export type Database = {
           {
             foreignKeyName: "billing_issue_leases_issued_by_fkey";
             columns: ["issued_by"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      audit_shopify_connections: {
+        Row: Row<AuditShopifyConnection>;
+        Insert: Insert<
+          AuditShopifyConnection,
+          | "id"
+          | "status"
+          | "failed_attempts"
+          | "last_attempt_at"
+          | "shopify_shop_id"
+          | "shopify_name"
+          | "shopify_domain"
+          | "primary_domain"
+          | "shopify_currency"
+          | "shopify_client_id"
+          | "credential_hint"
+          | "granted_scopes"
+          | "scope_profile"
+          | "created_at"
+          | "updated_at"
+          | "connected_at"
+          | "last_verified_at"
+          | "reviewed_at"
+          | "reviewed_by"
+          | "revoked_at"
+          | "last_error_code"
+        >;
+        Update: Partial<AuditShopifyConnection>;
+        Relationships: [
+          {
+            foreignKeyName: "audit_shopify_connections_created_by_fkey";
+            columns: ["created_by"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "audit_shopify_connections_reviewed_by_fkey";
+            columns: ["reviewed_by"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      audit_shopify_credentials: {
+        Row: Row<AuditShopifyCredential>;
+        Insert: Insert<AuditShopifyCredential, "updated_at">;
+        Update: Partial<AuditShopifyCredential>;
+        Relationships: [
+          {
+            foreignKeyName: "audit_shopify_credentials_connection_id_fkey";
+            columns: ["connection_id"];
+            isOneToOne: true;
+            referencedRelation: "audit_shopify_connections";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      audit_shopify_connection_events: {
+        Row: Row<AuditShopifyConnectionEvent>;
+        Insert: Insert<
+          AuditShopifyConnectionEvent,
+          "id" | "actor_profile_id" | "details" | "created_at"
+        >;
+        Update: Partial<AuditShopifyConnectionEvent>;
+        Relationships: [
+          {
+            foreignKeyName: "audit_shopify_connection_events_connection_id_fkey";
+            columns: ["connection_id"];
+            isOneToOne: false;
+            referencedRelation: "audit_shopify_connections";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "audit_shopify_connection_events_actor_profile_id_fkey";
+            columns: ["actor_profile_id"];
             isOneToOne: false;
             referencedRelation: "profiles";
             referencedColumns: ["id"];
@@ -1727,6 +1870,57 @@ export type Database = {
     };
     Views: Record<never, never>;
     Functions: {
+      create_audit_shopify_invitation: {
+        Args: {
+          p_connection_id: string;
+          p_store_label: string;
+          p_token_hash: string;
+          p_expires_at: string;
+          p_created_by: string;
+        };
+        Returns: string;
+      };
+      complete_audit_shopify_connection: {
+        Args: {
+          p_connection_id: string;
+          p_token_hash: string;
+          p_shopify_shop_id: string;
+          p_shopify_name: string;
+          p_shopify_domain: string;
+          p_primary_domain: string | null;
+          p_shopify_currency: string;
+          p_shopify_client_id: string;
+          p_credential_hint: string;
+          p_granted_scopes: string[];
+          p_client_secret_ciphertext: string;
+        };
+        Returns: string;
+      };
+      rotate_audit_shopify_invitation: {
+        Args: {
+          p_connection_id: string;
+          p_token_hash: string;
+          p_expires_at: string;
+          p_admin_id: string;
+        };
+        Returns: string;
+      };
+      record_audit_shopify_invitation_failure: {
+        Args: {
+          p_connection_id: string;
+          p_token_hash: string;
+          p_error_code: string;
+        };
+        Returns: number | null;
+      };
+      revoke_audit_shopify_connection: {
+        Args: { p_connection_id: string; p_admin_id: string };
+        Returns: string;
+      };
+      review_audit_shopify_connection: {
+        Args: { p_connection_id: string; p_admin_id: string };
+        Returns: string;
+      };
       is_admin: {
         Args: Record<string, never>;
         Returns: boolean;
