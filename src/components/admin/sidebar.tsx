@@ -7,6 +7,7 @@ import {
   Clapperboard,
   Globe2,
   LineChart,
+  Plug,
   Scale,
   FileText,
   LayoutGrid,
@@ -65,6 +66,18 @@ const NAV_GROUPS: Group[] = [
       { href: "/admin/campaigns", icon: Target, label: (d) => d.nav.campaigns },
       { href: "/admin/leads", icon: Users, label: (d) => d.nav.leads },
       { href: "/admin/analytics", icon: BarChart3, label: (d) => d.nav.analytics },
+    ],
+  },
+  {
+    // External stores linked only for internal audits. Kept apart from Growth
+    // because these credentials never enter client metrics or billing.
+    label: (d) => d.nav.groupAudit,
+    items: [
+      {
+        href: "/admin/audit/connections",
+        icon: Plug,
+        label: (d) => d.nav.connections,
+      },
     ],
   },
   {
