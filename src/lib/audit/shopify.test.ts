@@ -164,8 +164,27 @@ describe("audit Shopify GraphQL verification", () => {
 
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toContain(`/admin/api/${AUDIT_SHOPIFY_API_VERSION}/graphql.json`);
-    expect(init.redirect).toBe("error");
+    expect(init.redirect).toBe("manual");
     expect(init.cache).toBe("no-store");
+  });
+
+  it("does not follow a GraphQL redirect carrying the temporary access token", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(null, {
+          status: 302,
+          headers: { location: "https://admin.shopify.com/store/example" },
+        }),
+      ),
+    );
+
+    await expect(
+      verifyAuditShop({
+        shopDomain: "example.myshopify.com",
+        accessToken: "temporary-access-token-123",
+      }),
+    ).rejects.toMatchObject({ code: "invalid_shop_response", retryable: false });
   });
 
   it("rejects a credential that resolves to another shop", async () => {
