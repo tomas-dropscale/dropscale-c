@@ -26,6 +26,18 @@ describe("telegramConfig", () => {
     process.env.TELEGRAM_CHAT_ID = "c";
     expect(telegramConfig()).toEqual({ token: "t", chatId: "c" });
   });
+
+  it("trims the whitespace `wrangler secret put` leaves on a pasted value", () => {
+    process.env.TELEGRAM_BOT_TOKEN = " 123:AAH\n";
+    process.env.TELEGRAM_CHAT_ID = "-100123\n";
+    expect(telegramConfig()).toEqual({ token: "123:AAH", chatId: "-100123" });
+  });
+
+  it("treats a whitespace-only secret as unset", () => {
+    process.env.TELEGRAM_BOT_TOKEN = "  ";
+    process.env.TELEGRAM_CHAT_ID = "-100123";
+    expect(telegramConfig()).toBeNull();
+  });
 });
 
 describe("sendTelegram", () => {

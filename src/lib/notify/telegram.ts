@@ -22,8 +22,13 @@ export type TelegramConfig = { token: string; chatId: string };
  * fail the write that triggered it.
  */
 export function telegramConfig(): TelegramConfig | null {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  const chatId = process.env.TELEGRAM_CHAT_ID;
+  // Trimmed, because these arrive through `wrangler secret put` and a pasted
+  // value routinely carries a trailing newline or a stray space. Telegram does
+  // not ignore it: a chat id of "-100123\n" comes back as "chat not found",
+  // which reads exactly like a wrong id and sends you looking in the wrong
+  // place.
+  const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
+  const chatId = process.env.TELEGRAM_CHAT_ID?.trim();
   if (!token || !chatId) return null;
   return { token, chatId };
 }
