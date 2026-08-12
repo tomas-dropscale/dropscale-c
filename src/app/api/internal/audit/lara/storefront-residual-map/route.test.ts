@@ -9,7 +9,7 @@ vi.mock("@/lib/audit/connections", () => ({
   getAuditMachineSponsor: mocks.sponsor,
 }));
 vi.mock("@/lib/audit/lara-storefront-residual-collector", () => ({
-  LARA_STOREFRONT_RESIDUAL_RUN_ID: "423ca684-157a-436a-b04b-262a2a0f7945",
+  LARA_STOREFRONT_RESIDUAL_RUN_ID: "d09f89fe-c372-46e7-9d3b-7edd751d22fc",
   runLaraStorefrontResidualCollector: mocks.collect,
 }));
 vi.mock("@/lib/audit/shopify-lara", () => ({
@@ -24,7 +24,7 @@ import { NextRequest } from "next/server";
 import { POST } from "./route";
 
 const URL = "https://dropscale.app/api/internal/audit/lara/storefront-residual-map";
-const RUN_ID = "423ca684-157a-436a-b04b-262a2a0f7945";
+const RUN_ID = "d09f89fe-c372-46e7-9d3b-7edd751d22fc";
 const SUMMARY = {
   auditStatus: "complete",
   completionIssues: [],
@@ -32,6 +32,7 @@ const SUMMARY = {
   scannedSourceCount: 240,
   matchedSourceCount: 6,
   textSizeReconciliationCount: 44,
+  integrityDiagnosticCount: 45,
   kachingEmbedCount: 1,
   activeKachingEmbedCount: 1,
   croatianPostMatchedFileCount: 3,

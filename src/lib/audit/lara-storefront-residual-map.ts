@@ -7,7 +7,7 @@ import { LARA_AUDIT_CONNECTION } from "./shopify-lara";
 import type { AuditShopifyRuntime } from "./shopify-runtime";
 
 export const LARA_STOREFRONT_RESIDUAL_SCHEMA_VERSION =
-  "lara-storefront-residual-map.v2" as const;
+  "lara-storefront-residual-map.v3" as const;
 
 export const LARA_STOREFRONT_RESIDUAL_TARGETS = Object.freeze({
   theme: Object.freeze({
@@ -415,6 +415,20 @@ export type LaraStorefrontResidualArtifact = {
       decodedByteLength: number;
       integrityMode: "text_crlf_normalized";
     }>;
+    integrityDiagnostics: Array<{
+      filename: string;
+      bodyMode: BodyMode;
+      reportedSize: number;
+      decodedByteLength: number | null;
+      stringLength: number | null;
+      rawMd5Matches: boolean | null;
+      crlfByteLength: number | null;
+      crlfMd5Matches: boolean | null;
+      appendLfMd5Matches: boolean | null;
+      appendCrlfMd5Matches: boolean | null;
+      stripFinalLfMd5Matches: boolean | null;
+      shortLivedHost: string | null;
+    }>;
     evidence: LaraStorefrontResidualSourceEvidence[];
   };
   kachingEmbed: {
@@ -557,6 +571,38 @@ function verifyTextIntegrity(input: {
     return null;
   }
   return { decodedByteLength, integrityMode: "text_crlf_normalized" };
+}
+
+function textIntegrityDiagnostic(input: {
+  filename: string;
+  content: string;
+  reportedSize: number;
+  checksumMd5: string | null;
+}): LaraStorefrontResidualArtifact["sourceScan"]["integrityDiagnostics"][number] {
+  const crlf = restoreCrlf(input.content);
+  const checksum = input.checksumMd5;
+  const withoutFinalLf = input.content.endsWith("\n")
+    ? input.content.slice(0, -1)
+    : null;
+  return {
+    filename: input.filename,
+    bodyMode: "text",
+    reportedSize: input.reportedSize,
+    decodedByteLength: new TextEncoder().encode(input.content).byteLength,
+    stringLength: input.content.length,
+    rawMd5Matches: checksum === null ? null : md5Hex(input.content) === checksum,
+    crlfByteLength: new TextEncoder().encode(crlf).byteLength,
+    crlfMd5Matches: checksum === null ? null : md5Hex(crlf) === checksum,
+    appendLfMd5Matches:
+      checksum === null ? null : md5Hex(`${input.content}\n`) === checksum,
+    appendCrlfMd5Matches:
+      checksum === null ? null : md5Hex(`${input.content}\r\n`) === checksum,
+    stripFinalLfMd5Matches:
+      checksum === null || withoutFinalLf === null
+        ? null
+        : md5Hex(withoutFinalLf) === checksum,
+    shortLivedHost: null,
+  };
 }
 
 function canonicalJson(value: unknown): string {
@@ -1160,6 +1206,7 @@ export async function collectLaraStorefrontResidualMap({
 
   const evidence: LaraStorefrontResidualSourceEvidence[] = [];
   const textSizeReconciliations: LaraStorefrontResidualArtifact["sourceScan"]["textSizeReconciliations"] = [];
+  const integrityDiagnostics: LaraStorefrontResidualArtifact["sourceScan"]["integrityDiagnostics"] = [];
   let scannedCount = 0;
   let scannedBytes = 0;
   let settingsSource: { content: string; sha256: string } | null = null;
@@ -1234,6 +1281,28 @@ export async function collectLaraStorefrontResidualMap({
         }
       }
       if (content === null) {
+        if (node.body.__typename === "OnlineStoreThemeFileBodyUrl") {
+          let shortLivedHost: string | null = null;
+          try {
+            shortLivedHost = new URL(node.body.url).hostname.toLocaleLowerCase();
+          } catch {
+            shortLivedHost = null;
+          }
+          integrityDiagnostics.push({
+            filename: expected.filename,
+            bodyMode: "short_lived_url",
+            reportedSize: nodeSize,
+            decodedByteLength: null,
+            stringLength: null,
+            rawMd5Matches: null,
+            crlfByteLength: null,
+            crlfMd5Matches: null,
+            appendLfMd5Matches: null,
+            appendCrlfMd5Matches: null,
+            stripFinalLfMd5Matches: null,
+            shortLivedHost,
+          });
+        }
         skipped.push({
           filename: expected.filename,
           reason:
@@ -1257,6 +1326,16 @@ export async function collectLaraStorefrontResidualMap({
               }
             : null;
       if (!integrity) {
+        if (node.body.__typename === "OnlineStoreThemeFileBodyText") {
+          integrityDiagnostics.push(
+            textIntegrityDiagnostic({
+              filename: expected.filename,
+              content,
+              reportedSize: nodeSize,
+              checksumMd5: node.checksumMd5,
+            }),
+          );
+        }
         skipped.push({ filename: expected.filename, reason: "source_integrity_mismatch" });
         continue;
       }
@@ -1373,6 +1452,7 @@ export async function collectLaraStorefrontResidualMap({
       matchedFileCount: evidence.length,
       skipped,
       textSizeReconciliations,
+      integrityDiagnostics,
       evidence: evidence.sort((left, right) =>
         left.filename.localeCompare(right.filename),
       ),
@@ -1415,6 +1495,7 @@ export type LaraStorefrontResidualSummary = {
   scannedSourceCount: number;
   matchedSourceCount: number;
   textSizeReconciliationCount: number;
+  integrityDiagnosticCount: number;
   kachingEmbedCount: number;
   activeKachingEmbedCount: number;
   croatianPostMatchedFileCount: number;
@@ -1466,6 +1547,33 @@ export function summariseLaraStorefrontResidualArtifact(
         record.integrityMode !== "text_crlf_normalized"
       );
     }) ||
+    !Array.isArray(sourceScan?.integrityDiagnostics) ||
+    sourceScan.integrityDiagnostics.some((entry) => {
+      const record = objectRecord(entry);
+      return (
+        !record ||
+        typeof record.filename !== "string" ||
+        !["text", "base64", "short_lived_url"].includes(String(record.bodyMode)) ||
+        typeof record.reportedSize !== "number" ||
+        (record.decodedByteLength !== null &&
+          typeof record.decodedByteLength !== "number") ||
+        (record.stringLength !== null && typeof record.stringLength !== "number") ||
+        (record.rawMd5Matches !== null &&
+          typeof record.rawMd5Matches !== "boolean") ||
+        (record.crlfByteLength !== null &&
+          typeof record.crlfByteLength !== "number") ||
+        (record.crlfMd5Matches !== null &&
+          typeof record.crlfMd5Matches !== "boolean") ||
+        (record.appendLfMd5Matches !== null &&
+          typeof record.appendLfMd5Matches !== "boolean") ||
+        (record.appendCrlfMd5Matches !== null &&
+          typeof record.appendCrlfMd5Matches !== "boolean") ||
+        (record.stripFinalLfMd5Matches !== null &&
+          typeof record.stripFinalLfMd5Matches !== "boolean") ||
+        (record.shortLivedHost !== null &&
+          typeof record.shortLivedHost !== "string")
+      );
+    }) ||
     typeof kaching?.embedCount !== "number" ||
     typeof kaching?.activeEmbedCount !== "number" ||
     !Array.isArray(croatianPost?.matchedFiles) ||
@@ -1505,6 +1613,7 @@ export function summariseLaraStorefrontResidualArtifact(
     scannedSourceCount: sourceScan.scannedCount,
     matchedSourceCount: sourceScan.matchedFileCount,
     textSizeReconciliationCount: sourceScan.textSizeReconciliations.length,
+    integrityDiagnosticCount: sourceScan.integrityDiagnostics.length,
     kachingEmbedCount: kaching.embedCount,
     activeKachingEmbedCount: kaching.activeEmbedCount,
     croatianPostMatchedFileCount: croatianPost.matchedFiles.length,

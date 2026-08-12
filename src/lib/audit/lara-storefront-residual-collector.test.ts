@@ -26,7 +26,7 @@ vi.mock("./lara-storefront-residual-map", () => {
     LARA_STOREFRONT_RESIDUAL_QUERY_MANIFEST: {
       fixed: "query LaraFixedRead { shop { id } }",
     },
-    LARA_STOREFRONT_RESIDUAL_SCHEMA_VERSION: "lara-storefront-residual-map.v2",
+    LARA_STOREFRONT_RESIDUAL_SCHEMA_VERSION: "lara-storefront-residual-map.v3",
     laraStorefrontResidualManifestSha256: mocks.manifestHash,
     laraStorefrontResidualSchemaSha256: mocks.schemaHash,
     LaraStorefrontResidualMapError,
@@ -84,6 +84,7 @@ const SUMMARY = {
   scannedSourceCount: 240,
   matchedSourceCount: 4,
   textSizeReconciliationCount: 3,
+  integrityDiagnosticCount: 0,
   kachingEmbedCount: 1,
   activeKachingEmbedCount: 1,
   croatianPostMatchedFileCount: 2,
@@ -106,7 +107,7 @@ const SUMMARY = {
   },
 };
 const ARTIFACT = {
-  schemaVersion: "lara-storefront-residual-map.v2",
+  schemaVersion: "lara-storefront-residual-map.v3",
   queryManifestSha256: MANIFEST_HASH,
 };
 

@@ -26,7 +26,7 @@ import {
 import type { AuditShopifyRun } from "@/lib/supabase/types";
 
 export const LARA_STOREFRONT_RESIDUAL_RUN_ID =
-  "423ca684-157a-436a-b04b-262a2a0f7945" as const;
+  "d09f89fe-c372-46e7-9d3b-7edd751d22fc" as const;
 
 const REQUEST_SOURCE = "system.storefront_residual_map";
 const REQUEST_NOTE =

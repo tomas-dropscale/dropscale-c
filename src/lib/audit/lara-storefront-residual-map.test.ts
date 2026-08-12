@@ -447,6 +447,7 @@ describe("the fixed read-only Lara storefront residual mapper", () => {
       scannedSourceCount: 4,
       matchedSourceCount: 3,
       textSizeReconciliationCount: 0,
+      integrityDiagnosticCount: 0,
       kachingEmbedCount: 1,
       activeKachingEmbedCount: 1,
       croatianPostMatchedFileCount: 1,
@@ -498,6 +499,7 @@ describe("the fixed read-only Lara storefront residual mapper", () => {
     ).toMatchObject({ integrityMode: "text_crlf_normalized" });
     expect(summariseLaraStorefrontResidualArtifact(artifact)).toMatchObject({
       textSizeReconciliationCount: 1,
+      integrityDiagnosticCount: 0,
     });
   });
 
@@ -512,6 +514,20 @@ describe("the fixed read-only Lara storefront residual mapper", () => {
     expect(artifact.sourceScan.skipped).toContainEqual({
       filename: "sections/header-group.json",
       reason: "short_lived_body_unavailable",
+    });
+    expect(artifact.sourceScan.integrityDiagnostics).toContainEqual({
+      filename: "sections/header-group.json",
+      bodyMode: "short_lived_url",
+      reportedSize: bytes(SALE_SOURCE),
+      decodedByteLength: null,
+      stringLength: null,
+      rawMd5Matches: null,
+      crlfByteLength: null,
+      crlfMd5Matches: null,
+      appendLfMd5Matches: null,
+      appendCrlfMd5Matches: null,
+      stripFinalLfMd5Matches: null,
+      shortLivedHost: "cdn.shopify.com",
     });
     expect(artifact.findings.saleNarrative.markerOccurrences).toBe(0);
   });
@@ -563,7 +579,7 @@ describe("the fixed read-only Lara storefront residual mapper", () => {
   it("does not accept a completed artifact with changed shop or theme evidence", async () => {
     expect(
       summariseLaraStorefrontResidualArtifact({
-        schemaVersion: "lara-storefront-residual-map.v2",
+        schemaVersion: "lara-storefront-residual-map.v3",
         auditStatus: "complete",
         completionIssues: [],
         apiVersion: "2026-07",
