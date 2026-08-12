@@ -4,11 +4,15 @@ import { NextRequest } from "next/server";
 const mocks = vi.hoisted(() => ({
   getSessionProfile: vi.fn(),
   sendTelegram: vi.fn(),
+  createServiceClient: vi.fn(),
 }));
 
 vi.mock("server-only", () => ({}));
 vi.mock("@/lib/supabase/server", () => ({
   getSessionProfile: mocks.getSessionProfile,
+}));
+vi.mock("@/lib/supabase/service", () => ({
+  createServiceClient: mocks.createServiceClient,
 }));
 // Only the send is faked. The formatter stays real — pointing the alias at the
 // module itself, since the suite runs without path-alias resolution — so these
@@ -36,12 +40,24 @@ const newClient = {
   record: { approval_status: "pending", full_name: "Ana Dias", email: "ana@loja.pt" },
 };
 
+/** Minimal stand-in for the service client's `from(...).select(...).in(...)`. */
+function serviceClient(rows: Record<string, Record<string, unknown>[]>) {
+  return {
+    from: (table: string) => ({
+      select: () => ({
+        in: async () => ({ data: rows[table] ?? [], error: null }),
+      }),
+    }),
+  };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   process.env.NOTIFY_SECRET = SECRET;
   process.env.NEXT_PUBLIC_SITE_URL = "https://dropscale.app";
   mocks.sendTelegram.mockResolvedValue({ ok: true });
   mocks.getSessionProfile.mockResolvedValue({ profile: null });
+  mocks.createServiceClient.mockReturnValue(null);
 });
 
 describe("POST /api/notify/telegram", () => {
@@ -129,6 +145,65 @@ describe("POST /api/notify/telegram", () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ ok: false, reason: "rejected" });
+  });
+
+  it("names the approver on a decision", async () => {
+    const ADMIN = "aaaaaaaa-0000-4000-8000-000000000001";
+    mocks.createServiceClient.mockReturnValue(
+      serviceClient({ profiles: [{ id: ADMIN, full_name: "Tomás" }] }),
+    );
+
+    await POST(
+      post(
+        {
+          type: "UPDATE",
+          table: "portal_clients",
+          record: { approval_status: "approved", full_name: "Ana Dias", approved_by: ADMIN },
+          old_record: { approval_status: "pending", full_name: "Ana Dias", approved_by: null },
+        },
+        authed,
+      ),
+    );
+
+    expect(mocks.sendTelegram.mock.calls[0][0]).toContain("por Tomás");
+  });
+
+  it("still sends the alert when names cannot be resolved", async () => {
+    mocks.createServiceClient.mockReturnValue(null);
+
+    const response = await POST(
+      post(
+        {
+          type: "UPDATE",
+          table: "portal_clients",
+          record: { approval_status: "approved", full_name: "Ana Dias", approved_by: "adm-1" },
+          old_record: { approval_status: "pending", full_name: "Ana Dias", approved_by: null },
+        },
+        authed,
+      ),
+    );
+
+    expect(response.status).toBe(200);
+    const sent = mocks.sendTelegram.mock.calls[0][0];
+    expect(sent).toContain("Cliente aprovado");
+    expect(sent).not.toContain("adm-1");
+  });
+
+  it("does not spend lookups on a payload that announces nothing", async () => {
+    await POST(
+      post(
+        {
+          type: "UPDATE",
+          table: "portal_clients",
+          record: { approval_status: "approved", approved_by: "adm-1" },
+          old_record: { approval_status: "approved", approved_by: "adm-1" },
+        },
+        authed,
+      ),
+    );
+
+    expect(mocks.createServiceClient).not.toHaveBeenCalled();
+    expect(mocks.sendTelegram).not.toHaveBeenCalled();
   });
 
   it("rejects a body that is not JSON", async () => {

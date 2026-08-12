@@ -1,8 +1,59 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { getSessionProfile } from "@/lib/supabase/server";
-import { formatAdminEvent, isNotifiedTable, type WebhookPayload } from "@/lib/notify/admin-events";
+import { createServiceClient } from "@/lib/supabase/service";
+import {
+  formatAdminEvent,
+  isNotifiedTable,
+  lookupsFor,
+  type ResolvedNames,
+  type WebhookPayload,
+} from "@/lib/notify/admin-events";
 import { sendTelegram } from "@/lib/notify/telegram";
+
+/**
+ * Puts names to the uuids a row carries — who approved, which store.
+ *
+ * Service-role because the webhook has no session, and it is read-only. Every
+ * failure degrades to "no name" rather than no alert: an unresolved id costs a
+ * word in the message, whereas a thrown lookup would cost the whole
+ * notification.
+ */
+async function resolveNames(payload: WebhookPayload): Promise<ResolvedNames> {
+  const { profileIds, adAccountIds } = lookupsFor(payload);
+  if (profileIds.length === 0 && adAccountIds.length === 0) return {};
+
+  const supabase = createServiceClient();
+  if (!supabase) return {};
+
+  const names: ResolvedNames = {};
+
+  try {
+    if (profileIds.length > 0) {
+      const { data } = await supabase
+        .from("profiles")
+        .select("id, full_name")
+        .in("id", profileIds);
+      names.profiles = Object.fromEntries(
+        (data ?? []).map((row) => [row.id, row.full_name]),
+      );
+    }
+
+    if (adAccountIds.length > 0) {
+      const { data } = await supabase
+        .from("ad_accounts")
+        .select("id, store_name")
+        .in("id", adAccountIds);
+      names.accounts = Object.fromEntries(
+        (data ?? []).map((row) => [row.id, row.store_name]),
+      );
+    }
+  } catch (error) {
+    console.error("Name lookup for a Telegram alert failed:", error);
+  }
+
+  return names;
+}
 
 /**
  * POST — Supabase Database Webhook lands here and the team gets a Telegram
@@ -52,7 +103,14 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ ok: true, skipped: "table not notified" });
   }
 
-  const message = formatAdminEvent(body);
+  // Cheap pre-check: resolving names costs queries, and most payloads announce
+  // nothing at all. Only look them up once the payload is known to be worth a
+  // message.
+  if (!formatAdminEvent(body)) {
+    return NextResponse.json({ ok: true, skipped: "nothing to announce" });
+  }
+
+  const message = formatAdminEvent(body, await resolveNames(body));
   if (!message) {
     return NextResponse.json({ ok: true, skipped: "nothing to announce" });
   }
