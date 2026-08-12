@@ -37,7 +37,8 @@ const VARIANT_GID = /^gid:\/\/shopify\/ProductVariant\/[1-9][0-9]*$/;
 const HANDLE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const MONEY = /^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/;
 const RESULT_HOST = "storage.googleapis.com";
-const RESULT_PATH = /^\/shopify\/[A-Za-z0-9_./=+~-]{8,1024}$/;
+const RESULT_PATH =
+  /^\/(?:shopify|shopify-tiers-assets-prod-us-east1)\/[A-Za-z0-9_./=+~-]{8,1024}$/;
 const BULK_RECOVERY_LOOKBACK_MS = 5 * 60 * 1_000;
 
 export const LARA_PRICING_RECENT_BULK_QUERIES = `#graphql
@@ -530,6 +531,13 @@ function safeResultUrl(value: string): URL {
   } catch {
     throw runtimeError("bulk_download_invalid", "Shopify returned an invalid result URL.");
   }
+  const pathStart = value.indexOf("/", value.indexOf("://") + 3);
+  const queryStart = value.indexOf("?", pathStart);
+  const fragmentStart = value.indexOf("#", pathStart);
+  const pathEnd = Math.min(
+    ...[queryStart, fragmentStart, value.length].filter((index) => index >= 0),
+  );
+  const rawPathname = pathStart >= 0 ? value.slice(pathStart, pathEnd) : "";
   if (
     parsed.protocol !== "https:" ||
     parsed.hostname !== RESULT_HOST ||
@@ -537,6 +545,7 @@ function safeResultUrl(value: string): URL {
     parsed.username ||
     parsed.password ||
     parsed.hash ||
+    rawPathname !== parsed.pathname ||
     !RESULT_PATH.test(parsed.pathname)
   ) {
     throw runtimeError(

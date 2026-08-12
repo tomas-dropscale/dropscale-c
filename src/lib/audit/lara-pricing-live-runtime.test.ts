@@ -306,9 +306,34 @@ describe("Lara pricing live Shopify boundary", () => {
     ).rejects.toBeInstanceOf(LaraPricingMutationAmbiguousError);
   });
 
-  it("rejects a Shopify-supplied result URL outside the exact storage allowlist without fetching it", async () => {
+  it.each([
+    {
+      label: "another host",
+      resultUrl: "https://evil.example/shopify/opaque-result-file",
+    },
+    {
+      label: "a near-match tier bucket",
+      resultUrl:
+        "https://storage.googleapis.com/shopify-tiers-assets-prod-us-east10/opaque-result-file?X-Goog-Signature=private",
+    },
+    {
+      label: "another Google Storage bucket",
+      resultUrl:
+        "https://storage.googleapis.com/shopify-tiers-assets-prod-us-west1/opaque-result-file?X-Goog-Signature=private",
+    },
+    {
+      label: "literal path traversal into an allowed bucket",
+      resultUrl:
+        "https://storage.googleapis.com/shopify-tiers-assets-prod-us-east1/../shopify/opaque-result-file?X-Goog-Signature=private",
+    },
+    {
+      label: "encoded path traversal into an allowed bucket",
+      resultUrl:
+        "https://storage.googleapis.com/shopify-tiers-assets-prod-us-east1/%2e%2e/shopify/opaque-result-file?X-Goog-Signature=private",
+    },
+  ])("rejects $label without fetching it", async ({ resultUrl }) => {
     const fetchMock = vi.fn(async () =>
-      graphqlResponse({ data: { bulkOperation: bulk({ url: "https://evil.example/steal" }) } }),
+      graphqlResponse({ data: { bulkOperation: bulk({ url: resultUrl }) } }),
     );
     vi.stubGlobal("fetch", fetchMock);
     const runtime = await createLaraPricingLiveRuntime();
@@ -321,65 +346,80 @@ describe("Lara pricing live Shopify boundary", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("streams, hashes and count-checks a direct credential-free Shopify JSONL result", async () => {
-    const product = {
-      id: "gid://shopify/Product/1",
-      handle: "safe-product",
-      title: "Safe product",
-      vendor: "Lara Rovinj",
-      status: "ACTIVE",
-      publishedAt: "2026-08-10T10:00:00.000Z",
-      updatedAt: "2026-08-11T10:00:00.000Z",
-    };
-    const variant = {
-      id: "gid://shopify/ProductVariant/11",
-      title: "Default Title",
-      price: "49.95",
-      compareAtPrice: "99.90",
-      updatedAt: "2026-08-11T10:00:00.000Z",
-      __parentId: product.id,
-    };
-    const jsonl = `${JSON.stringify(product)}\n${JSON.stringify(variant)}\n`;
-    const bytes = new TextEncoder().encode(jsonl).byteLength;
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(
-        graphqlResponse({
-          data: { bulkOperation: bulk({ fileSize: String(bytes) }) },
-        }),
-      )
-      .mockResolvedValueOnce(
-        new Response(jsonl, {
-          status: 200,
-          headers: {
-            "content-length": String(bytes),
-            "content-type": "application/octet-stream",
-          },
-        }),
-      );
-    vi.stubGlobal("fetch", fetchMock);
-    const runtime = await createLaraPricingLiveRuntime();
-    const downloaded = await runtime.downloadCompletedCatalogue({
-      operationId: "gid://shopify/BulkOperation/9001",
-      capturedAt: "2026-08-12T20:01:00.000Z",
-    });
+  it.each([
+    {
+      bucket: "shopify",
+      resultUrl:
+        "https://storage.googleapis.com/shopify/opaque-result-file?X-Goog-Signature=private",
+    },
+    {
+      bucket: "shopify-tiers-assets-prod-us-east1",
+      resultUrl:
+        "https://storage.googleapis.com/shopify-tiers-assets-prod-us-east1/opaque-result-file?X-Goog-Signature=private",
+    },
+  ])(
+    "streams, hashes and count-checks a direct credential-free JSONL result from $bucket",
+    async ({ bucket, resultUrl }) => {
+      const product = {
+        id: "gid://shopify/Product/1",
+        handle: "safe-product",
+        title: "Safe product",
+        vendor: "Lara Rovinj",
+        status: "ACTIVE",
+        publishedAt: "2026-08-10T10:00:00.000Z",
+        updatedAt: "2026-08-11T10:00:00.000Z",
+      };
+      const variant = {
+        id: "gid://shopify/ProductVariant/11",
+        title: "Default Title",
+        price: "49.95",
+        compareAtPrice: "99.90",
+        updatedAt: "2026-08-11T10:00:00.000Z",
+        __parentId: product.id,
+      };
+      const jsonl = `${JSON.stringify(product)}\n${JSON.stringify(variant)}\n`;
+      const bytes = new TextEncoder().encode(jsonl).byteLength;
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(
+          graphqlResponse({
+            data: { bulkOperation: bulk({ fileSize: String(bytes), url: resultUrl }) },
+          }),
+        )
+        .mockResolvedValueOnce(
+          new Response(jsonl, {
+            status: 200,
+            headers: {
+              "content-length": String(bytes),
+              "content-type": "application/octet-stream",
+            },
+          }),
+        );
+      vi.stubGlobal("fetch", fetchMock);
+      const runtime = await createLaraPricingLiveRuntime();
+      const downloaded = await runtime.downloadCompletedCatalogue({
+        operationId: "gid://shopify/BulkOperation/9001",
+        capturedAt: "2026-08-12T20:01:00.000Z",
+      });
 
-    expect(downloaded.byteLength).toBe(bytes);
-    expect(downloaded.jsonlSha256).toBe(await sha256(jsonl));
-    expect(downloaded.catalogue.counts).toEqual({
-      products: 1,
-      variants: 1,
-      productsWithCompareAt: 1,
-      variantsWithCompareAt: 1,
-    });
-    const downloadCall = fetchMock.mock.calls[1];
-    const url = downloadCall?.[0] as URL;
-    const init = downloadCall?.[1] as RequestInit;
-    expect(url.hostname).toBe("storage.googleapis.com");
-    expect(init.redirect).toBe("manual");
-    expect(init.credentials).toBe("omit");
-    expect(new Headers(init.headers).has("x-shopify-access-token")).toBe(false);
-  });
+      expect(downloaded.byteLength).toBe(bytes);
+      expect(downloaded.jsonlSha256).toBe(await sha256(jsonl));
+      expect(downloaded.catalogue.counts).toEqual({
+        products: 1,
+        variants: 1,
+        productsWithCompareAt: 1,
+        variantsWithCompareAt: 1,
+      });
+      const downloadCall = fetchMock.mock.calls[1];
+      const downloadUrl = downloadCall?.[0] as URL;
+      const init = downloadCall?.[1] as RequestInit;
+      expect(downloadUrl.hostname).toBe("storage.googleapis.com");
+      expect(downloadUrl.pathname.split("/")[1]).toBe(bucket);
+      expect(init.redirect).toBe("manual");
+      expect(init.credentials).toBe("omit");
+      expect(new Headers(init.headers).has("x-shopify-access-token")).toBe(false);
+    },
+  );
 
   it("fails closed when stored or freshly verified product scopes are missing", async () => {
     installConnection(connection(["read_products"]));
