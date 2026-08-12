@@ -182,7 +182,8 @@ export class LaraPricingLiveRepairError extends Error {
       | "plan_integrity_mismatch"
       | "verification_failed"
       | "terminal_artifact_invalid"
-      | "terminal_commit_ambiguous",
+      | "terminal_commit_ambiguous"
+      | "terminal_failure_commit_ambiguous",
     message: string,
   ) {
     super(message);
@@ -408,7 +409,13 @@ function assertCheckpoint(
     item &&
       (item.phase === "applying"
         ? item.execution &&
-          ["ready", "applying", "reconciling"].includes(item.execution.phase)
+          [
+            "ready",
+            "applying",
+            "reconciling",
+            "verification_pending",
+            "blocked",
+          ].includes(item.execution.phase)
         : [
               "verification_start_pending",
               "verification_starting",
@@ -1594,6 +1601,72 @@ async function commitVerifiedRun(
   }
 }
 
+async function commitBlockedRun(
+  state: { run: AuditShopifyRun; checkpoint: LaraPricingLiveCheckpoint },
+  leaseValue: string,
+  expected: { requestedBy: string; schemaHash: string; manifestHash: string },
+): Promise<AuditShopifyRun> {
+  if (
+    state.checkpoint.phase !== "blocked" ||
+    state.checkpoint.execution?.phase !== "blocked" ||
+    !state.checkpoint.blockedCode ||
+    state.checkpoint.blockedCode !== state.checkpoint.execution.blockedCode
+  ) {
+    throw new LaraPricingLiveRepairError(
+      "invalid_checkpoint",
+      "The blocked pricing checkpoint is not internally sealed.",
+    );
+  }
+  const errorCode = "pricing_execution_blocked";
+  let failed: AuditShopifyRun;
+  try {
+    failed = await failAuditShopifyRun({
+      run: state.run,
+      leaseToken: leaseValue,
+      checkpoint: state.checkpoint as unknown as Record<string, unknown>,
+      errorCode,
+      retryable: false,
+    });
+  } catch {
+    // A failure transition can commit even when its response is lost. Re-read
+    // before yielding the sealed blocked checkpoint for a safe retry.
+    let current: AuditShopifyRun | null = null;
+    try {
+      current = await getAuditShopifyRun({
+        runId: state.run.id,
+        shopDomain: state.run.shopify_domain,
+      });
+    } catch {
+      // The typed ambiguity below preserves the blocked checkpoint for retry.
+    }
+    if (current) {
+      validateRun(current, expected);
+      if (current.state === "failed") {
+        validateTerminalRunState(current);
+        if (current.error_code !== errorCode) {
+          throw new LaraPricingLiveRepairError(
+            "run_metadata_mismatch",
+            "The blocked pricing failure preserved another error code.",
+          );
+        }
+        return current;
+      }
+    }
+    throw new LaraPricingLiveRepairError(
+      "terminal_failure_commit_ambiguous",
+      "The sealed pricing failure was not durably acknowledged.",
+    );
+  }
+  validateFailureTransition(failed, expected, errorCode);
+  if (failed.state !== "failed") {
+    throw new LaraPricingLiveRepairError(
+      "run_metadata_mismatch",
+      "A definitive blocked pricing run did not become failed.",
+    );
+  }
+  return failed;
+}
+
 async function validateCompletedReplay(
   run: AuditShopifyRun,
   checkpoint: LaraPricingLiveCheckpoint,
@@ -1652,6 +1725,7 @@ function safeErrorCode(error: unknown): { code: string; retryable: boolean } {
       retryable: [
         "durable_transition_failed",
         "terminal_commit_ambiguous",
+        "terminal_failure_commit_ambiguous",
       ].includes(error.code),
     };
   }
@@ -1800,6 +1874,45 @@ export async function runLaraPricingLiveRepairOneShot(input: {
       return result("completed", completed.checkpoint);
     }
 
+    // The nested executor persists its blocked state before the outer phase.
+    // Reconcile either side of that failure crash window before slice budget
+    // accounting or runtime creation, then seal an exact terminal failure.
+    if (
+      state.checkpoint.phase === "applying" &&
+      state.checkpoint.execution?.phase === "blocked"
+    ) {
+      const blockedCode = state.checkpoint.execution.blockedCode;
+      if (!blockedCode) {
+        throw new LaraPricingLiveRepairError(
+          "invalid_checkpoint",
+          "The resumed blocked pricing execution has no evidence code.",
+        );
+      }
+      const blocked = await withEvent(
+        state.checkpoint,
+        { phase: "blocked", blockedCode },
+        "execution.blocked_reconciled",
+        blockedCode,
+      );
+      await persist(state, leaseValue, blocked);
+    }
+    if (state.checkpoint.phase === "blocked") {
+      const failed = await commitBlockedRun(state, leaseValue, expected);
+      return result("failed", state.checkpoint, failed.error_code);
+    }
+
+    if (
+      state.checkpoint.phase === "applying" &&
+      state.checkpoint.execution?.phase === "verification_pending"
+    ) {
+      const verificationPending = await withEvent(
+        state.checkpoint,
+        { phase: "verification_start_pending" },
+        "verification.required_reconciled",
+      );
+      await persist(state, leaseValue, verificationPending);
+    }
+
     if (state.checkpoint.sliceCount >= MAX_TOTAL_SLICES) {
       throw new LaraPricingLiveRepairError(
         "run_unavailable",
@@ -1938,18 +2051,7 @@ export async function runLaraPricingLiveRepairOneShot(input: {
           slice.checkpoint.blockedCode,
         );
         await persist(state, leaseValue, next);
-        const failed = await failAuditShopifyRun({
-          run: state.run,
-          leaseToken: leaseValue,
-          checkpoint: state.checkpoint as unknown as Record<string, unknown>,
-          errorCode: "pricing_execution_blocked",
-          retryable: false,
-        });
-        validateFailureTransition(
-          failed,
-          expected,
-          "pricing_execution_blocked",
-        );
+        const failed = await commitBlockedRun(state, leaseValue, expected);
         return result("failed", state.checkpoint, failed.error_code);
       }
       if (slice.phase === "verification_pending") {

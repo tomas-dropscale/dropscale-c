@@ -296,7 +296,7 @@ async function terminalCrashFixture(phase: "verifying" | "verified") {
     },
     blockedCode: null,
   };
-  return { checkpoint, store };
+  return { checkpoint, store, persisted };
 }
 
 beforeEach(() => {
@@ -590,6 +590,222 @@ describe("fenced Lara pricing one-shot", () => {
       expect(mocks.complete).toHaveBeenCalledTimes(1);
       expect(mocks.fail).not.toHaveBeenCalled();
     }
+  });
+
+  it("reconciles both blocked crash windows before the slice ceiling or Shopify runtime", async () => {
+    for (const outerPhase of ["applying", "blocked"] as const) {
+      vi.clearAllMocks();
+      mocks.preflightStore.mockResolvedValue(undefined);
+      const fixture = await terminalCrashFixture("verified");
+      const operation = fixture.persisted.root.operations[0];
+      if (!operation || !fixture.checkpoint.execution) {
+        throw new TypeError("missing blocked fixture");
+      }
+      const blockedCode = "PRODUCT_OR_PRICE_CAS_DRIFT";
+      const checkpoint: LaraPricingLiveCheckpoint = {
+        ...structuredClone(fixture.checkpoint),
+        phase: outerPhase,
+        sliceCount: 3_500,
+        execution: {
+          ...structuredClone(fixture.checkpoint.execution),
+          phase: "blocked",
+          nextOperationIndex: 0,
+          currentOperationIndex: 0,
+          currentOperationDigestSha256: operation.operationDigestSha256,
+          attemptsForCurrentOperation: 1,
+          appliedProducts: 0,
+          appliedVariants: 0,
+          externallyCompliantProducts: 0,
+          externallyCompliantVariants: 0,
+          freshVerificationDigestSha256: null,
+          freshVerificationProducts: null,
+          freshVerificationVariants: null,
+          blockedCode,
+        },
+        blockedCode: outerPhase === "blocked" ? blockedCode : null,
+      };
+      let running = await runRow({
+        state: "running",
+        checkpoint: structuredClone(checkpoint) as unknown as Record<
+          string,
+          unknown
+        >,
+        attempt_count: 11,
+        next_attempt_at: null,
+        lease_token: "72000000-0000-4000-8000-000000000001",
+        lease_generation: 7,
+        lease_acquired_at: "2026-08-12T20:06:00.000Z",
+        lease_renewed_at: "2026-08-12T20:06:00.000Z",
+        lease_expires_at: "2026-08-12T20:11:00.000Z",
+        started_at: "2026-08-12T20:00:01.000Z",
+      });
+      mocks.get.mockResolvedValue(
+        await runRow({
+          checkpoint: structuredClone(checkpoint) as unknown as Record<
+            string,
+            unknown
+          >,
+        }),
+      );
+      mocks.claim.mockImplementation(async (input: { leaseToken: string }) => {
+        running = { ...running, lease_token: input.leaseToken };
+        return running;
+      });
+      mocks.renew.mockImplementation(
+        async (input: { checkpoint: Record<string, unknown> }) => {
+          running = { ...running, checkpoint: structuredClone(input.checkpoint) };
+          return running;
+        },
+      );
+      mocks.fail.mockImplementation(
+        async (input: {
+          checkpoint: Record<string, unknown>;
+          errorCode: string;
+          retryable: boolean;
+        }) => ({
+          ...running,
+          state: "failed",
+          checkpoint: structuredClone(input.checkpoint),
+          artifact: null,
+          error_code: input.errorCode,
+          completed_at: null,
+          failed_at: "2026-08-12T20:07:00.000Z",
+          next_attempt_at: null,
+          lease_token: null,
+          lease_acquired_at: null,
+          lease_renewed_at: null,
+          lease_expires_at: null,
+        }),
+      );
+      const runtimeFactory = vi.fn(async () => inertRuntime());
+
+      await expect(
+        runLaraPricingLiveRepairOneShot({
+          requestedBy: REQUESTED_BY,
+          runtimeFactory,
+        }),
+      ).resolves.toEqual(
+        expect.objectContaining({
+          state: "failed",
+          phase: "blocked",
+          errorCode: "pricing_execution_blocked",
+        }),
+      );
+      expect(runtimeFactory).not.toHaveBeenCalled();
+      expect(mocks.fail).toHaveBeenCalledWith(
+        expect.objectContaining({
+          errorCode: "pricing_execution_blocked",
+          retryable: false,
+        }),
+      );
+    }
+  });
+
+  it("resumes nested verification_pending without repeating a product mutation", async () => {
+    const fixture = await terminalCrashFixture("verified");
+    if (!fixture.checkpoint.execution) throw new TypeError("missing execution fixture");
+    const checkpoint: LaraPricingLiveCheckpoint = {
+      ...structuredClone(fixture.checkpoint),
+      phase: "applying",
+      execution: {
+        ...structuredClone(fixture.checkpoint.execution),
+        phase: "verification_pending",
+        currentOperationIndex: null,
+        currentOperationDigestSha256: null,
+        attemptsForCurrentOperation: 0,
+        freshVerificationDigestSha256: null,
+        freshVerificationProducts: null,
+        freshVerificationVariants: null,
+        blockedCode: null,
+      },
+      verification: {
+        requestedAt: null,
+        operationId: null,
+        completedAt: null,
+        capturedAt: null,
+        jsonlSha256: null,
+        byteLength: null,
+        catalogueDigestSha256: null,
+        products: null,
+        variants: null,
+        variantsWithCompareAt: null,
+        pollCount: 0,
+        nextSourceOrdinal: 0,
+        missingSourceProducts: 0,
+        missingSourceVariants: 0,
+        sellingPriceDriftVariants: 0,
+        vendorDriftProducts: 0,
+        statusDriftProducts: 0,
+        publicationDriftProducts: 0,
+      },
+      blockedCode: null,
+    };
+    let running = await runRow({
+      state: "running",
+      checkpoint: structuredClone(checkpoint) as unknown as Record<
+        string,
+        unknown
+      >,
+      attempt_count: 11,
+      next_attempt_at: null,
+      lease_token: "72000000-0000-4000-8000-000000000001",
+      lease_generation: 7,
+      lease_acquired_at: "2026-08-12T20:06:00.000Z",
+      lease_renewed_at: "2026-08-12T20:06:00.000Z",
+      lease_expires_at: "2026-08-12T20:11:00.000Z",
+      started_at: "2026-08-12T20:00:01.000Z",
+    });
+    mocks.get.mockResolvedValue(
+      await runRow({
+        checkpoint: structuredClone(checkpoint) as unknown as Record<
+          string,
+          unknown
+        >,
+      }),
+    );
+    mocks.claim.mockImplementation(async (input: { leaseToken: string }) => {
+      running = { ...running, lease_token: input.leaseToken };
+      return running;
+    });
+    mocks.renew.mockImplementation(
+      async (input: { checkpoint: Record<string, unknown> }) => {
+        running = { ...running, checkpoint: structuredClone(input.checkpoint) };
+        return running;
+      },
+    );
+    mocks.rpc.mockImplementation(
+      async (_name: string, args: Record<string, unknown>) => {
+        running = {
+          ...running,
+          state: "queued",
+          checkpoint: structuredClone(
+            args.p_checkpoint as Record<string, unknown>,
+          ),
+          next_attempt_at: "2026-08-13T00:10:30.000Z",
+          lease_token: null,
+          lease_acquired_at: null,
+          lease_renewed_at: null,
+          lease_expires_at: null,
+        };
+        return { data: [running], error: null };
+      },
+    );
+    const runtime = inertRuntime();
+
+    await expect(
+      runLaraPricingLiveRepairOneShot({
+        requestedBy: REQUESTED_BY,
+        runtimeFactory: async () => runtime,
+      }),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        state: "in_progress",
+        phase: "verification_starting",
+      }),
+    );
+    expect(runtime.readFullProduct).not.toHaveBeenCalled();
+    expect(runtime.clearCompareAtPricesAtomic).not.toHaveBeenCalled();
+    expect(runtime.recoverExactCatalogueStarts).toHaveBeenCalledTimes(1);
   });
 
   it("keeps a sealed terminal checkpoint retryable when completion acknowledgement is ambiguous", async () => {
