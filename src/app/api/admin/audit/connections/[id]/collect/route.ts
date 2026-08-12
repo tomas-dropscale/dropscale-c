@@ -1,8 +1,13 @@
 import { NextResponse, type NextRequest } from "next/server";
 
-import { AuditConnectionError, requireAuditAdmin } from "@/lib/audit/connections";
+import {
+  AuditConnectionError,
+  getAuditMachineSponsor,
+  requireAuditAdmin,
+} from "@/lib/audit/connections";
 import {
   LARA_AUDIT_CONNECTION,
+  LARA_INITIAL_BASELINE_RUN_ID,
   runLaraAuditBaseline,
 } from "@/lib/audit/shopify-collector";
 import { isAuditConnectionId } from "@/lib/audit/invitations";
@@ -140,14 +145,24 @@ function sameOrigin(request: NextRequest): boolean {
 }
 
 export async function POST(request: NextRequest, { params }: Context) {
-  let adminId: string;
-  try {
-    // The session/role boundary runs before any service-role client or Shopify
-    // credential can be constructed.
-    adminId = (await requireAuditAdmin()).id;
-  } catch (error) {
-    const status = error instanceof AuditConnectionError ? error.status : 403;
-    return response({ error: status === 401 ? "Unauthorised." : "Forbidden." }, status);
+  const cronSecret = process.env.CRON_SECRET;
+  const machineAuthorised = Boolean(
+    cronSecret && request.headers.get("authorization") === `Bearer ${cronSecret}`,
+  );
+  let adminId: string | null = null;
+
+  if (!machineAuthorised) {
+    try {
+      // The browser session/role boundary runs before any service-role client
+      // or Shopify credential can be constructed.
+      adminId = (await requireAuditAdmin()).id;
+    } catch (error) {
+      const status = error instanceof AuditConnectionError ? error.status : 403;
+      return response(
+        { error: status === 401 ? "Unauthorised." : "Forbidden." },
+        status,
+      );
+    }
   }
 
   if (!sameOrigin(request)) return response({ error: "Forbidden." }, 403);
@@ -191,8 +206,43 @@ export async function POST(request: NextRequest, { params }: Context) {
     return response({ error: "Send exactly confirmation: collect-read-only." }, 400);
   }
 
+  if (machineAuthorised) {
+    try {
+      // CRON_SECRET has already been verified. Resolve the sponsor from the
+      // exact connected row; never accept an admin UUID from the request.
+      adminId = await getAuditMachineSponsor({
+        connectionId: LARA_AUDIT_CONNECTION.connectionId,
+        shopifyDomain: LARA_AUDIT_CONNECTION.shopDomain,
+        shopifyShopId: LARA_AUDIT_CONNECTION.shopId,
+      });
+    } catch (error) {
+      const status = error instanceof AuditConnectionError ? error.status : 500;
+      return response(
+        {
+          error:
+            status === 409
+              ? "The audit connection is not ready."
+              : "The read-only audit could not be started.",
+        },
+        status,
+      );
+    }
+  }
+
+  if (!adminId) {
+    return response({ error: "Forbidden." }, 403);
+  }
+
   try {
-    const result = await runLaraAuditBaseline({ requestedBy: adminId });
+    const result = await runLaraAuditBaseline(
+      machineAuthorised
+        ? {
+            requestedBy: adminId,
+            runId: LARA_INITIAL_BASELINE_RUN_ID,
+            trigger: "system",
+          }
+        : { requestedBy: adminId },
+    );
     if (result.state === "in_progress") {
       return response({ ok: true, runId: result.runId, state: result.state }, 202);
     }

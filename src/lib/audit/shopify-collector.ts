@@ -27,6 +27,13 @@ export const LARA_AUDIT_CONNECTION = Object.freeze({
   shopId: "gid://shopify/Shop/95462097276",
 });
 
+/**
+ * Stable UUID for the temporary machine bootstrap. Repeated cron
+ * deliveries replay this exact run instead of starting another Shopify read.
+ */
+export const LARA_INITIAL_BASELINE_RUN_ID =
+  "6d481a86-9fbe-4b11-8be1-b665fb8d4b32";
+
 export type LaraAuditCollectorResult = {
   runId: string;
   state: "completed" | "partial" | "in_progress" | "failed";
@@ -62,25 +69,34 @@ export async function runLaraAuditBaseline({
   requestedBy,
   runId = crypto.randomUUID(),
   leaseToken = crypto.randomUUID(),
-  note = "Lara Rovinj authorised Shopify Admin baseline",
+  trigger = "admin",
+  note,
 }: {
   requestedBy: string;
   runId?: string;
   leaseToken?: string;
+  trigger?: "admin" | "system";
   note?: string | null;
 }): Promise<LaraAuditCollectorResult> {
+  const requestedNote =
+    note === undefined
+      ? trigger === "system"
+        ? "Lara Rovinj authorised initial Shopify Admin baseline (machine bootstrap)"
+        : "Lara Rovinj authorised Shopify Admin baseline"
+      : note;
   const effectiveRunId = await enqueueAuditShopifyRun({
     runId,
     connectionId: LARA_AUDIT_CONNECTION.connectionId,
     requestedBy,
     shopDomain: LARA_AUDIT_CONNECTION.shopDomain,
-    source: "admin.baseline",
-    note,
+    source: trigger === "system" ? "system.initial_baseline" : "admin.baseline",
+    note: requestedNote,
     schemaHash: await auditBaselineSchemaSha256(),
     manifestHash: await auditBaselineManifestSha256(),
     // The first deployment is intentionally synchronous and user-triggered.
     // Do not advertise a retry queue until a real background consumer exists.
     maxRetries: 0,
+    actorType: trigger,
   });
 
   let claimed;

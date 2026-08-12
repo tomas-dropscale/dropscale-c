@@ -634,6 +634,7 @@ export type AuditShopifyConnectionEvent = {
 };
 
 export type AuditShopifyRunState = "queued" | "running" | "completed" | "failed";
+export type AuditShopifyRunRequestActor = "admin" | "system";
 
 /**
  * Durable, service-role-only state for a bounded read-only audit collector
@@ -644,6 +645,7 @@ export type AuditShopifyRun = {
   id: string;
   connection_id: string;
   requested_by: string;
+  requested_actor_type: AuditShopifyRunRequestActor;
   shopify_domain: string;
   state: AuditShopifyRunState;
   requested_source: string;
@@ -1220,6 +1222,7 @@ export type Database = {
         Insert: Insert<
           AuditShopifyRun,
           | "state"
+          | "requested_actor_type"
           | "requested_note"
           | "checkpoint"
           | "artifact"
@@ -2012,6 +2015,7 @@ export type Database = {
           p_manifest_hash: string;
           p_max_retries?: number;
           p_checkpoint?: Record<string, unknown>;
+          p_actor_type?: AuditShopifyRunRequestActor;
         };
         Returns: string;
       };

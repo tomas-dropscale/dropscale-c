@@ -2,8 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   createServiceClient: vi.fn(),
+  eq: vi.fn(),
   from: vi.fn(),
   getSessionProfile: vi.fn(),
+  maybeSingle: vi.fn(),
   neq: vi.fn(),
   order: vi.fn(),
   select: vi.fn(),
@@ -25,7 +27,7 @@ vi.mock("@/lib/supabase/service", () => ({
   createServiceClient: mocks.createServiceClient,
 }));
 
-import { listAuditConnections } from "./connections";
+import { getAuditMachineSponsor, listAuditConnections } from "./connections";
 
 const ADMIN_ID = "40000000-0000-4000-8000-000000000001";
 
@@ -154,5 +156,53 @@ describe("audit connection DAL", () => {
         needsReview: false,
       },
     ]);
+  });
+
+  it("resolves a machine sponsor only from the exact connected shop binding", async () => {
+    mocks.select.mockReturnValueOnce({ eq: mocks.eq });
+    mocks.eq.mockReturnValue({ maybeSingle: mocks.maybeSingle });
+    mocks.maybeSingle.mockResolvedValue({
+      data: {
+        created_by: ADMIN_ID,
+        status: "connected",
+        shopify_domain: "jwmtjg-fm.myshopify.com",
+        shopify_shop_id: "gid://shopify/Shop/95462097276",
+      },
+      error: null,
+    });
+
+    await expect(
+      getAuditMachineSponsor({
+        connectionId: "a023c7e2-a96b-4f04-bc6e-0165e23332c3",
+        shopifyDomain: "jwmtjg-fm.myshopify.com",
+        shopifyShopId: "gid://shopify/Shop/95462097276",
+      }),
+    ).resolves.toBe(ADMIN_ID);
+    expect(mocks.eq).toHaveBeenCalledWith(
+      "id",
+      "a023c7e2-a96b-4f04-bc6e-0165e23332c3",
+    );
+  });
+
+  it("fails closed when the machine binding does not match", async () => {
+    mocks.select.mockReturnValueOnce({ eq: mocks.eq });
+    mocks.eq.mockReturnValue({ maybeSingle: mocks.maybeSingle });
+    mocks.maybeSingle.mockResolvedValue({
+      data: {
+        created_by: ADMIN_ID,
+        status: "connected",
+        shopify_domain: "different.myshopify.com",
+        shopify_shop_id: "gid://shopify/Shop/95462097276",
+      },
+      error: null,
+    });
+
+    await expect(
+      getAuditMachineSponsor({
+        connectionId: "a023c7e2-a96b-4f04-bc6e-0165e23332c3",
+        shopifyDomain: "jwmtjg-fm.myshopify.com",
+        shopifyShopId: "gid://shopify/Shop/95462097276",
+      }),
+    ).rejects.toMatchObject({ code: "invalid_state", status: 409 });
   });
 });

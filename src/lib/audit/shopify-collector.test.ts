@@ -54,7 +54,10 @@ vi.mock("@/lib/audit/shopify-runs", () => {
 
 import { AuditShopifyRuntimeError } from "@/lib/audit/shopify-runtime";
 import { AuditShopifyRunError } from "@/lib/audit/shopify-runs";
-import { LARA_AUDIT_CONNECTION, runLaraAuditBaseline } from "./shopify-collector";
+import {
+  LARA_AUDIT_CONNECTION,
+  runLaraAuditBaseline,
+} from "./shopify-collector";
 
 const RUN_ID = "40000000-0000-4000-8000-000000000010";
 const LEASE = "40000000-0000-4000-8000-000000000011";
@@ -102,6 +105,7 @@ describe("exact Lara Shopify collector orchestration", () => {
         schemaHash: HASH,
         manifestHash: HASH,
         maxRetries: 0,
+        actorType: "admin",
       }),
     );
     expect(mocks.createAuditShopifyRuntime).toHaveBeenCalledWith({
@@ -129,6 +133,26 @@ describe("exact Lara Shopify collector orchestration", () => {
     });
     expect(mocks.completeAuditShopifyRun).toHaveBeenCalledWith(
       expect.objectContaining({ run: CLAIMED, leaseToken: LEASE }),
+    );
+  });
+
+  it("binds a machine bootstrap to system evidence without changing the sponsor", async () => {
+    await expect(
+      runLaraAuditBaseline({
+        requestedBy: ADMIN_ID,
+        runId: RUN_ID,
+        leaseToken: LEASE,
+        trigger: "system",
+      }),
+    ).resolves.toMatchObject({ runId: RUN_ID, state: "completed" });
+
+    expect(mocks.enqueueAuditShopifyRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        requestedBy: ADMIN_ID,
+        source: "system.initial_baseline",
+        note: expect.stringContaining("machine bootstrap"),
+        actorType: "system",
+      }),
     );
   });
 

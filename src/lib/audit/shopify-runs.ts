@@ -1,7 +1,10 @@
 import "server-only";
 
 import { createServiceClient } from "@/lib/supabase/service";
-import type { AuditShopifyRun } from "@/lib/supabase/types";
+import type {
+  AuditShopifyRun,
+  AuditShopifyRunRequestActor,
+} from "@/lib/supabase/types";
 
 export class AuditShopifyRunError extends Error {
   constructor(
@@ -45,6 +48,7 @@ export async function enqueueAuditShopifyRun(input: {
   schemaHash: string;
   manifestHash: string;
   maxRetries?: number;
+  actorType?: AuditShopifyRunRequestActor;
 }) {
   const { data, error } = await serviceOrThrow().rpc("enqueue_audit_shopify_run", {
     p_run_id: input.runId,
@@ -57,6 +61,7 @@ export async function enqueueAuditShopifyRun(input: {
     p_manifest_hash: input.manifestHash,
     p_max_retries: input.maxRetries ?? 3,
     p_checkpoint: {},
+    p_actor_type: input.actorType ?? "admin",
   });
   if (error || typeof data !== "string") {
     throw new AuditShopifyRunError("enqueue_failed", "The audit run could not be queued.");

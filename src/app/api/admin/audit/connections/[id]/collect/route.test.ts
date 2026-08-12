@@ -1,7 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 
 const mocks = vi.hoisted(() => ({
+  getAuditMachineSponsor: vi.fn(),
   requireAuditAdmin: vi.fn(),
   runLaraAuditBaseline: vi.fn(),
 }));
@@ -12,12 +13,16 @@ vi.mock("@/lib/audit/connections", () => ({
       super("Audit connection error");
     }
   },
+  getAuditMachineSponsor: mocks.getAuditMachineSponsor,
   requireAuditAdmin: mocks.requireAuditAdmin,
 }));
 vi.mock("@/lib/audit/shopify-collector", () => ({
   LARA_AUDIT_CONNECTION: {
     connectionId: "a023c7e2-a96b-4f04-bc6e-0165e23332c3",
+    shopDomain: "jwmtjg-fm.myshopify.com",
+    shopId: "gid://shopify/Shop/95462097276",
   },
+  LARA_INITIAL_BASELINE_RUN_ID: "6d481a86-9fbe-4b11-8be1-b665fb8d4b32",
   runLaraAuditBaseline: mocks.runLaraAuditBaseline,
 }));
 vi.mock("@/lib/audit/invitations", () => ({
@@ -31,7 +36,7 @@ const CONNECTION_ID = "a023c7e2-a96b-4f04-bc6e-0165e23332c3";
 
 function request(
   body: unknown,
-  options: { origin?: string; id?: string } = {},
+  options: { origin?: string; id?: string; authorization?: string } = {},
 ) {
   return {
     request: new NextRequest(
@@ -41,6 +46,9 @@ function request(
         headers: {
           "content-type": "application/json",
           ...(options.origin ? { origin: options.origin } : {}),
+          ...(options.authorization
+            ? { authorization: options.authorization }
+            : {}),
         },
         body: JSON.stringify(body),
       },
@@ -51,7 +59,9 @@ function request(
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.stubEnv("CRON_SECRET", "cron-secret-for-test");
   mocks.requireAuditAdmin.mockResolvedValue({ id: "admin", role: "admin" });
+  mocks.getAuditMachineSponsor.mockResolvedValue("sponsor-admin");
   mocks.runLaraAuditBaseline.mockResolvedValue({
     runId: "40000000-0000-4000-8000-000000000010",
     state: "completed",
@@ -75,12 +85,50 @@ beforeEach(() => {
   });
 });
 
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
 describe("admin read-only Shopify audit collector route", () => {
   it("authenticates before invoking the privileged collector", async () => {
     mocks.requireAuditAdmin.mockRejectedValue(new Error("Forbidden"));
     const input = request({ confirmation: "collect-read-only" });
     const result = await POST(input.request, input.context);
     expect(result.status).toBe(403);
+    expect(mocks.runLaraAuditBaseline).not.toHaveBeenCalled();
+  });
+
+  it("accepts only the exact cron bearer and derives the machine sponsor from the pinned connection", async () => {
+    const input = request(
+      { confirmation: "collect-read-only" },
+      { authorization: "Bearer cron-secret-for-test" },
+    );
+    const result = await POST(input.request, input.context);
+
+    expect(result.status).toBe(200);
+    expect(mocks.requireAuditAdmin).not.toHaveBeenCalled();
+    expect(mocks.getAuditMachineSponsor).toHaveBeenCalledWith({
+      connectionId: CONNECTION_ID,
+      shopifyDomain: "jwmtjg-fm.myshopify.com",
+      shopifyShopId: "gid://shopify/Shop/95462097276",
+    });
+    expect(mocks.runLaraAuditBaseline).toHaveBeenCalledWith({
+      requestedBy: "sponsor-admin",
+      runId: "6d481a86-9fbe-4b11-8be1-b665fb8d4b32",
+      trigger: "system",
+    });
+  });
+
+  it("does not treat a wrong machine bearer as machine authority", async () => {
+    mocks.requireAuditAdmin.mockRejectedValue(new Error("Forbidden"));
+    const input = request(
+      { confirmation: "collect-read-only" },
+      { authorization: "Bearer wrong-secret" },
+    );
+    const result = await POST(input.request, input.context);
+
+    expect(result.status).toBe(403);
+    expect(mocks.getAuditMachineSponsor).not.toHaveBeenCalled();
     expect(mocks.runLaraAuditBaseline).not.toHaveBeenCalled();
   });
 

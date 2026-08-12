@@ -6,11 +6,13 @@ const MIGRATIONS = [
   "supabase/migrations/0040_audit_shopify_connections.sql",
   "supabase/migrations/0041_audit_shopify_scope_clearance.sql",
   "supabase/migrations/0042_audit_shopify_runs.sql",
+  "supabase/migrations/0043_audit_shopify_run_request_actors.sql",
 ]
   .map((path) => readFileSync(path, "utf8"))
   .join("\n");
 
 const ADMIN = "42000000-0000-4000-8000-000000000001";
+const SECOND_ADMIN = "42000000-0000-4000-8000-000000000008";
 const CONNECTION = "42000000-0000-4000-8000-000000000002";
 const RUN = "42000000-0000-4000-8000-000000000003";
 const LEASE_A = "42000000-0000-4000-8000-000000000004";
@@ -62,6 +64,7 @@ type RunRow = {
   id: string;
   connection_id: string;
   requested_by: string;
+  requested_actor_type: "admin" | "system";
   shopify_domain: string;
   state: "queued" | "running" | "completed" | "failed";
   requested_source: string;
@@ -95,6 +98,8 @@ async function enqueue({
   schemaHash = SCHEMA_HASH,
   maxRetries = 3,
   checkpoint = {},
+  actorType = "admin",
+  requestedBy = ADMIN,
 }: {
   runId?: string;
   domain?: string;
@@ -102,21 +107,24 @@ async function enqueue({
   schemaHash?: string;
   maxRetries?: number;
   checkpoint?: Record<string, unknown>;
+  actorType?: string;
+  requestedBy?: string;
 } = {}) {
   return db.query<{ id: string }>(
     `select public.enqueue_audit_shopify_run(
-      $1::uuid, $2::uuid, $3::uuid, $4, 'gmc_compliance', $5, $6, $7, $8, $9::jsonb
+      $1::uuid, $2::uuid, $3::uuid, $4, 'gmc_compliance', $5, $6, $7, $8, $9::jsonb, $10
     ) as id`,
     [
       runId,
       CONNECTION,
-      ADMIN,
+      requestedBy,
       domain,
       note,
       schemaHash,
       MANIFEST_HASH,
       maxRetries,
       JSON.stringify(checkpoint),
+      actorType,
     ],
   );
 }
@@ -214,8 +222,8 @@ beforeEach(async () => {
   await db.exec(PRELUDE);
   await db.exec(MIGRATIONS);
   await db.query(
-    "insert into public.profiles (id, role) values ($1, 'admin')",
-    [ADMIN],
+    "insert into public.profiles (id, role) values ($1, 'admin'), ($2, 'admin')",
+    [ADMIN, SECOND_ADMIN],
   );
   await db.query(
     `insert into public.audit_shopify_connections (
@@ -319,6 +327,7 @@ describe("durable Shopify audit collector runs", () => {
       id: RUN,
       connection_id: CONNECTION,
       requested_by: ADMIN,
+      requested_actor_type: "admin",
       shopify_domain: DOMAIN,
       state: "queued",
       requested_source: "gmc_compliance",
@@ -375,6 +384,47 @@ describe("durable Shopify audit collector runs", () => {
     await expect(
       enqueue({ domain: "another-shop.myshopify.com" }),
     ).rejects.toThrow(/exact connected Shopify domain/i);
+  });
+
+  it("records machine-triggered runs as system activity without impersonating their admin sponsor", async () => {
+    const first = await enqueue({ actorType: "system" });
+    expect(first.rows).toEqual([{ id: RUN }]);
+
+    const queued = await db.query<RunRow>(
+      "select * from public.audit_shopify_runs where id = $1",
+      [RUN],
+    );
+    expect(queued.rows[0]).toMatchObject({
+      id: RUN,
+      requested_by: ADMIN,
+      requested_actor_type: "system",
+    });
+
+    const requests = await db.query<{
+      actor_type: string;
+      actor_profile_id: string | null;
+      run_id: string;
+    }>(`
+      select actor_type, actor_profile_id, details->>'run_id' as run_id
+      from public.audit_shopify_connection_events
+      where event_type = 'audit_collector_requested'
+    `);
+    expect(requests.rows).toEqual([
+      { actor_type: "system", actor_profile_id: null, run_id: RUN },
+    ]);
+
+    await expect(enqueue({ actorType: "admin" })).rejects.toThrow(
+      /different evidence/i,
+    );
+    await expect(
+      enqueue({ runId: RUN_2, actorType: "admin" }),
+    ).rejects.toThrow(/active audit manifest.*different evidence/i);
+    await expect(
+      enqueue({ runId: RUN_2, actorType: "system", requestedBy: SECOND_ADMIN }),
+    ).rejects.toThrow(/active audit manifest.*different evidence/i);
+    await expect(
+      enqueue({ runId: RUN_2, actorType: "worker" }),
+    ).rejects.toThrow(/invalid audit run request/i);
   });
 
   it("persists bounded progress across renew, voluntary yield, resume and completion", async () => {

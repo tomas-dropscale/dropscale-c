@@ -40,6 +40,13 @@ const nextHandler = handler as {
   fetch(request: Request, env: Env, ctx: Ctx): Promise<Response>;
 };
 
+const TEMPORARY_LARA_AUDIT_CRON = "35 * * * *";
+const LARA_AUDIT_COLLECT_PATH =
+  "/api/admin/audit/connections/a023c7e2-a96b-4f04-bc6e-0165e23332c3/collect";
+const LARA_AUDIT_CONFIRMATION = JSON.stringify({
+  confirmation: "collect-read-only",
+});
+
 const worker = {
   fetch(request: Request, env: Env, ctx: Ctx): Promise<Response> {
     return nextHandler.fetch(request, env, ctx);
@@ -48,6 +55,51 @@ const worker = {
   async scheduled(event: { cron: string }, env: Env, ctx: Ctx): Promise<void> {
     if (!env.CRON_SECRET) {
       console.error("Cron skipped: CRON_SECRET is not set on this Worker.");
+      return;
+    }
+
+    // Only the path is ever used for routing; the origin just has to be a valid
+    // absolute URL, so a missing site URL must not abort the run.
+    const origin = env.NEXT_PUBLIC_SITE_URL ?? "https://dropscale.app";
+
+    /**
+     * TEMPORARY ONE-SHOT BOOTSTRAP: run Lara's exact, fixed read-only baseline
+     * without a browser session. This branch returns before the operational job
+     * selector below, so the temporary trigger can never run metrics, ledgers
+     * or billing. Remove this branch, its constants and the matching Wrangler
+     * trigger immediately after the successful baseline has been verified.
+     */
+    if (event.cron === TEMPORARY_LARA_AUDIT_CRON) {
+      try {
+        const response = await nextHandler.fetch(
+          new Request(`${origin}${LARA_AUDIT_COLLECT_PATH}`, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${env.CRON_SECRET}`,
+              "Content-Type": "application/json",
+            },
+            body: LARA_AUDIT_CONFIRMATION,
+          }),
+          env,
+          ctx,
+        );
+
+        const body = await response.text();
+        if (!response.ok) {
+          console.error(
+            `Cron "temporary Lara read-only audit" ${LARA_AUDIT_COLLECT_PATH} failed (${response.status}): ${body}`,
+          );
+          return;
+        }
+        console.log(
+          `Cron "temporary Lara read-only audit" ${LARA_AUDIT_COLLECT_PATH}: ${body}`,
+        );
+      } catch (error) {
+        console.error(
+          `Cron "temporary Lara read-only audit" ${LARA_AUDIT_COLLECT_PATH} threw:`,
+          error,
+        );
+      }
       return;
     }
 
@@ -79,10 +131,6 @@ const worker = {
               name: "hourly refresh",
               paths: ["/api/admin/sync-metrics", "/api/admin/sync-ledgers"],
             };
-
-    // Only the path is ever used for routing; the origin just has to be a valid
-    // absolute URL, so a missing site URL must not abort the run.
-    const origin = env.NEXT_PUBLIC_SITE_URL ?? "https://dropscale.app";
 
     // Sequential, not parallel: the ledger reads Google, the rollup writes it,
     // and two concurrent syncs would only race each other for the same quota.

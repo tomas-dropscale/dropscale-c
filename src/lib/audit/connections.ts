@@ -157,6 +157,50 @@ export async function listAuditConnections(): Promise<AuditConnectionDTO[]> {
     .filter((connection) => connection.status !== "revoked");
 }
 
+/**
+ * Resolve the accountable admin sponsor for an already authenticated machine
+ * collector. This function deliberately does not authenticate the HTTP caller;
+ * a CRON_SECRET boundary must have succeeded before it is invoked. The exact
+ * connection, canonical domain and Shopify shop GID are all compared here so a
+ * machine route cannot select an arbitrary connection or sponsor.
+ */
+export async function getAuditMachineSponsor(input: {
+  connectionId: string;
+  shopifyDomain: string;
+  shopifyShopId: string;
+}): Promise<string> {
+  const service = serviceOrThrow();
+  const { data, error } = await service
+    .from("audit_shopify_connections")
+    .select("created_by, status, shopify_domain, shopify_shop_id")
+    .eq("id", input.connectionId)
+    .maybeSingle();
+
+  if (error) {
+    throw new AuditConnectionError(
+      "database_error",
+      "Could not load the audit connection sponsor.",
+      500,
+    );
+  }
+
+  if (
+    !data ||
+    data.status !== "connected" ||
+    data.shopify_domain !== input.shopifyDomain ||
+    data.shopify_shop_id !== input.shopifyShopId ||
+    typeof data.created_by !== "string"
+  ) {
+    throw new AuditConnectionError(
+      "invalid_state",
+      "The exact connected Shopify store is not available.",
+      409,
+    );
+  }
+
+  return data.created_by;
+}
+
 function normaliseStoreLabel(value: string): string {
   const label = value.trim().replace(/\s+/g, " ");
   if (!label || label.length > 120) {

@@ -36,6 +36,7 @@ function run(overrides: Partial<AuditShopifyRun> = {}): AuditShopifyRun {
     id: RUN_ID,
     connection_id: CONNECTION_ID,
     requested_by: "40000000-0000-4000-8000-000000000001",
+    requested_actor_type: "admin",
     shopify_domain: DOMAIN,
     state: "running",
     requested_source: "admin.baseline",
@@ -98,6 +99,7 @@ describe("durable Shopify audit run DAL", () => {
       p_manifest_hash: HASH,
       p_max_retries: 3,
       p_checkpoint: {},
+      p_actor_type: "admin",
     });
   });
 
