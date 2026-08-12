@@ -292,30 +292,30 @@ describe("the dedicated Lara live theme runtime", () => {
   });
 
   it.each([
-    ["wrong key", { key: "layout/theme.liquid" }, {}, "invalid_rest_asset"],
-    ["wrong theme", { theme_id: 999 }, {}, "invalid_rest_asset"],
-    ["wrong size", { size: 999 }, {}, "invalid_rest_asset"],
-    ["wrong checksum", { checksum: "0".repeat(32) }, {}, "invalid_rest_asset"],
-    ["wrong content type", { content_type: "text/plain" }, {}, "invalid_rest_asset"],
-    ["invalid timestamp", { updated_at: "not-a-time" }, {}, "invalid_rest_asset"],
-    ["an extra field", { attachment: "e30=" }, {}, "invalid_rest_asset"],
+    ["wrong key", { key: "layout/theme.liquid" }, {}, "invalid_rest_asset_fields"],
+    ["wrong theme", { theme_id: 999 }, {}, "invalid_rest_asset_fields"],
+    ["wrong size", { size: 999 }, {}, "invalid_rest_asset_integrity"],
+    ["wrong checksum", { checksum: "0".repeat(32) }, {}, "invalid_rest_asset_integrity"],
+    ["wrong content type", { content_type: "text/plain" }, {}, "invalid_rest_asset_fields"],
+    ["invalid timestamp", { updated_at: "not-a-time" }, {}, "invalid_rest_asset_fields"],
+    ["an extra field", { attachment: "e30=" }, {}, "invalid_rest_asset_fields"],
     [
       "an oversized declared envelope",
       {},
       { "content-length": "12500001" },
-      "invalid_rest_asset",
+      "invalid_rest_asset_response",
     ],
     [
       "a non-JSON response type",
       {},
       { "content-type": "text/html" },
-      "invalid_rest_asset",
+      "invalid_rest_asset_response",
     ],
     [
       "wrong API version",
       {},
       { "x-shopify-api-version": "2026-04" },
-      "invalid_rest_asset",
+      "invalid_rest_asset_response",
     ],
   ] as const)(
     "rejects a REST asset with %s",

@@ -122,6 +122,12 @@ export type LaraThemeUrgencyLiveRuntimeErrorCode =
   | "invalid_plan"
   | "invalid_source_query"
   | "invalid_rest_asset"
+  | "invalid_rest_asset_envelope"
+  | "invalid_rest_asset_fields"
+  | "invalid_rest_asset_integrity"
+  | "invalid_rest_asset_json"
+  | "invalid_rest_asset_redirect"
+  | "invalid_rest_asset_response"
   | "missing_read_themes"
   | "missing_write_themes"
   | "mutation_ambiguous"
@@ -465,7 +471,7 @@ async function getExactRestAsset(
     response.url !== url.href
   ) {
     throw runtimeError(
-      "invalid_rest_asset",
+      "invalid_rest_asset_redirect",
       "Shopify redirected the fixed REST theme asset request.",
     );
   }
@@ -480,7 +486,7 @@ async function getExactRestAsset(
     throw runtimeError(
       response.status === 429 || response.status >= 500
         ? "rest_asset_upstream_unavailable"
-        : "invalid_rest_asset",
+        : "invalid_rest_asset_response",
       "Shopify returned an invalid fixed REST theme asset response.",
       response.status === 429 || response.status >= 500,
     );
@@ -500,7 +506,7 @@ async function getExactRestAsset(
     new TextEncoder().encode(raw).byteLength > MAX_REST_ASSET_ENVELOPE_BYTES
   ) {
     throw runtimeError(
-      "invalid_rest_asset",
+      "invalid_rest_asset_envelope",
       "The fixed REST theme asset envelope exceeded its bounded size.",
     );
   }
@@ -510,7 +516,7 @@ async function getExactRestAsset(
     envelope = JSON.parse(raw);
   } catch {
     throw runtimeError(
-      "invalid_rest_asset",
+      "invalid_rest_asset_json",
       "Shopify returned malformed fixed REST theme asset JSON.",
     );
   }
@@ -535,7 +541,7 @@ async function getExactRestAsset(
     !MD5.test(asset.checksum)
   ) {
     throw runtimeError(
-      "invalid_rest_asset",
+      "invalid_rest_asset_fields",
       "Shopify returned malformed fixed REST theme asset fields.",
     );
   }
@@ -547,7 +553,7 @@ async function getExactRestAsset(
     createHash("md5").update(content, "utf8").digest("hex") !== checksumMd5
   ) {
     throw runtimeError(
-      "invalid_rest_asset",
+      "invalid_rest_asset_integrity",
       "The fixed REST theme asset failed its exact byte-size and MD5 proof.",
     );
   }
