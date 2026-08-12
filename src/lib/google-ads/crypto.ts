@@ -1,8 +1,7 @@
 /**
  * AES-GCM encryption for every third-party secret this product stores: each
  * client's Google Ads refresh token, each operational Shopify Admin token,
- * each audit-only Shopify Client Secret, operational app secrets and the HST
- * ERP session.
+ * each audit-only Shopify Client Secret and the HST ERP session.
  *
  * Web Crypto only, so it runs on both Node and Cloudflare Workers. The key
  * lives in GOOGLE_ADS_TOKEN_ENC_KEY (32 bytes, base64) and never leaves the
