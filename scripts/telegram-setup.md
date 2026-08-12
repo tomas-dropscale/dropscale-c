@@ -80,8 +80,27 @@ yet.
 
 ## 4. Point Supabase at the route
 
-**Supabase → Database → Webhooks → Create a new hook.** Four hooks, one per
-table — the UI takes a single table each.
+Migration `0034_telegram_admin_webhooks.sql` creates all four triggers in one
+go. Print it with the secret filled in and paste it into **Supabase → SQL
+Editor**:
+
+```bash
+node scripts/telegram-webhooks-sql.mjs
+```
+
+The migration in git carries a `__NOTIFY_SECRET__` placeholder; the script
+substitutes it to stdout and never writes the filled-in version to disk. Point
+the triggers elsewhere with `--url https://staging.example.com`.
+
+It calls `pg_net` directly rather than going through Supabase's own
+`supabase_functions.http_request()`. That function only exists after the
+dashboard's Database Webhooks page has been opened and used once — a manual step
+per project that a migration cannot perform for itself. The payload is
+byte-for-byte the shape Supabase's webhooks send, so the route accepts either
+and switching back later needs no application change.
+
+Doing it through the dashboard instead is four passes through
+**Integrations → Database Webhooks → Create a new hook**:
 
 | | |
 |---|---|
