@@ -3,7 +3,6 @@
 import * as React from "react";
 import { useRouter } from "next/navigation";
 import {
-  AlertTriangle,
   Check,
   CheckCircle2,
   Clipboard,
@@ -29,6 +28,10 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { Input, Label } from "@/components/ui/input";
+import {
+  getAuditConnectionSummary,
+  visibleAuditConnections,
+} from "@/lib/audit/connection-summary";
 import type { AuditConnectionDTO } from "@/lib/audit/connections";
 import { createClient } from "@/lib/supabase/client";
 
@@ -40,6 +43,54 @@ type Invitation = {
 };
 
 type Feedback = { tone: "error" | "success"; message: string } | null;
+
+type ReviewNotice = {
+  key: string;
+  count: number;
+};
+
+const NOTICE_VISIBLE_MS = 4_500;
+const NOTICE_FADE_MS = 300;
+
+function TransientNotice({
+  children,
+  onDismiss,
+}: {
+  children: React.ReactNode;
+  onDismiss: () => void;
+}) {
+  const [visible, setVisible] = React.useState(false);
+  const onDismissRef = React.useRef(onDismiss);
+
+  React.useEffect(() => {
+    onDismissRef.current = onDismiss;
+  }, [onDismiss]);
+
+  React.useEffect(() => {
+    const enterFrame = window.requestAnimationFrame(() => setVisible(true));
+    const leaveTimer = window.setTimeout(() => setVisible(false), NOTICE_VISIBLE_MS);
+    const dismissTimer = window.setTimeout(
+      () => onDismissRef.current(),
+      NOTICE_VISIBLE_MS + NOTICE_FADE_MS,
+    );
+
+    return () => {
+      window.cancelAnimationFrame(enterFrame);
+      window.clearTimeout(leaveTimer);
+      window.clearTimeout(dismissTimer);
+    };
+  }, []);
+
+  return (
+    <div
+      className={`transition-opacity duration-300 motion-reduce:transition-none ${
+        visible ? "opacity-100" : "opacity-0"
+      }`}
+    >
+      {children}
+    </div>
+  );
+}
 
 function dateTime(value: string | null): string {
   if (!value) return "—";
@@ -121,6 +172,32 @@ export function AuditConnectionsView({
   const [busy, setBusy] = React.useState<string | null>(null);
   const [copied, setCopied] = React.useState(false);
 
+  const activeConnections = React.useMemo(
+    () => visibleAuditConnections(connections),
+    [connections],
+  );
+  const counts = React.useMemo(
+    () => getAuditConnectionSummary(activeConnections),
+    [activeConnections],
+  );
+  const newConnections = React.useMemo(
+    () => activeConnections.filter((connection) => connection.needsReview),
+    [activeConnections],
+  );
+  const announcedReviewIds = React.useRef(
+    new Set(newConnections.map((connection) => connection.id)),
+  );
+  const [reviewNotice, setReviewNotice] = React.useState<ReviewNotice | null>(() => {
+    if (newConnections.length === 0) return null;
+    return {
+      key: newConnections
+        .map((connection) => connection.id)
+        .sort()
+        .join(":"),
+      count: newConnections.length,
+    };
+  });
+
   React.useEffect(() => {
     let refreshTimer: ReturnType<typeof setTimeout> | null = null;
     const refresh = () => {
@@ -146,20 +223,23 @@ export function AuditConnectionsView({
     };
   }, [router]);
 
-  const counts = React.useMemo(
-    () => ({
-      connected: connections.filter((item) => item.status === "connected").length,
-      waiting: connections.filter((item) => item.status === "waiting").length,
-      attention: connections.filter(
-        (item) =>
-          item.needsReview ||
-          item.status === "expired" ||
-          (item.status === "waiting" && Boolean(item.lastErrorCode)),
-      ).length,
-    }),
-    [connections],
-  );
-  const newConnections = connections.filter((item) => item.needsReview);
+  React.useEffect(() => {
+    const unannounced = newConnections.filter(
+      (connection) => !announcedReviewIds.current.has(connection.id),
+    );
+    if (unannounced.length === 0) return;
+
+    for (const connection of unannounced) {
+      announcedReviewIds.current.add(connection.id);
+    }
+    setReviewNotice({
+      key: unannounced
+        .map((connection) => connection.id)
+        .sort()
+        .join(":"),
+      count: unannounced.length,
+    });
+  }, [newConnections]);
 
   function readBody(body: unknown): string {
     return body && typeof body === "object" && typeof (body as { error?: unknown }).error === "string"
@@ -311,7 +391,9 @@ export function AuditConnectionsView({
       return;
     }
     setAddOpen(open);
-    if (!open) {
+    if (open) {
+      setFeedback(null);
+    } else {
       setInvitation(null);
       setFeedback(null);
       setCopied(false);
@@ -337,14 +419,13 @@ export function AuditConnectionsView({
             icon={Clock3}
           />
           <CountCard
-            label="Needs attention"
-            value={counts.attention}
-            help="New connections, failed setup or expired links"
-            icon={AlertTriangle}
-            tone={counts.attention > 0 ? "warning" : "neutral"}
+            label="Waiting on reviews"
+            value={counts.waitingOnReviews}
+            help="Connected stores awaiting review"
+            icon={CheckCircle2}
           />
         </div>
-        <div className="flex justify-end">
+        <div className="flex justify-start">
           <Dialog open={addOpen} onOpenChange={onDialogChange}>
           <DialogTrigger asChild>
             <Button variant="primary">
@@ -422,25 +503,58 @@ export function AuditConnectionsView({
         </div>
       </div>
 
-      {newConnections.length > 0 && (
-        <div className="rounded-[var(--radius-card)] border border-[var(--success-green)]/25 bg-[var(--success-green)]/8 px-4 py-3">
-          <div className="flex items-start gap-3">
-            <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-[var(--success-green)]" aria-hidden />
-            <div>
-              <p className="text-[13px] font-medium text-[var(--text-primary)]">
-                {newConnections.length === 1
-                  ? "A Shopify store has just connected"
-                  : `${newConnections.length} Shopify stores have connected`}
-              </p>
-              <p className="mt-0.5 text-[12px] text-[var(--text-secondary)]">
-                Review the verified domain and scopes below, then acknowledge the connection.
-              </p>
-            </div>
-          </div>
+      {(reviewNotice || (feedback && !addOpen)) && (
+        <div className="space-y-2">
+          {reviewNotice && (
+            <TransientNotice
+              key={reviewNotice.key}
+              onDismiss={() =>
+                setReviewNotice((current) =>
+                  current?.key === reviewNotice.key ? null : current,
+                )
+              }
+            >
+              <div
+                role="status"
+                aria-live="polite"
+                aria-atomic="true"
+                className="rounded-[var(--radius-card)] border border-[var(--success-green)]/25 bg-[var(--success-green)]/8 px-4 py-3"
+              >
+                <div className="flex items-start gap-3">
+                  <CheckCircle2
+                    className="mt-0.5 size-4 shrink-0 text-[var(--success-green)]"
+                    aria-hidden
+                  />
+                  <div>
+                    <p className="text-[13px] font-medium text-[var(--text-primary)]">
+                      {reviewNotice.count === 1
+                        ? "A Shopify store has connected"
+                        : `${reviewNotice.count} Shopify stores have connected`}
+                    </p>
+                    <p className="mt-0.5 text-[12px] text-[var(--text-secondary)]">
+                      Review the verified domain and scopes below, then acknowledge the connection.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </TransientNotice>
+          )}
+
+          {feedback && !addOpen &&
+            (feedback.tone === "success" ? (
+              <TransientNotice
+                key={feedback.message}
+                onDismiss={() =>
+                  setFeedback((current) => (current === feedback ? null : current))
+                }
+              >
+                <FormAlert tone="success">{feedback.message}</FormAlert>
+              </TransientNotice>
+            ) : (
+              <FormAlert tone="error">{feedback.message}</FormAlert>
+            ))}
         </div>
       )}
-
-      {feedback && !addOpen && <FormAlert tone={feedback.tone}>{feedback.message}</FormAlert>}
 
       <section aria-labelledby="audit-connections-list">
         <div className="mb-3 flex items-center justify-between gap-3">
@@ -456,7 +570,7 @@ export function AuditConnectionsView({
           </span>
         </div>
 
-        {connections.length === 0 ? (
+        {activeConnections.length === 0 ? (
           <div className="panel flex min-h-48 flex-col items-center justify-center p-6 text-center">
             <span className="flex size-10 items-center justify-center rounded-full bg-[var(--accent-gold-dim)] text-[var(--accent-gold-strong)]">
               <Store className="size-5" aria-hidden />
@@ -468,7 +582,7 @@ export function AuditConnectionsView({
           </div>
         ) : (
           <div className="space-y-3">
-            {connections.map((connection) => (
+            {activeConnections.map((connection) => (
               <article
                 key={connection.id}
                 className={`panel p-4 sm:p-5 ${

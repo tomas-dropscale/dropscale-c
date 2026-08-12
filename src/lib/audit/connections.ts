@@ -142,6 +142,7 @@ export async function listAuditConnections(): Promise<AuditConnectionDTO[]> {
   const { data, error } = await service
     .from("audit_shopify_connections")
     .select(SAFE_CONNECTION_COLUMNS)
+    .neq("status", "revoked")
     .order("created_at", { ascending: false });
 
   if (error) {
@@ -151,7 +152,9 @@ export async function listAuditConnections(): Promise<AuditConnectionDTO[]> {
       500,
     );
   }
-  return (data ?? []).map((row) => toDTO(row as unknown as Record<string, unknown>));
+  return (data ?? [])
+    .map((row) => toDTO(row as unknown as Record<string, unknown>))
+    .filter((connection) => connection.status !== "revoked");
 }
 
 function normaliseStoreLabel(value: string): string {
