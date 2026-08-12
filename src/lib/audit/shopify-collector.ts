@@ -20,12 +20,9 @@ import {
   getAuditShopifyRun,
   renewAuditShopifyRun,
 } from "@/lib/audit/shopify-runs";
+import { LARA_AUDIT_CONNECTION } from "./shopify-lara";
 
-export const LARA_AUDIT_CONNECTION = Object.freeze({
-  connectionId: "a023c7e2-a96b-4f04-bc6e-0165e23332c3",
-  shopDomain: "jwmtjg-fm.myshopify.com",
-  shopId: "gid://shopify/Shop/95462097276",
-});
+export { LARA_AUDIT_CONNECTION } from "./shopify-lara";
 
 /**
  * Stable UUID for the temporary machine bootstrap. Repeated cron

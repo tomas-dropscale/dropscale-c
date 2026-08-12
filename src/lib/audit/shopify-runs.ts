@@ -132,13 +132,14 @@ export async function completeAuditShopifyRun(input: {
   run: AuditShopifyRun;
   leaseToken: string;
   artifact: Record<string, unknown>;
+  checkpoint?: Record<string, unknown>;
 }) {
   const { data, error } = await serviceOrThrow().rpc("complete_audit_shopify_run", {
     p_run_id: input.run.id,
     p_shopify_domain: input.run.shopify_domain,
     p_lease_token: input.leaseToken,
     p_lease_generation: input.run.lease_generation,
-    p_checkpoint: { completed: true },
+    p_checkpoint: input.checkpoint ?? { completed: true },
     p_artifact: input.artifact,
   });
   const completed = firstRun(data);
@@ -156,13 +157,14 @@ export async function failAuditShopifyRun(input: {
   leaseToken: string;
   errorCode: string;
   retryable: boolean;
+  checkpoint?: Record<string, unknown>;
 }) {
   const { data, error } = await serviceOrThrow().rpc("fail_audit_shopify_run", {
     p_run_id: input.run.id,
     p_shopify_domain: input.run.shopify_domain,
     p_lease_token: input.leaseToken,
     p_lease_generation: input.run.lease_generation,
-    p_checkpoint: { failedAt: new Date().toISOString() },
+    p_checkpoint: input.checkpoint ?? { failedAt: new Date().toISOString() },
     p_error_code: input.errorCode,
     p_retryable: input.retryable,
     p_retry_after_seconds: 30,
