@@ -3,6 +3,7 @@ import { getWorkspaceContext } from "@/lib/portal/workspace";
 import { fetchAccounts } from "@/lib/portal/data";
 import { fetchPendingCounts } from "@/lib/admin/approvals";
 import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
+import { legacyAssetActionsBlocked } from "@/lib/portal/client-rollout";
 import { PortalShell } from "@/components/portal/portal-shell";
 
 /**
@@ -12,7 +13,10 @@ import { PortalShell } from "@/components/portal/portal-shell";
 export default async function MainLayout({ children }: { children: React.ReactNode }) {
   // The gate above already guaranteed both of these exist.
   const { viewer, active, workspaces } = await getWorkspaceContext();
-  const accounts = await fetchAccounts();
+  const [accounts, blockLegacyAssetActions] = await Promise.all([
+    fetchAccounts(),
+    legacyAssetActionsBlocked(),
+  ]);
 
   if (!viewer || !active) return null; // unreachable; satisfies the type-checker
 
@@ -59,6 +63,7 @@ export default async function MainLayout({ children }: { children: React.ReactNo
       isAdmin={isAdmin}
       pending={pending}
       setup={setup}
+      blockLegacyAssetActions={blockLegacyAssetActions}
     >
       {children}
     </PortalShell>

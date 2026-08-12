@@ -18,6 +18,7 @@ import { fetchAccounts } from "@/lib/portal/data";
 import { createClient } from "@/lib/supabase/server";
 import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
 import { GettingStartedGuide } from "@/components/portal/getting-started-guide";
+import { ManagedAssetsNotice } from "@/components/portal/managed-assets-notice";
 import { ensureDailyCoverage, recomputeDailyMetrics } from "@/lib/metrics/recompute";
 import {
   fetchDailyMetrics,
@@ -39,6 +40,7 @@ import { RangePicker } from "@/components/portal/range-picker";
 import { StoreSelector } from "@/components/portal/store-selector";
 import { fmt } from "@/lib/i18n";
 import { getServerDictionary } from "@/lib/i18n/server";
+import { legacyAssetActionsBlocked } from "@/lib/portal/client-rollout";
 
 export async function generateMetadata(): Promise<Metadata> {
   const { d } = await getServerDictionary();
@@ -58,7 +60,11 @@ export default async function DashboardPage({
 }) {
   const params = await searchParams;
   const range = parseRange(params);
-  const [accounts, { d }] = await Promise.all([fetchAccounts(), getServerDictionary()]);
+  const [accounts, { d }, blockLegacyAssetActions] = await Promise.all([
+    fetchAccounts(),
+    getServerDictionary(),
+    legacyAssetActionsBlocked(),
+  ]);
 
   // Coverage first so the recompute's freshness check sees its rows and
   // skips the overlap; both are per-account no-ops on a warm cache.
@@ -208,25 +214,28 @@ export default async function DashboardPage({
       }
     >
       {accounts.length === 0 ? (
-        /* No stores yet is the FIRST onboarding state, not an empty page: the
-           guide is what someone landing here needs, and it already knows how
-           to walk them from "no store" to Shopify, ads and costs. */
-        <div className="space-y-4">
-          <GettingStartedGuide accounts={[]} costsSet={costsDone} showGoogle={needsGoogle} />
+        blockLegacyAssetActions ? (
+          <ManagedAssetsNotice />
+        ) : (
+          /* No stores yet is the FIRST legacy onboarding state, not an empty
+             page. V2-active clients use the secure Add Assets link above. */
+          <div className="space-y-4">
+            <GettingStartedGuide accounts={[]} costsSet={costsDone} showGoogle={needsGoogle} />
 
-          <div className="panel flex flex-col items-center gap-3 px-6 py-10 text-center">
-            <PackageOpen className="size-7 text-[var(--text-muted)]" />
-            <p className="text-[14px] font-medium text-[var(--text-primary)]">
-              {d.portal.noStores}
-            </p>
-            <p className="max-w-[380px] text-[13px] leading-relaxed text-[var(--text-secondary)]">
-              {fmt(d.portal.noStoresHelp, {
-                add: d.portal.addAccount,
-                request: d.portal.requestAccount,
-              })}
-            </p>
+            <div className="panel flex flex-col items-center gap-3 px-6 py-10 text-center">
+              <PackageOpen className="size-7 text-[var(--text-muted)]" />
+              <p className="text-[14px] font-medium text-[var(--text-primary)]">
+                {d.portal.noStores}
+              </p>
+              <p className="max-w-[380px] text-[13px] leading-relaxed text-[var(--text-secondary)]">
+                {fmt(d.portal.noStoresHelp, {
+                  add: d.portal.addAccount,
+                  request: d.portal.requestAccount,
+                })}
+              </p>
+            </div>
           </div>
-        </div>
+        )
       ) : (
         <div className="space-y-4">
           {/* While any product has no cost, nudge — those sales use the default
@@ -256,7 +265,15 @@ export default async function DashboardPage({
               step as it's done. Once everything's set but data is still
               syncing, the quiet banner. */}
           {!setupComplete ? (
-            <GettingStartedGuide accounts={visible} costsSet={costsDone} showGoogle={needsGoogle} />
+            blockLegacyAssetActions ? (
+              <ManagedAssetsNotice />
+            ) : (
+              <GettingStartedGuide
+                accounts={visible}
+                costsSet={costsDone}
+                showGoogle={needsGoogle}
+              />
+            )
           ) : (
             rows.length === 0 && (
               <div className="panel flex items-center gap-3 px-4 py-3.5">

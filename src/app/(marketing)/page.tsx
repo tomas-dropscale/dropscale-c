@@ -1,4 +1,3 @@
-import Link from "next/link";
 import {
   ArrowRight,
   BarChart3,
@@ -335,10 +334,10 @@ export default function LandingPage() {
                 </a>
               </Button>
               <Button variant="secondary" size="lg" asChild>
-                <Link href="/register">
+                <a href="mailto:leandro@dropscale.io?subject=Dropscale%20portal%20access">
                   <Search />
-                  Create portal account
-                </Link>
+                  Request portal access
+                </a>
               </Button>
             </div>
           </Reveal>

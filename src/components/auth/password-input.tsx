@@ -14,7 +14,6 @@ export function PasswordInput({ className, ...props }: React.ComponentProps<"inp
       <button
         type="button"
         onClick={() => setVisible((v) => !v)}
-        tabIndex={-1}
         aria-label={visible ? "Hide password" : "Show password"}
         className="absolute top-1/2 right-1 -translate-y-1/2 rounded-md p-2 text-[var(--text-muted)] transition-smooth hover:text-[var(--text-secondary)]"
       >

@@ -15,6 +15,7 @@ import {
   TrendingUp,
   Truck,
   UserCheck,
+  UserPlus,
   Users,
   type LucideIcon,
 } from "lucide-react";
@@ -24,7 +25,12 @@ import { SideNav, SideNavItem, SideNavLabel } from "@/components/ui/side-nav";
 import { useI18n } from "@/lib/i18n/provider";
 import type { Dictionary } from "@/lib/i18n";
 
-type Item = { href: string; icon: LucideIcon; label: (d: Dictionary) => string };
+type Item = {
+  href: string;
+  icon: LucideIcon;
+  label: (d: Dictionary) => string;
+  badge?: (d: Dictionary) => string;
+};
 type Group = { label: ((d: Dictionary) => string) | null; items: Item[] };
 
 /**
@@ -53,7 +59,17 @@ const NAV_GROUPS: Group[] = [
   {
     label: (d) => d.nav.groupGrowth,
     items: [
-      { href: "/admin/clients", icon: UserCheck, label: (d) => d.nav.clients },
+      {
+        href: "/admin/client-onboarding",
+        icon: UserPlus,
+        label: (d) => d.nav.clients,
+        badge: (d) => d.nav.newBadge,
+      },
+      {
+        href: "/admin/clients",
+        icon: UserCheck,
+        label: (d) => d.nav.clientsLegacy,
+      },
       { href: "/admin/referrals", icon: BadgePercent, label: () => "Referrals" },
       // Next to Campaigns on purpose: the creatives clients hand in are the raw
       // material for the screen right below it.
@@ -90,27 +106,32 @@ export function Sidebar({
   pendingClients = 0,
   newCreatives = 0,
   onNavigate,
+  activePath,
 }: {
   pendingClients?: number;
   /** Client submissions nobody has reviewed yet (migration 0018). */
   newCreatives?: number;
   onNavigate?: () => void;
+  /** Lets read-only visual previews highlight the production destination. */
+  activePath?: string;
 }) {
   const pathname = usePathname();
+  const currentPath = activePath ?? pathname;
   const { d } = useI18n();
 
   // "/admin" only lights up on an exact match, otherwise every nested
   // route would mark it active too. "/dashboard" never matches in here.
   const isActive = (href: string) =>
-    href === "/admin" ? pathname === href : pathname.startsWith(href);
+    href === "/admin" ? currentPath === href : currentPath.startsWith(href);
 
   // Counts live on the screen that clears them: approvals on Clients, unreviewed
   // submissions on Creatives.
   const count = (href: string) =>
     href === "/admin/clients" ? pendingClients : href === "/admin/creatives" ? newCreatives : 0;
 
-  const renderItem = ({ href, label, icon }: Item) => {
-    const badge = count(href);
+  const renderItem = ({ href, label, icon, badge: badgeLabel }: Item) => {
+    const countBadge = count(href);
+    const textBadge = badgeLabel?.(d);
 
     return (
       <SideNavItem
@@ -121,9 +142,13 @@ export function Sidebar({
         active={isActive(href)}
         onNavigate={onNavigate}
         trailing={
-          badge > 0 ? (
+          textBadge ? (
+            <span className="rounded-full border border-[var(--accent-gold)]/30 bg-[var(--accent-gold-dim)] px-1.5 py-0.5 text-[9px] font-semibold tracking-[0.04em] text-[var(--accent-gold-strong)] uppercase">
+              {textBadge}
+            </span>
+          ) : countBadge > 0 ? (
             <span className="flex min-w-[18px] items-center justify-center rounded-full bg-[var(--accent-gold)] px-1 text-[10px] font-semibold text-[var(--bg-base)]">
-              {badge > 9 ? "9+" : badge}
+              {countBadge > 9 ? "9+" : countBadge}
             </span>
           ) : undefined
         }

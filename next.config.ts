@@ -12,6 +12,24 @@ const nextConfig: NextConfig = {
    * Harmless for `next dev` and for a plain Node deployment.
    */
   output: "standalone",
+  async headers() {
+    return [
+      {
+        source: "/onboarding/client/:path*",
+        headers: [
+          { key: "Cache-Control", value: "private, no-store" },
+          { key: "Content-Security-Policy", value: "frame-ancestors 'none'" },
+          { key: "X-Frame-Options", value: "DENY" },
+          { key: "X-Content-Type-Options", value: "nosniff" },
+          { key: "Referrer-Policy", value: "no-referrer" },
+          {
+            key: "Permissions-Policy",
+            value: "camera=(), geolocation=(), microphone=(), payment=()",
+          },
+        ],
+      },
+    ];
+  },
 };
 
 export default nextConfig;

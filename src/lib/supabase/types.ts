@@ -858,6 +858,142 @@ export type CogsCollectionTier = {
 };
 
 // ---------------------------------------------------------------------------
+// Client onboarding V2 (purpose-bound; parallel to legacy ad_accounts)
+// ---------------------------------------------------------------------------
+
+export type ClientOnboardingMode = "new_client" | "add_assets" | "reconnect";
+export type ClientOnboardingAsset = "shopify" | "google_ads";
+export type ClientOnboardingStatus =
+  | "pending"
+  | "collecting"
+  | "submitted"
+  | "reviewed"
+  | "active"
+  | "revoked";
+
+export type ClientOnboardingSession = {
+  id: string;
+  mode: ClientOnboardingMode;
+  requested_assets: ClientOnboardingAsset[];
+  status: ClientOnboardingStatus;
+  invite_token_hash: string | null;
+  invite_expires_at: string | null;
+  failed_attempts: number;
+  last_attempt_at: string | null;
+  target_client_id: string | null;
+  claimed_user_id: string | null;
+  first_name: string | null;
+  last_name: string | null;
+  email: string | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  identity_created_at: string | null;
+  submitted_at: string | null;
+  reviewed_at: string | null;
+  reviewed_by: string | null;
+  activated_at: string | null;
+  revoked_at: string | null;
+  last_error_code: string | null;
+};
+
+export type ClientOnboardingSecret = {
+  session_id: string;
+  windsor_access_token_ciphertext: string | null;
+  updated_at: string;
+};
+
+export type ClientShopifyConnection = {
+  id: string;
+  session_id: string;
+  client_id: string;
+  status: "connected" | "revoked";
+  shopify_shop_id: string;
+  shopify_name: string;
+  shopify_domain: string;
+  primary_domain: string | null;
+  shopify_currency: string;
+  credential_hint: string | null;
+  granted_scopes: string[];
+  scope_profile: "client-reporting-read-v1";
+  created_at: string;
+  updated_at: string;
+  connected_at: string;
+  last_verified_at: string | null;
+  revoked_at: string | null;
+  last_error_code: string | null;
+};
+
+export type ClientShopifyCredential = {
+  connection_id: string;
+  shopify_client_id: string;
+  client_secret_ciphertext: string;
+  updated_at: string;
+};
+
+export type ClientGoogleAdsConnection = {
+  id: string;
+  session_id: string;
+  client_id: string;
+  status: "connected" | "revoked";
+  windsor_account_id: string;
+  account_name: string;
+  currency: string | null;
+  time_zone: string | null;
+  data_source_id: string | null;
+  created_at: string;
+  updated_at: string;
+  connected_at: string;
+  last_verified_at: string | null;
+  revoked_at: string | null;
+  last_error_code: string | null;
+};
+
+export type ClientAssetMapping = {
+  id: string;
+  session_id: string;
+  shopify_connection_id: string;
+  google_ads_connection_id: string;
+  created_at: string;
+};
+
+export type ClientRolloutState = {
+  client_id: string;
+  operational_surface:
+    | "legacy_only"
+    | "v2_onboarding"
+    | "v2_ready_for_cutover"
+    | "v2_active"
+    | "rollback_legacy";
+  onboarding_session_id: string | null;
+  updated_by: string | null;
+  updated_at: string;
+};
+
+export type ClientOnboardingEvent = {
+  id: string;
+  session_id: string;
+  event_type:
+    | "invitation_created"
+    | "invitation_rotated"
+    | "identity_claimed"
+    | "shopify_connected"
+    | "google_connected"
+    | "assets_mapped"
+    | "submitted"
+    | "reviewed"
+    | "activated"
+    | "invitation_revoked"
+    | "connections_revoked"
+    | "verification_succeeded"
+    | "verification_failed";
+  actor_type: "admin" | "invite" | "client" | "system";
+  actor_id: string | null;
+  details: Record<string, unknown>;
+  created_at: string;
+};
+
+// ---------------------------------------------------------------------------
 // Database map
 // ---------------------------------------------------------------------------
 
@@ -1131,6 +1267,207 @@ export type Database = {
             columns: ["issued_by"];
             isOneToOne: false;
             referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      client_onboarding_sessions: {
+        Row: Row<ClientOnboardingSession>;
+        Insert: Insert<
+          ClientOnboardingSession,
+          | "status"
+          | "invite_token_hash"
+          | "invite_expires_at"
+          | "failed_attempts"
+          | "last_attempt_at"
+          | "target_client_id"
+          | "claimed_user_id"
+          | "first_name"
+          | "last_name"
+          | "email"
+          | "created_at"
+          | "updated_at"
+          | "identity_created_at"
+          | "submitted_at"
+          | "reviewed_at"
+          | "reviewed_by"
+          | "activated_at"
+          | "revoked_at"
+          | "last_error_code"
+        >;
+        Update: Partial<ClientOnboardingSession>;
+        Relationships: [
+          {
+            foreignKeyName: "client_onboarding_sessions_target_client_id_fkey";
+            columns: ["target_client_id"];
+            isOneToOne: false;
+            referencedRelation: "portal_clients";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "client_onboarding_sessions_created_by_fkey";
+            columns: ["created_by"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "client_onboarding_sessions_reviewed_by_fkey";
+            columns: ["reviewed_by"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      client_onboarding_secrets: {
+        Row: Row<ClientOnboardingSecret>;
+        Insert: Insert<ClientOnboardingSecret, "windsor_access_token_ciphertext" | "updated_at">;
+        Update: Partial<ClientOnboardingSecret>;
+        Relationships: [
+          {
+            foreignKeyName: "client_onboarding_secrets_session_id_fkey";
+            columns: ["session_id"];
+            isOneToOne: true;
+            referencedRelation: "client_onboarding_sessions";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      client_shopify_connections: {
+        Row: Row<ClientShopifyConnection>;
+        Insert: Insert<
+          ClientShopifyConnection,
+          | "id"
+          | "status"
+          | "primary_domain"
+          | "credential_hint"
+          | "granted_scopes"
+          | "scope_profile"
+          | "created_at"
+          | "updated_at"
+          | "connected_at"
+          | "last_verified_at"
+          | "revoked_at"
+          | "last_error_code"
+        >;
+        Update: Partial<ClientShopifyConnection>;
+        Relationships: [
+          {
+            foreignKeyName: "client_shopify_connections_session_id_fkey";
+            columns: ["session_id"];
+            isOneToOne: false;
+            referencedRelation: "client_onboarding_sessions";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      client_shopify_credentials: {
+        Row: Row<ClientShopifyCredential>;
+        Insert: Insert<ClientShopifyCredential, "updated_at">;
+        Update: Partial<ClientShopifyCredential>;
+        Relationships: [
+          {
+            foreignKeyName: "client_shopify_credentials_connection_id_fkey";
+            columns: ["connection_id"];
+            isOneToOne: true;
+            referencedRelation: "client_shopify_connections";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      client_google_ads_connections: {
+        Row: Row<ClientGoogleAdsConnection>;
+        Insert: Insert<
+          ClientGoogleAdsConnection,
+          | "id"
+          | "status"
+          | "currency"
+          | "time_zone"
+          | "data_source_id"
+          | "created_at"
+          | "updated_at"
+          | "connected_at"
+          | "last_verified_at"
+          | "revoked_at"
+          | "last_error_code"
+        >;
+        Update: Partial<ClientGoogleAdsConnection>;
+        Relationships: [
+          {
+            foreignKeyName: "client_google_ads_connections_session_id_fkey";
+            columns: ["session_id"];
+            isOneToOne: false;
+            referencedRelation: "client_onboarding_sessions";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      client_asset_mappings: {
+        Row: Row<ClientAssetMapping>;
+        Insert: Insert<ClientAssetMapping, "id" | "created_at">;
+        Update: Partial<ClientAssetMapping>;
+        Relationships: [
+          {
+            foreignKeyName: "client_asset_mappings_session_id_fkey";
+            columns: ["session_id"];
+            isOneToOne: false;
+            referencedRelation: "client_onboarding_sessions";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "client_asset_mappings_shopify_connection_id_fkey";
+            columns: ["shopify_connection_id"];
+            isOneToOne: false;
+            referencedRelation: "client_shopify_connections";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "client_asset_mappings_google_ads_connection_id_fkey";
+            columns: ["google_ads_connection_id"];
+            isOneToOne: false;
+            referencedRelation: "client_google_ads_connections";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      client_rollout_states: {
+        Row: Row<ClientRolloutState>;
+        Insert: Insert<
+          ClientRolloutState,
+          "operational_surface" | "onboarding_session_id" | "updated_by" | "updated_at"
+        >;
+        Update: Partial<ClientRolloutState>;
+        Relationships: [
+          {
+            foreignKeyName: "client_rollout_states_client_id_fkey";
+            columns: ["client_id"];
+            isOneToOne: true;
+            referencedRelation: "portal_clients";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "client_rollout_states_onboarding_session_id_fkey";
+            columns: ["onboarding_session_id"];
+            isOneToOne: false;
+            referencedRelation: "client_onboarding_sessions";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      client_onboarding_events: {
+        Row: Row<ClientOnboardingEvent>;
+        Insert: Insert<
+          ClientOnboardingEvent,
+          "id" | "actor_id" | "details" | "created_at"
+        >;
+        Update: Partial<ClientOnboardingEvent>;
+        Relationships: [
+          {
+            foreignKeyName: "client_onboarding_events_session_id_fkey";
+            columns: ["session_id"];
+            isOneToOne: false;
+            referencedRelation: "client_onboarding_sessions";
             referencedColumns: ["id"];
           },
         ];
@@ -1952,6 +2289,144 @@ export type Database = {
     };
     Views: Record<never, never>;
     Functions: {
+      create_client_onboarding_invitation: {
+        Args: {
+          p_session_id: string;
+          p_mode: ClientOnboardingMode;
+          p_requested_assets: ClientOnboardingAsset[];
+          p_target_client_id: string | null;
+          p_token_hash: string;
+          p_expires_at: string;
+          p_created_by: string;
+        };
+        Returns: string;
+      };
+      legacy_asset_writes_allowed: {
+        Args: { p_client_id: string };
+        Returns: boolean;
+      };
+      rotate_client_onboarding_invitation: {
+        Args: {
+          p_session_id: string;
+          p_token_hash: string;
+          p_expires_at: string;
+          p_admin_id: string;
+        };
+        Returns: string;
+      };
+      claim_client_onboarding_identity: {
+        Args: {
+          p_session_id: string;
+          p_token_hash: string;
+          p_user_id: string;
+          p_first_name: string;
+          p_last_name: string;
+          p_email: string;
+        };
+        Returns: string;
+      };
+      store_client_windsor_authorization: {
+        Args: {
+          p_session_id: string;
+          p_token_hash: string;
+          p_ciphertext: string;
+        };
+        Returns: string;
+      };
+      complete_client_shopify_connection: {
+        Args: {
+          p_connection_id: string;
+          p_session_id: string;
+          p_token_hash: string;
+          p_shopify_shop_id: string;
+          p_shopify_name: string;
+          p_shopify_domain: string;
+          p_primary_domain: string | null;
+          p_shopify_currency: string;
+          p_shopify_client_id: string;
+          p_credential_hint: string;
+          p_granted_scopes: string[];
+          p_client_secret_ciphertext: string;
+        };
+        Returns: string;
+      };
+      record_client_shopify_health: {
+        Args: {
+          p_connection_id: string;
+          p_admin_id: string;
+          p_ok: boolean;
+          p_tested_at: string;
+          p_error_code: string | null;
+        };
+        Returns: string;
+      };
+      revoke_client_shopify_connection: {
+        Args: { p_connection_id: string; p_admin_id: string };
+        Returns: string;
+      };
+      upsert_client_google_ads_connection: {
+        Args: {
+          p_session_id: string;
+          p_token_hash: string;
+          p_windsor_account_id: string;
+          p_account_name: string;
+          p_currency: string | null;
+          p_time_zone: string | null;
+          p_data_source_id: string | null;
+        };
+        Returns: string;
+      };
+      upsert_client_google_ads_connections: {
+        Args: {
+          p_session_id: string;
+          p_token_hash: string;
+          p_accounts: Array<{
+            windsorAccountId: string;
+            accountName: string;
+            currency: string | null;
+            timeZone: string | null;
+            dataSourceId: string | null;
+          }>;
+        };
+        Returns: string[];
+      };
+      record_client_google_ads_health: {
+        Args: {
+          p_connection_id: string;
+          p_admin_id: string;
+          p_ok: boolean;
+          p_tested_at: string;
+          p_error_code: string | null;
+        };
+        Returns: string;
+      };
+      revoke_client_google_ads_connection: {
+        Args: { p_connection_id: string; p_admin_id: string };
+        Returns: string;
+      };
+      replace_client_asset_mappings: {
+        Args: {
+          p_session_id: string;
+          p_token_hash: string;
+          p_mappings: Array<{
+            shopifyConnectionId: string;
+            googleAdsConnectionId: string;
+          }>;
+        };
+        Returns: number;
+      };
+      submit_client_onboarding_session: {
+        Args: { p_session_id: string; p_token_hash: string };
+        Returns: string;
+      };
+      review_client_onboarding_session: {
+        Args: { p_session_id: string; p_admin_id: string; p_activate?: boolean };
+        Returns: string;
+      };
+      revoke_client_onboarding_session: {
+        Args: { p_session_id: string; p_admin_id: string };
+        Returns: string;
+      };
       create_audit_shopify_invitation: {
         Args: {
           p_connection_id: string;

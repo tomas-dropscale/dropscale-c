@@ -17,6 +17,7 @@ import {
 
 import type { AdAccount } from "@/lib/supabase/types";
 import { AddAccountModal } from "@/components/portal/add-account-modal";
+import { ManagedAssetsNotice } from "@/components/portal/managed-assets-notice";
 import { Logo } from "@/components/brand/logo";
 import { SideNav, SideNavAction, SideNavItem, SideNavLabel } from "@/components/ui/side-nav";
 import { useI18n } from "@/lib/i18n/provider";
@@ -26,6 +27,7 @@ export function Sidebar({
   accounts,
   activeAccountId,
   isAdmin = false,
+  blockLegacyAssetActions = false,
   onNavigate,
 }: {
   /** The workspace new stores belong to — the owner's id, not the viewer's. */
@@ -33,6 +35,8 @@ export function Sidebar({
   accounts: AdAccount[];
   activeAccountId: string | null;
   isAdmin?: boolean;
+  /** V2-active clients receive an Add Assets link instead of writing legacy rows. */
+  blockLegacyAssetActions?: boolean;
   onNavigate?: () => void;
 }) {
   const { d } = useI18n();
@@ -125,15 +129,23 @@ export function Sidebar({
           </ul>
         </div>
 
-        <ul className="flex flex-col gap-0.5">
-          <SideNavAction icon={Plus} label={d.portal.addAccount} onClick={() => setAddOpen(true)} />
-          <SideNavItem
-            href="/dashboard/request-account"
-            icon={UserPlus}
-            label={d.portal.requestAccount}
-            onNavigate={onNavigate}
-          />
-        </ul>
+        {blockLegacyAssetActions ? (
+          <ManagedAssetsNotice compact />
+        ) : (
+          <ul className="flex flex-col gap-0.5">
+            <SideNavAction
+              icon={Plus}
+              label={d.portal.addAccount}
+              onClick={() => setAddOpen(true)}
+            />
+            <SideNavItem
+              href="/dashboard/request-account"
+              icon={UserPlus}
+              label={d.portal.requestAccount}
+              onNavigate={onNavigate}
+            />
+          </ul>
+        )}
       </div>
 
       {isAdmin && (
@@ -147,7 +159,9 @@ export function Sidebar({
         </ul>
       )}
 
-      <AddAccountModal open={addOpen} onOpenChange={setAddOpen} clientId={workspaceId} />
+      {!blockLegacyAssetActions && (
+        <AddAccountModal open={addOpen} onOpenChange={setAddOpen} clientId={workspaceId} />
+      )}
     </SideNav>
   );
 }

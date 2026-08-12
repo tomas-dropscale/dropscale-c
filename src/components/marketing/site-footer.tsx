@@ -8,7 +8,11 @@ const COLUMNS: { heading: string; links: { label: string; href: string; external
       heading: "Product",
       links: [
         { label: "Client portal", href: "/login" },
-        { label: "Create account", href: "/register" },
+        {
+          label: "Contact us",
+          href: "mailto:leandro@dropscale.io?subject=Intro%20call%20—%20Google%20Ads",
+          external: true,
+        },
       ],
     },
     {

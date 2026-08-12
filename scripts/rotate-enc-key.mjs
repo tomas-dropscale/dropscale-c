@@ -5,7 +5,8 @@
  *   node scripts/rotate-enc-key.mjs --commit   # actually rotates
  *
  * ONE key protects every client's Google Ads refresh token, every store's
- * Shopify Admin token, audit-only Shopify Client Secrets and the HST session.
+ * Shopify Admin token, audit/onboarding Shopify Client Secrets, Windsor
+ * onboarding correlation tokens and the HST session.
  * Changing the key without this script does not "reset" anything — it makes
  * all of them undecryptable, and quietly, because the app treats a failed
  * decrypt as "no token" and falls back to empty data. Every sync would stop and
@@ -44,6 +45,16 @@ const TARGETS = [
     table: "audit_shopify_credentials",
     pk: "connection_id",
     columns: ["client_secret_ciphertext"],
+  },
+  {
+    table: "client_shopify_credentials",
+    pk: "connection_id",
+    columns: ["client_secret_ciphertext"],
+  },
+  {
+    table: "client_onboarding_secrets",
+    pk: "session_id",
+    columns: ["windsor_access_token_ciphertext"],
   },
 ];
 

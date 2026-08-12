@@ -43,8 +43,8 @@ export const en = {
       forgot: "Forgot your password?",
       remember: "Remember me",
       submit: "Sign in",
-      noAccount: "Don't have an account?",
-      register: "Create account",
+      noAccount: "Need access?",
+      register: "Contact us",
       passwordRequired: "Enter your password.",
       passwordUpdated: "Password updated. You can sign in now.",
       accessRevoked: "Your admin access was removed, so your session has ended.",
@@ -52,8 +52,11 @@ export const en = {
     },
 
     register: {
-      title: "Create account",
-      subtitle: "Create your Dropscale IO client account.",
+      title: "Access by invitation",
+      subtitle: "Client portal accounts are created through a secure Dropscale onboarding link.",
+      inviteOnlyBody:
+        "If you are joining Dropscale, use the private link sent by our team. Contact us if you need a new invitation or have not received one.",
+      contact: "Contact Dropscale",
       nameLabel: "Full name",
       namePlaceholder: "First and last name",
       passwordPlaceholder: "At least 8 characters",
@@ -123,6 +126,8 @@ export const en = {
     expenses: "Expenses",
     profit: "Daily Profit",
     clients: "Clients",
+    clientsLegacy: "Clients (Legacy)",
+    newBadge: "New",
     campaigns: "Campaigns",
     creatives: "Creatives",
     leads: "Leads",
@@ -318,6 +323,11 @@ export const en = {
     noStoresHelp:
       "Use “{add}” in the sidebar to link an existing Google Ads account, or “{request}” to have the team set one up for you.",
     noAdsAccounts: "No accounts linked yet. Add one from the dashboard sidebar.",
+    managedAssetsTitle: "Assets are added by secure link",
+    managedAssetsBody:
+      "Need a Shopify store or Google Ads account added? Ask the Dropscale team for an Add Assets link. This workspace can stay active without any assets.",
+    managedAssetsSidebar:
+      "Need a store or ad account? Ask Dropscale for an Add Assets link.",
     dashboard: "Dashboard",
     googleGroup: "Google",
     financeGroup: "Finance",
@@ -1273,8 +1283,8 @@ export const pt: Dictionary = {
       forgot: "Esqueci-me da password",
       remember: "Lembrar-me",
       submit: "Entrar",
-      noAccount: "Ainda não tens conta?",
-      register: "Criar conta",
+      noAccount: "Precisas de acesso?",
+      register: "Contacta-nos",
       passwordRequired: "Introduz a tua password.",
       passwordUpdated: "Password actualizada. Já podes entrar.",
       accessRevoked: "O teu acesso de admin foi removido, por isso a sessão terminou.",
@@ -1282,8 +1292,11 @@ export const pt: Dictionary = {
     },
 
     register: {
-      title: "Criar conta",
-      subtitle: "Cria a tua conta de cliente Dropscale IO.",
+      title: "Acesso por convite",
+      subtitle: "As contas do portal são criadas através de um link seguro de onboarding da Dropscale.",
+      inviteOnlyBody:
+        "Se vais começar a trabalhar com a Dropscale, usa o link privado enviado pela nossa equipa. Contacta-nos se precisares de um novo convite ou se ainda não o recebeste.",
+      contact: "Contactar a Dropscale",
       nameLabel: "Nome completo",
       namePlaceholder: "Nome e apelido",
       passwordPlaceholder: "Mínimo 8 caracteres",
@@ -1353,6 +1366,8 @@ export const pt: Dictionary = {
     expenses: "Despesas",
     profit: "Lucro diário",
     clients: "Clientes",
+    clientsLegacy: "Clientes (Legacy)",
+    newBadge: "Novo",
     campaigns: "Campanhas",
     creatives: "Criativos",
     leads: "Leads",
@@ -1546,6 +1561,11 @@ export const pt: Dictionary = {
     noStoresHelp:
       "Usa “{add}” na barra lateral para ligares uma conta Google Ads existente, ou “{request}” para a equipa criar uma por ti.",
     noAdsAccounts: "Ainda não há contas ligadas. Adiciona uma a partir da barra lateral.",
+    managedAssetsTitle: "Os assets são adicionados por link seguro",
+    managedAssetsBody:
+      "Precisas de adicionar uma loja Shopify ou conta Google Ads? Pede à equipa Dropscale um link Adicionar Assets. Este espaço pode continuar ativo sem assets.",
+    managedAssetsSidebar:
+      "Precisas de uma loja ou conta de anúncios? Pede à Dropscale um link Adicionar Assets.",
     dashboard: "Dashboard",
     googleGroup: "Google",
     financeGroup: "Finanças",
@@ -2485,8 +2505,8 @@ export const ptBR: Dictionary = {
       forgot: "Esqueceu a senha?",
       remember: "Lembrar de mim",
       submit: "Entrar",
-      noAccount: "Ainda não tem conta?",
-      register: "Criar conta",
+      noAccount: "Precisa de acesso?",
+      register: "Fale conosco",
       passwordRequired: "Digite sua senha.",
       passwordUpdated: "Senha atualizada. Você já pode entrar.",
       accessRevoked: "Seu acesso de admin foi removido, então a sessão foi encerrada.",
@@ -2494,8 +2514,11 @@ export const ptBR: Dictionary = {
     },
 
     register: {
-      title: "Criar conta",
-      subtitle: "Crie sua conta de cliente Dropscale IO.",
+      title: "Acesso por convite",
+      subtitle: "As contas do portal são criadas por meio de um link seguro de onboarding da Dropscale.",
+      inviteOnlyBody:
+        "Se você vai começar a trabalhar com a Dropscale, use o link privado enviado por nossa equipe. Fale conosco se precisar de um novo convite ou ainda não tiver recebido um.",
+      contact: "Falar com a Dropscale",
       nameLabel: "Nome completo",
       namePlaceholder: "Nome e sobrenome",
       passwordPlaceholder: "No mínimo 8 caracteres",
@@ -2565,6 +2588,8 @@ export const ptBR: Dictionary = {
     expenses: "Despesas",
     profit: "Lucro diário",
     clients: "Clientes",
+    clientsLegacy: "Clientes (Legacy)",
+    newBadge: "Novo",
     campaigns: "Campanhas",
     creatives: "Criativos",
     leads: "Leads",
@@ -2758,6 +2783,11 @@ export const ptBR: Dictionary = {
     noStoresHelp:
       "Use “{add}” na barra lateral para vincular uma conta do Google Ads existente, ou “{request}” para o time criar uma para você.",
     noAdsAccounts: "Nenhuma conta vinculada ainda. Adicione uma pela barra lateral.",
+    managedAssetsTitle: "Os ativos são adicionados por link seguro",
+    managedAssetsBody:
+      "Precisa adicionar uma loja Shopify ou conta do Google Ads? Peça à equipe Dropscale um link Adicionar Ativos. Este espaço pode continuar ativo sem ativos.",
+    managedAssetsSidebar:
+      "Precisa de uma loja ou conta de anúncios? Peça à Dropscale um link Adicionar Ativos.",
     dashboard: "Dashboard",
     googleGroup: "Google",
     financeGroup: "Finanças",
@@ -3694,8 +3724,8 @@ export const es: Dictionary = {
       forgot: "¿Olvidaste tu contraseña?",
       remember: "Recordarme",
       submit: "Entrar",
-      noAccount: "¿Aún no tienes cuenta?",
-      register: "Crear cuenta",
+      noAccount: "¿Necesitas acceso?",
+      register: "Contáctanos",
       passwordRequired: "Introduce tu contraseña.",
       passwordUpdated: "Contraseña actualizada. Ya puedes entrar.",
       accessRevoked: "Se retiró tu acceso de administrador, por eso terminó la sesión.",
@@ -3703,8 +3733,11 @@ export const es: Dictionary = {
     },
 
     register: {
-      title: "Crear cuenta",
-      subtitle: "Crea tu cuenta de cliente de Dropscale IO.",
+      title: "Acceso por invitación",
+      subtitle: "Las cuentas del portal se crean mediante un enlace seguro de onboarding de Dropscale.",
+      inviteOnlyBody:
+        "Si vas a empezar a trabajar con Dropscale, utiliza el enlace privado enviado por nuestro equipo. Contáctanos si necesitas una nueva invitación o aún no la has recibido.",
+      contact: "Contactar con Dropscale",
       nameLabel: "Nombre completo",
       namePlaceholder: "Nombre y apellidos",
       passwordPlaceholder: "Mínimo 8 caracteres",
@@ -3774,6 +3807,8 @@ export const es: Dictionary = {
     expenses: "Gastos",
     profit: "Beneficio diario",
     clients: "Clientes",
+    clientsLegacy: "Clientes (Legacy)",
+    newBadge: "Nuevo",
     campaigns: "Campañas",
     creatives: "Creativos",
     leads: "Leads",
@@ -3967,6 +4002,11 @@ export const es: Dictionary = {
     noStoresHelp:
       "Usa «{add}» en la barra lateral para vincular una cuenta de Google Ads existente, o «{request}» para que el equipo cree una por ti.",
     noAdsAccounts: "Todavía no hay cuentas vinculadas. Añade una desde la barra lateral.",
+    managedAssetsTitle: "Los recursos se añaden mediante un enlace seguro",
+    managedAssetsBody:
+      "¿Necesitas añadir una tienda Shopify o una cuenta de Google Ads? Pide al equipo de Dropscale un enlace Añadir recursos. Este espacio puede seguir activo sin recursos.",
+    managedAssetsSidebar:
+      "¿Necesitas una tienda o cuenta publicitaria? Pide a Dropscale un enlace Añadir recursos.",
     dashboard: "Panel",
     googleGroup: "Google",
     financeGroup: "Finanzas",
@@ -4905,8 +4945,8 @@ export const fr: Dictionary = {
       forgot: "Mot de passe oublié ?",
       remember: "Se souvenir de moi",
       submit: "Se connecter",
-      noAccount: "Pas encore de compte ?",
-      register: "Créer un compte",
+      noAccount: "Besoin d’un accès ?",
+      register: "Contactez-nous",
       passwordRequired: "Saisissez votre mot de passe.",
       passwordUpdated: "Mot de passe mis à jour. Vous pouvez vous connecter.",
       accessRevoked: "Votre accès administrateur a été retiré, votre session a donc pris fin.",
@@ -4914,8 +4954,11 @@ export const fr: Dictionary = {
     },
 
     register: {
-      title: "Créer un compte",
-      subtitle: "Créez votre compte client Dropscale IO.",
+      title: "Accès sur invitation",
+      subtitle: "Les comptes du portail sont créés via un lien d’onboarding sécurisé de Dropscale.",
+      inviteOnlyBody:
+        "Si vous commencez à travailler avec Dropscale, utilisez le lien privé envoyé par notre équipe. Contactez-nous si vous avez besoin d’une nouvelle invitation ou si vous ne l’avez pas reçue.",
+      contact: "Contacter Dropscale",
       nameLabel: "Nom complet",
       namePlaceholder: "Prénom et nom",
       passwordPlaceholder: "8 caractères minimum",
@@ -4986,6 +5029,8 @@ export const fr: Dictionary = {
     expenses: "Dépenses",
     profit: "Bénéfice quotidien",
     clients: "Clients",
+    clientsLegacy: "Clients (Legacy)",
+    newBadge: "Nouveau",
     campaigns: "Campagnes",
     creatives: "Créatifs",
     leads: "Leads",
@@ -5179,6 +5224,11 @@ export const fr: Dictionary = {
     noStoresHelp:
       "Utilisez « {add} » dans le menu latéral pour relier un compte Google Ads existant, ou « {request} » pour que l'équipe en crée un pour vous.",
     noAdsAccounts: "Aucun compte relié pour l'instant. Ajoutez-en un depuis le menu latéral.",
+    managedAssetsTitle: "Les ressources sont ajoutées par lien sécurisé",
+    managedAssetsBody:
+      "Vous devez ajouter une boutique Shopify ou un compte Google Ads ? Demandez à l’équipe Dropscale un lien Ajouter des ressources. Cet espace peut rester actif sans ressources.",
+    managedAssetsSidebar:
+      "Besoin d’une boutique ou d’un compte publicitaire ? Demandez à Dropscale un lien Ajouter des ressources.",
     dashboard: "Tableau de bord",
     googleGroup: "Google",
     financeGroup: "Finances",

@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import { Suspense } from "react";
-import Link from "next/link";
 import { AuthCard } from "@/components/auth/auth-card";
 import { LoginForm } from "@/components/auth/login-form";
 import { getServerDictionary } from "@/lib/i18n/server";
@@ -20,12 +19,12 @@ export default async function LoginPage() {
       footer={
         <>
           {d.auth.login.noAccount}{" "}
-          <Link
-            href="/register"
+          <a
+            href="mailto:leandro@dropscale.io?subject=Dropscale%20portal%20access"
             className="transition-smooth font-medium text-[var(--accent-gold)] hover:text-[var(--accent-gold-strong)]"
           >
             {d.auth.login.register}
-          </Link>
+          </a>
         </>
       }
     >

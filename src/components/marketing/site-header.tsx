@@ -44,10 +44,10 @@ export function SiteHeader() {
             <Link href="/login">Sign in</Link>
           </Button>
           <Button variant="primary" size="sm" asChild>
-            <Link href="/register">
+            <a href="mailto:leandro@dropscale.io?subject=Intro%20call%20—%20Google%20Ads">
               Get started
               <ArrowRight />
-            </Link>
+            </a>
           </Button>
         </div>
       </div>
