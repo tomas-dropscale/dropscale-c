@@ -16,6 +16,11 @@ import {
 } from "lucide-react";
 
 import { FormAlert } from "@/components/auth/auth-card";
+import {
+  LARA_AUDIT_CONNECTION_ID,
+  requestReadOnlyLaraAudit,
+  type AuditCollectionSummary,
+} from "@/components/admin/audit-read-only-client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -109,6 +114,82 @@ function StatusBadge({ status }: { status: AuditConnectionDTO["status"] }) {
   return <Badge variant="gold">Waiting for client</Badge>;
 }
 
+function AuditRunSummary({ summary }: { summary: AuditCollectionSummary }) {
+  const number = new Intl.NumberFormat(undefined);
+  const badge =
+    summary.state === "completed"
+      ? { label: "Baseline complete", variant: "success" as const }
+      : summary.state === "partial"
+        ? { label: "Baseline partial", variant: "warning" as const }
+        : summary.state === "in_progress"
+          ? { label: "Baseline running", variant: "warning" as const }
+        : { label: "Baseline stopped", variant: "danger" as const };
+  const hasCatalogCounts =
+    summary.catalog.products !== null || summary.catalog.variants !== null;
+  const hasCapturedCounts =
+    summary.captured.priorityProductsRequested > 0 ||
+    summary.captured.policies > 0 ||
+    summary.captured.pages > 0 ||
+    summary.captured.menus > 0 ||
+    summary.captured.themeSourceFilesMatched > 0;
+
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      className="mt-4 rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3"
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge variant={badge.variant}>{badge.label}</Badge>
+        <span className="text-[11.5px] text-[var(--text-secondary)]">
+          Run <code className="break-all text-[var(--text-primary)]">{summary.runId}</code>
+        </span>
+      </div>
+      {summary.generatedAt && (
+        <p className="mt-2 text-[11.5px] text-[var(--text-secondary)]">
+          Snapshot generated {dateTime(summary.generatedAt)}
+        </p>
+      )}
+      {summary.modules.total > 0 && (
+        <p className="mt-2 text-[12px] text-[var(--text-secondary)]">
+          Modules: {summary.modules.complete} complete · {summary.modules.blocked} blocked ·{" "}
+          {summary.modules.failed} failed
+        </p>
+      )}
+      {hasCatalogCounts && (
+        <p className="mt-1 text-[12px] text-[var(--text-secondary)]">
+          Catalog snapshot:
+          {summary.catalog.products !== null
+            ? ` ${summary.catalog.productsExact === false ? "at least " : ""}${number.format(summary.catalog.products)} products`
+            : " products unavailable"}
+          {summary.catalog.variants !== null
+            ? ` · ${summary.catalog.variantsExact === false ? "at least " : ""}${number.format(summary.catalog.variants)} variants`
+            : " · variants unavailable"}
+        </p>
+      )}
+      {hasCapturedCounts && (
+        <p className="mt-1 text-[12px] text-[var(--text-secondary)]">
+          Captured: {summary.captured.priorityProductsFound}/
+          {summary.captured.priorityProductsRequested} priority products ·{" "}
+          {summary.captured.policies} policies · {summary.captured.pages} pages ·{" "}
+          {summary.captured.menus} menus · {summary.captured.themeSourceFilesMatched} theme
+          source matches
+        </p>
+      )}
+      {summary.errorCode && (
+        <p className="mt-1 text-[11.5px] text-[var(--warning-orange)]">
+          Safe failure code: <code>{summary.errorCode}</code>
+        </p>
+      )}
+      <p className="mt-2 text-[11px] text-[var(--text-secondary)]">
+        Fixed read-only collection. No Shopify data was changed; raw audit content is not shown
+        in this view.
+      </p>
+    </div>
+  );
+}
+
 function setupIssueMessage(connection: AuditConnectionDTO): string {
   if (connection.failedAttempts >= 10) {
     return "This setup link is locked after 10 unsuccessful attempts. Generate a replacement link.";
@@ -171,6 +252,9 @@ export function AuditConnectionsView({
   const [feedback, setFeedback] = React.useState<Feedback>(null);
   const [busy, setBusy] = React.useState<string | null>(null);
   const [copied, setCopied] = React.useState(false);
+  const [auditSummaries, setAuditSummaries] = React.useState<
+    Record<string, AuditCollectionSummary>
+  >({});
 
   const activeConnections = React.useMemo(
     () => visibleAuditConnections(connections),
@@ -347,6 +431,49 @@ export function AuditConnectionsView({
       router.refresh();
     } catch {
       setFeedback({ tone: "error", message: "The connection could not be reviewed." });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function collectReadOnlyAudit(connection: AuditConnectionDTO) {
+    if (
+      !window.confirm(
+        "Run the fixed read-only baseline for Lara Rovinj? It reads authorised Shopify Admin data and does not modify the store.",
+      )
+    ) {
+      return;
+    }
+
+    setBusy(`collect:${connection.id}`);
+    setFeedback(null);
+    try {
+      const result = await requestReadOnlyLaraAudit(connection.id);
+      if (result.summary) {
+        const summary = result.summary;
+        setAuditSummaries((current) => ({
+          ...current,
+          [connection.id]: summary,
+        }));
+      }
+      if (!result.ok) {
+        setFeedback({ tone: "error", message: result.message });
+        return;
+      }
+      setFeedback({
+        tone: "success",
+        message:
+          result.summary.state === "completed"
+            ? "The Lara read-only baseline completed. Its sanitized summary is shown on the connection."
+            : result.summary.state === "in_progress"
+              ? "A Lara read-only baseline is already running. No duplicate collection was started."
+            : "The Lara read-only collection finished partially and is not treated as a complete audit.",
+      });
+    } catch {
+      setFeedback({
+        tone: "error",
+        message: "The read-only audit could not be completed. No Shopify data was changed.",
+      });
     } finally {
       setBusy(null);
     }
@@ -628,6 +755,19 @@ export function AuditConnectionsView({
                         {connection.status === "waiting" ? "Replace setup link" : "Generate new link"}
                       </Button>
                     )}
+                    {connection.status === "connected" &&
+                      connection.id === LARA_AUDIT_CONNECTION_ID && (
+                        <Button
+                          type="button"
+                          size="sm"
+                          onClick={() => collectReadOnlyAudit(connection)}
+                          loading={busy === `collect:${connection.id}`}
+                          title="Run the fixed Lara baseline without changing Shopify data"
+                        >
+                          <RefreshCw aria-hidden />
+                          Run read-only audit
+                        </Button>
+                      )}
                     {connection.needsReview && (
                       <Button
                         type="button"
@@ -656,35 +796,40 @@ export function AuditConnectionsView({
                 </div>
 
                 {connection.status === "connected" && (
-                  <div className="mt-4 grid gap-3 border-t border-[var(--border-subtle)] pt-4 sm:grid-cols-3">
-                    <div>
-                      <p className="label-caps">Verified store</p>
-                      <p className="mt-1 text-[12.5px] text-[var(--text-primary)]">
-                        {connection.shopifyName ?? connection.storeLabel}
-                        {connection.currency ? ` · ${connection.currency}` : ""}
-                      </p>
+                  <>
+                    <div className="mt-4 grid gap-3 border-t border-[var(--border-subtle)] pt-4 sm:grid-cols-3">
+                      <div>
+                        <p className="label-caps">Verified store</p>
+                        <p className="mt-1 text-[12.5px] text-[var(--text-primary)]">
+                          {connection.shopifyName ?? connection.storeLabel}
+                          {connection.currency ? ` · ${connection.currency}` : ""}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="label-caps">Connected</p>
+                        <p className="mt-1 text-[12.5px] text-[var(--text-secondary)]">
+                          {dateTime(connection.connectedAt)}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="label-caps">Credential</p>
+                        <p className="mt-1 text-[12.5px] text-[var(--text-secondary)]">
+                          Encrypted · ends in {connection.credentialHint ?? "—"}
+                        </p>
+                      </div>
+                      <details className="sm:col-span-3">
+                        <summary className="cursor-pointer text-[12px] font-medium text-[var(--accent-gold-strong)]">
+                          {connection.grantedScopes.length} verified audit scopes
+                        </summary>
+                        <p className="mt-2 break-words text-[11.5px] leading-relaxed text-[var(--text-secondary)]">
+                          {connection.grantedScopes.join(", ")}
+                        </p>
+                      </details>
                     </div>
-                    <div>
-                      <p className="label-caps">Connected</p>
-                      <p className="mt-1 text-[12.5px] text-[var(--text-secondary)]">
-                        {dateTime(connection.connectedAt)}
-                      </p>
-                    </div>
-                    <div>
-                      <p className="label-caps">Credential</p>
-                      <p className="mt-1 text-[12.5px] text-[var(--text-secondary)]">
-                        Encrypted · ends in {connection.credentialHint ?? "—"}
-                      </p>
-                    </div>
-                    <details className="sm:col-span-3">
-                      <summary className="cursor-pointer text-[12px] font-medium text-[var(--accent-gold-strong)]">
-                        {connection.grantedScopes.length} verified audit scopes
-                      </summary>
-                      <p className="mt-2 break-words text-[11.5px] leading-relaxed text-[var(--text-secondary)]">
-                        {connection.grantedScopes.join(", ")}
-                      </p>
-                    </details>
-                  </div>
+                    {auditSummaries[connection.id] && (
+                      <AuditRunSummary summary={auditSummaries[connection.id]} />
+                    )}
+                  </>
                 )}
 
                 {connection.status === "waiting" && (

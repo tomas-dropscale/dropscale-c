@@ -625,11 +625,48 @@ export type AuditShopifyConnectionEvent = {
     | "store_connected"
     | "connection_reviewed"
     | "connection_revoked"
-    | "verification_failed";
+    | "verification_failed"
+    | "audit_collector_requested";
   actor_type: "admin" | "invite" | "system";
   actor_profile_id: string | null;
   details: Record<string, unknown>;
   created_at: string;
+};
+
+export type AuditShopifyRunState = "queued" | "running" | "completed" | "failed";
+
+/**
+ * Durable, service-role-only state for a bounded read-only audit collector
+ * (migration 0042). `checkpoint` and `artifact` are sanitized JSON objects;
+ * neither may contain credential-shaped keys.
+ */
+export type AuditShopifyRun = {
+  id: string;
+  connection_id: string;
+  requested_by: string;
+  shopify_domain: string;
+  state: AuditShopifyRunState;
+  requested_source: string;
+  requested_note: string | null;
+  schema_hash: string;
+  manifest_hash: string;
+  checkpoint: Record<string, unknown>;
+  artifact: Record<string, unknown> | null;
+  attempt_count: number;
+  retry_count: number;
+  max_retries: number;
+  next_attempt_at: string | null;
+  lease_token: string | null;
+  lease_generation: number;
+  lease_acquired_at: string | null;
+  lease_renewed_at: string | null;
+  lease_expires_at: string | null;
+  error_code: string | null;
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  failed_at: string | null;
 };
 
 export type AccountRequest = {
@@ -1172,6 +1209,48 @@ export type Database = {
           {
             foreignKeyName: "audit_shopify_connection_events_actor_profile_id_fkey";
             columns: ["actor_profile_id"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      audit_shopify_runs: {
+        Row: Row<AuditShopifyRun>;
+        Insert: Insert<
+          AuditShopifyRun,
+          | "state"
+          | "requested_note"
+          | "checkpoint"
+          | "artifact"
+          | "attempt_count"
+          | "retry_count"
+          | "max_retries"
+          | "next_attempt_at"
+          | "lease_token"
+          | "lease_generation"
+          | "lease_acquired_at"
+          | "lease_renewed_at"
+          | "lease_expires_at"
+          | "error_code"
+          | "created_at"
+          | "updated_at"
+          | "started_at"
+          | "completed_at"
+          | "failed_at"
+        >;
+        Update: Partial<AuditShopifyRun>;
+        Relationships: [
+          {
+            foreignKeyName: "audit_shopify_runs_connection_id_fkey";
+            columns: ["connection_id"];
+            isOneToOne: false;
+            referencedRelation: "audit_shopify_connections";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "audit_shopify_runs_requested_by_fkey";
+            columns: ["requested_by"];
             isOneToOne: false;
             referencedRelation: "profiles";
             referencedColumns: ["id"];
@@ -1920,6 +1999,76 @@ export type Database = {
       review_audit_shopify_connection: {
         Args: { p_connection_id: string; p_admin_id: string };
         Returns: string;
+      };
+      enqueue_audit_shopify_run: {
+        Args: {
+          p_run_id: string;
+          p_connection_id: string;
+          p_requested_by: string;
+          p_shopify_domain: string;
+          p_requested_source: string;
+          p_requested_note: string | null;
+          p_schema_hash: string;
+          p_manifest_hash: string;
+          p_max_retries?: number;
+          p_checkpoint?: Record<string, unknown>;
+        };
+        Returns: string;
+      };
+      claim_audit_shopify_run: {
+        Args: {
+          p_lease_token: string;
+          p_run_id?: string | null;
+          p_shopify_domain?: string | null;
+          p_lease_seconds?: number;
+        };
+        Returns: AuditShopifyRun[];
+      };
+      renew_audit_shopify_run: {
+        Args: {
+          p_run_id: string;
+          p_shopify_domain: string;
+          p_lease_token: string;
+          p_lease_generation: number;
+          p_checkpoint: Record<string, unknown>;
+          p_lease_seconds?: number;
+        };
+        Returns: AuditShopifyRun[];
+      };
+      yield_audit_shopify_run: {
+        Args: {
+          p_run_id: string;
+          p_shopify_domain: string;
+          p_lease_token: string;
+          p_lease_generation: number;
+          p_checkpoint: Record<string, unknown>;
+          p_continue_after_seconds?: number;
+        };
+        Returns: AuditShopifyRun[];
+      };
+      complete_audit_shopify_run: {
+        Args: {
+          p_run_id: string;
+          p_shopify_domain: string;
+          p_lease_token: string;
+          p_lease_generation: number;
+          p_checkpoint: Record<string, unknown>;
+          p_artifact: Record<string, unknown>;
+        };
+        Returns: AuditShopifyRun[];
+      };
+      fail_audit_shopify_run: {
+        Args: {
+          p_run_id: string;
+          p_shopify_domain: string;
+          p_lease_token: string;
+          p_lease_generation: number;
+          p_checkpoint: Record<string, unknown>;
+          p_error_code: string;
+          p_retryable: boolean;
+          p_retry_after_seconds?: number;
+        };
+        Returns: AuditShopifyRun[];
       };
       is_admin: {
         Args: Record<string, never>;
