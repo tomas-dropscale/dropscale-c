@@ -40,13 +40,6 @@ const nextHandler = handler as {
   fetch(request: Request, env: Env, ctx: Ctx): Promise<Response>;
 };
 
-const TEMPORARY_LARA_QUARANTINE_CRON = "*/2 * * * *";
-const LARA_QUARANTINE_PATH = "/api/internal/audit/lara/priority-quarantine";
-const LARA_QUARANTINE_CONFIRMATION = JSON.stringify({
-  action: "apply",
-  confirmation: "apply-lara-priority-quarantine-active-to-draft",
-});
-
 const worker = {
   fetch(request: Request, env: Env, ctx: Ctx): Promise<Response> {
     return nextHandler.fetch(request, env, ctx);
@@ -55,52 +48,6 @@ const worker = {
   async scheduled(event: { cron: string }, env: Env, ctx: Ctx): Promise<void> {
     if (!env.CRON_SECRET) {
       console.error("Cron skipped: CRON_SECRET is not set on this Worker.");
-      return;
-    }
-
-    // Only the path is ever used for routing; the origin just has to be a valid
-    // absolute URL, so a missing site URL must not abort the run.
-    const origin = env.NEXT_PUBLIC_SITE_URL ?? "https://dropscale.app";
-
-    /**
-     * TEMPORARY FIXED REPAIR: quarantine the ten exact Lara products whose
-     * public identity/claims contradict their actual product content. The
-     * route owns the shop, run, plan, products and mutation; this trigger can
-     * only send the fixed confirmation. Repeated ticks resume the same fenced
-     * run and cannot create another batch. Remove this branch and its matching
-     * Wrangler trigger immediately after Admin + storefront verification.
-     */
-    if (event.cron === TEMPORARY_LARA_QUARANTINE_CRON) {
-      try {
-        const response = await nextHandler.fetch(
-          new Request(`${origin}${LARA_QUARANTINE_PATH}`, {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${env.CRON_SECRET}`,
-              "Content-Type": "application/json",
-            },
-            body: LARA_QUARANTINE_CONFIRMATION,
-          }),
-          env,
-          ctx,
-        );
-
-        const body = await response.text();
-        if (!response.ok) {
-          console.error(
-            `Cron "temporary Lara priority quarantine" ${LARA_QUARANTINE_PATH} failed (${response.status}): ${body}`,
-          );
-          return;
-        }
-        console.log(
-          `Cron "temporary Lara priority quarantine" ${LARA_QUARANTINE_PATH}: ${body}`,
-        );
-      } catch (error) {
-        console.error(
-          `Cron "temporary Lara priority quarantine" ${LARA_QUARANTINE_PATH} threw:`,
-          error,
-        );
-      }
       return;
     }
 
@@ -132,6 +79,10 @@ const worker = {
               name: "hourly refresh",
               paths: ["/api/admin/sync-metrics", "/api/admin/sync-ledgers"],
             };
+
+    // Only the path is ever used for routing; the origin just has to be a valid
+    // absolute URL, so a missing site URL must not abort the run.
+    const origin = env.NEXT_PUBLIC_SITE_URL ?? "https://dropscale.app";
 
     // Sequential, not parallel: the ledger reads Google, the rollup writes it,
     // and two concurrent syncs would only race each other for the same quota.
