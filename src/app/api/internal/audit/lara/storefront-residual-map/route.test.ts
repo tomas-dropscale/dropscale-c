@@ -9,7 +9,7 @@ vi.mock("@/lib/audit/connections", () => ({
   getAuditMachineSponsor: mocks.sponsor,
 }));
 vi.mock("@/lib/audit/lara-storefront-residual-collector", () => ({
-  LARA_STOREFRONT_RESIDUAL_RUN_ID: "d09f89fe-c372-46e7-9d3b-7edd751d22fc",
+  LARA_STOREFRONT_RESIDUAL_RUN_ID: "6f7632f6-78e1-497f-a055-0efd3c60f0e3",
   runLaraStorefrontResidualCollector: mocks.collect,
 }));
 vi.mock("@/lib/audit/shopify-lara", () => ({
@@ -24,7 +24,7 @@ import { NextRequest } from "next/server";
 import { POST } from "./route";
 
 const URL = "https://dropscale.app/api/internal/audit/lara/storefront-residual-map";
-const RUN_ID = "d09f89fe-c372-46e7-9d3b-7edd751d22fc";
+const RUN_ID = "6f7632f6-78e1-497f-a055-0efd3c60f0e3";
 const SUMMARY = {
   auditStatus: "complete",
   completionIssues: [],

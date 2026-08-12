@@ -7,7 +7,17 @@ import { LARA_AUDIT_CONNECTION } from "./shopify-lara";
 import type { AuditShopifyRuntime } from "./shopify-runtime";
 
 export const LARA_STOREFRONT_RESIDUAL_SCHEMA_VERSION =
-  "lara-storefront-residual-map.v3" as const;
+  "lara-storefront-residual-map.v4" as const;
+
+const SHOPIFY_GENERATED_JSON_BANNER = `/*
+ * ------------------------------------------------------------
+ * IMPORTANT: The contents of this file are auto-generated.
+ *
+ * This file may be updated by the Shopify admin theme editor
+ * or related systems. Please exercise caution as any changes
+ * made to this file may be overwritten.
+ * ------------------------------------------------------------
+ */`;
 
 export const LARA_STOREFRONT_RESIDUAL_TARGETS = Object.freeze({
   theme: Object.freeze({
@@ -333,6 +343,11 @@ type BodyReader = (input: {
 }) => Promise<string>;
 
 type BodyMode = "text" | "base64" | "short_lived_url";
+type TextIntegrityMode =
+  | "exact"
+  | "text_crlf_normalized"
+  | "shopify_json_banner_stripped"
+  | "shopify_json_compacted";
 
 export type LaraStorefrontResidualSourceEvidence = {
   filename: string;
@@ -340,7 +355,7 @@ export type LaraStorefrontResidualSourceEvidence = {
   updatedAt: string;
   size: number;
   decodedByteLength: number;
-  integrityMode: "exact" | "text_crlf_normalized";
+  integrityMode: TextIntegrityMode;
   bodyMode: BodyMode;
   sourceSha256: string;
   matches: Array<{
@@ -413,7 +428,7 @@ export type LaraStorefrontResidualArtifact = {
       filename: string;
       reportedSize: number;
       decodedByteLength: number;
-      integrityMode: "text_crlf_normalized";
+      integrityMode: Exclude<TextIntegrityMode, "exact">;
     }>;
     integrityDiagnostics: Array<{
       filename: string;
@@ -546,31 +561,72 @@ function verifyTextIntegrity(input: {
   content: string;
   reportedSize: number;
   checksumMd5: string | null;
+  filename: string;
 }): {
+  content: string;
   decodedByteLength: number;
-  integrityMode: "exact" | "text_crlf_normalized";
+  integrityMode: TextIntegrityMode;
 } | null {
-  const decodedByteLength = new TextEncoder().encode(input.content).byteLength;
-  const exactChecksum =
-    input.checksumMd5 === null || md5Hex(input.content) === input.checksumMd5;
-  if (decodedByteLength === input.reportedSize && exactChecksum) {
-    return { decodedByteLength, integrityMode: "exact" };
+  const matchesStoredEvidence = (content: string): boolean =>
+    new TextEncoder().encode(content).byteLength === input.reportedSize &&
+    (input.checksumMd5 === null || md5Hex(content) === input.checksumMd5);
+  if (matchesStoredEvidence(input.content)) {
+    return {
+      content: input.content,
+      decodedByteLength: input.reportedSize,
+      integrityMode: "exact",
+    };
   }
 
   // Shopify can return a text body with CRLF line endings normalised to LF
   // while `size` and checksum still describe the stored bytes. Accept only
   // that one deterministic transformation, and only when both the documented
   // byte count and MD5 prove the reconstruction.
-  if (input.checksumMd5 === null || !input.content.includes("\n")) return null;
-  const restored = restoreCrlf(input.content);
-  const restoredByteLength = new TextEncoder().encode(restored).byteLength;
-  if (
-    restoredByteLength !== input.reportedSize ||
-    md5Hex(restored) !== input.checksumMd5
-  ) {
+  if (input.checksumMd5 !== null && input.content.includes("\n")) {
+    const restored = restoreCrlf(input.content);
+    if (matchesStoredEvidence(restored)) {
+      return {
+        content: restored,
+        decodedByteLength: input.reportedSize,
+        integrityMode: "text_crlf_normalized",
+      };
+    }
+  }
+
+  if (!input.filename.toLocaleLowerCase().endsWith(".json")) return null;
+  const bannerPrefix = `${SHOPIFY_GENERATED_JSON_BANNER}\n`;
+  if (!input.content.startsWith(bannerPrefix)) return null;
+  const stripped = input.content.slice(bannerPrefix.length);
+  if (input.checksumMd5 !== null && matchesStoredEvidence(stripped)) {
+    return {
+      content: stripped,
+      decodedByteLength: input.reportedSize,
+      integrityMode: "shopify_json_banner_stripped",
+    };
+  }
+
+  // Shopify may also pretty-print the JSON body it projects through GraphQL.
+  // Reconstruct only valid JSON after the exact Shopify-generated banner, and
+  // accept the compact representation only when both stored size and MD5
+  // prove that it is byte-for-byte the underlying theme file.
+  if (input.checksumMd5 === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stripped);
+  } catch {
     return null;
   }
-  return { decodedByteLength, integrityMode: "text_crlf_normalized" };
+  const compact = JSON.stringify(parsed);
+  for (const candidate of [compact, `${compact}\n`, `${compact}\r\n`]) {
+    if (matchesStoredEvidence(candidate)) {
+      return {
+        content: candidate,
+        decodedByteLength: input.reportedSize,
+        integrityMode: "shopify_json_compacted",
+      };
+    }
+  }
+  return null;
 }
 
 function textIntegrityDiagnostic(input: {
@@ -780,7 +836,7 @@ async function sourceEvidence(
   bodyMode: BodyMode,
   integrity: {
     decodedByteLength: number;
-    integrityMode: "exact" | "text_crlf_normalized";
+    integrityMode: TextIntegrityMode;
   },
 ): Promise<LaraStorefrontResidualSourceEvidence | null> {
   const starts = lineStarts(content);
@@ -1318,9 +1374,11 @@ export async function collectLaraStorefrontResidualMap({
               content,
               reportedSize: nodeSize,
               checksumMd5: node.checksumMd5,
+              filename: expected.filename,
             })
           : new TextEncoder().encode(content).byteLength === nodeSize
             ? {
+                content,
                 decodedByteLength: nodeSize,
                 integrityMode: "exact" as const,
               }
@@ -1349,7 +1407,7 @@ export async function collectLaraStorefrontResidualMap({
       }
       scannedCount += 1;
       scannedBytes += integrity.decodedByteLength;
-      if (integrity.integrityMode === "text_crlf_normalized") {
+      if (integrity.integrityMode !== "exact") {
         textSizeReconciliations.push({
           filename: expected.filename,
           reportedSize: nodeSize,
@@ -1357,11 +1415,17 @@ export async function collectLaraStorefrontResidualMap({
           integrityMode: integrity.integrityMode,
         });
       }
-      const contentSha256 = await sha256Hex(content);
+      const verifiedContent = integrity.content;
+      const contentSha256 = await sha256Hex(verifiedContent);
       if (expected.filename === "config/settings_data.json") {
-        settingsSource = { content, sha256: contentSha256 };
+        settingsSource = { content: verifiedContent, sha256: contentSha256 };
       }
-      const match = await sourceEvidence(expected, content, bodyMode, integrity);
+      const match = await sourceEvidence(
+        expected,
+        verifiedContent,
+        bodyMode,
+        integrity,
+      );
       if (match) evidence.push(match);
     }
   }
@@ -1544,7 +1608,11 @@ export function summariseLaraStorefrontResidualArtifact(
         typeof record.filename !== "string" ||
         typeof record.reportedSize !== "number" ||
         typeof record.decodedByteLength !== "number" ||
-        record.integrityMode !== "text_crlf_normalized"
+        ![
+          "text_crlf_normalized",
+          "shopify_json_banner_stripped",
+          "shopify_json_compacted",
+        ].includes(String(record.integrityMode))
       );
     }) ||
     !Array.isArray(sourceScan?.integrityDiagnostics) ||

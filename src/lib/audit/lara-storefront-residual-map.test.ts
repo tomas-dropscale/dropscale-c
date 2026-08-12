@@ -58,6 +58,15 @@ const SALE_SOURCE = JSON.stringify({
   promo: { heading: "Sniženja", subheading: "Do 50% popusta" },
 });
 const NEUTRAL_SOURCE = "<main>{{ content_for_layout }}</main>";
+const SHOPIFY_BANNER = `/*
+ * ------------------------------------------------------------
+ * IMPORTANT: The contents of this file are auto-generated.
+ *
+ * This file may be updated by the Shopify admin theme editor
+ * or related systems. Please exercise caution as any changes
+ * made to this file may be overwritten.
+ * ------------------------------------------------------------
+ */`;
 
 function bytes(value: string) {
   return new TextEncoder().encode(value).byteLength;
@@ -173,11 +182,14 @@ function runtime(
     wrongTheme?: boolean;
     duplicateMenu?: boolean;
     crlfNormalizedSettings?: boolean;
+    shopifyProjectedSettings?: boolean;
   } = {},
 ) {
   const storedSettings = options.crlfNormalizedSettings
     ? SETTINGS_SOURCE.replaceAll("\n", "\r\n")
-    : SETTINGS_SOURCE;
+    : options.shopifyProjectedSettings
+      ? JSON.stringify(JSON.parse(SETTINGS_SOURCE))
+      : SETTINGS_SOURCE;
   const settingsFile = metadata("config/settings_data.json", storedSettings);
   const queryMock = vi.fn(async (
     document: string,
@@ -223,7 +235,9 @@ function runtime(
             ...settingsFile,
             body: {
               __typename: "OnlineStoreThemeFileBodyText",
-              content: SETTINGS_SOURCE,
+              content: options.shopifyProjectedSettings
+                ? `${SHOPIFY_BANNER}\n${SETTINGS_SOURCE}`
+                : SETTINGS_SOURCE,
             },
           },
         ],
@@ -488,7 +502,7 @@ describe("the fixed read-only Lara storefront residual mapper", () => {
       {
         filename: "config/settings_data.json",
         reportedSize: bytes(SETTINGS_SOURCE.replaceAll("\n", "\r\n")),
-        decodedByteLength: bytes(SETTINGS_SOURCE),
+        decodedByteLength: bytes(SETTINGS_SOURCE.replaceAll("\n", "\r\n")),
         integrityMode: "text_crlf_normalized",
       },
     ]);
@@ -500,6 +514,28 @@ describe("the fixed read-only Lara storefront residual mapper", () => {
     expect(summariseLaraStorefrontResidualArtifact(artifact)).toMatchObject({
       textSizeReconciliationCount: 1,
       integrityDiagnosticCount: 0,
+    });
+  });
+
+  it("strips only the exact Shopify JSON banner and verifies compact stored bytes", async () => {
+    const compactSettings = JSON.stringify(JSON.parse(SETTINGS_SOURCE));
+    const sourceRuntime = runtime({ shopifyProjectedSettings: true });
+
+    const artifact = await collectLaraStorefrontResidualMap({
+      runtime: sourceRuntime,
+      readShortLivedBody: vi.fn(async () => SALE_SOURCE),
+    });
+
+    expect(artifact.auditStatus).toBe("complete");
+    expect(artifact.sourceScan.textSizeReconciliations).toContainEqual({
+      filename: "config/settings_data.json",
+      reportedSize: bytes(compactSettings),
+      decodedByteLength: bytes(compactSettings),
+      integrityMode: "shopify_json_compacted",
+    });
+    expect(artifact.kachingEmbed).toMatchObject({
+      structuralEvidenceComplete: true,
+      activeEmbedCount: 1,
     });
   });
 
@@ -579,7 +615,7 @@ describe("the fixed read-only Lara storefront residual mapper", () => {
   it("does not accept a completed artifact with changed shop or theme evidence", async () => {
     expect(
       summariseLaraStorefrontResidualArtifact({
-        schemaVersion: "lara-storefront-residual-map.v3",
+        schemaVersion: "lara-storefront-residual-map.v4",
         auditStatus: "complete",
         completionIssues: [],
         apiVersion: "2026-07",

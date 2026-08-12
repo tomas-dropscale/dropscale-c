@@ -26,7 +26,7 @@ import {
 import type { AuditShopifyRun } from "@/lib/supabase/types";
 
 export const LARA_STOREFRONT_RESIDUAL_RUN_ID =
-  "d09f89fe-c372-46e7-9d3b-7edd751d22fc" as const;
+  "6f7632f6-78e1-497f-a055-0efd3c60f0e3" as const;
 
 const REQUEST_SOURCE = "system.storefront_residual_map";
 const REQUEST_NOTE =
@@ -76,6 +76,12 @@ function allowedThemeBodyHost(hostname: string): boolean {
 
 function allowedThemeBodyUrl(url: URL): boolean {
   if (allowedThemeBodyHost(url.hostname)) return true;
+  if (
+    url.hostname.toLocaleLowerCase() ===
+    "shopify-shop-assets.storage.googleapis.com"
+  ) {
+    return true;
+  }
   return (
     url.hostname.toLocaleLowerCase() === "storage.googleapis.com" &&
     url.pathname.startsWith("/shopify")

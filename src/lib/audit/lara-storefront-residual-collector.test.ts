@@ -26,7 +26,7 @@ vi.mock("./lara-storefront-residual-map", () => {
     LARA_STOREFRONT_RESIDUAL_QUERY_MANIFEST: {
       fixed: "query LaraFixedRead { shop { id } }",
     },
-    LARA_STOREFRONT_RESIDUAL_SCHEMA_VERSION: "lara-storefront-residual-map.v3",
+    LARA_STOREFRONT_RESIDUAL_SCHEMA_VERSION: "lara-storefront-residual-map.v4",
     laraStorefrontResidualManifestSha256: mocks.manifestHash,
     laraStorefrontResidualSchemaSha256: mocks.schemaHash,
     LaraStorefrontResidualMapError,
@@ -107,7 +107,7 @@ const SUMMARY = {
   },
 };
 const ARTIFACT = {
-  schemaVersion: "lara-storefront-residual-map.v3",
+  schemaVersion: "lara-storefront-residual-map.v4",
   queryManifestSha256: MANIFEST_HASH,
 };
 
@@ -317,8 +317,8 @@ describe("the Shopify short-lived theme body boundary", () => {
 
   it("accepts only Shopify-prefixed short-lived bodies on Google storage", async () => {
     const source = "body";
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(source, {
+    const fetchMock = vi.fn().mockImplementation(
+      async () => new Response(source, {
         status: 200,
         headers: { "content-length": String(source.length) },
       }),
@@ -334,7 +334,21 @@ describe("the Shopify short-lived theme body boundary", () => {
     ).resolves.toBe(source);
     await expect(
       readLaraShortLivedThemeBody({
+        url: "https://shopify-shop-assets.storage.googleapis.com/opaque/theme.css?X-Goog-Signature=private",
+        expectedBytes: source.length,
+        filename: "assets/main.css",
+      }),
+    ).resolves.toBe(source);
+    await expect(
+      readLaraShortLivedThemeBody({
         url: "https://storage.googleapis.com/unrelated/body?X-Goog-Signature=private",
+        expectedBytes: source.length,
+        filename: "assets/main.css",
+      }),
+    ).rejects.toThrow("disallowed");
+    await expect(
+      readLaraShortLivedThemeBody({
+        url: "https://attacker.storage.googleapis.com/opaque/theme.css",
         expectedBytes: source.length,
         filename: "assets/main.css",
       }),
