@@ -218,7 +218,7 @@ describe("the dedicated Lara live theme runtime", () => {
       method: "GET",
       apiVersion: "2026-07",
       themeId: LARA_THEME_URGENCY_REST_THEME_ID,
-      redirects: "error",
+      redirects: "manual",
       writesAllowed: false,
       filenames: LARA_THEME_URGENCY_FILES,
     });
@@ -281,7 +281,7 @@ describe("the dedicated Lara live theme runtime", () => {
     ]);
     expect(init).toMatchObject({
       method: "GET",
-      redirect: "error",
+      redirect: "manual",
       cache: "no-store",
       headers: {
         accept: "application/json",

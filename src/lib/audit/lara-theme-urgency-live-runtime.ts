@@ -62,7 +62,11 @@ export const LARA_THEME_URGENCY_REST_ASSET_MANIFEST = Object.freeze({
   path: `/admin/api/${AUDIT_SHOPIFY_API_VERSION}/themes/${LARA_THEME_URGENCY_REST_THEME_ID}/assets.json`,
   fields: REST_ASSET_FIELDS,
   filenames: LARA_THEME_URGENCY_FILES,
-  redirects: "error",
+  // Cloudflare must observe redirects without following them. `manual` keeps
+  // the Shopify token on the original host and lets the response validator
+  // reject every 3xx explicitly; `error` collapses a redirect into the same
+  // fetch exception as a network failure and removes useful safe evidence.
+  redirects: "manual",
   writesAllowed: false,
   requestTimeoutMs: REQUEST_TIMEOUT_MS,
   response: Object.freeze({
@@ -122,6 +126,9 @@ export type LaraThemeUrgencyLiveRuntimeErrorCode =
   | "missing_write_themes"
   | "mutation_ambiguous"
   | "mutation_rejected"
+  | "rest_asset_body_unavailable"
+  | "rest_asset_fetch_unavailable"
+  | "rest_asset_upstream_unavailable"
   | "rest_asset_unavailable"
   | "shop_mismatch"
   | "shop_verification_unavailable"
@@ -436,7 +443,7 @@ async function getExactRestAsset(
   try {
     response = await fetch(url, {
       method: "GET",
-      redirect: "error",
+      redirect: "manual",
       cache: "no-store",
       signal: controller.signal,
       headers: {
@@ -446,7 +453,7 @@ async function getExactRestAsset(
     });
   } catch {
     throw runtimeError(
-      "rest_asset_unavailable",
+      "rest_asset_fetch_unavailable",
       "Shopify could not return the fixed REST theme asset.",
       true,
     );
@@ -472,7 +479,7 @@ async function getExactRestAsset(
   ) {
     throw runtimeError(
       response.status === 429 || response.status >= 500
-        ? "rest_asset_unavailable"
+        ? "rest_asset_upstream_unavailable"
         : "invalid_rest_asset",
       "Shopify returned an invalid fixed REST theme asset response.",
       response.status === 429 || response.status >= 500,
@@ -484,7 +491,7 @@ async function getExactRestAsset(
     raw = await response.text();
   } catch {
     throw runtimeError(
-      "rest_asset_unavailable",
+      "rest_asset_body_unavailable",
       "Shopify interrupted the fixed REST theme asset response.",
       true,
     );
