@@ -43,3 +43,28 @@ only the ">60 days of history" extension and requires the base `read_orders`
 its error message spells out the trap. App-side fix: Configuration → Admin
 API integration → enable `read_orders` (keep `read_all_orders` too) → save →
 install/update the app → reconnect in the panel.
+
+## 2026-08-12 — Audit Connections changes appeared unchanged after push
+
+**Symptom:** The Audit Connections page still showed `Needs attention`, a
+right-aligned `Add store` button, persistent green notices, and revoked rows
+after the first implementation was pushed.
+
+**Cause:** There are two different local repositories with the same Worker
+name. The production audit/admin app lives in `dropscale-c`, while the session
+started in the sibling `dropscale` repository. The first change was also pushed
+to a feature branch whose Cloudflare build failed and produced no Version ID.
+After the corrected commits reached `main`, the screenshot used to report that
+nothing had changed was timestamped before the successful Workers Build had
+finished. Local Wrangler authentication was then incorrectly treated as the
+deployment path even though the project already had Git-triggered deployment
+and protected Cloudflare access.
+
+**Fix:** Treat `/home/degendad/dev/projects/dropscale-c` and remote
+`tomas-dropscale/dropscale-c` as canonical. Pull `main` before editing, work and
+push directly on `main` when publication is requested, then wait for the
+`Workers Builds: dropscale-da` check and verify its Build/Version IDs against
+`dropscale.app`. Routine deploys need no `wrangler login` or OAuth. Existing
+Cloudflare and Supabase access remains in protected local files and must never
+be printed. The UI change was committed in `347f806`; the successfully deployed
+`main` head for this incident was `18ee5c6`.
