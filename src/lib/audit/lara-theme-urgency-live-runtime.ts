@@ -122,8 +122,11 @@ export type LaraThemeUrgencyLiveRuntimeErrorCode =
   | "missing_write_themes"
   | "mutation_ambiguous"
   | "mutation_rejected"
+  | "rest_asset_unavailable"
   | "shop_mismatch"
+  | "shop_verification_unavailable"
   | "shopify_unavailable"
+  | "source_query_unavailable"
   | "source_drift"
   | "theme_write_exemption_unavailable"
   | "unsupported_api_version";
@@ -299,7 +302,7 @@ async function postGraphql(
     );
   } catch {
     throw runtimeError(
-      mutation ? "mutation_ambiguous" : "shopify_unavailable",
+      mutation ? "mutation_ambiguous" : "source_query_unavailable",
       mutation
         ? "The exact theme mutation outcome is ambiguous and must be reconciled."
         : "Shopify could not be reached for the exact theme read.",
@@ -322,7 +325,7 @@ function requireUsableResponse(response: Response, mutation: boolean): void {
   }
   if (response.status >= 300 || !response.ok) {
     throw runtimeError(
-      mutation ? "mutation_ambiguous" : "shopify_unavailable",
+      mutation ? "mutation_ambiguous" : "source_query_unavailable",
       mutation
         ? "Shopify did not confirm the exact theme mutation."
         : "Shopify rejected the exact theme read.",
@@ -443,7 +446,7 @@ async function getExactRestAsset(
     });
   } catch {
     throw runtimeError(
-      "shopify_unavailable",
+      "rest_asset_unavailable",
       "Shopify could not return the fixed REST theme asset.",
       true,
     );
@@ -469,7 +472,7 @@ async function getExactRestAsset(
   ) {
     throw runtimeError(
       response.status === 429 || response.status >= 500
-        ? "shopify_unavailable"
+        ? "rest_asset_unavailable"
         : "invalid_rest_asset",
       "Shopify returned an invalid fixed REST theme asset response.",
       response.status === 429 || response.status >= 500,
@@ -481,7 +484,7 @@ async function getExactRestAsset(
     raw = await response.text();
   } catch {
     throw runtimeError(
-      "shopify_unavailable",
+      "rest_asset_unavailable",
       "Shopify interrupted the fixed REST theme asset response.",
       true,
     );
@@ -848,7 +851,11 @@ export async function createLaraThemeUrgencyLiveRuntime(): Promise<LaraThemeUrge
   try {
     verified = await verifyAuditShop({ shopDomain: storedDomain, accessToken });
   } catch {
-    throw runtimeError("shopify_unavailable", "Shopify could not verify Lara.", true);
+    throw runtimeError(
+      "shop_verification_unavailable",
+      "Shopify could not verify Lara.",
+      true,
+    );
   }
   if (
     verified.shopId !== LARA_AUDIT_CONNECTION.shopId ||
