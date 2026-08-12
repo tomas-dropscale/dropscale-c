@@ -47,7 +47,7 @@ export const LARA_THEME_URGENCY_TEXT_BODY_INTEGRITY_POLICY = Object.freeze([
   "literal_text_requires_exact_reported_size_and_available_md5",
   "crlf_reconstruction_requires_exact_size_and_md5",
   "exact_shopify_generated_json_banner_then_bounded_candidates_require_exact_size_and_md5",
-  "fixed_rest_asset_fallback_requires_matching_graphql_metadata_and_exact_size_and_md5",
+  "fixed_rest_asset_projection_uses_the_same_bounded_candidates_then_requires_matching_graphql_metadata_and_exact_size_and_md5",
 ] as const);
 
 /** The merchant explicitly accepted Lara Rovinj as the structured brand/vendor. */
@@ -561,7 +561,7 @@ function shopifyGeneratedJsonStoredCandidates(content: string): Set<string> {
  * and requires an exact size plus MD5 proof. The snapshot, inverse and backup
  * therefore retain the proven stored bytes rather than the API projection.
  */
-function completeStoredTextBody({
+export function proveLaraThemeUrgencyStoredTextBody({
   filename,
   content,
   size,
@@ -715,7 +715,7 @@ export async function readLaraThemeUrgencySnapshot({
     }
     assertTimestamp(file.updatedAt);
     const size = numericSize(file.size);
-    const projectedContent = completeStoredTextBody({
+    const projectedContent = proveLaraThemeUrgencyStoredTextBody({
       filename,
       content: file.body.content,
       size,

@@ -1,7 +1,5 @@
 import "server-only";
 
-import { createHash } from "node:crypto";
-
 import { decryptToken } from "@/lib/google-ads/crypto";
 import { createServiceClient } from "@/lib/supabase/service";
 import {
@@ -9,6 +7,7 @@ import {
   LARA_THEME_URGENCY_REST_THEME_ID,
   LARA_THEME_URGENCY_SOURCE_QUERY,
   LARA_THEME_URGENCY_THEME,
+  proveLaraThemeUrgencyStoredTextBody,
   readLaraThemeUrgencySnapshot,
   type LaraThemeUrgencyFilename,
   type LaraThemeUrgencyReadRuntime,
@@ -545,13 +544,16 @@ async function getExactRestAsset(
       "Shopify returned malformed fixed REST theme asset fields.",
     );
   }
-  const content = asset.value;
+  const projectedContent = asset.value;
   const size = Number(asset.size);
   const checksumMd5 = asset.checksum;
-  if (
-    new TextEncoder().encode(content).byteLength !== size ||
-    createHash("md5").update(content, "utf8").digest("hex") !== checksumMd5
-  ) {
+  const content = proveLaraThemeUrgencyStoredTextBody({
+    filename,
+    content: projectedContent,
+    size,
+    checksumMd5,
+  });
+  if (content === null) {
     throw runtimeError(
       "invalid_rest_asset_integrity",
       "The fixed REST theme asset failed its exact byte-size and MD5 proof.",

@@ -291,6 +291,31 @@ describe("the dedicated Lara live theme runtime", () => {
     expect(init?.body).toBeUndefined();
   });
 
+  it("proves REST-normalized line endings against Shopify's exact stored size and MD5", async () => {
+    const filename = "templates/index.json" as const;
+    const parsed = { sections: { main: { settings: { enabled: true } } } };
+    const storedContent = `${JSON.stringify(parsed, null, 4)}\n`.replaceAll(
+      "\n",
+      "\r\n",
+    );
+    const projectedContent = `${JSON.stringify(parsed, null, 4)}\n`;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        restAssetResponse(filename, projectedContent, {
+          size: Buffer.byteLength(storedContent, "utf8"),
+          checksum: createHash("md5").update(storedContent, "utf8").digest("hex"),
+        }),
+      ),
+    );
+    const runtime = await createLaraThemeUrgencyLiveRuntime();
+    await expect(runtime.readExactThemeAsset(filename)).resolves.toMatchObject({
+      content: storedContent,
+      size: Buffer.byteLength(storedContent, "utf8"),
+      checksumMd5: createHash("md5").update(storedContent, "utf8").digest("hex"),
+    });
+  });
+
   it.each([
     ["wrong key", { key: "layout/theme.liquid" }, {}, "invalid_rest_asset_fields"],
     ["wrong theme", { theme_id: 999 }, {}, "invalid_rest_asset_fields"],
