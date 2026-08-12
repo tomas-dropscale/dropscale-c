@@ -238,6 +238,42 @@ describe("Lara pricing live Shopify boundary", () => {
     });
   });
 
+  it("preserves a lowercase Unicode Shopify handle during the product CAS read", async () => {
+    const fetchMock = vi.fn(async () =>
+      graphqlResponse({
+        data: {
+          product: {
+            id: "gid://shopify/Product/1",
+            handle: "čarape-1",
+            title: "Safe product",
+            vendor: "Lara Rovinj",
+            status: "ACTIVE",
+            publishedAt: "2026-08-10T10:00:00.000Z",
+            updatedAt: "2026-08-11T10:00:00.000Z",
+            variants: {
+              nodes: [
+                {
+                  id: "gid://shopify/ProductVariant/11",
+                  title: "Default Title",
+                  price: "49.95",
+                  compareAtPrice: "99.90",
+                  updatedAt: "2026-08-11T10:00:00.000Z",
+                },
+              ],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          },
+        },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = await createLaraPricingLiveRuntime();
+
+    await expect(
+      runtime.readFullProduct("gid://shopify/Product/1"),
+    ).resolves.toMatchObject({ handle: "čarape-1" });
+  });
+
   it("sends only id plus compareAtPrice null and distinguishes definite rejection from ambiguity", async () => {
     const accepted = vi.fn(async () =>
       graphqlResponse({

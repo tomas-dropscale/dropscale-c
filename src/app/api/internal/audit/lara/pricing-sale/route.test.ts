@@ -58,7 +58,7 @@ beforeEach(() => {
   process.env.CRON_SECRET = "machine-secret";
   mocks.run.mockResolvedValue({
     state: "in_progress",
-    runId: "526c1b70-3b99-40d7-9761-bd67f083bcd9",
+    runId: "b719f316-8d22-41c8-8475-a142e6851ec3",
     phase: "preparing",
     products: 1_449,
     variants: 38_069,
@@ -145,7 +145,7 @@ describe("fixed Lara pricing repair machine route", () => {
   it("returns a no-store completed proof and does not expose private material", async () => {
     mocks.run.mockResolvedValueOnce({
       state: "completed",
-      runId: "526c1b70-3b99-40d7-9761-bd67f083bcd9",
+      runId: "b719f316-8d22-41c8-8475-a142e6851ec3",
       phase: "verified",
       products: 1_449,
       variants: 38_069,

@@ -121,10 +121,13 @@ function memoryStore(): LaraPricingImmutableArtifactStore & {
 describe("Lara unsupported sale-price plan", () => {
   it("builds exact all-status evidence from an ungrouped Admin Bulk Query", async () => {
     const products = [
-      productFixture(1, [
-        { price: "49.95", compareAtPrice: "99.90" },
-        { price: "39.95", compareAtPrice: null },
-      ]),
+      {
+        ...productFixture(1, [
+          { price: "49.95", compareAtPrice: "99.90" },
+          { price: "39.95", compareAtPrice: null },
+        ]),
+        handle: "čarape-1",
+      },
       productFixture(2, [{ price: "20.00", compareAtPrice: "40.00" }], "DRAFT"),
       productFixture(3, [{ price: "30.00", compareAtPrice: null }], "ARCHIVED"),
       productFixture(4, [{ price: "40.00", compareAtPrice: "80.00" }], "UNLISTED"),
@@ -152,6 +155,103 @@ describe("Lara unsupported sale-price plan", () => {
     expect(LARA_PRICING_REFERENCE_COUNTS.qualification).toMatch(/Reference only/);
     expect(LARA_PRICING_CATALOG_BULK_QUERY).toContain("products");
     expect(LARA_PRICING_CATALOG_BULK_QUERY).toContain("variants");
+    expect(catalogue.products[0].handle).toBe("čarape-1");
+  });
+
+  it("reconciles variants that precede their parents when Shopify does not group objects", async () => {
+    const products = [
+      productFixture(1, [
+        { price: "49.95", compareAtPrice: "99.90" },
+        { price: "39.95", compareAtPrice: null },
+      ]),
+      productFixture(2, [{ price: "20.00", compareAtPrice: "40.00" }], "DRAFT"),
+    ];
+    const lines = products.flatMap((product) => {
+      const { variants, ...productRow } = product;
+      return [
+        ...variants.map((variant) =>
+          JSON.stringify({ ...variant, __parentId: product.id }),
+        ),
+        JSON.stringify(productRow),
+      ];
+    });
+    const jsonl = `${lines.join("\n")}\n`;
+
+    const catalogue = await parseLaraPricingCatalogueBulkResult({
+      chunks: [jsonl.slice(0, 41), jsonl.slice(41)],
+      operation: evidence(jsonl, products),
+      capturedAt: CAPTURED_AT,
+    });
+
+    expect(catalogue.counts).toEqual({
+      products: 2,
+      variants: 3,
+      productsWithCompareAt: 2,
+      variantsWithCompareAt: 2,
+    });
+    expect(catalogue.products[0].variants.map((variant) => variant.id)).toEqual([
+      "gid://shopify/ProductVariant/1001",
+      "gid://shopify/ProductVariant/1002",
+    ]);
+  });
+
+  it("returns only sanitized result-shape diagnostic codes", async () => {
+    const product = productFixture(1, [{ price: "10.00", compareAtPrice: null }]);
+    const { variants, ...productRow } = product;
+    const validProduct = `${JSON.stringify(productRow)}\n`;
+    const invalidProduct = `${JSON.stringify({ ...productRow, unexpected: true })}\n`;
+    const invalidVariant = `${JSON.stringify(productRow)}\n${JSON.stringify({
+      ...variants[0],
+      price: 10,
+      __parentId: product.id,
+    })}\n`;
+    const unknownRow = `${JSON.stringify({ id: "gid://shopify/Collection/1" })}\n`;
+
+    await expect(
+      parseLaraPricingCatalogueBulkResult({
+        chunks: [1] as unknown as string[],
+        operation: evidence("1", [product]),
+        capturedAt: CAPTURED_AT,
+      }),
+    ).rejects.toMatchObject({ code: "BULK_STREAM_INVALID" });
+    await expect(
+      parseLaraPricingCatalogueBulkResult({
+        chunks: ["{\n"],
+        operation: evidence("{\n", [product]),
+        capturedAt: CAPTURED_AT,
+      }),
+    ).rejects.toMatchObject({ code: "BULK_JSONL_INVALID" });
+    await expect(
+      parseLaraPricingCatalogueBulkResult({
+        chunks: [invalidProduct],
+        operation: evidence(invalidProduct, [product]),
+        capturedAt: CAPTURED_AT,
+      }),
+    ).rejects.toMatchObject({ code: "BULK_PRODUCT_ROW_INVALID" });
+    await expect(
+      parseLaraPricingCatalogueBulkResult({
+        chunks: [invalidVariant],
+        operation: evidence(invalidVariant, [product]),
+        capturedAt: CAPTURED_AT,
+      }),
+    ).rejects.toMatchObject({ code: "BULK_VARIANT_ROW_INVALID" });
+    await expect(
+      parseLaraPricingCatalogueBulkResult({
+        chunks: [unknownRow],
+        operation: evidence(unknownRow, [product]),
+        capturedAt: CAPTURED_AT,
+      }),
+    ).rejects.toMatchObject({ code: "BULK_ROW_SHAPE_INVALID" });
+    await expect(
+      parseLaraPricingCatalogueBulkResult({
+        chunks: [validProduct],
+        operation: {
+          ...evidence(validProduct, [product]),
+          objectCount: 1,
+        },
+        capturedAt: CAPTURED_AT,
+      }),
+    ).rejects.toMatchObject({ code: "BULK_CATALOGUE_INCOMPLETE" });
   });
 
   it("plans only compare-at nulling and preserves every selling price", async () => {

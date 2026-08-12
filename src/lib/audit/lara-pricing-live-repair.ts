@@ -65,7 +65,7 @@ import {
 export const LARA_PRICING_LIVE_REPAIR_SCHEMA_VERSION =
   "lara-pricing-sale-live-repair.v1" as const;
 export const LARA_PRICING_LIVE_REPAIR_RUN_ID =
-  "526c1b70-3b99-40d7-9761-bd67f083bcd9" as const;
+  "b719f316-8d22-41c8-8475-a142e6851ec3" as const;
 
 const RUN_SOURCE = "system.lara_pricing_sale_repair" as const;
 const RUN_NOTE =

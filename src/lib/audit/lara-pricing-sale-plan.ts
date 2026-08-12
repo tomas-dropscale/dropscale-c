@@ -186,7 +186,10 @@ export const LARA_PRICING_GRAPHQL_MANIFEST = Object.freeze({
 const PRODUCT_GID = /^gid:\/\/shopify\/Product\/[1-9][0-9]*$/;
 const VARIANT_GID = /^gid:\/\/shopify\/ProductVariant\/[1-9][0-9]*$/;
 const BULK_OPERATION_GID = /^gid:\/\/shopify\/BulkOperation\/[1-9][0-9]*$/;
-const HANDLE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+// Shopify documents product handles as lowercase letters, numbers and
+// hyphens. `\p{L}`/`\p{N}` is intentional: valid Admin handles are not
+// restricted to ASCII, and the fixed reader must preserve them as evidence.
+const HANDLE = /^[\p{L}\p{N}]+(?:-[\p{L}\p{N}]+)*$/u;
 const SHA256 = /^[a-f0-9]{64}$/;
 const ARTIFACT_KEY = /^[a-z0-9][a-z0-9/_.-]{2,499}$/;
 const ROOT_ARTIFACT_KEY =
@@ -197,6 +200,11 @@ const MONEY = /^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/;
 
 const timestampSchema = z.string().datetime({ offset: true });
 const moneySchema = z.string().regex(MONEY).max(100);
+const handleSchema = z
+  .string()
+  .max(255)
+  .regex(HANDLE)
+  .refine((value) => value === value.toLowerCase());
 
 const variantSnapshotSchema = z
   .object({
@@ -211,7 +219,7 @@ const variantSnapshotSchema = z
 const productSnapshotSchema = z
   .object({
     id: z.string().regex(PRODUCT_GID),
-    handle: z.string().regex(HANDLE).max(255),
+    handle: handleSchema,
     title: z.string().max(500),
     vendor: z.string().max(255),
     status: z.enum(["ACTIVE", "DRAFT", "ARCHIVED", "UNLISTED"]),
@@ -286,7 +294,7 @@ type MutableProduct = Omit<LaraPricingProductSnapshot, "variants"> & {
 const bulkProductLineSchema = z
   .object({
     id: z.string().regex(PRODUCT_GID),
-    handle: z.string().regex(HANDLE).max(255),
+    handle: handleSchema,
     title: z.string().max(500),
     vendor: z.string().max(255),
     status: z.enum(["ACTIVE", "DRAFT", "ARCHIVED", "UNLISTED"]),
@@ -304,7 +312,12 @@ export class LaraPricingSalePlanError extends Error {
     public readonly code:
       | "BULK_NOT_COMPLETED"
       | "BULK_METADATA_INVALID"
-      | "BULK_RESULT_INVALID"
+      | "BULK_STREAM_INVALID"
+      | "BULK_JSONL_INVALID"
+      | "BULK_PRODUCT_ROW_INVALID"
+      | "BULK_VARIANT_ROW_INVALID"
+      | "BULK_ROW_SHAPE_INVALID"
+      | "BULK_CATALOGUE_INCOMPLETE"
       | "BULK_RESULT_TOO_LARGE"
       | "COUNT_MISMATCH"
       | "DUPLICATE_RESOURCE"
@@ -398,7 +411,7 @@ async function* jsonlLines(
   for await (const chunk of chunks) {
     if (typeof chunk !== "string") {
       throw new LaraPricingSalePlanError(
-        "BULK_RESULT_INVALID",
+        "BULK_STREAM_INVALID",
         "The pricing Bulk Query stream did not contain text chunks.",
       );
     }
@@ -497,6 +510,10 @@ export async function parseLaraPricingCatalogueBulkResult({
   }
 
   const byId = new Map<string, MutableProduct>();
+  // `groupObjects: false` deliberately removes Shopify's parent/child
+  // grouping guarantee. Keep children keyed by their explicit `__parentId`
+  // and reconcile them only after the whole bounded result has been parsed.
+  const variantsByParentId = new Map<string, LaraPricingVariantSnapshot[]>();
   const variantIds = new Set<string>();
   let observedFileBytes = 0;
   let parsedObjectCount = 0;
@@ -510,7 +527,7 @@ export async function parseLaraPricingCatalogueBulkResult({
       value = JSON.parse(item.line);
     } catch {
       throw new LaraPricingSalePlanError(
-        "BULK_RESULT_INVALID",
+        "BULK_JSONL_INVALID",
         "The pricing Bulk Query returned invalid JSONL.",
       );
     }
@@ -520,7 +537,7 @@ export async function parseLaraPricingCatalogueBulkResult({
       const parsed = bulkProductLineSchema.safeParse(value);
       if (!parsed.success) {
         throw new LaraPricingSalePlanError(
-          "BULK_RESULT_INVALID",
+          "BULK_PRODUCT_ROW_INVALID",
           "The pricing Bulk Query returned an invalid product row.",
         );
       }
@@ -538,7 +555,7 @@ export async function parseLaraPricingCatalogueBulkResult({
       const parsed = bulkVariantLineSchema.safeParse(value);
       if (!parsed.success) {
         throw new LaraPricingSalePlanError(
-          "BULK_RESULT_INVALID",
+          "BULK_VARIANT_ROW_INVALID",
           "The pricing Bulk Query returned an invalid variant row.",
         );
       }
@@ -548,32 +565,38 @@ export async function parseLaraPricingCatalogueBulkResult({
           "The pricing Bulk Query returned a duplicate variant.",
         );
       }
-      const parent = byId.get(parsed.data.__parentId);
-      if (!parent) {
-        throw new LaraPricingSalePlanError(
-          "ORPHAN_VARIANT",
-          "The pricing Bulk Query returned a variant without its product parent.",
-        );
-      }
       variantIds.add(parsed.data.id);
-      parent.variants.push({
+      const variant: LaraPricingVariantSnapshot = {
         id: parsed.data.id,
         title: parsed.data.title,
         price: parsed.data.price,
         compareAtPrice: parsed.data.compareAtPrice,
         updatedAt: parsed.data.updatedAt,
-      });
+      };
+      const siblings = variantsByParentId.get(parsed.data.__parentId);
+      if (siblings) siblings.push(variant);
+      else variantsByParentId.set(parsed.data.__parentId, [variant]);
       continue;
     }
 
     throw new LaraPricingSalePlanError(
-      "BULK_RESULT_INVALID",
+      "BULK_ROW_SHAPE_INVALID",
       "The pricing Bulk Query returned a row outside the fixed product/variant shape.",
     );
   }
 
   const querySha256 = await remediationSha256(LARA_PRICING_CATALOG_BULK_QUERY);
   const bulk = parseBulkEvidence(operation, observedFileBytes, querySha256);
+  for (const [parentId, variants] of variantsByParentId) {
+    const parent = byId.get(parentId);
+    if (!parent) {
+      throw new LaraPricingSalePlanError(
+        "ORPHAN_VARIANT",
+        "The pricing Bulk Query returned a variant without its product parent.",
+      );
+    }
+    parent.variants.push(...variants);
+  }
   const products = [...byId.values()]
     .map((product) => ({
       ...product,
@@ -589,7 +612,7 @@ export async function parseLaraPricingCatalogueBulkResult({
     )
   ) {
     throw new LaraPricingSalePlanError(
-      "BULK_RESULT_INVALID",
+      "BULK_CATALOGUE_INCOMPLETE",
       "The pricing Bulk Query did not contain a complete product catalogue.",
     );
   }

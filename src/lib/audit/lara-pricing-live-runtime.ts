@@ -34,7 +34,7 @@ const DOWNLOAD_TIMEOUT_MS = 120_000;
 const BULK_OPERATION_GID = /^gid:\/\/shopify\/BulkOperation\/[1-9][0-9]*$/;
 const PRODUCT_GID = /^gid:\/\/shopify\/Product\/[1-9][0-9]*$/;
 const VARIANT_GID = /^gid:\/\/shopify\/ProductVariant\/[1-9][0-9]*$/;
-const HANDLE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const HANDLE = /^[\p{L}\p{N}]+(?:-[\p{L}\p{N}]+)*$/u;
 const MONEY = /^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/;
 const RESULT_HOST = "storage.googleapis.com";
 const RESULT_PATH =
@@ -171,6 +171,15 @@ function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+function shopifyProductHandle(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length <= 255 &&
+    HANDLE.test(value) &&
+    value === value.toLowerCase()
+  );
 }
 
 function credentialCiphertext(value: unknown): string | null {
@@ -815,7 +824,7 @@ function parseProduct(value: unknown): {
   const pageInfo = record(connection?.pageInfo);
   if (
     typeof product?.id !== "string" || !PRODUCT_GID.test(product.id) ||
-    typeof product.handle !== "string" || !HANDLE.test(product.handle) ||
+    !shopifyProductHandle(product.handle) ||
     typeof product.title !== "string" || product.title.length > 500 ||
     typeof product.vendor !== "string" || product.vendor.length > 255 ||
     !["ACTIVE", "DRAFT", "ARCHIVED", "UNLISTED"].includes(
