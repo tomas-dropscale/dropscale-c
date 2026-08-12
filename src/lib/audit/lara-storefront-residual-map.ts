@@ -1,11 +1,13 @@
 import "server-only";
 
+import { createHash } from "node:crypto";
+
 import { AUDIT_SHOPIFY_API_VERSION } from "./shopify";
 import { LARA_AUDIT_CONNECTION } from "./shopify-lara";
 import type { AuditShopifyRuntime } from "./shopify-runtime";
 
 export const LARA_STOREFRONT_RESIDUAL_SCHEMA_VERSION =
-  "lara-storefront-residual-map.v1" as const;
+  "lara-storefront-residual-map.v2" as const;
 
 export const LARA_STOREFRONT_RESIDUAL_TARGETS = Object.freeze({
   theme: Object.freeze({
@@ -337,6 +339,8 @@ export type LaraStorefrontResidualSourceEvidence = {
   checksumMd5: string | null;
   updatedAt: string;
   size: number;
+  decodedByteLength: number;
+  integrityMode: "exact" | "text_crlf_normalized";
   bodyMode: BodyMode;
   sourceSha256: string;
   matches: Array<{
@@ -405,6 +409,12 @@ export type LaraStorefrontResidualArtifact = {
     scannedBytes: number;
     matchedFileCount: number;
     skipped: Array<{ filename: string; reason: string }>;
+    textSizeReconciliations: Array<{
+      filename: string;
+      reportedSize: number;
+      decodedByteLength: number;
+      integrityMode: "text_crlf_normalized";
+    }>;
     evidence: LaraStorefrontResidualSourceEvidence[];
   };
   kachingEmbed: {
@@ -508,6 +518,45 @@ async function sha256Hex(value: string): Promise<string> {
   return [...new Uint8Array(digest)]
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
+}
+
+function md5Hex(value: string): string {
+  return createHash("md5").update(value, "utf8").digest("hex");
+}
+
+function restoreCrlf(value: string): string {
+  return value.replace(/\r?\n/g, "\r\n");
+}
+
+function verifyTextIntegrity(input: {
+  content: string;
+  reportedSize: number;
+  checksumMd5: string | null;
+}): {
+  decodedByteLength: number;
+  integrityMode: "exact" | "text_crlf_normalized";
+} | null {
+  const decodedByteLength = new TextEncoder().encode(input.content).byteLength;
+  const exactChecksum =
+    input.checksumMd5 === null || md5Hex(input.content) === input.checksumMd5;
+  if (decodedByteLength === input.reportedSize && exactChecksum) {
+    return { decodedByteLength, integrityMode: "exact" };
+  }
+
+  // Shopify can return a text body with CRLF line endings normalised to LF
+  // while `size` and checksum still describe the stored bytes. Accept only
+  // that one deterministic transformation, and only when both the documented
+  // byte count and MD5 prove the reconstruction.
+  if (input.checksumMd5 === null || !input.content.includes("\n")) return null;
+  const restored = restoreCrlf(input.content);
+  const restoredByteLength = new TextEncoder().encode(restored).byteLength;
+  if (
+    restoredByteLength !== input.reportedSize ||
+    md5Hex(restored) !== input.checksumMd5
+  ) {
+    return null;
+  }
+  return { decodedByteLength, integrityMode: "text_crlf_normalized" };
 }
 
 function canonicalJson(value: unknown): string {
@@ -683,6 +732,10 @@ async function sourceEvidence(
   file: ThemeFileMetadata & { size: number },
   content: string,
   bodyMode: BodyMode,
+  integrity: {
+    decodedByteLength: number;
+    integrityMode: "exact" | "text_crlf_normalized";
+  },
 ): Promise<LaraStorefrontResidualSourceEvidence | null> {
   const starts = lineStarts(content);
   let jsonPointers = new Map<
@@ -732,6 +785,8 @@ async function sourceEvidence(
     checksumMd5: file.checksumMd5,
     updatedAt: file.updatedAt,
     size: file.size,
+    decodedByteLength: integrity.decodedByteLength,
+    integrityMode: integrity.integrityMode,
     bodyMode,
     sourceSha256: await sha256Hex(content),
     matches,
@@ -1104,6 +1159,7 @@ export async function collectLaraStorefrontResidualMap({
   }
 
   const evidence: LaraStorefrontResidualSourceEvidence[] = [];
+  const textSizeReconciliations: LaraStorefrontResidualArtifact["sourceScan"]["textSizeReconciliations"] = [];
   let scannedCount = 0;
   let scannedBytes = 0;
   let settingsSource: { content: string; sha256: string } | null = null;
@@ -1156,11 +1212,6 @@ export async function collectLaraStorefrontResidualMap({
         skipped.push({ filename: expected.filename, reason: "source_file_byte_cap" });
         continue;
       }
-      if (scannedBytes + nodeSize > MAX_TOTAL_SOURCE_BYTES) {
-        skipped.push({ filename: expected.filename, reason: "source_total_byte_cap" });
-        continue;
-      }
-
       let content: string | null = null;
       let bodyMode: BodyMode = "text";
       if (node.body.__typename === "OnlineStoreThemeFileBodyText") {
@@ -1192,18 +1243,46 @@ export async function collectLaraStorefrontResidualMap({
         });
         continue;
       }
-      const byteLength = new TextEncoder().encode(content).byteLength;
-      if (byteLength !== nodeSize) {
-        skipped.push({ filename: expected.filename, reason: "source_byte_size_mismatch" });
+      const integrity =
+        node.body.__typename === "OnlineStoreThemeFileBodyText"
+          ? verifyTextIntegrity({
+              content,
+              reportedSize: nodeSize,
+              checksumMd5: node.checksumMd5,
+            })
+          : new TextEncoder().encode(content).byteLength === nodeSize
+            ? {
+                decodedByteLength: nodeSize,
+                integrityMode: "exact" as const,
+              }
+            : null;
+      if (!integrity) {
+        skipped.push({ filename: expected.filename, reason: "source_integrity_mismatch" });
+        continue;
+      }
+      if (integrity.decodedByteLength > MAX_SOURCE_FILE_BYTES) {
+        skipped.push({ filename: expected.filename, reason: "source_file_byte_cap" });
+        continue;
+      }
+      if (scannedBytes + integrity.decodedByteLength > MAX_TOTAL_SOURCE_BYTES) {
+        skipped.push({ filename: expected.filename, reason: "source_total_byte_cap" });
         continue;
       }
       scannedCount += 1;
-      scannedBytes += byteLength;
+      scannedBytes += integrity.decodedByteLength;
+      if (integrity.integrityMode === "text_crlf_normalized") {
+        textSizeReconciliations.push({
+          filename: expected.filename,
+          reportedSize: nodeSize,
+          decodedByteLength: integrity.decodedByteLength,
+          integrityMode: integrity.integrityMode,
+        });
+      }
       const contentSha256 = await sha256Hex(content);
       if (expected.filename === "config/settings_data.json") {
         settingsSource = { content, sha256: contentSha256 };
       }
-      const match = await sourceEvidence(expected, content, bodyMode);
+      const match = await sourceEvidence(expected, content, bodyMode, integrity);
       if (match) evidence.push(match);
     }
   }
@@ -1293,6 +1372,7 @@ export async function collectLaraStorefrontResidualMap({
       scannedBytes,
       matchedFileCount: evidence.length,
       skipped,
+      textSizeReconciliations,
       evidence: evidence.sort((left, right) =>
         left.filename.localeCompare(right.filename),
       ),
@@ -1334,6 +1414,7 @@ export type LaraStorefrontResidualSummary = {
   themeFileCount: number;
   scannedSourceCount: number;
   matchedSourceCount: number;
+  textSizeReconciliationCount: number;
   kachingEmbedCount: number;
   activeKachingEmbedCount: number;
   croatianPostMatchedFileCount: number;
@@ -1374,6 +1455,17 @@ export function summariseLaraStorefrontResidualArtifact(
     typeof theme.fileCount !== "number" ||
     typeof sourceScan?.scannedCount !== "number" ||
     typeof sourceScan?.matchedFileCount !== "number" ||
+    !Array.isArray(sourceScan?.textSizeReconciliations) ||
+    sourceScan.textSizeReconciliations.some((entry) => {
+      const record = objectRecord(entry);
+      return (
+        !record ||
+        typeof record.filename !== "string" ||
+        typeof record.reportedSize !== "number" ||
+        typeof record.decodedByteLength !== "number" ||
+        record.integrityMode !== "text_crlf_normalized"
+      );
+    }) ||
     typeof kaching?.embedCount !== "number" ||
     typeof kaching?.activeEmbedCount !== "number" ||
     !Array.isArray(croatianPost?.matchedFiles) ||
@@ -1412,6 +1504,7 @@ export function summariseLaraStorefrontResidualArtifact(
     themeFileCount: theme.fileCount,
     scannedSourceCount: sourceScan.scannedCount,
     matchedSourceCount: sourceScan.matchedFileCount,
+    textSizeReconciliationCount: sourceScan.textSizeReconciliations.length,
     kachingEmbedCount: kaching.embedCount,
     activeKachingEmbedCount: kaching.activeEmbedCount,
     croatianPostMatchedFileCount: croatianPost.matchedFiles.length,

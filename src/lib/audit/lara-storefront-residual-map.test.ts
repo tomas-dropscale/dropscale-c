@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { createHash } from "node:crypto";
+
 vi.mock("server-only", () => ({}));
 
 import {
@@ -25,20 +27,24 @@ const THEME = {
   updatedAt: "2026-08-12T20:00:00Z",
 };
 
-const SETTINGS_SOURCE = JSON.stringify({
-  current: {
-    blocks: {
-      "embed-1": {
-        type: "shopify://apps/kaching-cart/blocks/embed/12345678",
-        disabled: false,
-        settings: {
-          clearCartOnTimerEnd: false,
-          apiKey: "must-not-persist",
+const SETTINGS_SOURCE = JSON.stringify(
+  {
+    current: {
+      blocks: {
+        "embed-1": {
+          type: "shopify://apps/kaching-cart/blocks/embed/12345678",
+          disabled: false,
+          settings: {
+            clearCartOnTimerEnd: false,
+            apiKey: "must-not-persist",
+          },
         },
       },
     },
   },
-});
+  null,
+  2,
+);
 const SHIPPING_SOURCE = JSON.stringify({
   blocks: [
     {
@@ -60,14 +66,13 @@ function bytes(value: string) {
 function metadata(filename: string, content: string, contentType = "application/json") {
   return {
     filename,
-    checksumMd5: "a".repeat(32),
+    checksumMd5: createHash("md5").update(content, "utf8").digest("hex"),
     contentType,
     size: bytes(content),
     updatedAt: "2026-08-12T20:00:00Z",
   };
 }
 
-const SETTINGS_FILE = metadata("config/settings_data.json", SETTINGS_SOURCE);
 const SHIPPING_FILE = metadata("sections/footer-group.json", SHIPPING_SOURCE);
 const SALE_FILE = metadata("sections/header-group.json", SALE_SOURCE);
 const NEUTRAL_FILE = metadata(
@@ -163,7 +168,17 @@ function menus() {
   };
 }
 
-function runtime(options: { wrongTheme?: boolean; duplicateMenu?: boolean } = {}) {
+function runtime(
+  options: {
+    wrongTheme?: boolean;
+    duplicateMenu?: boolean;
+    crlfNormalizedSettings?: boolean;
+  } = {},
+) {
+  const storedSettings = options.crlfNormalizedSettings
+    ? SETTINGS_SOURCE.replaceAll("\n", "\r\n")
+    : SETTINGS_SOURCE;
+  const settingsFile = metadata("config/settings_data.json", storedSettings);
   const queryMock = vi.fn(async (
     document: string,
     variables: Record<string, unknown> = {},
@@ -187,7 +202,7 @@ function runtime(options: { wrongTheme?: boolean; duplicateMenu?: boolean } = {}
           files:
             after === null
               ? {
-                  nodes: [SETTINGS_FILE, SHIPPING_FILE, LOGO_FILE],
+                  nodes: [settingsFile, SHIPPING_FILE, LOGO_FILE],
                   pageInfo: { hasNextPage: true, endCursor: "page-2" },
                   userErrors: [],
                 }
@@ -203,9 +218,9 @@ function runtime(options: { wrongTheme?: boolean; duplicateMenu?: boolean } = {}
       const requested = variables.filenames as string[];
       const all = new Map([
         [
-          SETTINGS_FILE.filename,
+          settingsFile.filename,
           {
-            ...SETTINGS_FILE,
+            ...settingsFile,
             body: {
               __typename: "OnlineStoreThemeFileBodyText",
               content: SETTINGS_SOURCE,
@@ -431,6 +446,7 @@ describe("the fixed read-only Lara storefront residual mapper", () => {
       themeFileCount: 5,
       scannedSourceCount: 4,
       matchedSourceCount: 3,
+      textSizeReconciliationCount: 0,
       kachingEmbedCount: 1,
       activeKachingEmbedCount: 1,
       croatianPostMatchedFileCount: 1,
@@ -457,6 +473,31 @@ describe("the fixed read-only Lara storefront residual mapper", () => {
           },
         ],
       },
+    });
+  });
+
+  it("proves Shopify text-body CRLF normalization with stored size and MD5", async () => {
+    const artifact = await collectLaraStorefrontResidualMap({
+      runtime: runtime({ crlfNormalizedSettings: true }),
+      readShortLivedBody: vi.fn(async () => SALE_SOURCE),
+    });
+
+    expect(artifact.auditStatus).toBe("complete");
+    expect(artifact.sourceScan.textSizeReconciliations).toEqual([
+      {
+        filename: "config/settings_data.json",
+        reportedSize: bytes(SETTINGS_SOURCE.replaceAll("\n", "\r\n")),
+        decodedByteLength: bytes(SETTINGS_SOURCE),
+        integrityMode: "text_crlf_normalized",
+      },
+    ]);
+    expect(
+      artifact.sourceScan.evidence.find(
+        (entry) => entry.filename === "config/settings_data.json",
+      ),
+    ).toMatchObject({ integrityMode: "text_crlf_normalized" });
+    expect(summariseLaraStorefrontResidualArtifact(artifact)).toMatchObject({
+      textSizeReconciliationCount: 1,
     });
   });
 
@@ -522,7 +563,7 @@ describe("the fixed read-only Lara storefront residual mapper", () => {
   it("does not accept a completed artifact with changed shop or theme evidence", async () => {
     expect(
       summariseLaraStorefrontResidualArtifact({
-        schemaVersion: "lara-storefront-residual-map.v1",
+        schemaVersion: "lara-storefront-residual-map.v2",
         auditStatus: "complete",
         completionIssues: [],
         apiVersion: "2026-07",

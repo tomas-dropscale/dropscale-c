@@ -26,7 +26,7 @@ import {
 import type { AuditShopifyRun } from "@/lib/supabase/types";
 
 export const LARA_STOREFRONT_RESIDUAL_RUN_ID =
-  "4851324f-82ce-4235-a8c7-9a2a61e500e5" as const;
+  "423ca684-157a-436a-b04b-262a2a0f7945" as const;
 
 const REQUEST_SOURCE = "system.storefront_residual_map";
 const REQUEST_NOTE =
@@ -74,6 +74,14 @@ function allowedThemeBodyHost(hostname: string): boolean {
   );
 }
 
+function allowedThemeBodyUrl(url: URL): boolean {
+  if (allowedThemeBodyHost(url.hostname)) return true;
+  return (
+    url.hostname.toLocaleLowerCase() === "storage.googleapis.com" &&
+    url.pathname.startsWith("/shopify")
+  );
+}
+
 /**
  * Read a short-lived body URL returned directly by Shopify Admin GraphQL.
  * The URL never comes from the HTTP caller and is never persisted or logged.
@@ -103,7 +111,7 @@ export async function readLaraShortLivedThemeBody(input: {
     url.username ||
     url.password ||
     (url.port && url.port !== "443") ||
-    !allowedThemeBodyHost(url.hostname)
+    !allowedThemeBodyUrl(url)
   ) {
     throw new Error("Shopify returned a disallowed short-lived theme body URL.");
   }
