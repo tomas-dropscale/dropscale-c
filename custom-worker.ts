@@ -40,6 +40,13 @@ const nextHandler = handler as {
   fetch(request: Request, env: Env, ctx: Ctx): Promise<Response>;
 };
 
+const TEMPORARY_LARA_TRUST_PAGES_CRON = "*/2 * * * *";
+const LARA_TRUST_PAGES_PATH = "/api/internal/audit/lara/trust-pages";
+const LARA_TRUST_PAGES_CONFIRMATION = JSON.stringify({
+  action: "apply",
+  confirmation: "apply-lara-contact-about-approved-copy",
+});
+
 const worker = {
   fetch(request: Request, env: Env, ctx: Ctx): Promise<Response> {
     return nextHandler.fetch(request, env, ctx);
@@ -48,6 +55,51 @@ const worker = {
   async scheduled(event: { cron: string }, env: Env, ctx: Ctx): Promise<void> {
     if (!env.CRON_SECRET) {
       console.error("Cron skipped: CRON_SECRET is not set on this Worker.");
+      return;
+    }
+
+    // Only the path is ever used for routing; the origin just has to be a valid
+    // absolute URL, so a missing site URL must not abort the run.
+    const origin = env.NEXT_PUBLIC_SITE_URL ?? "https://dropscale.app";
+
+    /**
+     * TEMPORARY FIXED REPAIR: replace only the body of Lara's two exact trust
+     * pages with the approved merchant identity. The route owns the shop,
+     * page ids, full HTML, plan digest and stable run id. Repeated ticks only
+     * resume or re-verify that fenced one-shot run. Remove this branch and its
+     * matching trigger immediately after Admin and storefront verification.
+     */
+    if (event.cron === TEMPORARY_LARA_TRUST_PAGES_CRON) {
+      try {
+        const response = await nextHandler.fetch(
+          new Request(`${origin}${LARA_TRUST_PAGES_PATH}`, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${env.CRON_SECRET}`,
+              "Content-Type": "application/json",
+            },
+            body: LARA_TRUST_PAGES_CONFIRMATION,
+          }),
+          env,
+          ctx,
+        );
+
+        const body = await response.text();
+        if (!response.ok) {
+          console.error(
+            `Cron "temporary Lara trust pages" ${LARA_TRUST_PAGES_PATH} failed (${response.status}): ${body}`,
+          );
+          return;
+        }
+        console.log(
+          `Cron "temporary Lara trust pages" ${LARA_TRUST_PAGES_PATH}: ${body}`,
+        );
+      } catch (error) {
+        console.error(
+          `Cron "temporary Lara trust pages" ${LARA_TRUST_PAGES_PATH} threw:`,
+          error,
+        );
+      }
       return;
     }
 
@@ -79,10 +131,6 @@ const worker = {
               name: "hourly refresh",
               paths: ["/api/admin/sync-metrics", "/api/admin/sync-ledgers"],
             };
-
-    // Only the path is ever used for routing; the origin just has to be a valid
-    // absolute URL, so a missing site URL must not abort the run.
-    const origin = env.NEXT_PUBLIC_SITE_URL ?? "https://dropscale.app";
 
     // Sequential, not parallel: the ledger reads Google, the rollup writes it,
     // and two concurrent syncs would only race each other for the same quota.

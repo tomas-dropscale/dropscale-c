@@ -8,6 +8,9 @@
   "compatibility_date": "2025-03-25",
   "triggers": {
     "crons": [
+      // TEMPORARY: resume one fixed, fenced Lara trust-page repair run.
+      // Remove immediately after both Admin/public pages are verified.
+      "*/2 * * * *",
       // Mondays 14:05 UTC - every Google account timezone has crossed into
       // Monday, with extra time for Sunday's delayed Google reporting. Capture
       // the exact closed-week evidence and reconcile Stripe payment state;
