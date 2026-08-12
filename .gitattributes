@@ -1,0 +1,19 @@
+# Line endings are normalised to LF in the working tree on every platform.
+#
+# Without this, a Windows checkout with core.autocrlf=true rewrites every file
+# to CRLF, and the billing SQL suites break: they assert on migration text
+# character by character (`proof.indexOf("select\n    count(*)")`) and one of
+# them regex-matches another test file for `;\n\nlet db:`. Seventeen tests fail
+# for a whitespace difference that never reaches the repository — git stores LF
+# either way — which costs an afternoon to diagnose every time somebody clones
+# on Windows.
+* text=auto eol=lf
+
+# Binary assets git must never touch.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary
