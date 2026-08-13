@@ -38,13 +38,21 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
+  actionableReviewSession,
   assetConnectionKey,
+  availableOnboardingAssetKinds,
   buildClientCards,
   cardUpdatedAt,
   connectionTestTargets,
+  isAssetReconnecting,
+  onboardingAssetLabel,
+  onboardingSessionPurpose,
+  openReconnectForAsset,
+  openOnboardingSessions,
   runAssetConnectionTests,
   type AssetConnectionTestTarget,
   type ClientCard,
+  type OnboardingAssetKind,
 } from "@/components/admin/client-onboarding-card-model";
 import type { ExistingClientRosterDTO } from "@/lib/client-onboarding/legacy-roster";
 import type { ClientOnboardingSessionDTO } from "@/lib/client-onboarding/sessions";
@@ -102,13 +110,10 @@ function assetsForChoice(choice: AssetChoice): ClientOnboardingAsset[] {
   return ["shopify", "google_ads"];
 }
 
-function assetLabel(assets: readonly ClientOnboardingAsset[]) {
-  const shopify = assets.includes("shopify");
-  const google = assets.includes("google_ads");
-  if (shopify && google) return "Shopify & Google Ads";
-  if (shopify) return "Shopify";
-  if (google) return "Google Ads";
-  return "Account only";
+function choiceForAvailableAssets(
+  assets: readonly OnboardingAssetKind[],
+): AssetChoice {
+  return assets.length === 2 ? "both" : assets[0] ?? "both";
 }
 
 function modeLabel(mode: ClientOnboardingMode) {
@@ -372,11 +377,15 @@ function AssetChoiceField({
   value,
   onChange,
   newClient,
+  availableAssets = ["shopify", "google_ads"],
 }: {
   value: AssetChoice;
   onChange: (value: AssetChoice) => void;
   newClient: boolean;
+  availableAssets?: readonly OnboardingAssetKind[];
 }) {
+  const shopifyAvailable = availableAssets.includes("shopify");
+  const googleAvailable = availableAssets.includes("google_ads");
   return (
     <div className="space-y-1.5">
       <Label id="client-onboarding-asset-choice">
@@ -394,9 +403,15 @@ function AssetChoiceField({
             </>
           ) : (
             <>
-              <SelectItem value="shopify">Shopify store</SelectItem>
-              <SelectItem value="google_ads">Google Ads account</SelectItem>
-              <SelectItem value="both">Shopify & Google Ads</SelectItem>
+              {shopifyAvailable && (
+                <SelectItem value="shopify">Shopify store</SelectItem>
+              )}
+              {googleAvailable && (
+                <SelectItem value="google_ads">Google Ads account</SelectItem>
+              )}
+              {shopifyAvailable && googleAvailable && (
+                <SelectItem value="both">Shopify & Google Ads</SelectItem>
+              )}
             </>
           )}
         </SelectContent>
@@ -406,7 +421,9 @@ function AssetChoiceField({
           ? value === "account"
             ? "Creates dashboard access only. Assets can be requested later from the client card."
             : "The client must connect all Shopify stores and Google Ads accounts they use before submitting."
-          : "The client can connect one or more of each requested asset."}
+          : availableAssets.length === 1
+            ? `${onboardingAssetLabel(availableAssets)} is the only asset type without an open link.`
+            : "The client can connect one or more of each requested asset."}
       </p>
     </div>
   );
@@ -559,6 +576,16 @@ export function ClientOnboardingManager({
       setDialogError("Choose Shopify, Google Ads or both.");
       return;
     }
+    if (
+      createMode === "add_assets" &&
+      assetTarget &&
+      assets.some(
+        (asset) => !availableOnboardingAssetKinds(assetTarget.sessions).includes(asset),
+      )
+    ) {
+      setDialogError("Choose only asset types that do not already have an open link.");
+      return;
+    }
     setBusy("create");
     setDialogError("");
     try {
@@ -600,6 +627,7 @@ export function ClientOnboardingManager({
 
   async function patchSession(session: ClientOnboardingSessionDTO, action: SessionAction) {
     if (readOnlyPreview) return;
+    const purpose = onboardingSessionPurpose(session);
     setBusy(`${action}:${session.id}`);
     setDialogError("");
     try {
@@ -641,11 +669,17 @@ export function ClientOnboardingManager({
       setActionTarget(null);
       if (nextInvitation) setInvitation(nextInvitation);
       const messages: Record<SessionAction, [string, string]> = {
-        rotate: ["Link replaced", "The previous onboarding link no longer works. Send only the new one."],
+        rotate: [
+          "Link replaced",
+          `The previous link for ${purpose} no longer works. Send only the new one; other open links are unchanged.`,
+        ],
         approve: session.requestedAssets.length
           ? ["Connections approved", "The connected stores and ad accounts are ready for reporting setup."]
           : ["Client activated", "The client can now access their dashboard."],
-        revoke: ["Onboarding cancelled", "The onboarding link and any connections added through it have been removed. The client’s dashboard access is unchanged."],
+        revoke: [
+          "Link cancelled",
+          `The link for ${purpose} and any connections added through it have been removed. Other open links and the client’s dashboard access are unchanged.`,
+        ],
       };
       showNotice("success", ...messages[action]);
     } catch (error) {
@@ -786,6 +820,12 @@ export function ClientOnboardingManager({
 
   const selectedActionSession = actionTarget?.session;
   const selectedAction = actionTarget?.action;
+  const selectedActionPurpose = selectedActionSession
+    ? onboardingSessionPurpose(selectedActionSession)
+    : "this onboarding";
+  const assetTargetAvailableAssets = assetTarget
+    ? availableOnboardingAssetKinds(assetTarget.sessions)
+    : [];
 
   return (
     <div className="space-y-6">
@@ -866,17 +906,9 @@ export function ClientOnboardingManager({
               const accountOnly = card.sessions.every(
                 (entry) => entry.requestedAssets.length === 0,
               );
-              const openSession = card.sessions.find(
-                (entry) => entry.rawStatus === "pending" || entry.rawStatus === "collecting",
-              );
-              const reviewSession = card.sessions.find((entry) =>
-                entry.status === "submitted" || entry.status === "reviewed",
-              );
-              const canCancel = Boolean(openSession);
-              const canRotate = Boolean(openSession);
-              const hasOpenSession = card.sessions.some((entry) =>
-                entry.rawStatus === "pending" || entry.rawStatus === "collecting",
-              );
+              const openSessions = openOnboardingSessions(card.sessions);
+              const availableAssets = availableOnboardingAssetKinds(card.sessions);
+              const reviewSession = actionableReviewSession(card.sessions);
               const hasActiveWorkspace = cardIsActive(card);
               const canTargetAssets = Boolean(card.clientId && hasActiveWorkspace);
               const disabled = readOnlyPreview || backendLoadFailed || rosterLoadFailed;
@@ -891,12 +923,18 @@ export function ClientOnboardingManager({
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
                         <h3 className="text-[14px] font-semibold text-[var(--text-primary)]">{cardClientName(card)}</h3>
-                        {session && session.mode !== "new_client" && <Badge variant="neutral">{modeLabel(session.mode)}</Badge>}
-                        {session
+                        {openSessions.length ? (
+                          <Badge variant="neutral">
+                            {openSessions.length} open {openSessions.length === 1 ? "link" : "links"}
+                          </Badge>
+                        ) : (
+                          session && session.mode !== "new_client" && <Badge variant="neutral">{modeLabel(session.mode)}</Badge>
+                        )}
+                        {!openSessions.length && (session
                           ? statusBadge(session)
                           : card.roster
                             ? rosterStatusBadge(card.roster)
-                            : null}
+                            : null)}
                         {session && hasActiveWorkspace && session.status !== "active" && (
                           <Badge variant="success">Active client</Badge>
                         )}
@@ -910,14 +948,43 @@ export function ClientOnboardingManager({
                       <Button type="button" size="sm" loading={testingAll} disabled={disabled} onClick={() => void testConnections(card)}>
                         <CheckCircle2 aria-hidden /> Test all connections
                       </Button>
-                      <Button type="button" size="sm" disabled={disabled || hasOpenSession || !canTargetAssets} onClick={() => { setAssetTarget(card); setCreateMode("add_assets"); setAssetChoice("both"); setInvitation(null); setDialogError(""); }}>
+                      <Button type="button" size="sm" disabled={disabled || availableAssets.length === 0 || !canTargetAssets} onClick={() => { setAssetTarget(card); setReconnectTarget(null); setCreateMode("add_assets"); setAssetChoice(choiceForAvailableAssets(availableAssets)); setInvitation(null); setDialogError(""); }}>
                         <Plus aria-hidden /> Add assets
                       </Button>
-                      {canRotate && openSession && <Button type="button" size="sm" disabled={disabled} onClick={() => setActionTarget({ session: openSession, action: "rotate" })}><RefreshCw aria-hidden /> Rotate link</Button>}
-                      {reviewSession && (reviewSession.status === "submitted" || reviewSession.requestedAssets.length === 0) && <Button type="button" size="sm" variant={reviewSession.requestedAssets.length === 0 ? "primary" : "secondary"} disabled={disabled} onClick={() => setActionTarget({ session: reviewSession, action: "approve" })}><ShieldCheck aria-hidden /> {reviewSession.requestedAssets.length === 0 ? "Approve client" : "Approve connections"}</Button>}
-                      {canCancel && openSession && <Button type="button" size="sm" variant="danger" disabled={disabled} onClick={() => setActionTarget({ session: openSession, action: "revoke" })}><Unplug aria-hidden /> Cancel onboarding</Button>}
+                      {reviewSession && <Button type="button" size="sm" variant={reviewSession.requestedAssets.length === 0 ? "primary" : "secondary"} disabled={disabled} onClick={() => setActionTarget({ session: reviewSession, action: "approve" })}><ShieldCheck aria-hidden /> {reviewSession.requestedAssets.length === 0 ? "Approve client" : "Approve connections"}</Button>}
                     </div>
                   </div>
+
+                  {openSessions.length > 0 && (
+                    <section className="mt-4 overflow-hidden rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)]" aria-label="Open onboarding links">
+                      <div className="border-b border-[var(--border-subtle)] px-3 py-2.5">
+                        <p className="flex items-center gap-1.5 text-[11px] font-medium text-[var(--text-primary)]"><Link2 className="size-3.5 text-[var(--accent-gold-strong)]" aria-hidden /> Open links</p>
+                      </div>
+                      <ul>
+                        {openSessions.map((openSession) => {
+                          const purpose = onboardingSessionPurpose(openSession);
+                          return (
+                            <li key={openSession.id} className="flex flex-col gap-3 border-t border-[var(--border-subtle)] px-3 py-3 first:border-t-0 sm:flex-row sm:items-center sm:justify-between">
+                              <div className="min-w-0">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <p className="text-[12.5px] font-medium text-[var(--text-primary)]">{purpose}</p>
+                                  {statusBadge(openSession)}
+                                </div>
+                                <p className="mt-1 text-[11px] text-[var(--text-secondary)]">
+                                  {openSession.reconnectTarget?.domain && <><span className="break-all">{openSession.reconnectTarget.domain}</span><span aria-hidden> · </span></>}
+                                  {openSession.inviteExpiresAt ? `Expires ${formatDate(openSession.inviteExpiresAt)}` : "Expiry unavailable"}
+                                </p>
+                              </div>
+                              <div className="grid w-full grid-cols-2 gap-2 sm:w-auto sm:shrink-0">
+                                <Button type="button" size="sm" disabled={disabled} aria-label={`Replace ${purpose} link`} onClick={() => setActionTarget({ session: openSession, action: "rotate" })}><RefreshCw aria-hidden /> Replace link</Button>
+                                <Button type="button" size="sm" variant="danger" disabled={disabled} aria-label={`Cancel ${purpose} link`} onClick={() => setActionTarget({ session: openSession, action: "revoke" })}><Unplug aria-hidden /> Cancel link</Button>
+                              </div>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </section>
+                  )}
 
                   <div className="mt-4 grid gap-3 xl:grid-cols-2">
                     <section className="rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3" aria-label="Shopify connections">
@@ -927,6 +994,13 @@ export function ClientOnboardingManager({
                           {card.shopify.map((store) => {
                             const key = assetConnectionKey("shopify", store.source, store.id);
                             const target = targetsByKey.get(key);
+                            const exactReconnectOpen = Boolean(
+                              openReconnectForAsset(card.sessions, store),
+                            );
+                            const reconnecting = isAssetReconnecting(
+                              card.sessions,
+                              store,
+                            );
                             const state = connectionStates[key] ?? {
                               status:
                                 store.source === "onboarding" && store.lastErrorCode
@@ -939,7 +1013,10 @@ export function ClientOnboardingManager({
                             return (
                               <li key={key} aria-busy={state.status === "testing"} className="flex flex-col gap-3 border-t border-[var(--border-subtle)] py-3 first:border-t-0 first:pt-0 last:pb-0 sm:flex-row sm:items-start sm:justify-between">
                                 <div className="min-w-0">
-                                  <p className="truncate text-[12.5px] font-medium text-[var(--text-primary)]">{store.name}</p>
+                                  <div className="flex min-w-0 flex-wrap items-center gap-2">
+                                    <p className="truncate text-[12.5px] font-medium text-[var(--text-primary)]">{store.name}</p>
+                                    {reconnecting && <Badge variant="gold">Reconnecting</Badge>}
+                                  </div>
                                   <p className="mt-0.5 break-all text-[11px] text-[var(--text-secondary)]">{store.domain}</p>
                                   {state.status === "failed" && state.message && <p className="mt-2 text-[11px] leading-relaxed text-[var(--danger-red)]">{state.message}</p>}
                                 </div>
@@ -947,8 +1024,8 @@ export function ClientOnboardingManager({
                                   <ConnectionStatus state={state} />
                                   <div className="grid w-full grid-cols-3 gap-2 sm:flex sm:w-auto sm:justify-end">
                                     <Button type="button" size="sm" loading={state.status === "testing"} disabled={disabled || !target} aria-label={`Test ${store.name} Shopify connection`} onClick={() => target && void testConnectionTargets(card, [target])}>Test</Button>
-                                    <Button type="button" size="sm" disabled={disabled || hasOpenSession || !canTargetAssets} aria-label={`Reconnect ${store.name} Shopify connection`} onClick={() => { setAssetTarget(card); setReconnectTarget({ source: store.source, id: store.id, name: store.name, domain: store.domain }); setCreateMode("reconnect"); setAssetChoice("shopify"); setInvitation(null); setDialogError(""); }}>Reconnect</Button>
-                                    <Button type="button" size="sm" variant="danger" disabled={disabled} aria-label={`Remove ${store.name} Shopify connection`} onClick={() => { setDisconnectTarget({ kind: "shopify", source: store.source, id: store.id, name: store.name, clientName: cardClientName(card) }); setDialogError(""); }}>Remove</Button>
+                                    <Button type="button" size="sm" disabled={disabled || exactReconnectOpen || !canTargetAssets} aria-label={`Reconnect ${store.name} Shopify connection`} onClick={() => { setAssetTarget(card); setReconnectTarget({ source: store.source, id: store.id, name: store.name, domain: store.domain }); setCreateMode("reconnect"); setAssetChoice("shopify"); setInvitation(null); setDialogError(""); }}>Reconnect</Button>
+                                    <Button type="button" size="sm" variant="danger" disabled={disabled || exactReconnectOpen} title={exactReconnectOpen ? "Cancel the open reconnect link before removing this store." : undefined} aria-label={exactReconnectOpen ? `Remove ${store.name} Shopify connection unavailable while reconnecting` : `Remove ${store.name} Shopify connection`} onClick={() => { setDisconnectTarget({ kind: "shopify", source: store.source, id: store.id, name: store.name, clientName: cardClientName(card) }); setDialogError(""); }}>Remove</Button>
                                   </div>
                                 </div>
                               </li>
@@ -996,11 +1073,6 @@ export function ClientOnboardingManager({
                     </section>
                   </div>
 
-                  <div className="mt-4 flex flex-wrap items-center gap-2 text-[11px] text-[var(--text-secondary)]">
-                    {session?.requestedAssets.length ? <Badge variant="neutral">{assetLabel(session.requestedAssets)}</Badge> : null}
-                    {session?.inviteExpiresAt && <span>Link expires {formatDate(session.inviteExpiresAt)}</span>}
-                    {session?.lastErrorCode && <Badge variant="danger">{session.lastErrorCode}</Badge>}
-                  </div>
                 </article>
               );
             })}
@@ -1031,10 +1103,19 @@ export function ClientOnboardingManager({
                   <p className="mt-2 text-[11px] leading-relaxed text-[var(--text-muted)]">The link can reconnect only this store. It cannot be used to add a different Shopify store.</p>
                 </div>
               ) : (
-                <AssetChoiceField value={assetChoice} onChange={setAssetChoice} newClient={createMode === "new_client"} />
+                <AssetChoiceField
+                  value={assetChoice}
+                  onChange={setAssetChoice}
+                  newClient={createMode === "new_client"}
+                  availableAssets={
+                    createMode === "add_assets"
+                      ? assetTargetAvailableAssets
+                      : undefined
+                  }
+                />
               )}
               {dialogError && <p role="alert" className="text-[12px] text-[var(--danger-red)]">{dialogError}</p>}
-              <DialogFooter><Button type="button" variant="primary" loading={busy === "create"} disabled={readOnlyPreview || backendLoadFailed || rosterLoadFailed || createMode === "reconnect" && !reconnectTarget} onClick={() => void createInvitation()}><Link2 aria-hidden /> Generate one-time link</Button></DialogFooter>
+              <DialogFooter><Button type="button" variant="primary" loading={busy === "create"} disabled={readOnlyPreview || backendLoadFailed || rosterLoadFailed || createMode === "reconnect" && !reconnectTarget || createMode === "add_assets" && assetTargetAvailableAssets.length === 0} onClick={() => void createInvitation()}><Link2 aria-hidden /> Generate one-time link</Button></DialogFooter>
             </div>
           )}
         </DialogContent>
@@ -1043,16 +1124,16 @@ export function ClientOnboardingManager({
       <Dialog open={Boolean(actionTarget)} onOpenChange={(open) => { if (!open) { setActionTarget(null); setDialogError(""); } }}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{selectedAction === "rotate" ? "Replace this onboarding link?" : selectedAction === "approve" ? selectedActionSession?.requestedAssets.length === 0 ? "Approve this client?" : "Approve these connections?" : "Cancel this open onboarding?"}</DialogTitle>
+            <DialogTitle>{selectedAction === "rotate" ? "Replace this open link?" : selectedAction === "approve" ? selectedActionSession?.requestedAssets.length === 0 ? "Approve this client?" : "Approve these connections?" : "Cancel this open link?"}</DialogTitle>
             <DialogDescription>
-              {selectedAction === "rotate" ? "The current one-time link will stop working immediately. The replacement link will be shown once." : selectedAction === "approve" ? selectedActionSession?.requestedAssets.length === 0 ? "This confirms the review and gives the client access to their dashboard." : "This approves the connected stores and ad accounts. Billing remains unchanged." : "This removes the open onboarding link and any connections added through it. The client’s dashboard access remains unchanged."}
+              {selectedAction === "rotate" ? `Only this link (${selectedActionPurpose}) will stop working immediately. The replacement will be shown once; other open links and client access are unchanged.` : selectedAction === "approve" ? selectedActionSession?.requestedAssets.length === 0 ? "This confirms the review and gives the client access to their dashboard." : "This approves the connected stores and ad accounts. Billing remains unchanged." : `Only this link (${selectedActionPurpose}) and connections added through it will be removed. Other open links and the client’s dashboard access are unchanged.`}
             </DialogDescription>
           </DialogHeader>
-          {selectedActionSession && <div className="rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3 text-[12px] text-[var(--text-secondary)]"><strong className="font-medium text-[var(--text-primary)]">{clientName(selectedActionSession)}</strong></div>}
+          {selectedActionSession && <div className="rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3 text-[12px] text-[var(--text-secondary)]"><strong className="font-medium text-[var(--text-primary)]">{clientName(selectedActionSession)}</strong>{selectedAction !== "approve" && <><br />{selectedActionPurpose}{selectedActionSession.reconnectTarget?.domain && <><br /><span className="break-all">{selectedActionSession.reconnectTarget.domain}</span></>}</>}</div>}
           {dialogError && <p role="alert" className="text-[12px] text-[var(--danger-red)]">{dialogError}</p>}
           <DialogFooter>
             <Button type="button" onClick={() => { setActionTarget(null); setDialogError(""); }}>Cancel</Button>
-            {selectedActionSession && selectedAction && <Button type="button" variant={selectedAction === "revoke" ? "danger" : selectedAction === "approve" && selectedActionSession.requestedAssets.length === 0 ? "primary" : "secondary"} loading={busy === `${selectedAction}:${selectedActionSession.id}`} onClick={() => void patchSession(selectedActionSession, selectedAction)}>{selectedAction === "revoke" ? <Unplug aria-hidden /> : selectedAction === "rotate" ? <RefreshCw aria-hidden /> : <Check aria-hidden />}{selectedAction === "rotate" ? "Replace link" : selectedAction === "approve" ? selectedActionSession.requestedAssets.length === 0 ? "Approve client" : "Approve connections" : "Cancel onboarding"}</Button>}
+            {selectedActionSession && selectedAction && <Button type="button" variant={selectedAction === "revoke" ? "danger" : selectedAction === "approve" && selectedActionSession.requestedAssets.length === 0 ? "primary" : "secondary"} loading={busy === `${selectedAction}:${selectedActionSession.id}`} onClick={() => void patchSession(selectedActionSession, selectedAction)}>{selectedAction === "revoke" ? <Unplug aria-hidden /> : selectedAction === "rotate" ? <RefreshCw aria-hidden /> : <Check aria-hidden />}{selectedAction === "rotate" ? "Replace link" : selectedAction === "approve" ? selectedActionSession.requestedAssets.length === 0 ? "Approve client" : "Approve connections" : "Cancel link"}</Button>}
           </DialogFooter>
         </DialogContent>
       </Dialog>

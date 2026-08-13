@@ -72,6 +72,7 @@ export class ClientShopifyConnectionError extends Error {
       | "stored_identity_mismatch"
       | "invalid_session"
       | "reconnect_target_mismatch"
+      | "reconnect_in_progress"
       | "duplicate_store"
       | "not_found"
       | "server_not_configured"

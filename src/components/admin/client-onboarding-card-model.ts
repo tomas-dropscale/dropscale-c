@@ -34,6 +34,96 @@ export type AssetConnectionTestResult = {
   message?: string;
 };
 
+const ONBOARDING_ASSET_KINDS = ["shopify", "google_ads"] as const;
+
+export type OnboardingAssetKind = (typeof ONBOARDING_ASSET_KINDS)[number];
+
+function isOpenSession(session: ClientOnboardingSessionDTO) {
+  return session.rawStatus === "pending" || session.rawStatus === "collecting";
+}
+
+export function openOnboardingSessions(
+  sessions: readonly ClientOnboardingSessionDTO[],
+) {
+  return sessions.filter(isOpenSession);
+}
+
+export function occupiedOnboardingAssetKinds(
+  sessions: readonly ClientOnboardingSessionDTO[],
+): OnboardingAssetKind[] {
+  const open = openOnboardingSessions(sessions).filter(
+    (session) => session.mode !== "reconnect",
+  );
+  return ONBOARDING_ASSET_KINDS.filter((kind) =>
+    open.some((session) => session.requestedAssets.includes(kind)),
+  );
+}
+
+export function availableOnboardingAssetKinds(
+  sessions: readonly ClientOnboardingSessionDTO[],
+): OnboardingAssetKind[] {
+  const occupied = new Set(occupiedOnboardingAssetKinds(sessions));
+  return ONBOARDING_ASSET_KINDS.filter((kind) => !occupied.has(kind));
+}
+
+export function openReconnectForAsset(
+  sessions: readonly ClientOnboardingSessionDTO[],
+  asset: Pick<CardShopifyAsset, "source" | "id">,
+) {
+  return (
+    openOnboardingSessions(sessions).find(
+      (session) =>
+        session.mode === "reconnect" &&
+        session.reconnectTarget?.source === asset.source &&
+        session.reconnectTarget.id === asset.id,
+    ) ?? null
+  );
+}
+
+export function isAssetReconnecting(
+  sessions: readonly ClientOnboardingSessionDTO[],
+  asset: Pick<CardShopifyAsset, "source" | "id">,
+) {
+  const reconnect = openReconnectForAsset(sessions, asset);
+  return Boolean(reconnect && !reconnect.reconnectCompletedAt);
+}
+
+export function onboardingAssetLabel(assets: readonly OnboardingAssetKind[]) {
+  const shopify = assets.includes("shopify");
+  const google = assets.includes("google_ads");
+  if (shopify && google) return "Shopify & Google Ads";
+  if (shopify) return "Shopify";
+  if (google) return "Google Ads";
+  return "Account only";
+}
+
+export function onboardingSessionPurpose(session: ClientOnboardingSessionDTO) {
+  if (session.mode === "reconnect") {
+    return session.reconnectTarget
+      ? `Reconnect Shopify · ${session.reconnectTarget.name}`
+      : "Reconnect Shopify";
+  }
+  if (session.mode === "add_assets") {
+    return `Add ${onboardingAssetLabel(session.requestedAssets)}`;
+  }
+  return session.requestedAssets.length
+    ? `Client setup · ${onboardingAssetLabel(session.requestedAssets)}`
+    : "Create client account";
+}
+
+export function actionableReviewSession(
+  sessions: readonly ClientOnboardingSessionDTO[],
+) {
+  return (
+    sessions.find((session) => session.status === "submitted") ??
+    sessions.find(
+      (session) =>
+        session.status === "reviewed" && session.requestedAssets.length === 0,
+    ) ??
+    null
+  );
+}
+
 export function assetConnectionKey(
   kind: AssetConnectionTestTarget["kind"],
   source: AssetConnectionTestTarget["source"],

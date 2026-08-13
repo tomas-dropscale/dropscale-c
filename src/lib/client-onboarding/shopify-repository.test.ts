@@ -180,4 +180,18 @@ describe("Supabase reporting Shopify repository", () => {
       p_admin_id: ADMIN_ID,
     });
   });
+
+  it("classifies removal during an exact reconnect as a conflict", async () => {
+    const rpc = vi.fn().mockResolvedValue({
+      data: null,
+      error: { code: "23514", message: "internal reconnect target detail" },
+    });
+    mocks.createServiceClient.mockReturnValue({ rpc });
+    const repo = createReportingShopifyRepository();
+
+    await expect(repo.revoke(CONNECTION_ID, ADMIN_ID)).rejects.toMatchObject({
+      code: "reconnect_in_progress",
+      status: 409,
+    });
+  });
 });

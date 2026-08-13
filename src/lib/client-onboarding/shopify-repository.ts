@@ -242,6 +242,13 @@ async function revoke(
         404,
       );
     }
+    if (error?.code === "23514") {
+      throw new ClientShopifyConnectionError(
+        "reconnect_in_progress",
+        "Complete or cancel this store's open reconnect link before removing it.",
+        409,
+      );
+    }
     throw databaseFailure("The Shopify reporting connection could not be revoked.");
   }
 }

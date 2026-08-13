@@ -546,7 +546,7 @@ export async function createClientOnboardingSession(input: {
           ? "The selected Shopify store is no longer available."
           : "The selected client no longer exists."
         : error?.code === "23505"
-          ? "This client already has an open onboarding link. Cancel or complete it first."
+          ? "This client already has an open link for one of the requested assets. Complete or cancel that link first."
           : "Could not create the onboarding invitation.",
       error?.code === "P0002" ? 404 : error?.code === "23505" ? 409 : 500,
     );

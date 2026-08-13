@@ -272,6 +272,24 @@ describe("legacy Shopify disconnect", () => {
     expect((caught as Error).message).not.toContain("secret database detail");
   });
 
+  it("keeps a store connected while its reconnect link is open", async () => {
+    const rpc = vi.fn().mockResolvedValue({
+      data: null,
+      error: { code: "23514", message: "internal reconnect target detail" },
+    });
+
+    await expect(
+      disconnectLegacyShopifyConnection({
+        accountId: ID,
+        adminId: "40000000-0000-4000-8000-000000000003",
+        service: { rpc } as never,
+      }),
+    ).rejects.toMatchObject({
+      code: "reconnect_in_progress",
+      status: 409,
+    });
+  });
+
   it("fails closed when the RPC does not return the exact account", async () => {
     const rpc = vi.fn().mockResolvedValue({
       data: "40000000-0000-4000-8000-000000000099",

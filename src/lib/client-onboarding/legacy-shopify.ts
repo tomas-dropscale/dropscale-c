@@ -50,7 +50,10 @@ export class LegacyShopifyHealthError extends Error {
 
 export class LegacyShopifyDisconnectError extends Error {
   constructor(
-    public readonly code: "not_found" | "database_error",
+    public readonly code:
+      | "not_found"
+      | "reconnect_in_progress"
+      | "database_error",
     message: string,
     public readonly status: number,
   ) {
@@ -79,6 +82,13 @@ export async function disconnectLegacyShopifyConnection({
       "not_found",
       "Active legacy Shopify connection not found.",
       404,
+    );
+  }
+  if (error?.code === "23514") {
+    throw new LegacyShopifyDisconnectError(
+      "reconnect_in_progress",
+      "Complete or cancel this store's open reconnect link before removing it.",
+      409,
     );
   }
   throw new LegacyShopifyDisconnectError(

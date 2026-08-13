@@ -3,8 +3,15 @@ import { describe, expect, it } from "vitest";
 import type { ExistingClientRosterDTO } from "@/lib/client-onboarding/legacy-roster";
 import type { ClientOnboardingSessionDTO } from "@/lib/client-onboarding/sessions";
 import {
+  actionableReviewSession,
+  availableOnboardingAssetKinds,
   buildClientCards,
   connectionTestTargets,
+  isAssetReconnecting,
+  onboardingSessionPurpose,
+  occupiedOnboardingAssetKinds,
+  openReconnectForAsset,
+  openOnboardingSessions,
   runAssetConnectionTests,
   type AssetConnectionTestTarget,
 } from "./client-onboarding-card-model";
@@ -81,6 +88,29 @@ function reconnectedSession(): ClientOnboardingSessionDTO {
   };
 }
 
+function onboardingSession(
+  overrides: Partial<ClientOnboardingSessionDTO> = {},
+): ClientOnboardingSessionDTO {
+  return {
+    ...reconnectedSession(),
+    mode: "add_assets",
+    requestedAssets: ["google_ads"],
+    status: "waiting",
+    rawStatus: "pending",
+    inviteExpiresAt: "2026-02-08T00:00:00.000Z",
+    reconnectTarget: null,
+    reconnectCompletedAt: null,
+    submittedAt: null,
+    reviewedAt: null,
+    activatedAt: null,
+    shopify: [],
+    googleAds: [],
+    mappings: [],
+    needsReview: false,
+    ...overrides,
+  };
+}
+
 describe("client roster merge", () => {
   it("shows existing accounts even before they have an onboarding session", () => {
     const [card] = buildClientCards([], [roster()]);
@@ -105,6 +135,127 @@ describe("client roster merge", () => {
       name: "New connection",
       domain: "NORTHWIND-DEMO.myshopify.com",
     });
+  });
+});
+
+describe("client onboarding card actions", () => {
+  it("keeps reconnect slots exact and separate from Add assets", () => {
+    const storeA = roster().shopify[0];
+    const storeB = {
+      ...storeA,
+      id: "30000000-0000-4000-8000-000000000002",
+      name: "Second store",
+      domain: "second-store.myshopify.com",
+    };
+    const reconnectA = onboardingSession({
+      id: "20000000-0000-4000-8000-000000000002",
+      mode: "reconnect",
+      requestedAssets: ["shopify"],
+      status: "expired",
+      rawStatus: "pending",
+      reconnectTarget: reconnectedSession().reconnectTarget,
+    });
+
+    expect(occupiedOnboardingAssetKinds([reconnectA])).toEqual([]);
+    expect(availableOnboardingAssetKinds([reconnectA])).toEqual([
+      "shopify",
+      "google_ads",
+    ]);
+    expect(openReconnectForAsset([reconnectA], storeA)).toBe(reconnectA);
+    expect(openReconnectForAsset([reconnectA], storeB)).toBeNull();
+    expect(
+      openReconnectForAsset([reconnectA], {
+        source: "onboarding",
+        id: storeA.id,
+      }),
+    ).toBeNull();
+    expect(isAssetReconnecting([reconnectA], storeA)).toBe(true);
+    expect(isAssetReconnecting([reconnectA], storeB)).toBe(false);
+  });
+
+  it("lists two exact reconnect targets beside Google Ads and clears a completed tag", () => {
+    const targetA = reconnectedSession().reconnectTarget!;
+    const targetB = {
+      ...targetA,
+      id: "30000000-0000-4000-8000-000000000002",
+      name: "Second store",
+      domain: "second-store.myshopify.com",
+    };
+    const reconnectA = onboardingSession({
+      id: "20000000-0000-4000-8000-000000000002",
+      mode: "reconnect",
+      requestedAssets: ["shopify"],
+      reconnectTarget: targetA,
+    });
+    const reconnectB = onboardingSession({
+      id: "20000000-0000-4000-8000-000000000003",
+      mode: "reconnect",
+      requestedAssets: ["shopify"],
+      reconnectTarget: targetB,
+    });
+    const googleAds = onboardingSession({
+      id: "20000000-0000-4000-8000-000000000004",
+      rawStatus: "collecting",
+      status: "collecting",
+    });
+
+    expect(openOnboardingSessions([reconnectA, reconnectB, googleAds])).toEqual([
+      reconnectA,
+      reconnectB,
+      googleAds,
+    ]);
+    expect(occupiedOnboardingAssetKinds([reconnectA, reconnectB, googleAds])).toEqual([
+      "google_ads",
+    ]);
+    expect(availableOnboardingAssetKinds([reconnectA, reconnectB, googleAds])).toEqual([
+      "shopify",
+    ]);
+    expect(
+      openReconnectForAsset([reconnectA, reconnectB, googleAds], targetB),
+    ).toBe(reconnectB);
+    expect(onboardingSessionPurpose(reconnectA)).toBe(
+      "Reconnect Shopify · Old connection",
+    );
+    expect(onboardingSessionPurpose(googleAds)).toBe("Add Google Ads");
+
+    const completedA = {
+      ...reconnectA,
+      reconnectCompletedAt: "2026-02-03T00:00:00.000Z",
+    };
+    expect(openReconnectForAsset([completedA], targetA)).toBe(completedA);
+    expect(isAssetReconnecting([completedA], targetA)).toBe(false);
+  });
+
+  it("treats a combined open link as occupying both asset kinds", () => {
+    const combined = onboardingSession({
+      requestedAssets: ["shopify", "google_ads"],
+    });
+
+    expect(occupiedOnboardingAssetKinds([combined])).toEqual([
+      "shopify",
+      "google_ads",
+    ]);
+    expect(availableOnboardingAssetKinds([combined])).toEqual([]);
+  });
+
+  it("prioritises a submitted setup over a reviewed account-only setup", () => {
+    const reviewedAccount = onboardingSession({
+      id: "20000000-0000-4000-8000-000000000004",
+      requestedAssets: [],
+      status: "reviewed",
+      rawStatus: "reviewed",
+    });
+    const submittedAssets = onboardingSession({
+      id: "20000000-0000-4000-8000-000000000005",
+      status: "submitted",
+      rawStatus: "submitted",
+      needsReview: true,
+    });
+
+    expect(actionableReviewSession([reviewedAccount, submittedAssets])).toBe(
+      submittedAssets,
+    );
+    expect(actionableReviewSession([reviewedAccount])).toBe(reviewedAccount);
   });
 });
 
