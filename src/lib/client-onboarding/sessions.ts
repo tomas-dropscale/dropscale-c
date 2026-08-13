@@ -968,7 +968,7 @@ export async function reviewClientOnboardingSession(
         : "database_error",
       error?.code === "23514"
         ? error.message.includes("reporting activation")
-          ? "Review saved. Activation will be available when V2 reporting is connected to the client portal."
+          ? "The client cannot be activated until reporting is connected to their dashboard."
           : "The client must confirm their email before activation."
         : error?.code === "P0002"
           ? "Submitted onboarding session not found."
@@ -1009,7 +1009,7 @@ export async function revokeClientOnboardingSession(sessionId: string, adminId: 
         error?.code === "P0002" ? "not_found" : "database_error",
         error?.code === "P0002"
           ? "Only an open onboarding session can be revoked."
-          : "The V2 onboarding connections could not be revoked.",
+          : "The onboarding connections could not be removed.",
         error?.code === "P0002" ? 409 : 500,
       );
     }

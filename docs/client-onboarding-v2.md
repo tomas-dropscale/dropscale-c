@@ -457,7 +457,7 @@ Nenhuma destas ações faz `DELETE` de `portal_clients`, `ad_accounts`, invoices
 - O registo público legacy deixa de criar novos clientes; `/register` explica que o acesso é por convite e mantém login/recovery de utilizadores atuais.
 - O link de novo cliente não contém nome, email, client ID legível, API key ou outro PII/segredo.
 - Um novo cliente fornece primeiro nome, último nome, email e password e consegue entrar na dashboard após o fluxo aprovado.
-- Um novo utilizador sem assets consegue submeter, ser revisto e ativado; o cartão mostra `Account only` / `No assets yet`, e `Add assets` continua disponível.
+- Um novo utilizador sem assets consegue submeter e ser aprovado numa única ação administrativa, que ativa imediatamente o acesso à dashboard; `Add assets` continua disponível no cartão sem badges redundantes.
 - Reconexão e Add Assets usam a identidade existente; não criam um segundo auth user/portal client.
 - Links expirados, usados ou revogados falham de forma segura.
 

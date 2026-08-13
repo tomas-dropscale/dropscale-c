@@ -52,7 +52,7 @@ export type LegacyClientSnapshot = {
 
 type AssetChoice = "account" | "shopify" | "google_ads" | "both";
 type DialogMode = "new_client" | "reconnect" | "add_assets";
-type SessionAction = "rotate" | "review" | "activate" | "revoke";
+type SessionAction = "rotate" | "approve" | "revoke";
 type ActionTarget = { session: ClientOnboardingSessionDTO; action: SessionAction };
 type DisconnectTarget =
   | { kind: "shopify"; id: string; name: string; clientName: string }
@@ -196,7 +196,7 @@ function formatDate(value: string | null) {
 
 function statusBadge(session: ClientOnboardingSessionDTO) {
   if (session.status === "active") return <Badge variant="success">Active</Badge>;
-  if (session.status === "reviewed") return <Badge variant="success">Reviewed</Badge>;
+  if (session.status === "reviewed") return <Badge variant="success">Approved</Badge>;
   if (session.status === "submitted") return <Badge variant="warning">Ready for review</Badge>;
   if (session.status === "expired") return <Badge variant="danger">Link expired</Badge>;
   if (session.status === "collecting") return <Badge variant="gold">In progress</Badge>;
@@ -510,10 +510,16 @@ export function ClientOnboardingManager({
     setBusy(`${action}:${session.id}`);
     setDialogError("");
     try {
+      const requestAction =
+        action === "approve"
+          ? session.requestedAssets.length === 0
+            ? "activate"
+            : "review"
+          : action;
       const response = await fetch(`/api/admin/client-onboarding/${session.id}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ action }),
+        body: JSON.stringify({ action: requestAction }),
       });
       const body = await readJson(response);
       if (!response.ok) throw new Error(errorMessage(body, `The ${action} action could not be completed.`));
@@ -543,11 +549,10 @@ export function ClientOnboardingManager({
       if (nextInvitation) setInvitation(nextInvitation);
       const messages: Record<SessionAction, [string, string]> = {
         rotate: ["Link replaced", "The previous onboarding link no longer works. Send only the new one."],
-        review: session.requestedAssets.length
-          ? ["Setup reviewed", "The connections are staged safely. Portal reporting activation remains held until the V2 reporting adapter is enabled."]
-          : ["Setup reviewed", "The account-only workspace is reviewed and ready for activation."],
-        activate: ["Client activated", "The reviewed V2 setup is now active. Billing was not started by this action."],
-        revoke: ["Onboarding cancelled", "The open V2 setup, its link and Dropscale-side connection records from that setup were cancelled. Portal access was not disabled; external Windsor or Google access may still require separate removal."],
+        approve: session.requestedAssets.length
+          ? ["Connections approved", "The connected stores and ad accounts are ready for reporting setup."]
+          : ["Client activated", "The client can now access their dashboard."],
+        revoke: ["Onboarding cancelled", "The onboarding link and any connections added through it have been removed. The client’s dashboard access is unchanged."],
       };
       showNotice("success", ...messages[action]);
     } catch (error) {
@@ -563,10 +568,10 @@ export function ClientOnboardingManager({
       const accountOnly = card.sessions.every((session) => session.requestedAssets.length === 0);
       showNotice(
         "info",
-        `${cardClientName(card)} has no technical connections`,
+        `${cardClientName(card)} has no connected assets`,
         accountOnly
-          ? "This is an account-only client. There are no Shopify or Google Ads assets to test yet."
-          : "The requested Shopify or Google Ads assets have not been connected yet, so there is nothing technical to test.",
+          ? "There are no Shopify or Google Ads connections to test."
+          : "The requested Shopify or Google Ads connections have not been added yet.",
       );
       return;
     }
@@ -651,8 +656,8 @@ export function ClientOnboardingManager({
         "success",
         `${target.name} disconnected`,
         target.kind === "shopify"
-          ? "The Shopify reporting credential was revoked. The client's portal access and other assets were not changed."
-          : "The Google Ads connection was removed from Dropscale. The Windsor/Google authorization was not removed, and the client's portal access and other assets were not changed.",
+          ? "The Shopify connection was removed. The client’s dashboard access and other connections are unchanged."
+          : "The Google Ads connection was removed from Dropscale. The Windsor and Google authorization remains unchanged, as do the client’s dashboard access and other connections.",
       );
     } catch (error) {
       setDialogError(error instanceof Error ? error.message : "The asset could not be disconnected.");
@@ -674,16 +679,16 @@ export function ClientOnboardingManager({
       )}
       {backendLoadFailed && (
         <div role="alert" className="rounded-[var(--radius-card)] border border-[var(--danger-red)]/30 bg-[var(--danger-red)]/8 px-4 py-3 text-[12px] text-[var(--text-secondary)]">
-          The V2 client list could not be loaded. Actions are disabled until the backend is available.
+          The client list could not be loaded. Actions are temporarily unavailable.
         </div>
       )}
       {notice && <NoticeBanner key={notice.id} notice={notice} dismiss={() => setNotice(null)} />}
 
       <div className="space-y-3">
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          <CountCard label="Active clients" value={counts.active} help="Approved V2 workspaces" icon={Users} tone="success" />
+          <CountCard label="Active clients" value={counts.active} help="Clients with dashboard access" icon={Users} tone="success" />
           <CountCard label="Onboarding" value={counts.onboarding} help="Waiting or in progress" icon={Clock3} />
-          <CountCard label="Ready for review" value={counts.review} help="Submitted or reviewed" icon={ShieldCheck} tone="warning" />
+          <CountCard label="Setup approval" value={counts.review} help="Submitted or approved setups" icon={ShieldCheck} tone="warning" />
           <CountCard label="Needs attention" value={counts.issues} help="Expired links or reported errors" icon={CircleAlert} tone="danger" />
         </div>
         <div className="flex flex-wrap justify-start gap-2">
@@ -700,7 +705,7 @@ export function ClientOnboardingManager({
         <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <p className="label-caps">Clients</p>
-            <h2 id="client-onboarding-list" className="mt-1 text-[15px] font-semibold text-[var(--text-primary)]">V2 onboarding workspace</h2>
+            <h2 id="client-onboarding-list" className="mt-1 text-[15px] font-semibold text-[var(--text-primary)]">Client onboarding</h2>
           </div>
           {cards.length > 0 && (
             <div className="flex flex-col gap-2 sm:flex-row">
@@ -715,7 +720,7 @@ export function ClientOnboardingManager({
                   <SelectItem value="waiting">Waiting for client</SelectItem>
                   <SelectItem value="collecting">In progress</SelectItem>
                   <SelectItem value="submitted">Ready for review</SelectItem>
-                  <SelectItem value="reviewed">Reviewed</SelectItem>
+                  <SelectItem value="reviewed">Approved</SelectItem>
                   <SelectItem value="active">Active</SelectItem>
                   <SelectItem value="expired">Expired</SelectItem>
                   <SelectItem value="issues">Needs attention</SelectItem>
@@ -728,8 +733,8 @@ export function ClientOnboardingManager({
         {cards.length === 0 ? (
           <div className="panel flex min-h-64 flex-col items-center justify-center p-6 text-center">
             <span className="flex size-11 items-center justify-center rounded-full bg-[var(--accent-gold-dim)] text-[var(--accent-gold-strong)]"><Users className="size-5" aria-hidden /></span>
-            <p className="mt-3 text-[14px] font-medium text-[var(--text-primary)]">No clients in the V2 workspace</p>
-            <p className="mt-1 max-w-lg text-[12.5px] leading-relaxed text-[var(--text-secondary)]">Create a blank onboarding link for a new client, or deliberately reconnect one Legacy client. Existing Legacy data and billing remain intact.</p>
+            <p className="mt-3 text-[14px] font-medium text-[var(--text-primary)]">No clients yet</p>
+            <p className="mt-1 max-w-lg text-[12.5px] leading-relaxed text-[var(--text-secondary)]">Create an onboarding link for a new client, or reconnect an existing client.</p>
           </div>
         ) : filteredCards.length === 0 ? (
           <div className="panel flex min-h-40 flex-col items-center justify-center p-6 text-center">
@@ -758,9 +763,6 @@ export function ClientOnboardingManager({
                 entry.rawStatus === "pending" || entry.rawStatus === "collecting",
               );
               const hasActiveWorkspace = cardHasStatus(card, ["active"]);
-              const activationHeld = Boolean(
-                reviewSession?.status === "reviewed" && reviewSession.requestedAssets.length > 0,
-              );
               const canTargetAssets = Boolean(session.targetClientId || hasActiveWorkspace);
               const disabled = readOnlyPreview || backendLoadFailed;
               return (
@@ -774,16 +776,11 @@ export function ClientOnboardingManager({
                         {hasActiveWorkspace && session.status !== "active" && (
                           <Badge variant="success">Active client</Badge>
                         )}
-                        {activationHeld && <Badge variant="neutral">Reporting activation staged</Badge>}
-                        {noAssets && (
-                          <Badge variant="neutral">
-                            {accountOnly ? "Account only · No assets yet" : "Assets requested · None connected yet"}
-                          </Badge>
-                        )}
+                        {noAssets && !accountOnly && <Badge variant="neutral">Assets not connected</Badge>}
                         {cardHasIssue(card) && <Badge variant="danger">Connection needs attention</Badge>}
                       </div>
-                      <p className="mt-1 break-all text-[12px] text-[var(--text-secondary)]">{cardEmail(card) ?? "Identity not completed yet"}</p>
-                      <p className="mt-1 text-[11px] text-[var(--text-muted)]">Latest session {session.id.slice(0, 8)} · updated {formatDate(session.updatedAt)}{card.sessions.length > 1 ? ` · ${card.sessions.length} onboarding sessions grouped` : ""}</p>
+                      <p className="mt-1 break-all text-[12px] text-[var(--text-secondary)]">{cardEmail(card) ?? "Waiting for client details"}</p>
+                      <p className="mt-1 text-[11px] text-[var(--text-muted)]">Updated {formatDate(session.updatedAt)}</p>
                     </div>
                     <div className="flex flex-wrap justify-start gap-2">
                       <Button type="button" size="sm" loading={busy === `test:${card.key}`} disabled={disabled} onClick={() => void testConnections(card)}>
@@ -793,18 +790,13 @@ export function ClientOnboardingManager({
                         <Plus aria-hidden /> Add assets
                       </Button>
                       {canRotate && openSession && <Button type="button" size="sm" disabled={disabled} onClick={() => setActionTarget({ session: openSession, action: "rotate" })}><RefreshCw aria-hidden /> Rotate link</Button>}
-                      {reviewSession?.status === "submitted" && <Button type="button" size="sm" disabled={disabled} onClick={() => setActionTarget({ session: reviewSession, action: "review" })}><ShieldCheck aria-hidden /> Review</Button>}
-                      {reviewSession?.status === "reviewed" && reviewSession.requestedAssets.length === 0 && <Button type="button" size="sm" variant="primary" disabled={disabled} onClick={() => setActionTarget({ session: reviewSession, action: "activate" })}><Check aria-hidden /> Activate</Button>}
+                      {reviewSession && (reviewSession.status === "submitted" || reviewSession.requestedAssets.length === 0) && <Button type="button" size="sm" variant={reviewSession.requestedAssets.length === 0 ? "primary" : "secondary"} disabled={disabled} onClick={() => setActionTarget({ session: reviewSession, action: "approve" })}><ShieldCheck aria-hidden /> {reviewSession.requestedAssets.length === 0 ? "Approve client" : "Approve connections"}</Button>}
                       {canCancel && openSession && <Button type="button" size="sm" variant="danger" disabled={disabled} onClick={() => setActionTarget({ session: openSession, action: "revoke" })}><Unplug aria-hidden /> Cancel onboarding</Button>}
                       {canDisconnectAssets && <Button type="button" size="sm" variant="danger" disabled={disabled} onClick={() => { setRevokeCard(card); setDisconnectTarget(null); setDialogError(""); }}><Unplug aria-hidden /> Revoke asset…</Button>}
                     </div>
                   </div>
 
-                  <div className="mt-4 grid gap-2 md:grid-cols-3">
-                    <div className="rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3">
-                      <p className="text-[11px] font-medium text-[var(--text-primary)]">Portal identity</p>
-                      <p className="mt-1 text-[11px] text-[var(--text-secondary)]">{session.claimedUserId ? "Identity claimed" : session.targetClientId ? "Existing client selected" : "Waiting for client"}</p>
-                    </div>
+                  <div className="mt-4 grid gap-2 md:grid-cols-2">
                     <div className="rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3">
                       <p className="flex items-center gap-1.5 text-[11px] font-medium text-[var(--text-primary)]"><Store className="size-3.5 text-[var(--accent-gold-strong)]" aria-hidden /> Shopify · {card.shopify.length}</p>
                       <p className="mt-1 text-[11px] text-[var(--text-secondary)]">{card.shopify.length ? card.shopify.map((store) => store.name).join(", ") : "No reporting stores connected"}</p>
@@ -816,7 +808,7 @@ export function ClientOnboardingManager({
                   </div>
 
                   <div className="mt-4 flex flex-wrap items-center gap-2 text-[11px] text-[var(--text-secondary)]">
-                    <Badge variant="neutral">{assetLabel(session.requestedAssets)}</Badge>
+                    {session.requestedAssets.length > 0 && <Badge variant="neutral">{assetLabel(session.requestedAssets)}</Badge>}
                     {session.inviteExpiresAt && <span>Link expires {formatDate(session.inviteExpiresAt)}</span>}
                     {session.lastErrorCode && <Badge variant="danger">{session.lastErrorCode}</Badge>}
                   </div>
@@ -830,9 +822,9 @@ export function ClientOnboardingManager({
       <Dialog open={Boolean(createMode)} onOpenChange={(open) => !open && closeCreate()}>
         <DialogContent className="max-w-xl">
           <DialogHeader>
-            <DialogTitle>{invitation ? "Copy one-time link" : createMode === "new_client" ? "Onboard a new client" : createMode === "reconnect" ? "Reconnect a Legacy client" : "Add client assets"}</DialogTitle>
+            <DialogTitle>{invitation ? "Copy one-time link" : createMode === "new_client" ? "Onboard a new client" : createMode === "reconnect" ? "Reconnect an existing client" : "Add client assets"}</DialogTitle>
             <DialogDescription>
-              {invitation ? "This bearer link is shown once. Copy it now and send it only to the intended client." : createMode === "new_client" ? "The client creates their dashboard account and either finishes without assets or completes Shopify and Google Ads setup." : createMode === "reconnect" ? "Choose the existing client and the technical connections they need to renew." : `Create a separate asset invitation for ${assetTarget ? cardClientName(assetTarget) : "this client"}.`}
+              {invitation ? "This private link is shown once. Copy it now and send it only to the intended client." : createMode === "new_client" ? "The client creates their dashboard account and either finishes without assets or completes Shopify and Google Ads setup." : createMode === "reconnect" ? "Choose the existing client and the connections they need to renew." : `Create a separate asset invitation for ${assetTarget ? cardClientName(assetTarget) : "this client"}.`}
             </DialogDescription>
           </DialogHeader>
           {invitation ? (
@@ -845,14 +837,14 @@ export function ClientOnboardingManager({
             <div className="space-y-4">
               {createMode === "reconnect" && (
                 legacyLoadFailed ? (
-                  <p role="alert" className="rounded-[10px] border border-[var(--danger-red)]/30 bg-[var(--danger-red)]/8 p-3 text-[12px] text-[var(--text-secondary)]">Legacy clients could not be loaded. Close and refresh before creating a reconnect link.</p>
+                  <p role="alert" className="rounded-[10px] border border-[var(--danger-red)]/30 bg-[var(--danger-red)]/8 p-3 text-[12px] text-[var(--text-secondary)]">Existing clients could not be loaded. Close and refresh before creating a reconnect link.</p>
                 ) : (
                   <>
                     <div className="space-y-1.5"><Label htmlFor="legacy-client-search">Existing client</Label><div className="relative"><Search className="pointer-events-none absolute top-1/2 left-3 size-3.5 -translate-y-1/2 text-[var(--text-muted)]" aria-hidden /><Input id="legacy-client-search" value={legacySearch} onChange={(event) => setLegacySearch(event.target.value)} placeholder="Search name or email" className="pl-9" /></div></div>
-                    <fieldset><legend className="sr-only">Select a Legacy client</legend><div className="max-h-64 space-y-2 overflow-y-auto pr-1">
+                    <fieldset><legend className="sr-only">Select an existing client</legend><div className="max-h-64 space-y-2 overflow-y-auto pr-1">
                       {legacyMatches.map((client) => {
                         const staged = stagedClientIds.has(client.id);
-                        return <label key={client.id} className="block cursor-pointer"><input type="radio" name="legacy-client" className="peer sr-only" value={client.id} checked={selectedLegacyId === client.id} disabled={staged} onChange={() => setSelectedLegacyId(client.id)} /><span className="block rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3 peer-checked:border-[var(--accent-gold)]/60 peer-focus-visible:ring-2 peer-focus-visible:ring-[var(--accent-gold)]/40 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"><span className="flex justify-between gap-2"><span><span className="block text-[12.5px] font-medium text-[var(--text-primary)]">{client.fullName}</span><span className="block break-all text-[11.5px] text-[var(--text-secondary)]">{client.email}</span></span>{staged && <Badge variant="neutral">Already in V2</Badge>}</span></span></label>;
+                        return <label key={client.id} className="block cursor-pointer"><input type="radio" name="legacy-client" className="peer sr-only" value={client.id} checked={selectedLegacyId === client.id} disabled={staged} onChange={() => setSelectedLegacyId(client.id)} /><span className="block rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3 peer-checked:border-[var(--accent-gold)]/60 peer-focus-visible:ring-2 peer-focus-visible:ring-[var(--accent-gold)]/40 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"><span className="flex justify-between gap-2"><span><span className="block text-[12.5px] font-medium text-[var(--text-primary)]">{client.fullName}</span><span className="block break-all text-[11.5px] text-[var(--text-secondary)]">{client.email}</span></span>{staged && <Badge variant="neutral">Already onboarded</Badge>}</span></span></label>;
                       })}
                     </div></fieldset>
                   </>
@@ -869,16 +861,16 @@ export function ClientOnboardingManager({
       <Dialog open={Boolean(actionTarget)} onOpenChange={(open) => { if (!open) { setActionTarget(null); setDialogError(""); } }}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{selectedAction === "rotate" ? "Replace this onboarding link?" : selectedAction === "review" ? "Mark this setup reviewed?" : selectedAction === "activate" ? "Activate this client setup?" : "Cancel this open onboarding?"}</DialogTitle>
+            <DialogTitle>{selectedAction === "rotate" ? "Replace this onboarding link?" : selectedAction === "approve" ? selectedActionSession?.requestedAssets.length === 0 ? "Approve this client?" : "Approve these connections?" : "Cancel this open onboarding?"}</DialogTitle>
             <DialogDescription>
-              {selectedAction === "rotate" ? "The current one-time link will stop working immediately. The replacement link will be shown once." : selectedAction === "review" ? "This records your review. It does not activate the client or start billing." : selectedAction === "activate" ? "This approves the reviewed V2 setup and client dashboard. Billing remains a separate workflow." : "This cancels only the selected open V2 setup, its invitation and Dropscale-side connection records from that setup. It does not disable the client's portal account or alter Legacy billing; Windsor or Google access may still require separate removal."}
+              {selectedAction === "rotate" ? "The current one-time link will stop working immediately. The replacement link will be shown once." : selectedAction === "approve" ? selectedActionSession?.requestedAssets.length === 0 ? "This confirms the review and gives the client access to their dashboard." : "This approves the connected stores and ad accounts. Billing remains unchanged." : "This removes the open onboarding link and any connections added through it. The client’s dashboard access remains unchanged."}
             </DialogDescription>
           </DialogHeader>
-          {selectedActionSession && <div className="rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3 text-[12px] text-[var(--text-secondary)]"><strong className="font-medium text-[var(--text-primary)]">{clientName(selectedActionSession)}</strong><br />Session {selectedActionSession.id}</div>}
+          {selectedActionSession && <div className="rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3 text-[12px] text-[var(--text-secondary)]"><strong className="font-medium text-[var(--text-primary)]">{clientName(selectedActionSession)}</strong></div>}
           {dialogError && <p role="alert" className="text-[12px] text-[var(--danger-red)]">{dialogError}</p>}
           <DialogFooter>
             <Button type="button" onClick={() => { setActionTarget(null); setDialogError(""); }}>Cancel</Button>
-            {selectedActionSession && selectedAction && <Button type="button" variant={selectedAction === "revoke" ? "danger" : selectedAction === "activate" ? "primary" : "secondary"} loading={busy === `${selectedAction}:${selectedActionSession.id}`} onClick={() => void patchSession(selectedActionSession, selectedAction)}>{selectedAction === "revoke" ? <Unplug aria-hidden /> : selectedAction === "rotate" ? <RefreshCw aria-hidden /> : <Check aria-hidden />}{selectedAction === "rotate" ? "Replace link" : selectedAction === "review" ? "Mark reviewed" : selectedAction === "activate" ? "Activate" : "Cancel onboarding"}</Button>}
+            {selectedActionSession && selectedAction && <Button type="button" variant={selectedAction === "revoke" ? "danger" : selectedAction === "approve" && selectedActionSession.requestedAssets.length === 0 ? "primary" : "secondary"} loading={busy === `${selectedAction}:${selectedActionSession.id}`} onClick={() => void patchSession(selectedActionSession, selectedAction)}>{selectedAction === "revoke" ? <Unplug aria-hidden /> : selectedAction === "rotate" ? <RefreshCw aria-hidden /> : <Check aria-hidden />}{selectedAction === "rotate" ? "Replace link" : selectedAction === "approve" ? selectedActionSession.requestedAssets.length === 0 ? "Approve client" : "Approve connections" : "Cancel onboarding"}</Button>}
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -892,7 +884,7 @@ export function ClientOnboardingManager({
                 <DialogDescription>
                   {disconnectTarget.kind === "shopify"
                     ? "This revokes only this Shopify reporting connection and destroys its stored credential."
-                    : "This removes only Dropscale's stored Google Ads connection. It does not unlink the account in Windsor or Google."} The client&apos;s portal account, other assets and Legacy billing are not changed.
+                    : "This removes only Dropscale's stored Google Ads connection. It does not unlink the account in Windsor or Google."} The client&apos;s dashboard access, other connections and billing remain unchanged.
                 </DialogDescription>
               </DialogHeader>
               <div className="rounded-[10px] border border-[var(--danger-red)]/25 bg-[var(--danger-red)]/8 p-3 text-[12px] text-[var(--text-secondary)]">
@@ -930,7 +922,7 @@ export function ClientOnboardingManager({
 
       <Dialog open={Boolean(invitation && !createMode)} onOpenChange={(open) => { if (!open) { setInvitation(null); setDialogError(""); setCopiedUrl(null); } }}>
         <DialogContent>
-          <DialogHeader><DialogTitle>Copy replacement link</DialogTitle><DialogDescription>The previous link is invalid. This replacement bearer is shown once.</DialogDescription></DialogHeader>
+          <DialogHeader><DialogTitle>Copy replacement link</DialogTitle><DialogDescription>The previous link is invalid. This private replacement link is shown once.</DialogDescription></DialogHeader>
           {invitation && <LinkPanel url={invitation.url} copied={copiedUrl === invitation.url} copy={() => void copyLink(invitation.url)} />}
           {dialogError && <p role="alert" className="text-[12px] text-[var(--danger-red)]">{dialogError}</p>}
         </DialogContent>
