@@ -400,6 +400,10 @@ describe("the dedicated Lara live theme runtime", () => {
     const runtime = await createLaraThemeUrgencyLiveRuntime();
     await expect(runtime.readExactThemeAsset(filename)).rejects.toMatchObject({
       code: "invalid_rest_asset_integrity",
+      diagnostic: {
+        filename,
+        discrepancyClass: "json_no_exact_bounded_candidate",
+      },
     });
   });
 
@@ -422,6 +426,10 @@ describe("the dedicated Lara live theme runtime", () => {
     const runtime = await createLaraThemeUrgencyLiveRuntime();
     await expect(runtime.readExactThemeAsset(filename)).rejects.toMatchObject({
       code: "invalid_rest_asset_integrity",
+      diagnostic: {
+        filename,
+        discrepancyClass: "liquid_no_exact_literal_or_crlf_candidate",
+      },
     });
   });
 
@@ -430,6 +438,7 @@ describe("the dedicated Lara live theme runtime", () => {
     ["wrong theme", { theme_id: 999 }, {}, "invalid_rest_asset_fields"],
     ["wrong size", { size: 999 }, {}, "invalid_rest_asset_integrity"],
     ["wrong checksum", { checksum: "0".repeat(32) }, {}, "invalid_rest_asset_integrity"],
+    ["a null checksum", { checksum: null }, {}, "invalid_rest_asset_fields"],
     ["wrong content type", { content_type: "text/plain" }, {}, "invalid_rest_asset_fields"],
     ["invalid timestamp", { updated_at: "not-a-time" }, {}, "invalid_rest_asset_fields"],
     ["an extra field", { attachment: "e30=" }, {}, "invalid_rest_asset_fields"],

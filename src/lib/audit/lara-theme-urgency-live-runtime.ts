@@ -143,11 +143,26 @@ export type LaraThemeUrgencyLiveRuntimeErrorCode =
   | "theme_write_exemption_unavailable"
   | "unsupported_api_version";
 
+export const LARA_THEME_URGENCY_SAFE_REST_INTEGRITY_CLASSES = Object.freeze([
+  "json_no_exact_bounded_candidate",
+  "liquid_no_exact_literal_or_crlf_candidate",
+] as const);
+export const LARA_THEME_URGENCY_SAFE_REST_INTEGRITY_FILENAMES =
+  LARA_THEME_URGENCY_FILES;
+
+export type LaraThemeUrgencySafeRestIntegrityDiagnostic = Readonly<{
+  filename: LaraThemeUrgencyFilename;
+  discrepancyClass:
+    (typeof LARA_THEME_URGENCY_SAFE_REST_INTEGRITY_CLASSES)[number];
+}>;
+
 export class LaraThemeUrgencyLiveRuntimeError extends Error {
   constructor(
     public readonly code: LaraThemeUrgencyLiveRuntimeErrorCode,
     message: string,
     public readonly retryable = false,
+    public readonly diagnostic: LaraThemeUrgencySafeRestIntegrityDiagnostic | null =
+      null,
   ) {
     super(message);
     this.name = "LaraThemeUrgencyLiveRuntimeError";
@@ -183,8 +198,14 @@ function runtimeError(
   code: LaraThemeUrgencyLiveRuntimeErrorCode,
   message: string,
   retryable = false,
+  diagnostic: LaraThemeUrgencySafeRestIntegrityDiagnostic | null = null,
 ) {
-  return new LaraThemeUrgencyLiveRuntimeError(code, message, retryable);
+  return new LaraThemeUrgencyLiveRuntimeError(
+    code,
+    message,
+    retryable,
+    diagnostic,
+  );
 }
 
 function objectRecord(value: unknown): Record<string, unknown> | null {
@@ -557,6 +578,13 @@ async function getExactRestAsset(
     throw runtimeError(
       "invalid_rest_asset_integrity",
       "The fixed REST theme asset failed its exact byte-size and MD5 proof.",
+      false,
+      {
+        filename,
+        discrepancyClass: filename.endsWith(".json")
+          ? "json_no_exact_bounded_candidate"
+          : "liquid_no_exact_literal_or_crlf_candidate",
+      },
     );
   }
   return Object.freeze({

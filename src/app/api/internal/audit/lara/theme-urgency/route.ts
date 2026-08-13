@@ -7,7 +7,11 @@ import {
   runLaraThemeUrgencyRepairOneShot,
 } from "@/lib/audit/lara-theme-urgency-live-repair";
 import { LaraThemeUrgencyLiveContractError } from "@/lib/audit/lara-theme-urgency-live-contract";
-import { LaraThemeUrgencyLiveRuntimeError } from "@/lib/audit/lara-theme-urgency-live-runtime";
+import {
+  LARA_THEME_URGENCY_SAFE_REST_INTEGRITY_CLASSES,
+  LARA_THEME_URGENCY_SAFE_REST_INTEGRITY_FILENAMES,
+  LaraThemeUrgencyLiveRuntimeError,
+} from "@/lib/audit/lara-theme-urgency-live-runtime";
 import { LARA_AUDIT_CONNECTION } from "@/lib/audit/shopify-lara";
 
 export const dynamic = "force-dynamic";
@@ -40,6 +44,32 @@ function exactKeys(value: Record<string, unknown>, keys: readonly string[]) {
     actual.length === expected.length &&
     actual.every((key, index) => key === expected[index])
   );
+}
+
+function safeRestIntegrityDiagnostic(
+  error: LaraThemeUrgencyLiveRuntimeError,
+): Readonly<{ filename: string; discrepancyClass: string }> | null {
+  const diagnostic = error.diagnostic;
+  if (
+    error.code !== "invalid_rest_asset_integrity" ||
+    !diagnostic ||
+    !exactKeys(diagnostic as unknown as Record<string, unknown>, [
+      "filename",
+      "discrepancyClass",
+    ]) ||
+    !LARA_THEME_URGENCY_SAFE_REST_INTEGRITY_FILENAMES.includes(
+      diagnostic.filename,
+    ) ||
+    !LARA_THEME_URGENCY_SAFE_REST_INTEGRITY_CLASSES.includes(
+      diagnostic.discrepancyClass,
+    )
+  ) {
+    return null;
+  }
+  return {
+    filename: diagnostic.filename,
+    discrepancyClass: diagnostic.discrepancyClass,
+  };
 }
 
 export async function POST(request: NextRequest) {
@@ -109,10 +139,16 @@ export async function POST(request: NextRequest) {
     if (result.state === "failed") return response({ ok: false, ...result }, 502);
     return response({ ok: true, ...result });
   } catch (error) {
+    if (error instanceof LaraThemeUrgencyLiveRuntimeError) {
+      const diagnostic = safeRestIntegrityDiagnostic(error);
+      return response(
+        diagnostic ? { error: error.code, diagnostic } : { error: error.code },
+        409,
+      );
+    }
     if (
       error instanceof LaraThemeUrgencyRepairError ||
-      error instanceof LaraThemeUrgencyLiveContractError ||
-      error instanceof LaraThemeUrgencyLiveRuntimeError
+      error instanceof LaraThemeUrgencyLiveContractError
     ) {
       return response({ error: error.code }, 409);
     }

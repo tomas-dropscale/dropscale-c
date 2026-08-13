@@ -31,11 +31,32 @@ vi.mock("@/lib/audit/lara-theme-urgency-live-contract", () => {
 });
 vi.mock("@/lib/audit/lara-theme-urgency-live-runtime", () => {
   class LaraThemeUrgencyLiveRuntimeError extends Error {
-    constructor(public readonly code: string) {
-      super(code);
+    constructor(
+      public readonly code: string,
+      message = code,
+      public readonly retryable = false,
+      public readonly diagnostic: unknown = null,
+    ) {
+      super(message);
     }
   }
-  return { LaraThemeUrgencyLiveRuntimeError };
+  return {
+    LARA_THEME_URGENCY_SAFE_REST_INTEGRITY_CLASSES: [
+      "json_no_exact_bounded_candidate",
+      "liquid_no_exact_literal_or_crlf_candidate",
+    ],
+    LARA_THEME_URGENCY_SAFE_REST_INTEGRITY_FILENAMES: [
+      "blocks/ai_gen_block_a974a97.liquid",
+      "templates/index.json",
+      "sections/main-product.liquid",
+      "templates/product.json",
+      "sections/collection-list.liquid",
+      "sections/featured-collection.liquid",
+      "sections/featured-product.liquid",
+      "config/settings_data.json",
+    ],
+    LaraThemeUrgencyLiveRuntimeError,
+  };
 });
 vi.mock("@/lib/audit/shopify-lara", () => ({
   LARA_AUDIT_CONNECTION: {
@@ -46,6 +67,7 @@ vi.mock("@/lib/audit/shopify-lara", () => ({
 }));
 
 import { NextRequest } from "next/server";
+import { LaraThemeUrgencyLiveRuntimeError } from "@/lib/audit/lara-theme-urgency-live-runtime";
 import { POST } from "./route";
 
 const URL = "https://dropscale.app/api/internal/audit/lara/theme-urgency";
@@ -187,5 +209,66 @@ describe("the exact machine-only Lara theme route", () => {
       }),
     );
     expect(failed.status).toBe(502);
+  });
+
+  it("returns only an allowlisted filename and discrepancy class for REST integrity failures", async () => {
+    const filename = "templates/index.json" as const;
+    mocks.dryRun.mockRejectedValueOnce(
+      new LaraThemeUrgencyLiveRuntimeError(
+        "invalid_rest_asset_integrity",
+        "SECRET_BODY size=123 checksum=deadbeef updatedAt=secret",
+        false,
+        {
+          filename,
+          discrepancyClass: "json_no_exact_bounded_candidate",
+        },
+      ),
+    );
+
+    const result = await POST(request({ action: "dry-run" }));
+    expect(result.status).toBe(409);
+    const body = await result.json();
+    expect(body).toEqual({
+      error: "invalid_rest_asset_integrity",
+      diagnostic: {
+        filename,
+        discrepancyClass: "json_no_exact_bounded_candidate",
+      },
+    });
+    expect(JSON.stringify(body)).not.toMatch(
+      /SECRET_BODY|size|checksum|updatedAt|deadbeef|123/,
+    );
+  });
+
+  it("drops malformed or non-allowlisted REST integrity diagnostics", async () => {
+    for (const diagnostic of [
+      {
+        filename: "layout/theme.liquid",
+        discrepancyClass: "liquid_no_exact_literal_or_crlf_candidate",
+      },
+      {
+        filename: "templates/index.json",
+        discrepancyClass: "arbitrary_detail",
+      },
+      {
+        filename: "templates/index.json",
+        discrepancyClass: "json_no_exact_bounded_candidate",
+        body: "SECRET_BODY",
+      },
+    ]) {
+      mocks.dryRun.mockRejectedValueOnce(
+        new LaraThemeUrgencyLiveRuntimeError(
+          "invalid_rest_asset_integrity",
+          "SECRET_BODY",
+          false,
+          diagnostic as never,
+        ),
+      );
+      const result = await POST(request({ action: "dry-run" }));
+      expect(result.status).toBe(409);
+      await expect(result.json()).resolves.toEqual({
+        error: "invalid_rest_asset_integrity",
+      });
+    }
   });
 });
