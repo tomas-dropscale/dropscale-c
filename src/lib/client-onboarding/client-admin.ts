@@ -4,7 +4,9 @@ import { ClientOnboardingError } from "@/lib/client-onboarding/sessions";
 import { createServiceClient } from "@/lib/supabase/service";
 
 const PORTAL_IDENTITY_COLUMNS =
-  "id, full_name, email, discord_handle" as const;
+  "id, full_name, email, discord_handle, approval_status" as const;
+const PASSWORD_RESET_REDIRECT =
+  "https://dropscale.app/auth/callback?next=%2Freset-password";
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const DISCORD_URL_PREFIX = /^(?:https?:\/\/|discord(?:app)?\.com\/|www\.)/i;
 const DISCORD_WHITESPACE_OR_CONTROL = /\s|[\u0000-\u001f\u007f]/;
@@ -14,6 +16,7 @@ type PortalIdentity = {
   fullName: string;
   email: string;
   discordHandle: string | null;
+  approvalStatus: string;
 };
 
 export type PortalClientIdentityInput = {
@@ -74,6 +77,7 @@ function asPortalIdentity(value: unknown): PortalIdentity | null {
     typeof row.id !== "string" ||
     typeof row.full_name !== "string" ||
     typeof row.email !== "string" ||
+    typeof row.approval_status !== "string" ||
     (row.discord_handle !== null && typeof row.discord_handle !== "string")
   ) {
     return null;
@@ -83,6 +87,7 @@ function asPortalIdentity(value: unknown): PortalIdentity | null {
     fullName: row.full_name,
     email: row.email,
     discordHandle: row.discord_handle,
+    approvalStatus: row.approval_status,
   };
 }
 
@@ -102,8 +107,18 @@ function sameIdentity(left: PortalIdentity, right: PortalIdentity) {
     left.id === right.id &&
     left.fullName === right.fullName &&
     left.email === right.email &&
-    left.discordHandle === right.discordHandle
+    left.discordHandle === right.discordHandle &&
+    left.approvalStatus === right.approvalStatus
   );
+}
+
+function publicIdentity(identity: PortalIdentity) {
+  return {
+    id: identity.id,
+    fullName: identity.fullName,
+    email: identity.email,
+    discordHandle: identity.discordHandle,
+  };
 }
 
 function databaseError(
@@ -178,6 +193,25 @@ function authWriteError(error: unknown) {
     );
   }
   return databaseError("The client login email could not be updated.");
+}
+
+function passwordResetError(error: unknown) {
+  if (
+    errorStatus(error) === 429 ||
+    errorCode(error) === "over_request_rate_limit" ||
+    errorCode(error) === "over_email_send_rate_limit"
+  ) {
+    return new ClientOnboardingError(
+      "too_many_attempts",
+      "Too many reset emails were requested. Wait a minute and try again.",
+      429,
+    );
+  }
+  return new ClientOnboardingError(
+    "identity_failed",
+    "The password reset email could not be sent.",
+    502,
+  );
 }
 
 async function readAuthEmail(
@@ -290,6 +324,7 @@ export async function updatePortalClientIdentity(
     fullName: input.fullName,
     email: input.email,
     discordHandle: input.discordHandle,
+    approvalStatus: previousPortal.approvalStatus,
   };
   const authEmailChanged = authResult.email !== input.email;
   if (authEmailChanged) {
@@ -320,7 +355,7 @@ export async function updatePortalClientIdentity(
   } catch (rpcError) {
     error = rpcError;
   }
-  if (!error && data === input.clientId) return desired;
+  if (!error && data === input.clientId) return publicIdentity(desired);
 
   // Do not blindly compensate an ambiguous RPC response: it may have committed.
   // Re-read the exact row and restore Auth only if every database field is still
@@ -329,7 +364,9 @@ export async function updatePortalClientIdentity(
   const verifiedPortal = verifiedResult.error
     ? null
     : asPortalIdentity(verifiedResult.data);
-  if (verifiedPortal && sameIdentity(verifiedPortal, desired)) return desired;
+  if (verifiedPortal && sameIdentity(verifiedPortal, desired)) {
+    return publicIdentity(desired);
+  }
   if (verifiedPortal && sameIdentity(verifiedPortal, previousPortal)) {
     if (authEmailChanged) {
       await restoreAuthEmail(
@@ -345,6 +382,65 @@ export async function updatePortalClientIdentity(
   throw databaseError(
     "The client identity update could not be verified. Refresh before retrying.",
   );
+}
+
+/** Send a recovery email to the current Auth email, never to browser input. */
+export async function sendPortalClientPasswordReset(clientId: string) {
+  const service = serviceOrThrow();
+  const portalResult = await readPortalIdentity(service, clientId);
+  if (portalResult.error) throw databaseError();
+  const portal = asPortalIdentity(portalResult.data);
+  if (!portal || portal.approvalStatus === "rejected") {
+    throw new ClientOnboardingError("not_found", "Client not found.", 404);
+  }
+
+  const [authResult, profileResult] = await Promise.all([
+    readAuthEmail(service, clientId),
+    service.from("profiles").select("role").eq("id", clientId).maybeSingle(),
+  ]);
+  if (profileResult.error) throw databaseError();
+  if (!profileResult.data) {
+    throw new ClientOnboardingError(
+      "invalid_state",
+      "The client login account could not be loaded.",
+      409,
+    );
+  }
+  if (profileResult.data?.role === "admin") {
+    throw new ClientOnboardingError("forbidden", "Forbidden.", 403);
+  }
+  if (authResult.error) {
+    throw new ClientOnboardingError(
+      "identity_failed",
+      "The client login account could not be loaded.",
+      502,
+    );
+  }
+  if (!authResult.email) {
+    throw new ClientOnboardingError(
+      "invalid_state",
+      "The client login account could not be loaded.",
+      409,
+    );
+  }
+  if (authResult.email !== portal.email.trim().toLowerCase()) {
+    throw new ClientOnboardingError(
+      "invalid_state",
+      "The client login email is still being updated. Refresh before retrying.",
+      409,
+    );
+  }
+
+  let error: unknown;
+  try {
+    ({ error } = await service.auth.resetPasswordForEmail(authResult.email, {
+      redirectTo: PASSWORD_RESET_REDIRECT,
+    }));
+  } catch (cause) {
+    throw passwordResetError(cause);
+  }
+  if (error) throw passwordResetError(error);
+  return authResult.email;
 }
 
 /** Archive means revoke portal access and open links, never delete history. */

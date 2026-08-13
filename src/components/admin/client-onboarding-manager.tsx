@@ -9,6 +9,7 @@ import {
   Clipboard,
   Clock3,
   Link2,
+  Mail,
   Megaphone,
   Pencil,
   Plus,
@@ -497,7 +498,13 @@ export function ClientOnboardingManager({
     email: "",
     discordHandle: "",
   });
+  const [passwordResetSent, setPasswordResetSent] = React.useState(false);
   const [removeTarget, setRemoveTarget] = React.useState<ClientManagementTarget | null>(null);
+  const editDialogBusy = Boolean(
+    editTarget &&
+      (busy === `edit-client:${editTarget.clientId}` ||
+        busy === `password-reset:${editTarget.clientId}`),
+  );
 
   const cards = React.useMemo(() => buildClientCards(sessions, roster), [sessions, roster]);
   const hasVisibleIssue = React.useCallback(
@@ -865,12 +872,49 @@ export function ClientOnboardingManager({
       email: target.email,
       discordHandle: target.discordHandle,
     });
+    setPasswordResetSent(false);
     setDialogError("");
   }
 
   function closeEditClient() {
     setEditTarget(null);
+    setPasswordResetSent(false);
     setDialogError("");
+  }
+
+  async function sendClientPasswordReset() {
+    if (!editTarget || readOnlyPreview) return;
+
+    const persistedEmail = editTarget.email.trim().toLowerCase();
+    const draftEmail = editDraft.email.trim().toLowerCase();
+    if (draftEmail !== persistedEmail) {
+      setDialogError("Save the new email before sending a reset link.");
+      return;
+    }
+
+    const busyKey = `password-reset:${editTarget.clientId}`;
+    setBusy(busyKey);
+    setDialogError("");
+    setPasswordResetSent(false);
+    try {
+      const response = await fetch(
+        `/api/admin/client-onboarding/client/${encodeURIComponent(editTarget.clientId)}`,
+        { method: "POST" },
+      );
+      const body = await readJson(response);
+      if (!response.ok) {
+        throw new Error(errorMessage(body, "The password reset email could not be sent."));
+      }
+      setPasswordResetSent(true);
+    } catch (error) {
+      setDialogError(
+        error instanceof Error
+          ? error.message
+          : "The password reset email could not be sent.",
+      );
+    } finally {
+      setBusy(null);
+    }
   }
 
   async function updateClientIdentity(event: React.FormEvent<HTMLFormElement>) {
@@ -1306,8 +1350,13 @@ export function ClientOnboardingManager({
         </DialogContent>
       </Dialog>
 
-      <Dialog open={Boolean(editTarget)} onOpenChange={(open) => !open && closeEditClient()}>
-        <DialogContent>
+      <Dialog
+        open={Boolean(editTarget)}
+        onOpenChange={(open) => {
+          if (!open && !editDialogBusy) closeEditClient();
+        }}
+      >
+        <DialogContent showClose={!editDialogBusy}>
           <DialogHeader>
             <DialogTitle>Edit client</DialogTitle>
             <DialogDescription>
@@ -1335,10 +1384,47 @@ export function ClientOnboardingManager({
                   type="email"
                   required
                   value={editDraft.email}
-                  onChange={(event) =>
-                    setEditDraft((current) => ({ ...current, email: event.target.value }))
-                  }
+                  onChange={(event) => {
+                    setEditDraft((current) => ({ ...current, email: event.target.value }));
+                    setPasswordResetSent(false);
+                  }}
                 />
+                <div className="space-y-1.5 pt-1">
+                  <Button
+                    type="button"
+                    size="sm"
+                    aria-describedby="password-reset-help"
+                    loading={busy === `password-reset:${editTarget.clientId}`}
+                    disabled={
+                      Boolean(busy) ||
+                      readOnlyPreview ||
+                      editDraft.email.trim().toLowerCase() !==
+                        editTarget.email.trim().toLowerCase()
+                    }
+                    onClick={() => void sendClientPasswordReset()}
+                  >
+                    <Mail aria-hidden /> Send password reset email
+                  </Button>
+                  <p
+                    id="password-reset-help"
+                    className="text-[11px] leading-relaxed text-[var(--text-muted)]"
+                  >
+                    {editDraft.email.trim().toLowerCase() !==
+                    editTarget.email.trim().toLowerCase()
+                      ? "Save the new email before sending a reset link."
+                      : "Sends a secure reset link to the client’s current login email. The password is not changed until the client uses it."}
+                  </p>
+                  {passwordResetSent && (
+                    <p
+                      role="status"
+                      aria-live="polite"
+                      aria-atomic="true"
+                      className="text-[12px] text-[var(--success-green)]"
+                    >
+                      Password reset email sent.
+                    </p>
+                  )}
+                </div>
               </div>
               <div className="space-y-2">
                 <Label htmlFor="edit-client-discord">Discord handle (optional)</Label>
@@ -1356,11 +1442,12 @@ export function ClientOnboardingManager({
               </div>
               {dialogError && <p role="alert" className="text-[12px] text-[var(--danger-red)]">{dialogError}</p>}
               <DialogFooter>
-                <Button type="button" onClick={closeEditClient}>Cancel</Button>
+                <Button type="button" disabled={Boolean(busy)} onClick={closeEditClient}>Cancel</Button>
                 <Button
                   type="submit"
                   variant="primary"
                   loading={busy === `edit-client:${editTarget.clientId}`}
+                  disabled={Boolean(busy)}
                 >
                   <Check aria-hidden /> Save changes
                 </Button>

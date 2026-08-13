@@ -2,6 +2,7 @@ import type { NextRequest } from "next/server";
 
 import {
   archivePortalClient,
+  sendPortalClientPasswordReset,
   updatePortalClientIdentity,
 } from "@/lib/client-onboarding/client-admin";
 import {
@@ -50,6 +51,30 @@ export async function PATCH(request: NextRequest, { params }: Context) {
     return clientOnboardingErrorResponse(
       error,
       "The client identity could not be updated.",
+    );
+  }
+}
+
+export async function POST(request: NextRequest, { params }: Context) {
+  try {
+    await requireClientOnboardingAdmin();
+    const { id } = await params;
+    if (!isClientOnboardingId(id)) {
+      return clientOnboardingResponse({ error: "Client not found." }, 404);
+    }
+    if (request.body) {
+      return clientOnboardingResponse(
+        { error: "This request does not accept a body." },
+        400,
+      );
+    }
+
+    await sendPortalClientPasswordReset(id);
+    return clientOnboardingResponse({ ok: true });
+  } catch (error) {
+    return clientOnboardingErrorResponse(
+      error,
+      "The password reset email could not be sent.",
     );
   }
 }

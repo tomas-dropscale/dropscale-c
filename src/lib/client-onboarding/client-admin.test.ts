@@ -17,7 +17,11 @@ const mocks = vi.hoisted(() => {
     select: vi.fn(),
     eq: vi.fn(),
     maybeSingle: vi.fn(),
+    profileSelect: vi.fn(),
+    profileEq: vi.fn(),
+    profileMaybeSingle: vi.fn(),
     getUserById: vi.fn(),
+    resetPasswordForEmail: vi.fn(),
     updateUserById: vi.fn(),
     rpc: vi.fn(),
   };
@@ -33,6 +37,7 @@ vi.mock("@/lib/supabase/service", () => ({
 
 import {
   archivePortalClient,
+  sendPortalClientPasswordReset,
   updatePortalClientIdentity,
 } from "./client-admin";
 
@@ -47,6 +52,7 @@ function portal(overrides: Record<string, unknown> = {}) {
     full_name: "Northwind Home",
     email: OLD_EMAIL,
     discord_handle: "northwind.home",
+    approval_status: "approved",
     ...overrides,
   };
 }
@@ -78,11 +84,22 @@ function input(overrides: Record<string, unknown> = {}) {
 describe("admin portal client persistence", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.from.mockReturnValue({ select: mocks.select });
+    mocks.from.mockImplementation((table: string) =>
+      table === "profiles"
+        ? { select: mocks.profileSelect }
+        : { select: mocks.select },
+    );
     mocks.select.mockReturnValue({ eq: mocks.eq });
     mocks.eq.mockReturnValue({ maybeSingle: mocks.maybeSingle });
+    mocks.profileSelect.mockReturnValue({ eq: mocks.profileEq });
+    mocks.profileEq.mockReturnValue({ maybeSingle: mocks.profileMaybeSingle });
     mocks.maybeSingle.mockResolvedValue({ data: portal(), error: null });
+    mocks.profileMaybeSingle.mockResolvedValue({
+      data: { role: "member" },
+      error: null,
+    });
     mocks.getUserById.mockResolvedValue(authUser(OLD_EMAIL));
+    mocks.resetPasswordForEmail.mockResolvedValue({ data: {}, error: null });
     mocks.updateUserById.mockResolvedValue(authUser(NEW_EMAIL));
     mocks.rpc.mockResolvedValue({ data: CLIENT_ID, error: null });
     mocks.createServiceClient.mockReturnValue({
@@ -92,6 +109,7 @@ describe("admin portal client persistence", () => {
           getUserById: mocks.getUserById,
           updateUserById: mocks.updateUserById,
         },
+        resetPasswordForEmail: mocks.resetPasswordForEmail,
       },
       rpc: mocks.rpc,
     });
@@ -282,6 +300,119 @@ describe("admin portal client persistence", () => {
     });
     expect(mocks.rpc).not.toHaveBeenCalled();
   });
+
+  it("sends recovery only to the matching Auth email with a token-hash callback redirect", async () => {
+    await expect(sendPortalClientPasswordReset(CLIENT_ID)).resolves.toBe(
+      OLD_EMAIL,
+    );
+
+    expect(mocks.resetPasswordForEmail).toHaveBeenCalledWith(OLD_EMAIL, {
+      redirectTo:
+        "https://dropscale.app/auth/callback?next=%2Freset-password",
+    });
+    expect(mocks.updateUserById).not.toHaveBeenCalled();
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+
+  it("does not send a recovery email when the portal client does not exist", async () => {
+    mocks.maybeSingle.mockResolvedValue({ data: null, error: null });
+
+    await expect(sendPortalClientPasswordReset(CLIENT_ID)).rejects.toMatchObject({
+      code: "not_found",
+      status: 404,
+    });
+    expect(mocks.resetPasswordForEmail).not.toHaveBeenCalled();
+  });
+
+  it("rejects a password reset while the portal and Auth emails disagree", async () => {
+    mocks.getUserById.mockResolvedValue(authUser(NEW_EMAIL));
+
+    await expect(sendPortalClientPasswordReset(CLIENT_ID)).rejects.toMatchObject({
+      code: "invalid_state",
+      status: 409,
+    });
+    expect(mocks.resetPasswordForEmail).not.toHaveBeenCalled();
+  });
+
+  it("does not send password reset email for an archived client", async () => {
+    mocks.maybeSingle.mockResolvedValue({
+      data: portal({ approval_status: "rejected" }),
+      error: null,
+    });
+
+    await expect(sendPortalClientPasswordReset(CLIENT_ID)).rejects.toMatchObject({
+      code: "not_found",
+      status: 404,
+    });
+    expect(mocks.getUserById).not.toHaveBeenCalled();
+    expect(mocks.resetPasswordForEmail).not.toHaveBeenCalled();
+  });
+
+  it("does not send password reset email to an admin profile", async () => {
+    mocks.profileMaybeSingle.mockResolvedValue({
+      data: { role: "admin" },
+      error: null,
+    });
+
+    await expect(sendPortalClientPasswordReset(CLIENT_ID)).rejects.toMatchObject({
+      code: "forbidden",
+      status: 403,
+    });
+    expect(mocks.resetPasswordForEmail).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the exact Auth account has no email", async () => {
+    mocks.getUserById.mockResolvedValue({
+      data: { user: { id: CLIENT_ID, email: null } },
+      error: null,
+    });
+
+    await expect(sendPortalClientPasswordReset(CLIENT_ID)).rejects.toMatchObject({
+      code: "invalid_state",
+      status: 409,
+    });
+    expect(mocks.resetPasswordForEmail).not.toHaveBeenCalled();
+  });
+
+  it("classifies password-reset rate limits without leaking Auth details", async () => {
+    mocks.resetPasswordForEmail.mockResolvedValue({
+      data: null,
+      error: {
+        code: "over_email_send_rate_limit",
+        status: 429,
+        message: "Internal provider detail",
+      },
+    });
+
+    await expect(sendPortalClientPasswordReset(CLIENT_ID)).rejects.toMatchObject({
+      code: "too_many_attempts",
+      status: 429,
+      message: "Too many reset emails were requested. Wait a minute and try again.",
+    });
+  });
+
+  it.each([
+    { mode: "returned", detail: "SMTP password leaked" },
+    { mode: "thrown", detail: "Network secret leaked" },
+  ])(
+    "redacts a $mode password-reset provider failure",
+    async ({ mode, detail }) => {
+      if (mode === "thrown") {
+        mocks.resetPasswordForEmail.mockRejectedValue(new Error(detail));
+      } else {
+        mocks.resetPasswordForEmail.mockResolvedValue({
+          data: null,
+          error: { code: "smtp_failed", status: 500, message: detail },
+        });
+      }
+
+      await expect(sendPortalClientPasswordReset(CLIENT_ID)).rejects.toMatchObject({
+        code: "identity_failed",
+        status: 502,
+        message: "The password reset email could not be sent.",
+      });
+    },
+  );
 
   it("archives through the service-only RPC without deleting any related row in TypeScript", async () => {
     await archivePortalClient(CLIENT_ID, ADMIN_ID);

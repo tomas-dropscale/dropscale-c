@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 
@@ -33,6 +35,7 @@ describe("auth callback redirect", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.exchangeCodeForSession.mockResolvedValue({ error: null });
+    mocks.verifyOtp.mockResolvedValue({ error: null });
   });
 
   it("returns a successful OAuth session to the requested onboarding path", async () => {
@@ -64,5 +67,34 @@ describe("auth callback redirect", () => {
     expect(response.headers.get("location")).toBe(
       "https://dropscale.app/dashboard",
     );
+  });
+
+  it("exchanges a cross-device recovery token and opens the reset page", async () => {
+    const response = await GET(
+      new NextRequest(
+        "https://dropscale.app/auth/callback?next=%2Freset-password&token_hash=recovery-token&type=recovery",
+      ),
+    );
+
+    expect(mocks.verifyOtp).toHaveBeenCalledWith({
+      type: "recovery",
+      token_hash: "recovery-token",
+    });
+    expect(mocks.exchangeCodeForSession).not.toHaveBeenCalled();
+    expect(response.headers.get("location")).toBe(
+      "https://dropscale.app/reset-password",
+    );
+  });
+
+  it("keeps the recovery email template on the cross-device token-hash contract", () => {
+    const template = readFileSync(
+      "supabase/templates/reset-password.html",
+      "utf8",
+    );
+
+    expect(template).toContain("{{ .RedirectTo }}");
+    expect(template).toContain("token_hash={{ .TokenHash }}");
+    expect(template).toContain("type=recovery");
+    expect(template).not.toContain("{{ .ConfirmationURL }}");
   });
 });

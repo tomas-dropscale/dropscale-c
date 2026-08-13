@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => {
     requireClientOnboardingAdmin: vi.fn(),
     isClientOnboardingId: vi.fn(),
     updatePortalClientIdentity: vi.fn(),
+    sendPortalClientPasswordReset: vi.fn(),
     archivePortalClient: vi.fn(),
   };
 });
@@ -29,6 +30,7 @@ vi.mock("@/lib/client-onboarding/invitations", () => ({
 }));
 vi.mock("@/lib/client-onboarding/client-admin", () => ({
   updatePortalClientIdentity: mocks.updatePortalClientIdentity,
+  sendPortalClientPasswordReset: mocks.sendPortalClientPasswordReset,
   archivePortalClient: mocks.archivePortalClient,
 }));
 vi.mock("@/lib/client-onboarding/http", () => ({
@@ -59,7 +61,7 @@ vi.mock("@/lib/client-onboarding/http", () => ({
   },
 }));
 
-import { DELETE, PATCH } from "./route";
+import { DELETE, PATCH, POST } from "./route";
 
 const CLIENT_ID = "40000000-0000-4000-8000-000000000001";
 const ADMIN_ID = "40000000-0000-4000-8000-000000000002";
@@ -92,6 +94,19 @@ function remove(body?: unknown) {
   );
 }
 
+function sendReset(body?: unknown) {
+  return new NextRequest(
+    `http://localhost/api/admin/client-onboarding/client/${CLIENT_ID}`,
+    body === undefined
+      ? { method: "POST" }
+      : {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        },
+  );
+}
+
 describe("admin portal client identity route", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -101,6 +116,9 @@ describe("admin portal client identity route", () => {
     });
     mocks.isClientOnboardingId.mockReturnValue(true);
     mocks.updatePortalClientIdentity.mockResolvedValue(undefined);
+    mocks.sendPortalClientPasswordReset.mockResolvedValue(
+      "owner@northwind.example",
+    );
     mocks.archivePortalClient.mockResolvedValue(undefined);
   });
 
@@ -158,6 +176,45 @@ describe("admin portal client identity route", () => {
 
     expect(response.status).toBe(400);
     expect(mocks.updatePortalClientIdentity).not.toHaveBeenCalled();
+  });
+
+  it("sends a reset email for the exact client without accepting an email from the browser", async () => {
+    const response = await POST(sendReset(), context());
+
+    expect(response.status).toBe(200);
+    expect(mocks.sendPortalClientPasswordReset).toHaveBeenCalledWith(CLIENT_ID);
+    await expect(response.json()).resolves.toEqual({ ok: true });
+  });
+
+  it("re-authorises the admin before sending a reset email", async () => {
+    mocks.requireClientOnboardingAdmin.mockRejectedValue(
+      new mocks.ClientOnboardingError("forbidden", "Forbidden.", 403),
+    );
+
+    const response = await POST(sendReset(), context());
+
+    expect(response.status).toBe(403);
+    expect(mocks.isClientOnboardingId).not.toHaveBeenCalled();
+    expect(mocks.sendPortalClientPasswordReset).not.toHaveBeenCalled();
+  });
+
+  it("rejects browser-supplied reset data", async () => {
+    const response = await POST(
+      sendReset({ email: "attacker@example.com" }),
+      context(),
+    );
+
+    expect(response.status).toBe(400);
+    expect(mocks.sendPortalClientPasswordReset).not.toHaveBeenCalled();
+  });
+
+  it("does not expose the password-reset helper for an invalid identifier", async () => {
+    mocks.isClientOnboardingId.mockReturnValue(false);
+
+    const response = await POST(sendReset(), context("not-a-client"));
+
+    expect(response.status).toBe(404);
+    expect(mocks.sendPortalClientPasswordReset).not.toHaveBeenCalled();
   });
 
   it("archives with no body and preserves the service contract", async () => {
