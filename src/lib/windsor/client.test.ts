@@ -81,7 +81,26 @@ describe("Windsor Google Ads server adapter", () => {
     expect(upstream.pathname).toBe("/api/team/generate-co-user-url/");
     expect(upstream.searchParams.get("allowed_sources")).toBe("google_ads");
     expect(upstream.searchParams.get("api_key")).toBe(API_KEY);
-    expect(fetcher.mock.calls[0]?.[1]).toMatchObject({ method: "GET", redirect: "error" });
+    expect(fetcher.mock.calls[0]?.[1]).toMatchObject({ method: "GET", redirect: "manual" });
+  });
+
+  it("rejects redirects without following or exposing the API key", async () => {
+    const fetcher = mockFetch(
+      new Response(null, {
+        status: 302,
+        headers: { location: "https://attacker.invalid/capture" },
+      }),
+    );
+
+    await expect(
+      createGoogleAdsAuthorization({ fetcher: fetcher as typeof fetch }),
+    ).rejects.toMatchObject({
+      code: "upstream_unavailable",
+      upstreamStatus: 302,
+    });
+
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher.mock.calls[0]?.[1]).toMatchObject({ redirect: "manual" });
   });
 
   it("allows the co-user link generator more than the read-request timeout", async () => {

@@ -374,7 +374,10 @@ async function requestJson(
       headers: { Accept: "application/json" },
       cache: "no-store",
       credentials: "omit",
-      redirect: "error",
+      // workerd does not implement `redirect: "error"`. Manual mode keeps
+      // authenticated requests on the exact Windsor endpoint; any 3xx is
+      // rejected below without following it or forwarding the API key.
+      redirect: "manual",
       signal: timeout.signal,
     });
     if (!response.ok) throw upstreamError(response);
