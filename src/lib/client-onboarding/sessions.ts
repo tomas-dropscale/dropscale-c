@@ -350,11 +350,12 @@ function normaliseAssets(
   const assets = [...new Set(value)].filter(
     (asset): asset is ClientOnboardingAsset => asset === "shopify" || asset === "google_ads",
   );
-  if (assets.length !== value.length || (assets.length === 0 && mode !== "new_client")) {
+  const invalidCount = mode === "new_client" ? assets.length === 1 : assets.length === 0;
+  if (assets.length !== value.length || invalidCount) {
     throw new ClientOnboardingError(
       "invalid_request",
       mode === "new_client"
-        ? "Choose account only, Shopify, Google Ads or both."
+        ? "Choose dashboard account only or complete Shopify and Google Ads setup."
         : "Choose Shopify, Google Ads or both.",
       400,
     );

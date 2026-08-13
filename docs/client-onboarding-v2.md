@@ -17,7 +17,7 @@ A transição mantém **duas superfícies de clientes em paralelo**. A página o
 - Durante a coexistência, `/admin/clients` continua a servir a implementação atual e aparece na navegação como **Clients (Legacy)**. A nova superfície usa `/admin/client-onboarding` e aparece como **Clients**, com um badge temporário `New`.
 - Todos os clientes criados depois da ativação da V2 entram exclusivamente em **Clients**. Clientes atuais continuam em **Clients (Legacy)** até existir um cutover individual, explícito e aprovado.
 - Não existe dual-write entre os dois sistemas. Em cada momento, um cliente tem uma única superfície operacional; dados V2 ainda em onboarding são staging e não alimentam reporting ou billing.
-- O onboarding de um cliente novo começa sempre num link criado pela Dropscale sem PII pré-preenchida. O cliente cria a sua conta e liga zero ou mais assets dentro dos requisitos definidos pelo admin. Um utilizador sem website ou conta de anúncios pode concluir um onboarding **Account only** e receber assets mais tarde através de um link separado.
+- O onboarding de um cliente novo começa sempre num link criado pela Dropscale sem PII pré-preenchida. O admin escolhe entre **Account only**, sem assets, e **Complete setup**, que pede Shopify e Google Ads e permite ligar todas as lojas e contas usadas pelo cliente. Assets parciais são pedidos mais tarde através de `Add Assets`.
 - O wizard mostra entre um e três passos, conforme o link: **Account** é sempre obrigatório; **Shopify stores** e **Google Ads accounts** só aparecem quando foram pedidos.
 - Shopify usa uma ligação segura gerida pela Dropscale, reutilizando o padrão técnico já provado em Audit Connections, mas com credenciais, finalidade e scopes mínimos de reporting separados.
 - Google Ads usa um co-user authorization link da Windsor.ai restrito a `google_ads`. Como não foi encontrado um contrato público de callback/webhook para a Dropscale, a confirmação é feita por polling server-side dos linked accounts.
@@ -140,7 +140,7 @@ Cada cliente tem as ações:
 
 #### `new_client`
 
-- O admin escolhe Account only, Shopify, Google Ads ou ambos e emite um link sem nome ou email pré-preenchidos.
+- O admin escolhe Account only ou Complete setup (Shopify + Google Ads) e emite um link sem nome ou email pré-preenchidos.
 - A abertura do link inicia o passo Account.
 - O cliente cria a própria identidade; só depois liga os assets pedidos.
 - A criação de conta é idempotente por sessão e email normalizado. Uma colisão com identidade existente exige login/recovery, nunca a criação silenciosa de uma segunda identidade.
@@ -218,7 +218,7 @@ Clientes legacy que nunca iniciaram migração podem ser tratados como `legacy_o
 - ID opaco e token público armazenado apenas como hash;
 - `mode`: `new_client | reconnect | add_assets`;
 - `target_portal_client_id`, nulo apenas antes da criação no modo novo;
-- tipos de asset pedidos; a lista pode ser vazia apenas em `new_client`, enquanto `add_assets` e `reconnect` exigem pelo menos um tipo;
+- tipos de asset pedidos; `new_client` aceita apenas a lista vazia (Account only) ou ambos os tipos (Complete setup), enquanto `add_assets` e `reconnect` exigem Shopify, Google Ads ou ambos;
 - estado, expiração, consumo e revogação;
 - criador admin e timestamps;
 - nenhuma PII no token/URL.
@@ -453,7 +453,7 @@ Nenhuma destas ações faz `DELETE` de `portal_clients`, `ad_accounts`, invoices
 
 ### Link e identidade
 
-- Um admin consegue gerar um link de novo cliente para Account only, Shopify, Google Ads ou ambos. Links `add_assets` e `reconnect` exigem Shopify, Google Ads ou ambos.
+- Um admin consegue gerar um link de novo cliente para Account only ou Complete setup (Shopify + Google Ads). Links `add_assets` e `reconnect` permitem Shopify, Google Ads ou ambos.
 - O registo público legacy deixa de criar novos clientes; `/register` explica que o acesso é por convite e mantém login/recovery de utilizadores atuais.
 - O link de novo cliente não contém nome, email, client ID legível, API key ou outro PII/segredo.
 - Um novo cliente fornece primeiro nome, último nome, email e password e consegue entrar na dashboard após o fluxo aprovado.

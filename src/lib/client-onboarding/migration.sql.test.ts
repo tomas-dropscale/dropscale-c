@@ -556,7 +556,7 @@ describe("client onboarding V2 migration", () => {
   });
 
   it("retries the same Shopify store idempotently for the same owner", async () => {
-    await createNewInvitation(["shopify"]);
+    await createNewInvitation();
     await claim();
     await db.query(
       `select public.complete_client_shopify_connection(
@@ -590,7 +590,7 @@ describe("client onboarding V2 migration", () => {
   });
 
   it("never transfers a Shopify asset or credential to another session", async () => {
-    await createNewInvitation(["shopify"]);
+    await createNewInvitation();
     await claim();
     await db.query(
       `select public.complete_client_shopify_connection(
@@ -646,7 +646,7 @@ describe("client onboarding V2 migration", () => {
   });
 
   it("stores Windsor authorization only while the locked Google Ads session is open", async () => {
-    await createNewInvitation(["google_ads"]);
+    await createNewInvitation();
     await claim();
 
     const stored = await db.query<{ id: string }>(
@@ -689,7 +689,7 @@ describe("client onboarding V2 migration", () => {
   });
 
   it("rejects Windsor authorization outside its purpose and from non-service callers", async () => {
-    await createNewInvitation(["shopify"]);
+    await createNewInvitation([]);
     await claim();
     await expect(
       db.query(`select public.store_client_windsor_authorization($1, $2, $3)`, [
@@ -731,7 +731,7 @@ describe("client onboarding V2 migration", () => {
   });
 
   it("persists a Google Ads batch atomically and rejects cross-session or cross-owner duplicates", async () => {
-    await createNewInvitation(["google_ads"]);
+    await createNewInvitation();
     await claim();
     await db.query(
       `select public.upsert_client_google_ads_connection(
@@ -798,7 +798,7 @@ describe("client onboarding V2 migration", () => {
   });
 
   it("retries a Google Ads batch idempotently within one session and returns input order", async () => {
-    await createNewInvitation(["google_ads"]);
+    await createNewInvitation();
     await claim();
     const firstBatch = [
       {
@@ -851,7 +851,7 @@ describe("client onboarding V2 migration", () => {
   });
 
   it("rejects malformed or duplicate Google Ads batches before writing", async () => {
-    await createNewInvitation(["google_ads"]);
+    await createNewInvitation();
     await claim();
     const valid = {
       windsorAccountId: "account-one",
@@ -904,7 +904,7 @@ describe("client onboarding V2 migration", () => {
   });
 
   it("maps same-client assets across sessions without satisfying current-session requirements", async () => {
-    await createNewInvitation(["shopify"]);
+    await createNewInvitation();
     await claim();
     await db.query(
       `select public.complete_client_shopify_connection(
@@ -1200,7 +1200,7 @@ describe("client onboarding V2 migration", () => {
   });
 
   it("revokes V2 secrets and assets while preserving a legacy account", async () => {
-    await createNewInvitation(["shopify"]);
+    await createNewInvitation();
     await claim();
     await db.query(
       `insert into public.portal_clients (id, full_name, email)

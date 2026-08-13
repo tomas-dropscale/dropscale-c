@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   getSessionProfile: vi.fn(),
   createServiceClient: vi.fn(),
+  createClientOnboardingInvitationMaterial: vi.fn(),
   hashClientOnboardingToken: vi.fn(),
 }));
 
@@ -15,7 +16,7 @@ vi.mock("@/lib/supabase/service", () => ({
 }));
 vi.mock("@/lib/client-onboarding/invitations", () => ({
   clientOnboardingInvitationUrl: vi.fn(),
-  createClientOnboardingInvitationMaterial: vi.fn(),
+  createClientOnboardingInvitationMaterial: mocks.createClientOnboardingInvitationMaterial,
   hashClientOnboardingToken: mocks.hashClientOnboardingToken,
   isClientOnboardingId: (value: unknown) => typeof value === "string" && value.length === 36,
   isClientOnboardingToken: (value: unknown) => typeof value === "string" && value.length === 43,
@@ -23,6 +24,7 @@ vi.mock("@/lib/client-onboarding/invitations", () => ({
 
 import {
   authorizeClientOnboardingRequest,
+  createClientOnboardingSession,
   recoverClientOnboardingIdentity,
   revokeClientOnboardingSession,
 } from "./sessions";
@@ -33,6 +35,53 @@ const OTHER_USER = "40000000-0000-4000-8000-000000000003";
 const OTHER_SESSION = "40000000-0000-4000-8000-000000000004";
 const TOKEN = "a".repeat(43);
 const TOKEN_HASH = "stored-token-hash";
+
+describe("client onboarding invitation asset rules", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.createClientOnboardingInvitationMaterial.mockResolvedValue({
+      id: SESSION,
+      token: TOKEN,
+      tokenHash: TOKEN_HASH,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      url: `https://dropscale.app/onboarding/client/${SESSION}#${TOKEN}`,
+    });
+  });
+
+  it.each(["shopify", "google_ads"])(
+    "rejects a partial new-client setup requesting only %s",
+    async (asset) => {
+      const { rpc } = serviceFor(sessionRow());
+
+      await expect(
+        createClientOnboardingSession({
+          mode: "new_client",
+          requestedAssets: [asset],
+          adminId: OTHER_USER,
+        }),
+      ).rejects.toMatchObject({ code: "invalid_request", status: 400 });
+      expect(mocks.createClientOnboardingInvitationMaterial).not.toHaveBeenCalled();
+      expect(rpc).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["add_assets", "shopify"],
+    ["reconnect", "google_ads"],
+  ] as const)("keeps %s links with only %s valid", async (mode, asset) => {
+    const { rpc } = serviceFor(sessionRow());
+
+    await expect(
+      createClientOnboardingSession({
+        mode,
+        requestedAssets: [asset],
+        targetClientId: OWNER,
+        adminId: OTHER_USER,
+      }),
+    ).resolves.toMatchObject({ mode, requestedAssets: [asset] });
+    expect(rpc).toHaveBeenCalledOnce();
+  });
+});
 
 function sessionRow(overrides: Record<string, unknown> = {}) {
   return {

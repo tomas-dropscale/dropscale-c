@@ -309,29 +309,41 @@ function LinkPanel({ url, copied, copy }: { url: string; copied: boolean; copy: 
 function AssetChoiceField({
   value,
   onChange,
-  allowAccountOnly,
+  newClient,
 }: {
   value: AssetChoice;
   onChange: (value: AssetChoice) => void;
-  allowAccountOnly: boolean;
+  newClient: boolean;
 }) {
   return (
     <div className="space-y-1.5">
-      <Label id="client-onboarding-asset-choice">Setup requested</Label>
+      <Label id="client-onboarding-asset-choice">
+        {newClient ? "Onboarding type" : "Assets requested"}
+      </Label>
       <Select value={value} onValueChange={(choice) => onChange(choice as AssetChoice)}>
         <SelectTrigger aria-labelledby="client-onboarding-asset-choice">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
-          {allowAccountOnly && <SelectItem value="account">Account only — no assets yet</SelectItem>}
-          <SelectItem value="shopify">Shopify store</SelectItem>
-          <SelectItem value="google_ads">Google Ads account</SelectItem>
-          <SelectItem value="both">Shopify + Google Ads</SelectItem>
+          {newClient ? (
+            <>
+              <SelectItem value="account">Dashboard account only — no assets yet</SelectItem>
+              <SelectItem value="both">Complete setup — Shopify + Google Ads</SelectItem>
+            </>
+          ) : (
+            <>
+              <SelectItem value="shopify">Shopify store</SelectItem>
+              <SelectItem value="google_ads">Google Ads account</SelectItem>
+              <SelectItem value="both">Shopify + Google Ads</SelectItem>
+            </>
+          )}
         </SelectContent>
       </Select>
       <p className="text-[11.5px] leading-relaxed text-[var(--text-secondary)]">
-        {value === "account"
-          ? "The client creates dashboard access now. Assets can be requested later."
+        {newClient
+          ? value === "account"
+            ? "Creates dashboard access only. Assets can be requested later from the client card."
+            : "The client must connect all Shopify stores and Google Ads accounts they use before submitting."
           : "The client can connect one or more of each requested asset."}
       </p>
     </div>
@@ -820,7 +832,7 @@ export function ClientOnboardingManager({
           <DialogHeader>
             <DialogTitle>{invitation ? "Copy one-time link" : createMode === "new_client" ? "Onboard a new client" : createMode === "reconnect" ? "Reconnect a Legacy client" : "Add client assets"}</DialogTitle>
             <DialogDescription>
-              {invitation ? "This bearer link is shown once. Copy it now and send it only to the intended client." : createMode === "new_client" ? "The client enters their own name, email and password, then connects any assets requested here." : createMode === "reconnect" ? "Choose the existing client and the technical connections they need to renew." : `Create a separate asset invitation for ${assetTarget ? cardClientName(assetTarget) : "this client"}.`}
+              {invitation ? "This bearer link is shown once. Copy it now and send it only to the intended client." : createMode === "new_client" ? "The client creates their dashboard account and either finishes without assets or completes Shopify and Google Ads setup." : createMode === "reconnect" ? "Choose the existing client and the technical connections they need to renew." : `Create a separate asset invitation for ${assetTarget ? cardClientName(assetTarget) : "this client"}.`}
             </DialogDescription>
           </DialogHeader>
           {invitation ? (
@@ -846,7 +858,7 @@ export function ClientOnboardingManager({
                   </>
                 )
               )}
-              <AssetChoiceField value={assetChoice} onChange={setAssetChoice} allowAccountOnly={createMode === "new_client"} />
+              <AssetChoiceField value={assetChoice} onChange={setAssetChoice} newClient={createMode === "new_client"} />
               {dialogError && <p role="alert" className="text-[12px] text-[var(--danger-red)]">{dialogError}</p>}
               <DialogFooter><Button type="button" variant="primary" loading={busy === "create"} disabled={readOnlyPreview || backendLoadFailed || createMode === "reconnect" && !selectedLegacyId} onClick={() => void createInvitation()}><Link2 aria-hidden /> Generate one-time link</Button></DialogFooter>
             </div>
