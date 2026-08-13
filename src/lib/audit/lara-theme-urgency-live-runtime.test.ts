@@ -316,6 +316,115 @@ describe("the dedicated Lara live theme runtime", () => {
     });
   });
 
+  it("reconstructs only a bounded standard JSON indentation selected by exact size and MD5", async () => {
+    const filename = "templates/index.json" as const;
+    const parsed = {
+      sections: { main: { settings: { title: "Lara Rovinj", enabled: true } } },
+    };
+    const projectedContent = `${SHOPIFY_GENERATED_JSON_BANNER}${JSON.stringify(
+      parsed,
+      null,
+      2,
+    )}`;
+    const storedContent = `${JSON.stringify(parsed, null, 4)}\n`;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        restAssetResponse(filename, projectedContent, {
+          size: Buffer.byteLength(storedContent, "utf8"),
+          checksum: createHash("md5").update(storedContent, "utf8").digest("hex"),
+        }),
+      ),
+    );
+
+    const runtime = await createLaraThemeUrgencyLiveRuntime();
+    await expect(runtime.readExactThemeAsset(filename)).resolves.toMatchObject({
+      projectedContent,
+      content: storedContent,
+      size: Buffer.byteLength(storedContent, "utf8"),
+      checksumMd5: createHash("md5").update(storedContent, "utf8").digest("hex"),
+    });
+  });
+
+  it("reconstructs Shopify's documented settings_data minification without rewriting JSON tokens", async () => {
+    const filename = "config/settings_data.json" as const;
+    const projectedJson = `{
+  "current": {
+    "escaped_url": "https:\\/\\/example.com\\/café",
+    "escaped_unicode": "\\u006c\\u0061\\u0072\\u0061"
+  }
+}`;
+    const projectedContent = `${SHOPIFY_GENERATED_JSON_BANNER}${projectedJson}`;
+    const storedContent =
+      '{"current":{"escaped_url":"https:\\/\\/example.com\\/café","escaped_unicode":"\\u006c\\u0061\\u0072\\u0061"}}';
+    expect(JSON.stringify(JSON.parse(projectedJson))).not.toBe(storedContent);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        restAssetResponse(filename, projectedContent, {
+          size: Buffer.byteLength(storedContent, "utf8"),
+          checksum: createHash("md5").update(storedContent, "utf8").digest("hex"),
+        }),
+      ),
+    );
+
+    const runtime = await createLaraThemeUrgencyLiveRuntime();
+    await expect(runtime.readExactThemeAsset(filename)).resolves.toMatchObject({
+      projectedContent,
+      content: storedContent,
+    });
+  });
+
+  it("rejects valid JSON whose stored indentation is outside the fixed REST candidate set", async () => {
+    const filename = "templates/index.json" as const;
+    const parsed = { sections: { main: { settings: { enabled: true } } } };
+    const projectedContent = `${SHOPIFY_GENERATED_JSON_BANNER}${JSON.stringify(
+      parsed,
+      null,
+      2,
+    )}`;
+    const storedContent = JSON.stringify(parsed, null, 10).replace(
+      /^( +)/gm,
+      (indent) => `${indent}  `,
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        restAssetResponse(filename, projectedContent, {
+          size: Buffer.byteLength(storedContent, "utf8"),
+          checksum: createHash("md5").update(storedContent, "utf8").digest("hex"),
+        }),
+      ),
+    );
+
+    const runtime = await createLaraThemeUrgencyLiveRuntime();
+    await expect(runtime.readExactThemeAsset(filename)).rejects.toMatchObject({
+      code: "invalid_rest_asset_integrity",
+    });
+  });
+
+  it("does not apply JSON reconstruction candidates to a Liquid filename", async () => {
+    const filename = "sections/main-product.liquid" as const;
+    const parsed = { message: "Posljednji komadi" };
+    const projectedContent = JSON.stringify(parsed, null, 2);
+    const storedContent = JSON.stringify(parsed, null, 4);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        restAssetResponse(filename, projectedContent, {
+          content_type: "application/x-liquid",
+          size: Buffer.byteLength(storedContent, "utf8"),
+          checksum: createHash("md5").update(storedContent, "utf8").digest("hex"),
+        }),
+      ),
+    );
+
+    const runtime = await createLaraThemeUrgencyLiveRuntime();
+    await expect(runtime.readExactThemeAsset(filename)).rejects.toMatchObject({
+      code: "invalid_rest_asset_integrity",
+    });
+  });
+
   it.each([
     ["wrong key", { key: "layout/theme.liquid" }, {}, "invalid_rest_asset_fields"],
     ["wrong theme", { theme_id: 999 }, {}, "invalid_rest_asset_fields"],

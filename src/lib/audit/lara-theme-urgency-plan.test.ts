@@ -412,6 +412,7 @@ describe("Lara exact theme urgency source collection", () => {
       contentType: "application/json",
       size: Buffer.byteLength(storedContent, "utf8"),
       updatedAt: AT,
+      projectedContent: decodedContent,
       content: storedContent,
     }));
     const snapshot = await readLaraThemeUrgencySnapshot({
@@ -449,10 +450,56 @@ describe("Lara exact theme urgency source collection", () => {
               contentType: "application/json",
               size: Buffer.byteLength(storedContent, "utf8"),
               updatedAt: "2026-08-12T18:00:01.000Z",
+              projectedContent: decodedContent,
               content: storedContent,
             })),
           },
           { filename, decodedContent, storedContent },
+        ),
+        capturedAt: AT,
+      }),
+    ).rejects.toMatchObject({ code: "INVALID_INPUT" });
+  });
+
+  it("rejects a REST reconstruction that is not independently derivable from the GraphQL JSON projection", async () => {
+    const filename = "templates/index.json" as const;
+    const graphqlParsed = { sections: { main: { type: "featured" } } };
+    const restParsed = { sections: { main: { type: "different" } } };
+    const graphqlProjection = `${SHOPIFY_GENERATED_JSON_BANNER}${JSON.stringify(
+      graphqlParsed,
+      null,
+      2,
+    )}`;
+    const restProjection = `${SHOPIFY_GENERATED_JSON_BANNER}${JSON.stringify(
+      restParsed,
+      null,
+      2,
+    )}`;
+    const storedContent = `${JSON.stringify(restParsed, null, 4)}\n`;
+    const checksumMd5 = createHash("md5")
+      .update(storedContent, "utf8")
+      .digest("hex");
+
+    await expect(
+      readLaraThemeUrgencySnapshot({
+        runtime: runtime(
+          {
+            readExactThemeAsset: vi.fn(async () => ({
+              filename,
+              themeId: LARA_THEME_URGENCY_REST_THEME_ID,
+              checksumMd5,
+              contentType: "application/json",
+              size: Buffer.byteLength(storedContent, "utf8"),
+              updatedAt: AT,
+              projectedContent: restProjection,
+              content: storedContent,
+            })),
+          },
+          {
+            filename,
+            decodedContent: graphqlProjection,
+            storedContent,
+          },
         ),
         capturedAt: AT,
       }),

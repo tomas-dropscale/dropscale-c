@@ -47,7 +47,9 @@ export const LARA_THEME_URGENCY_TEXT_BODY_INTEGRITY_POLICY = Object.freeze([
   "literal_text_requires_exact_reported_size_and_available_md5",
   "crlf_reconstruction_requires_exact_size_and_md5",
   "exact_shopify_generated_json_banner_then_bounded_candidates_require_exact_size_and_md5",
-  "fixed_rest_asset_projection_uses_the_same_bounded_candidates_then_requires_matching_graphql_metadata_and_exact_size_and_md5",
+  "fixed_rest_json_projection_adds_only_json_stringify_indent_1_to_10_tab_and_exact_shopify_settings_data_minification_candidates",
+  "fixed_rest_fallback_requires_graphql_and_rest_projections_to_reconstruct_one_identical_stored_body_with_matching_metadata_size_and_md5",
+  "fixed_rest_fallback_adds_no_liquid_reconstruction_candidates",
 ] as const);
 
 /** The merchant explicitly accepted Lara Rovinj as the structured brand/vendor. */
@@ -113,6 +115,8 @@ export type LaraThemeUrgencyRestAsset = DeepReadonly<{
   contentType: string;
   size: number;
   updatedAt: string;
+  /** Ephemeral REST projection used only for the independent GraphQL cross-proof. */
+  projectedContent: string;
   content: string;
 }>;
 
@@ -442,6 +446,19 @@ const SHOPIFY_GENERATED_JSON_BANNER_LF = `/*
 `;
 const SHOPIFY_GENERATED_JSON_BANNER_CRLF =
   SHOPIFY_GENERATED_JSON_BANNER_LF.replaceAll("\n", "\r\n");
+const REST_JSON_STANDARD_INDENTS = Object.freeze([
+  " ",
+  "  ",
+  "   ",
+  "    ",
+  "     ",
+  "      ",
+  "       ",
+  "        ",
+  "         ",
+  "          ",
+  "\t",
+] as const);
 
 function exactCount(value: string, needle: string): number {
   if (!needle) return 0;
@@ -516,6 +533,28 @@ function addTerminalLineEndingCandidates(candidates: Set<string>, value: string)
   candidates.add(`${withoutTerminalLineEnding}\r\n`);
 }
 
+function exactShopifyGeneratedJsonProjection(content: string): string | null {
+  if (content.startsWith(SHOPIFY_GENERATED_JSON_BANNER_LF)) {
+    return content.slice(SHOPIFY_GENERATED_JSON_BANNER_LF.length);
+  }
+  if (content.startsWith(SHOPIFY_GENERATED_JSON_BANNER_CRLF)) {
+    return content.slice(SHOPIFY_GENERATED_JSON_BANNER_CRLF.length);
+  }
+  return null;
+}
+
+function parsedJsonProjection(content: string): {
+  jsonText: string;
+  parsed: unknown;
+} | null {
+  const jsonText = exactShopifyGeneratedJsonProjection(content) ?? content;
+  try {
+    return { jsonText, parsed: JSON.parse(jsonText) as unknown };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Shopify's GraphQL Text body can project generated JSON as the exact standard
  * Theme Editor banner followed by formatted JSON, while size/checksum still
@@ -526,21 +565,11 @@ function addTerminalLineEndingCandidates(candidates: Set<string>, value: string)
  * common zero/LF/CRLF terminal line-ending variants.
  */
 function shopifyGeneratedJsonStoredCandidates(content: string): Set<string> {
-  let jsonText: string;
-  if (content.startsWith(SHOPIFY_GENERATED_JSON_BANNER_LF)) {
-    jsonText = content.slice(SHOPIFY_GENERATED_JSON_BANNER_LF.length);
-  } else if (content.startsWith(SHOPIFY_GENERATED_JSON_BANNER_CRLF)) {
-    jsonText = content.slice(SHOPIFY_GENERATED_JSON_BANNER_CRLF.length);
-  } else {
-    return new Set();
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(jsonText);
-  } catch {
-    return new Set();
-  }
+  const jsonText = exactShopifyGeneratedJsonProjection(content);
+  if (jsonText === null) return new Set();
+  const projection = parsedJsonProjection(jsonText);
+  if (projection === null) return new Set();
+  const { parsed } = projection;
   const compact = JSON.stringify(parsed);
   if (compact === undefined) return new Set();
 
@@ -552,6 +581,96 @@ function shopifyGeneratedJsonStoredCandidates(content: string): Set<string> {
   );
   addTerminalLineEndingCandidates(candidates, compact);
   return candidates;
+}
+
+/**
+ * Shopify CLI's theme checksum implementation documents that
+ * `config/settings_data.json` is minified before persistence. Reproduce only
+ * that fixed transformation: normalize CRLF, remove the exact generated-file
+ * banner above, and remove ASCII spaces/LF outside JSON strings. Keeping the
+ * original JSON token spelling is important for escaped slashes, Unicode
+ * escapes and numbers that JSON.parse/stringify could otherwise rewrite.
+ */
+function shopifySettingsDataMinifiedCandidate(jsonText: string): string {
+  const normalized = jsonText.replaceAll("\r\n", "\n");
+  let inString = false;
+  let escaped = false;
+  let minified = "";
+
+  for (const character of normalized) {
+    if (inString) {
+      minified += character;
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (character === '"') {
+      inString = true;
+      minified += character;
+    } else if (character !== " " && character !== "\n") {
+      minified += character;
+    }
+  }
+  return minified;
+}
+
+/**
+ * The REST endpoint can project JSON instead of returning the stored byte
+ * representation. This deliberately small candidate language contains only
+ * JSON.stringify's finite standard indentation range (1..10 spaces and one
+ * tab), LF/CRLF and terminal-line-ending variants, plus Shopify's documented
+ * settings_data minification. A caller must still prove exactly one candidate
+ * with Shopify's reported byte size and MD5, and the snapshot layer requires
+ * the independent GraphQL projection to reconstruct those identical bytes.
+ * Liquid receives no additional candidates here.
+ */
+export function proveLaraThemeUrgencyRestStoredTextBody({
+  filename,
+  content,
+  size,
+  checksumMd5,
+}: {
+  filename: LaraThemeUrgencyFilename;
+  content: string;
+  size: number;
+  checksumMd5: string | null;
+}): string | null {
+  const directlyProven = proveLaraThemeUrgencyStoredTextBody({
+    filename,
+    content,
+    size,
+    checksumMd5,
+  });
+  if (directlyProven !== null || checksumMd5 === null || !filename.endsWith(".json")) {
+    return directlyProven;
+  }
+
+  const projection = parsedJsonProjection(content);
+  if (projection === null) return null;
+  const candidates = new Set<string>();
+  const compact = JSON.stringify(projection.parsed);
+  if (compact === undefined) return null;
+  addTerminalLineEndingCandidates(candidates, compact);
+  for (const indent of REST_JSON_STANDARD_INDENTS) {
+    const formatted = JSON.stringify(projection.parsed, null, indent);
+    if (formatted === undefined) return null;
+    addTerminalLineEndingCandidates(candidates, formatted);
+    addTerminalLineEndingCandidates(candidates, formatted.replaceAll("\n", "\r\n"));
+  }
+  if (filename === "config/settings_data.json") {
+    candidates.add(shopifySettingsDataMinifiedCandidate(projection.jsonText));
+  }
+
+  const matches = [...candidates].filter(
+    (candidate) =>
+      utf8ByteLength(candidate) === size && md5Hex(candidate) === checksumMd5,
+  );
+  return matches.length === 1 ? matches[0]! : null;
 }
 
 /**
@@ -607,19 +726,36 @@ function verifyRestFallbackAgainstGraphql({
   filename: LaraThemeUrgencyFilename;
   graphql: {
     checksumMd5: string | null;
+    contentType: string;
     size: number;
     updatedAt: string;
+    projectedContent: string;
   };
   rest: LaraThemeUrgencyRestAsset;
 }): string {
+  const graphqlReconstruction = proveLaraThemeUrgencyRestStoredTextBody({
+    filename,
+    content: graphql.projectedContent,
+    size: graphql.size,
+    checksumMd5: graphql.checksumMd5,
+  });
+  const restReconstruction = proveLaraThemeUrgencyRestStoredTextBody({
+    filename,
+    content: rest.projectedContent,
+    size: rest.size,
+    checksumMd5: rest.checksumMd5,
+  });
   if (
     graphql.checksumMd5 === null ||
     rest.filename !== filename ||
     rest.themeId !== LARA_THEME_URGENCY_REST_THEME_ID ||
     rest.checksumMd5 !== graphql.checksumMd5 ||
+    rest.contentType !== graphql.contentType ||
     rest.size !== graphql.size ||
     Date.parse(rest.updatedAt) !== Date.parse(graphql.updatedAt) ||
-    !rest.contentType ||
+    graphqlReconstruction === null ||
+    graphqlReconstruction !== rest.content ||
+    restReconstruction !== rest.content ||
     utf8ByteLength(rest.content) !== rest.size ||
     md5Hex(rest.content) !== rest.checksumMd5
   ) {
@@ -728,8 +864,10 @@ export async function readLaraThemeUrgencySnapshot({
         filename,
         graphql: {
           checksumMd5: file.checksumMd5,
+          contentType: file.contentType,
           size,
           updatedAt: file.updatedAt,
+          projectedContent: file.body.content,
         },
         rest,
       });

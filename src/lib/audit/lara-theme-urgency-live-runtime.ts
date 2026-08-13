@@ -7,7 +7,7 @@ import {
   LARA_THEME_URGENCY_REST_THEME_ID,
   LARA_THEME_URGENCY_SOURCE_QUERY,
   LARA_THEME_URGENCY_THEME,
-  proveLaraThemeUrgencyStoredTextBody,
+  proveLaraThemeUrgencyRestStoredTextBody,
   readLaraThemeUrgencySnapshot,
   type LaraThemeUrgencyFilename,
   type LaraThemeUrgencyReadRuntime,
@@ -547,7 +547,7 @@ async function getExactRestAsset(
   const projectedContent = asset.value;
   const size = Number(asset.size);
   const checksumMd5 = asset.checksum;
-  const content = proveLaraThemeUrgencyStoredTextBody({
+  const content = proveLaraThemeUrgencyRestStoredTextBody({
     filename,
     content: projectedContent,
     size,
@@ -566,6 +566,7 @@ async function getExactRestAsset(
     contentType: asset.content_type,
     size,
     updatedAt: asset.updated_at,
+    projectedContent,
     content,
   });
 }
