@@ -14,15 +14,10 @@ import { PasswordInput } from "@/components/auth/password-input";
 import { FormAlert } from "@/components/auth/auth-card";
 import { GoogleButton } from "@/components/auth/google-button";
 import { createClient } from "@/lib/supabase/client";
+import { safeInternalPath } from "@/lib/site";
 import { loginSchema, authErrorMessage, type LoginInput } from "@/lib/validations/auth";
 
 const REMEMBERED_EMAIL_KEY = "dropscale-portal:remembered-email";
-
-/** Internal paths only — blocks open redirect via ?next=https://evil.example */
-function safeRedirect(next: string | null) {
-  if (!next || !next.startsWith("/") || next.startsWith("//")) return "/dashboard";
-  return next;
-}
 
 export function LoginForm() {
   const router = useRouter();
@@ -70,7 +65,7 @@ export function LoginForm() {
       .then(() => createClient().auth.getUser())
       .then(({ data }) => {
         if (!active || !data.user) return;
-        router.replace(safeRedirect(searchParams.get("next")));
+        router.replace(safeInternalPath(searchParams.get("next")) ?? "/dashboard");
         router.refresh();
       })
       .catch(() => {
@@ -105,7 +100,7 @@ export function LoginForm() {
       }
 
       // refresh() revalidates Server Components with the new session first
-      router.replace(safeRedirect(searchParams.get("next")));
+      router.replace(safeInternalPath(searchParams.get("next")) ?? "/dashboard");
       router.refresh();
     } catch (cause) {
       setServerError(cause instanceof Error ? cause.message : "Something went wrong. Try again.");

@@ -257,10 +257,15 @@ describe("client onboarding Windsor route", () => {
     mocks.encryptWindsorAccessToken.mockResolvedValue("encrypted-token");
     mocks.service.rpc.mockResolvedValue({ data: SESSION_ID, error: null });
 
-    const response = await POST(request("POST"), context());
+    const postRequest = request("POST");
+    const response = await POST(postRequest, context());
     const payload = await response.json();
 
     expect(response.status).toBe(200);
+    expect(mocks.createGoogleAdsAuthorization).toHaveBeenCalledTimes(1);
+    expect(mocks.createGoogleAdsAuthorization).toHaveBeenCalledWith({
+      signal: postRequest.signal,
+    });
     expect(mocks.encryptWindsorAccessToken).toHaveBeenCalledWith(rawAccessToken);
     expect(mocks.service.rpc).toHaveBeenCalledWith("store_client_windsor_authorization", {
       p_session_id: SESSION_ID,

@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 
 import { FormAlert } from "@/components/auth/auth-card";
+import { GoogleButton } from "@/components/auth/google-button";
 import { PasswordInput } from "@/components/auth/password-input";
 import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
@@ -25,9 +26,20 @@ import { REPORTING_SHOPIFY_SCOPES_TEXT } from "@/lib/client-onboarding/shopify-s
 import type { ClientOnboardingSessionDTO } from "@/lib/client-onboarding/sessions";
 import { authRedirect } from "@/lib/site";
 import { createClient as createBrowserSupabaseClient } from "@/lib/supabase/client";
+import { authErrorMessage } from "@/lib/validations/auth";
 
 type Step = 1 | 2 | 3;
 type Feedback = { tone: "error" | "success"; message: string } | null;
+
+class SessionFetchError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "SessionFetchError";
+  }
+}
 
 const TOKEN = /^[A-Za-z0-9_-]{43}$/;
 
@@ -135,16 +147,88 @@ function Stepper({
   );
 }
 
+function ExistingClientSignIn({
+  sessionId,
+  login,
+  busy,
+  onLoginChange,
+  onSubmit,
+  onGoogleError,
+}: {
+  sessionId: string;
+  login: { email: string; password: string };
+  busy: boolean;
+  onLoginChange: (login: { email: string; password: string }) => void;
+  onSubmit: (event: React.FormEvent<HTMLFormElement>) => void;
+  onGoogleError: (message: string) => void;
+}) {
+  return (
+    <>
+      <GoogleButton
+        redirectTo={authRedirect(`/onboarding/client/${sessionId}`)}
+        onError={onGoogleError}
+      />
+      <form onSubmit={onSubmit} className="space-y-4">
+        <div className="space-y-1.5">
+          <Label htmlFor="existing-email">Email</Label>
+          <Input
+            id="existing-email"
+            type="email"
+            autoComplete="email"
+            value={login.email}
+            onChange={(event) =>
+              onLoginChange({ ...login, email: event.target.value })
+            }
+            required
+          />
+        </div>
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between gap-3">
+            <Label htmlFor="existing-password">Password</Label>
+            <Link
+              href={`/forgot-password?next=${encodeURIComponent(
+                `/onboarding/client/${sessionId}`,
+              )}`}
+              className="text-[11.5px] font-medium text-[var(--accent-gold)] transition-colors hover:text-[var(--accent-gold-strong)]"
+            >
+              Forgot password?
+            </Link>
+          </div>
+          <PasswordInput
+            id="existing-password"
+            autoComplete="current-password"
+            value={login.password}
+            onChange={(event) =>
+              onLoginChange({ ...login, password: event.target.value })
+            }
+            required
+          />
+        </div>
+        <Button
+          type="submit"
+          variant="primary"
+          className="w-full"
+          loading={busy}
+        >
+          Verify and continue
+        </Button>
+      </form>
+    </>
+  );
+}
+
 export function ClientOnboardingFlow({ sessionId }: { sessionId: string }) {
   const tokenRef = React.useRef("");
+  const autoClaimRef = React.useRef("");
   const [session, setSession] =
     React.useState<ClientOnboardingSessionDTO | null>(null);
   const [linkState, setLinkState] = React.useState<
-    "checking" | "valid" | "invalid"
+    "checking" | "valid" | "reauthenticate" | "invalid"
   >("checking");
   const [linkError, setLinkError] = React.useState("");
   const [step, setStep] = React.useState<Step>(1);
   const [busy, setBusy] = React.useState(false);
+  const [authChecking, setAuthChecking] = React.useState(true);
   const [feedback, setFeedback] = React.useState<Feedback>(null);
   const headingRef = React.useRef<HTMLHeadingElement>(null);
 
@@ -208,8 +292,9 @@ export function ClientOnboardingFlow({ sessionId }: { sessionId: string }) {
         error?: string;
       } | null;
       if (!response.ok || !body?.session) {
-        throw new Error(
+        throw new SessionFetchError(
           responseError(body, "This onboarding link is no longer available."),
+          response.status,
         );
       }
       const nextSession = body.session;
@@ -241,8 +326,9 @@ export function ClientOnboardingFlow({ sessionId }: { sessionId: string }) {
   );
 
   React.useEffect(() => {
+    let active = true;
     const fragment = window.location.hash.slice(1);
-    const token = TOKEN.test(fragment) ? fragment : "";
+    const token = TOKEN.test(fragment) ? fragment : tokenRef.current;
     if (fragment) {
       window.history.replaceState(
         null,
@@ -252,15 +338,28 @@ export function ClientOnboardingFlow({ sessionId }: { sessionId: string }) {
     }
     tokenRef.current = token;
     void fetchSession(token)
-      .then(() => setLinkState("valid"))
+      .then(() => {
+        if (active) setLinkState("valid");
+      })
       .catch((error: unknown) => {
-        setLinkState("invalid");
+        if (!active) return;
+        const shouldReauthenticate =
+          !token &&
+          error instanceof SessionFetchError &&
+          (error.status === 401 || error.status === 403);
+        setLinkState(shouldReauthenticate ? "reauthenticate" : "invalid");
         setLinkError(
-          error instanceof Error
+          shouldReauthenticate
+            ? "Sign in with the account that received this invitation."
+            : error instanceof Error
             ? error.message
             : "This onboarding link is invalid.",
         );
       });
+
+    return () => {
+      active = false;
+    };
   }, [fetchSession]);
 
   React.useEffect(() => {
@@ -276,6 +375,73 @@ export function ClientOnboardingFlow({ sessionId }: { sessionId: string }) {
     }),
     [],
   );
+
+  const claimExistingAccount = React.useCallback(async () => {
+    const response = await fetch(
+      `/api/client-onboarding/${sessionId}/account`,
+      {
+        method: "POST",
+        cache: "no-store",
+        headers: requestHeaders(),
+        body: JSON.stringify({ kind: "existing" }),
+      },
+    );
+    const body = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(
+        responseError(body, "This client account could not be verified."),
+      );
+    }
+    const updated = await fetchSession();
+    setLinkState("valid");
+    setStep(suggestedStep(updated));
+    return updated;
+  }, [fetchSession, requestHeaders, sessionId]);
+
+  React.useEffect(() => {
+    if (
+      linkState !== "valid" ||
+      !session ||
+      session.mode === "new_client" ||
+      session.claimedUserId ||
+      autoClaimRef.current === session.id
+    ) {
+      return;
+    }
+
+    let active = true;
+    setAuthChecking(true);
+    void Promise.resolve()
+      .then(() => createBrowserSupabaseClient().auth.getUser())
+      .then(async ({ data, error }) => {
+        if (!active || error || !data.user) return;
+        autoClaimRef.current = session.id;
+        try {
+          await claimExistingAccount();
+          if (active) {
+            setFeedback({ tone: "success", message: "Account verified." });
+          }
+        } catch (claimError) {
+          if (active) {
+            setFeedback({
+              tone: "error",
+              message:
+                claimError instanceof Error
+                  ? claimError.message
+                  : "This client account could not be verified.",
+            });
+          }
+        }
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (active) setAuthChecking(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [claimExistingAccount, linkState, session]);
 
   async function createAccount(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -378,24 +544,9 @@ export function ClientOnboardingFlow({ sessionId }: { sessionId: string }) {
         password: existingLogin.password,
       });
       setExistingLogin((value) => ({ ...value, password: "" }));
-      if (error) throw new Error("The email or password is incorrect.");
-      const response = await fetch(
-        `/api/client-onboarding/${sessionId}/account`,
-        {
-          method: "POST",
-          cache: "no-store",
-          headers: requestHeaders(),
-          body: JSON.stringify({ kind: "existing" }),
-        },
-      );
-      const body = await response.json().catch(() => null);
-      if (!response.ok)
-        throw new Error(
-          responseError(body, "This client could not be verified."),
-        );
-      const updated = await fetchSession();
-      setStep(suggestedStep(updated));
-      setFeedback({ tone: "success", message: "Client identity verified." });
+      if (error) throw new Error(authErrorMessage(error));
+      await claimExistingAccount();
+      setFeedback({ tone: "success", message: "Account verified." });
     } catch (error) {
       setFeedback({
         tone: "error",
@@ -659,6 +810,37 @@ export function ClientOnboardingFlow({ sessionId }: { sessionId: string }) {
     );
   }
 
+  if (linkState === "reauthenticate") {
+    return (
+      <section className="panel mx-auto max-w-xl p-6 sm:p-8">
+        <div className="space-y-5">
+          <FormAlert>{linkError}</FormAlert>
+          {feedback && <FormAlert>{feedback.message}</FormAlert>}
+          <div>
+            <h1 className="text-lg font-semibold text-[var(--text-primary)]">
+              Choose the invited account
+            </h1>
+            <p className="mt-1 text-[12px] leading-relaxed text-[var(--text-secondary)]">
+              You may be signed in with a different account. Choose the Google
+              account that received this link, or sign in with its email and
+              password.
+            </p>
+          </div>
+          <ExistingClientSignIn
+            sessionId={sessionId}
+            login={existingLogin}
+            busy={busy}
+            onLoginChange={setExistingLogin}
+            onSubmit={signInExisting}
+            onGoogleError={(message) =>
+              setLinkError(authErrorMessage({ message }))
+            }
+          />
+        </div>
+      </section>
+    );
+  }
+
   if (linkState === "invalid" || !session) {
     return (
       <section className="panel mx-auto max-w-xl p-6 sm:p-8">
@@ -843,51 +1025,49 @@ export function ClientOnboardingFlow({ sessionId }: { sessionId: string }) {
           {step === 1 &&
             !session.claimedUserId &&
             session.mode !== "new_client" && (
-              <form
-                onSubmit={signInExisting}
-                className="mx-auto max-w-lg space-y-4"
-              >
+              <div className="mx-auto max-w-lg space-y-4">
                 <div>
                   <p className="label-caps">Verify existing client</p>
                   <h2 className="mt-1 text-[17px] font-semibold text-[var(--text-primary)]">
                     Sign in to add or reconnect assets
                   </h2>
+                  <p className="mt-1 text-[12px] leading-relaxed text-[var(--text-secondary)]">
+                    Use the account that received this invitation. If you
+                    normally sign in with Google, continue with Google below.
+                  </p>
                 </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="existing-email">Email</Label>
-                  <Input
-                    id="existing-email"
-                    type="email"
-                    autoComplete="email"
-                    value={existingLogin.email}
-                    onChange={(event) =>
-                      setExistingLogin({
-                        ...existingLogin,
-                        email: event.target.value,
-                      })
-                    }
-                    required
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="existing-password">Password</Label>
-                  <PasswordInput
-                    id="existing-password"
-                    autoComplete="current-password"
-                    value={existingLogin.password}
-                    onChange={(event) =>
-                      setExistingLogin({
-                        ...existingLogin,
-                        password: event.target.value,
-                      })
-                    }
-                    required
-                  />
-                </div>
-                <Button type="submit" variant="primary" loading={busy}>
-                  Verify and continue
-                </Button>
-              </form>
+                {authChecking ? (
+                  <div
+                    className="rounded-[12px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-5 text-center"
+                    role="status"
+                    aria-live="polite"
+                  >
+                    <RefreshCw
+                      className="mx-auto size-5 animate-spin text-[var(--accent-gold)]"
+                      aria-hidden
+                    />
+                    <p className="mt-2 text-[12px] text-[var(--text-secondary)]">
+                      Checking your signed-in account…
+                    </p>
+                  </div>
+                ) : (
+                  <>
+                    <ExistingClientSignIn
+                      sessionId={sessionId}
+                      login={existingLogin}
+                      busy={busy}
+                      onLoginChange={setExistingLogin}
+                      onSubmit={signInExisting}
+                      onGoogleError={(message) =>
+                        setFeedback({
+                          tone: "error",
+                          message: authErrorMessage({ message }),
+                        })
+                      }
+                    />
+                  </>
+                )}
+              </div>
             )}
 
           {step === 1 &&

@@ -17,6 +17,7 @@ const WINDSOR_DATASOURCE = "google_ads" as const;
 const ONBOARD_ORIGIN = "https://onboard.windsor.ai";
 const CONNECTORS_ORIGIN = "https://connectors.windsor.ai";
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+const AUTHORIZATION_REQUEST_TIMEOUT_MS = 25_000;
 const MAX_JSON_CHARS = 1_000_000;
 const MAX_SECRET_CHARS = 4_096;
 
@@ -439,7 +440,12 @@ export async function createGoogleAdsAuthorization(
 ): Promise<WindsorGoogleAdsAuthorization> {
   const url = new URL("/api/team/generate-co-user-url/", ONBOARD_ORIGIN);
   url.searchParams.set("allowed_sources", WINDSOR_DATASOURCE);
-  const payload = asRecord(await requestJson(url, options));
+  const payload = asRecord(
+    await requestJson(url, {
+      ...options,
+      timeoutMs: options.timeoutMs ?? AUTHORIZATION_REQUEST_TIMEOUT_MS,
+    }),
+  );
   if (!payload || typeof payload.url !== "string") {
     throw new WindsorError(
       "invalid_response",

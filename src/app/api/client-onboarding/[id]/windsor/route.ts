@@ -66,7 +66,7 @@ export async function POST(request: NextRequest, { params }: Context) {
         409,
       );
     }
-    const windsor = await createGoogleAdsAuthorization();
+    const windsor = await createGoogleAdsAuthorization({ signal: request.signal });
     const ciphertext = await encryptWindsorAccessToken(windsor.accessToken);
     const service = serviceOrThrow();
     const { data, error } = await service.rpc("store_client_windsor_authorization", {

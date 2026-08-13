@@ -21,6 +21,20 @@ export function authRedirect(next: string) {
   return `${siteUrl()}/auth/callback?next=${encodeURIComponent(next)}`;
 }
 
+/** Keep post-auth redirects on this application, including query/hash state. */
+export function safeInternalPath(value: unknown) {
+  if (typeof value !== "string" || !value.startsWith("/")) return null;
+
+  try {
+    const base = new URL("https://internal.invalid");
+    const target = new URL(value, base);
+    if (target.origin !== base.origin || target.pathname.startsWith("//")) return null;
+    return `${target.pathname}${target.search}${target.hash}`;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Redirect target for "Continue with Google".
  *

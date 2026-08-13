@@ -87,6 +87,21 @@ describe("client onboarding account route", () => {
     );
   });
 
+  it("verifies an authenticated existing client after an OAuth redirect without the bearer", async () => {
+    mocks.claimExistingClientOnboardingIdentity.mockResolvedValue(undefined);
+
+    const response = await POST(
+      request({ kind: "existing" }, false),
+      { params: Promise.resolve({ id: SESSION }) },
+    );
+
+    expect(response.ok).toBe(true);
+    expect(mocks.claimExistingClientOnboardingIdentity).toHaveBeenCalledWith({
+      sessionId: SESSION,
+      invitationToken: null,
+    });
+  });
+
   it("rejects a password or any other injected field", async () => {
     const response = await POST(
       request({

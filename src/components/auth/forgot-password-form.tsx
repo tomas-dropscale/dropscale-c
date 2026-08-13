@@ -9,16 +9,17 @@ import { Button } from "@/components/ui/button";
 import { Input, Label, FieldError } from "@/components/ui/input";
 import { FormAlert } from "@/components/auth/auth-card";
 import { createClient } from "@/lib/supabase/client";
-import { authRedirect } from "@/lib/site";
+import { authRedirect, safeInternalPath } from "@/lib/site";
 import {
   forgotPasswordSchema,
   authErrorMessage,
   type ForgotPasswordInput,
 } from "@/lib/validations/auth";
 
-export function ForgotPasswordForm() {
+export function ForgotPasswordForm({ next }: { next?: string | null }) {
   const [serverError, setServerError] = React.useState<string | null>(null);
   const [sent, setSent] = React.useState(false);
+  const safeNext = safeInternalPath(next);
 
   const {
     register,
@@ -35,8 +36,11 @@ export function ForgotPasswordForm() {
     try {
       const supabase = createClient();
 
+      const resetPath = safeNext
+        ? `/reset-password?next=${encodeURIComponent(safeNext)}`
+        : "/reset-password";
       const { error } = await supabase.auth.resetPasswordForEmail(values.email.trim(), {
-        redirectTo: authRedirect("/reset-password"),
+        redirectTo: authRedirect(resetPath),
       });
 
       if (error) {

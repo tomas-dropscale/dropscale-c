@@ -45,6 +45,7 @@ describe("Windsor Google Ads server adapter", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
   });
@@ -81,6 +82,41 @@ describe("Windsor Google Ads server adapter", () => {
     expect(upstream.searchParams.get("allowed_sources")).toBe("google_ads");
     expect(upstream.searchParams.get("api_key")).toBe(API_KEY);
     expect(fetcher.mock.calls[0]?.[1]).toMatchObject({ method: "GET", redirect: "error" });
+  });
+
+  it("allows the co-user link generator more than the read-request timeout", async () => {
+    vi.useFakeTimers();
+    const authorizationUrl =
+      `https://onboard.windsor.ai/token-login?access_token=${ACCESS_TOKEN}` +
+      "&allowed_sources=google_ads";
+    const fetcher = vi.fn(
+      (_input: URL | RequestInfo, init?: RequestInit) =>
+        new Promise<Response>((resolve, reject) => {
+          const timer = setTimeout(
+            () => resolve(jsonResponse({ url: authorizationUrl })),
+            12_000,
+          );
+          init?.signal?.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(timer);
+              reject(new DOMException("Aborted", "AbortError"));
+            },
+            { once: true },
+          );
+        }),
+    );
+
+    const pending = createGoogleAdsAuthorization({
+      fetcher: fetcher as typeof fetch,
+    });
+    await vi.advanceTimersByTimeAsync(12_000);
+
+    await expect(pending).resolves.toEqual({
+      authorizationUrl,
+      accessToken: ACCESS_TOKEN,
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
   it.each([

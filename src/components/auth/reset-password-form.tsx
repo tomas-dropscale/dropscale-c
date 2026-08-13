@@ -11,6 +11,7 @@ import { Label, FieldError } from "@/components/ui/input";
 import { PasswordInput } from "@/components/auth/password-input";
 import { FormAlert } from "@/components/auth/auth-card";
 import { createClient } from "@/lib/supabase/client";
+import { safeInternalPath } from "@/lib/site";
 import {
   resetPasswordSchema,
   authErrorMessage,
@@ -19,10 +20,11 @@ import {
 
 type Status = "checking" | "ready" | "no-session";
 
-export function ResetPasswordForm() {
+export function ResetPasswordForm({ next }: { next?: string | null }) {
   const router = useRouter();
   const [status, setStatus] = React.useState<Status>("checking");
   const [serverError, setServerError] = React.useState<string | null>(null);
+  const safeNext = safeInternalPath(next);
 
   const {
     register,
@@ -70,7 +72,13 @@ export function ResetPasswordForm() {
         return;
       }
 
-      // Drop the temporary link session so the new password is actually used
+      if (safeNext) {
+        router.replace(safeNext);
+        router.refresh();
+        return;
+      }
+
+      // Normal resets still require a fresh sign-in with the new password.
       await supabase.auth.signOut();
       router.replace("/login?notice=password-updated");
       router.refresh();
@@ -95,7 +103,15 @@ export function ResetPasswordForm() {
           This reset link is invalid or has expired. Request a new one below.
         </FormAlert>
         <Button asChild variant="secondary" size="lg" className="w-full">
-          <Link href="/forgot-password">Request a new link</Link>
+          <Link
+            href={
+              safeNext
+                ? `/forgot-password?next=${encodeURIComponent(safeNext)}`
+                : "/forgot-password"
+            }
+          >
+            Request a new link
+          </Link>
         </Button>
       </div>
     );

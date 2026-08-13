@@ -41,6 +41,7 @@ function GoogleMark() {
 export function GoogleButton({
   onError,
   referralCode,
+  redirectTo,
 }: {
   onError?: (message: string) => void;
   /**
@@ -49,6 +50,11 @@ export function GoogleButton({
    * the code, everyone who signs up with Google loses whoever sent them.
    */
   referralCode?: () => string;
+  /**
+   * Override the portal sign-up callback for an existing authenticated flow,
+   * such as returning to a client onboarding invitation.
+   */
+  redirectTo?: string;
 }) {
   const { d } = useI18n();
   const [busy, setBusy] = React.useState(false);
@@ -59,7 +65,7 @@ export function GoogleButton({
     const { error } = await createClient().auth.signInWithOAuth({
       provider: "google",
       options: {
-        redirectTo: oauthRedirect("/dashboard", referralCode?.()),
+        redirectTo: redirectTo ?? oauthRedirect("/dashboard", referralCode?.()),
         // Always show the account chooser: shared machines are common and a
         // silent re-auth into the wrong account is confusing to undo.
         queryParams: { prompt: "select_account" },

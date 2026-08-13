@@ -10,7 +10,14 @@ export function PasswordInput({ className, ...props }: React.ComponentProps<"inp
 
   return (
     <div className="relative">
-      <Input type={visible ? "text" : "password"} className={cn("pr-10", className)} {...props} />
+      <Input
+        type={visible ? "text" : "password"}
+        autoCapitalize="none"
+        autoCorrect="off"
+        spellCheck={false}
+        className={cn("pr-10", className)}
+        {...props}
+      />
       <button
         type="button"
         onClick={() => setVisible((v) => !v)}

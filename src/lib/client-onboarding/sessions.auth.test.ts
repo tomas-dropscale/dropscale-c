@@ -28,6 +28,7 @@ vi.mock("@/lib/client-onboarding/invitations", () => ({
 
 import {
   authorizeClientOnboardingRequest,
+  claimExistingClientOnboardingIdentity,
   createClientOnboardingSession,
   recoverClientOnboardingIdentity,
   revokeClientOnboardingSession,
@@ -250,6 +251,90 @@ describe("claimed existing-client onboarding authorization", () => {
       tokenHash: TOKEN_HASH,
       actorUserId: OWNER,
     });
+  });
+
+  it("allows the matching target to resume and claim an open invitation after OAuth", async () => {
+    serviceFor(
+      sessionRow({
+        mode: "add_assets",
+        requested_assets: ["google_ads"],
+        target_client_id: OWNER,
+        claimed_user_id: null,
+      }),
+    );
+    mocks.getSessionProfile.mockResolvedValue({ user: authUser(), profile: null });
+
+    await expect(authorizeClientOnboardingRequest(SESSION)).resolves.toMatchObject({
+      tokenHash: TOKEN_HASH,
+      actorUserId: OWNER,
+      usingInvitation: false,
+    });
+  });
+
+  it("claims the open invitation for its matching authenticated target without the bearer", async () => {
+    const { query, rpc } = serviceFor(
+      sessionRow({
+        mode: "add_assets",
+        requested_assets: ["google_ads"],
+        target_client_id: OWNER,
+        claimed_user_id: null,
+      }),
+    );
+    query.maybeSingle
+      .mockResolvedValueOnce({
+        data: sessionRow({
+          mode: "add_assets",
+          requested_assets: ["google_ads"],
+          target_client_id: OWNER,
+          claimed_user_id: null,
+        }),
+        error: null,
+      })
+      .mockResolvedValueOnce({
+        data: { full_name: "Casey Example", email: "casey@example.com" },
+        error: null,
+      });
+    mocks.getSessionProfile
+      .mockResolvedValueOnce({ user: authUser(), profile: null })
+      .mockResolvedValueOnce({ user: authUser(), profile: null });
+
+    await expect(
+      claimExistingClientOnboardingIdentity({
+        sessionId: SESSION,
+        invitationToken: null,
+      }),
+    ).resolves.toBeUndefined();
+    expect(rpc).toHaveBeenCalledWith(
+      "claim_client_onboarding_identity",
+      expect.objectContaining({
+        p_session_id: SESSION,
+        p_token_hash: TOKEN_HASH,
+        p_user_id: OWNER,
+      }),
+    );
+  });
+
+  it("never lets a different authenticated user claim an existing-client bearer", async () => {
+    const { rpc } = serviceFor(
+      sessionRow({
+        mode: "add_assets",
+        requested_assets: ["google_ads"],
+        target_client_id: OWNER,
+        claimed_user_id: null,
+      }),
+    );
+    mocks.getSessionProfile.mockResolvedValue({
+      user: authUser({ id: OTHER_USER }),
+      profile: null,
+    });
+
+    await expect(
+      claimExistingClientOnboardingIdentity({
+        sessionId: SESSION,
+        invitationToken: TOKEN,
+      }),
+    ).rejects.toMatchObject({ code: "forbidden", status: 403 });
+    expect(rpc).not.toHaveBeenCalled();
   });
 
   it.each(["submitted", "reviewed", "active"])(
