@@ -6,6 +6,7 @@ import {
   isExactRecord,
   readSmallJson,
 } from "@/lib/client-onboarding/http";
+import { listExistingClientRoster } from "@/lib/client-onboarding/legacy-roster";
 import {
   createClientOnboardingSession,
   listClientOnboardingSessions,
@@ -17,11 +18,13 @@ export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
-    await requireClientOnboardingAdmin();
-    const sessions = await listClientOnboardingSessions();
-    return clientOnboardingResponse({ sessions });
+    const [sessions, roster] = await Promise.all([
+      listClientOnboardingSessions(),
+      listExistingClientRoster(),
+    ]);
+    return clientOnboardingResponse({ sessions, roster });
   } catch (error) {
-    return clientOnboardingErrorResponse(error, "Client onboarding sessions could not be loaded.");
+    return clientOnboardingErrorResponse(error, "The client list could not be loaded.");
   }
 }
 

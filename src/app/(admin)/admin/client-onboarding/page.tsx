@@ -1,15 +1,15 @@
 import type { Metadata } from "next";
 
-import {
-  ClientOnboardingManager,
-  type LegacyClientSnapshot,
-} from "@/components/admin/client-onboarding-manager";
+import { ClientOnboardingManager } from "@/components/admin/client-onboarding-manager";
 import { PageContainer } from "@/components/ui/page-container";
+import {
+  listExistingClientRoster,
+  type ExistingClientRosterDTO,
+} from "@/lib/client-onboarding/legacy-roster";
 import {
   listClientOnboardingSessions,
   type ClientOnboardingSessionDTO,
 } from "@/lib/client-onboarding/sessions";
-import { createClient } from "@/lib/supabase/server";
 
 export const metadata: Metadata = { title: "Clients" };
 export const dynamic = "force-dynamic";
@@ -21,57 +21,22 @@ export const dynamic = "force-dynamic";
  * managed at /admin/clients.
  */
 export default async function ClientOnboardingPage() {
-  const supabase = await createClient();
   const sessionsPromise: Promise<{
     sessions: ClientOnboardingSessionDTO[];
     failed: boolean;
   }> = listClientOnboardingSessions()
     .then((sessions) => ({ sessions, failed: false }))
     .catch(() => ({ sessions: [], failed: true }));
-  const [clientsResult, accountsResult, sessionBundle] = await Promise.all([
-    supabase
-      .from("portal_clients")
-      .select("id, full_name, email, approval_status")
-      .order("full_name", { ascending: true }),
-    supabase
-      .from("ad_accounts")
-      .select("id, client_id, shopify_connected, google_ads_connected"),
+  const rosterPromise: Promise<{
+    roster: ExistingClientRosterDTO[];
+    failed: boolean;
+  }> = listExistingClientRoster()
+    .then((roster) => ({ roster, failed: false }))
+    .catch(() => ({ roster: [], failed: true }));
+  const [sessionBundle, rosterBundle] = await Promise.all([
     sessionsPromise,
+    rosterPromise,
   ]);
-
-  const legacyLoadFailed = Boolean(clientsResult.error || accountsResult.error);
-  const countsByClient = new Map<
-    string,
-    { adAccountRows: number; shopifyConnected: number; googleConnected: number }
-  >();
-
-  if (!legacyLoadFailed) {
-    for (const account of accountsResult.data ?? []) {
-      const counts = countsByClient.get(account.client_id) ?? {
-        adAccountRows: 0,
-        shopifyConnected: 0,
-        googleConnected: 0,
-      };
-      counts.adAccountRows += 1;
-      if (account.shopify_connected) counts.shopifyConnected += 1;
-      if (account.google_ads_connected) counts.googleConnected += 1;
-      countsByClient.set(account.client_id, counts);
-    }
-  }
-
-  const legacyClients: LegacyClientSnapshot[] = legacyLoadFailed
-    ? []
-    : (clientsResult.data ?? []).map((client) => ({
-        id: client.id,
-        fullName: client.full_name,
-        email: client.email,
-        approvalStatus: client.approval_status,
-        ...(countsByClient.get(client.id) ?? {
-          adAccountRows: 0,
-          shopifyConnected: 0,
-          googleConnected: 0,
-        }),
-      }));
 
   return (
     <PageContainer
@@ -80,9 +45,9 @@ export default async function ClientOnboardingPage() {
     >
       <ClientOnboardingManager
         initialSessions={sessionBundle.sessions}
+        initialRoster={rosterBundle.roster}
         backendLoadFailed={sessionBundle.failed}
-        legacyClients={legacyClients}
-        legacyLoadFailed={legacyLoadFailed}
+        rosterLoadFailed={rosterBundle.failed}
       />
     </PageContainer>
   );

@@ -434,7 +434,7 @@ export function ClientOnboardingPreview({
         ? "Existing client reconnection"
         : `Add ${
             config.assets === "both"
-              ? "Shopify + Google Ads"
+              ? "Shopify & Google Ads"
               : config.assets === "shopify"
                 ? "Shopify"
                 : "Google Ads"

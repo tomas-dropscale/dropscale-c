@@ -1,13 +1,11 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 
-import {
-  ClientOnboardingManager,
-  type LegacyClientSnapshot,
-} from "@/components/admin/client-onboarding-manager";
+import { ClientOnboardingManager } from "@/components/admin/client-onboarding-manager";
 import { Sidebar } from "@/components/admin/sidebar";
 import { BrowserChrome } from "@/components/portal/browser-chrome";
 import { PageContainer } from "@/components/ui/page-container";
+import type { ExistingClientRosterDTO } from "@/lib/client-onboarding/legacy-roster";
 import type { ClientOnboardingSessionDTO } from "@/lib/client-onboarding/sessions";
 
 export const metadata: Metadata = {
@@ -17,33 +15,50 @@ export const metadata: Metadata = {
   referrer: "no-referrer",
 };
 
-const PREVIEW_LEGACY_CLIENTS: LegacyClientSnapshot[] = [
+const PREVIEW_ROSTER: ExistingClientRosterDTO[] = [
   {
-    id: "preview-client-northwind",
+    clientId: "48f87d57-85d7-4010-a093-a1c06486038d",
     fullName: "Northwind Home",
     email: "owner@northwind.example",
     approvalStatus: "approved",
-    adAccountRows: 2,
-    shopifyConnected: 2,
-    googleConnected: 1,
+    createdAt: "2026-01-10T09:00:00.000Z",
+    shopify: [
+      {
+        id: "d13c7505-2b31-471c-87cd-fd2d56abeb45",
+        source: "legacy",
+        name: "Northwind Home",
+        domain: "northwind-home.myshopify.com",
+        currency: "EUR",
+        grantedScopes: ["read_orders", "read_products"],
+        connectedAt: "2026-02-02T10:00:00.000Z",
+      },
+    ],
   },
   {
-    id: "preview-client-atlas",
+    clientId: "1a1a08e0-d87a-45f7-beb7-e1b6c112495a",
     fullName: "Atlas Studio",
     email: "team@atlas.example",
     approvalStatus: "approved",
-    adAccountRows: 1,
-    shopifyConnected: 1,
-    googleConnected: 1,
+    createdAt: "2026-02-01T09:00:00.000Z",
+    shopify: [
+      {
+        id: "25243402-a697-4559-9867-bb4880903ea1",
+        source: "legacy",
+        name: "Atlas Studio (existing)",
+        domain: "atlas-preview.myshopify.com",
+        currency: "EUR",
+        grantedScopes: ["read_orders"],
+        connectedAt: "2026-03-01T10:00:00.000Z",
+      },
+    ],
   },
   {
-    id: "preview-client-cedar",
+    clientId: "69aa2e3c-d3d1-48c2-83d7-692255bde599",
     fullName: "Cedar & Coast",
     email: "hello@cedar.example",
     approvalStatus: "pending",
-    adAccountRows: 1,
-    shopifyConnected: 1,
-    googleConnected: 0,
+    createdAt: "2026-08-11T09:00:00.000Z",
+    shopify: [],
   },
 ];
 
@@ -157,9 +172,9 @@ export default function AdminClientsVisualPreviewPage() {
             >
               <ClientOnboardingManager
                 initialSessions={PREVIEW_SESSIONS}
+                initialRoster={PREVIEW_ROSTER}
                 backendLoadFailed={false}
-                legacyClients={PREVIEW_LEGACY_CLIENTS}
-                legacyLoadFailed={false}
+                rosterLoadFailed={false}
                 readOnlyPreview
               />
             </PageContainer>

@@ -37,18 +37,18 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  buildClientCards,
+  cardUpdatedAt,
+  type ClientCard,
+  type OnboardingShopifyAsset,
+} from "@/components/admin/client-onboarding-card-model";
+import type {
+  ExistingClientRosterDTO,
+  LegacyShopifyAssetDTO,
+} from "@/lib/client-onboarding/legacy-roster";
 import type { ClientOnboardingSessionDTO } from "@/lib/client-onboarding/sessions";
 import type { ClientOnboardingAsset, ClientOnboardingMode } from "@/lib/supabase/types";
-
-export type LegacyClientSnapshot = {
-  id: string;
-  fullName: string;
-  email: string;
-  approvalStatus: "pending" | "approved" | "rejected";
-  adAccountRows: number;
-  shopifyConnected: number;
-  googleConnected: number;
-};
 
 type AssetChoice = "account" | "shopify" | "google_ads" | "both";
 type DialogMode = "new_client" | "reconnect" | "add_assets";
@@ -71,14 +71,6 @@ type Notice = {
   message: string;
 };
 
-type ClientCard = {
-  key: string;
-  session: ClientOnboardingSessionDTO;
-  sessions: ClientOnboardingSessionDTO[];
-  shopify: ClientOnboardingSessionDTO["shopify"];
-  googleAds: ClientOnboardingSessionDTO["googleAds"];
-};
-
 const SUCCESS_VISIBLE_MS = 4_000;
 const SUCCESS_FADE_MS = 300;
 
@@ -92,7 +84,7 @@ function assetsForChoice(choice: AssetChoice): ClientOnboardingAsset[] {
 function assetLabel(assets: readonly ClientOnboardingAsset[]) {
   const shopify = assets.includes("shopify");
   const google = assets.includes("google_ads");
-  if (shopify && google) return "Shopify + Google Ads";
+  if (shopify && google) return "Shopify & Google Ads";
   if (shopify) return "Shopify";
   if (google) return "Google Ads";
   return "Account only";
@@ -104,43 +96,6 @@ function modeLabel(mode: ClientOnboardingMode) {
   return "Add assets";
 }
 
-function canonicalClientKey(session: ClientOnboardingSessionDTO) {
-  return session.claimedUserId ?? session.targetClientId ?? session.id;
-}
-
-function sessionRank(session: ClientOnboardingSessionDTO) {
-  return new Date(session.updatedAt).getTime();
-}
-
-function groupSessions(sessions: ClientOnboardingSessionDTO[]): ClientCard[] {
-  const groups = new Map<string, ClientOnboardingSessionDTO[]>();
-  for (const session of sessions) {
-    const key = canonicalClientKey(session);
-    const entries = groups.get(key) ?? [];
-    entries.push(session);
-    groups.set(key, entries);
-  }
-  return [...groups.entries()]
-    .map(([key, entries]) => {
-      const sorted = [...entries].sort((left, right) => sessionRank(right) - sessionRank(left));
-      const session = sorted[0];
-      const shopify = new Map<string, ClientOnboardingSessionDTO["shopify"][number]>();
-      const googleAds = new Map<string, ClientOnboardingSessionDTO["googleAds"][number]>();
-      for (const entry of entries) {
-        for (const store of entry.shopify) shopify.set(store.id, store);
-        for (const account of entry.googleAds) googleAds.set(account.id, account);
-      }
-      return {
-        key,
-        session,
-        sessions: sorted,
-        shopify: [...shopify.values()],
-        googleAds: [...googleAds.values()],
-      };
-    })
-    .sort((left, right) => sessionRank(right.session) - sessionRank(left.session));
-}
-
 function clientName(session: ClientOnboardingSessionDTO) {
   if (session.targetClientName) return session.targetClientName;
   const identity = [session.firstName, session.lastName].filter(Boolean).join(" ").trim();
@@ -148,22 +103,44 @@ function clientName(session: ClientOnboardingSessionDTO) {
 }
 
 function cardClientName(card: ClientCard) {
+  if (card.roster?.fullName) return card.roster.fullName;
   const named = card.sessions.find((session) => session.targetClientName)?.targetClientName;
   if (named) return named;
   const identity = card.sessions.find((session) => session.firstName || session.lastName);
-  return identity ? clientName(identity) : clientName(card.session);
+  return identity ? clientName(identity) : card.session ? clientName(card.session) : "Client";
 }
 
 function cardEmail(card: ClientCard) {
-  return card.session.email ?? card.sessions.find((session) => session.email)?.email ?? null;
+  return (
+    card.roster?.email ??
+    card.session?.email ??
+    card.sessions.find((session) => session.email)?.email ??
+    null
+  );
 }
 
 function cardHasIssue(card: ClientCard) {
   return Boolean(
     card.sessions.some((session) => session.lastErrorCode) ||
-      card.shopify.some((store) => store.lastErrorCode) ||
+      card.shopify.some(
+        (store) => store.source === "onboarding" && Boolean(store.lastErrorCode),
+      ) ||
       card.googleAds.some((account) => account.lastErrorCode),
   );
+}
+
+function cardIsActive(card: ClientCard) {
+  return card.roster?.approvalStatus === "approved" || cardHasStatus(card, ["active"]);
+}
+
+function cardIsPendingApproval(card: ClientCard) {
+  return card.roster?.approvalStatus === "pending";
+}
+
+function cardMatchesStatus(card: ClientCard, status: string) {
+  if (status === "active") return cardIsActive(card);
+  if (status === "pending_approval") return cardIsPendingApproval(card);
+  return cardHasStatus(card, [status]);
 }
 
 function cardHasStatus(card: ClientCard, statuses: readonly string[]) {
@@ -201,6 +178,14 @@ function statusBadge(session: ClientOnboardingSessionDTO) {
   if (session.status === "expired") return <Badge variant="danger">Link expired</Badge>;
   if (session.status === "collecting") return <Badge variant="gold">In progress</Badge>;
   return <Badge variant="neutral">Waiting for client</Badge>;
+}
+
+function rosterStatusBadge(client: ExistingClientRosterDTO) {
+  return client.approvalStatus === "approved" ? (
+    <Badge variant="success">Active</Badge>
+  ) : (
+    <Badge variant="warning">Pending approval</Badge>
+  );
 }
 
 function CountCard({
@@ -328,13 +313,13 @@ function AssetChoiceField({
           {newClient ? (
             <>
               <SelectItem value="account">Dashboard account only — no assets yet</SelectItem>
-              <SelectItem value="both">Complete setup — Shopify + Google Ads</SelectItem>
+              <SelectItem value="both">Complete setup — Shopify & Google Ads</SelectItem>
             </>
           ) : (
             <>
               <SelectItem value="shopify">Shopify store</SelectItem>
               <SelectItem value="google_ads">Google Ads account</SelectItem>
-              <SelectItem value="both">Shopify + Google Ads</SelectItem>
+              <SelectItem value="both">Shopify & Google Ads</SelectItem>
             </>
           )}
         </SelectContent>
@@ -352,18 +337,19 @@ function AssetChoiceField({
 
 export function ClientOnboardingManager({
   initialSessions,
+  initialRoster,
   backendLoadFailed,
-  legacyClients,
-  legacyLoadFailed,
+  rosterLoadFailed,
   readOnlyPreview = false,
 }: {
   initialSessions: ClientOnboardingSessionDTO[];
+  initialRoster: ExistingClientRosterDTO[];
   backendLoadFailed: boolean;
-  legacyClients: LegacyClientSnapshot[];
-  legacyLoadFailed: boolean;
+  rosterLoadFailed: boolean;
   readOnlyPreview?: boolean;
 }) {
   const [sessions, setSessions] = React.useState(initialSessions);
+  const [roster, setRoster] = React.useState(initialRoster);
   const [notice, setNotice] = React.useState<Notice | null>(null);
   const [search, setSearch] = React.useState("");
   const [statusFilter, setStatusFilter] = React.useState("all");
@@ -381,21 +367,26 @@ export function ClientOnboardingManager({
   const [revokeCard, setRevokeCard] = React.useState<ClientCard | null>(null);
   const [disconnectTarget, setDisconnectTarget] = React.useState<DisconnectTarget | null>(null);
 
-  const cards = React.useMemo(() => groupSessions(sessions), [sessions]);
-  const stagedClientIds = React.useMemo(
+  const cards = React.useMemo(() => buildClientCards(sessions, roster), [sessions, roster]);
+  const clientsWithOpenLinks = React.useMemo(
     () =>
       new Set(
-        sessions.flatMap((session) =>
-          [session.claimedUserId, session.targetClientId].filter(
-            (id): id is string => Boolean(id),
+        sessions
+          .filter(
+            (session) =>
+              session.rawStatus === "pending" || session.rawStatus === "collecting",
+          )
+          .flatMap((session) =>
+            [session.claimedUserId, session.targetClientId].filter(
+              (id): id is string => Boolean(id),
+            ),
           ),
-        ),
       ),
     [sessions],
   );
   const counts = React.useMemo(
     () => ({
-      active: cards.filter((card) => cardHasStatus(card, ["active"])).length,
+      active: cards.filter(cardIsActive).length,
       onboarding: cards.filter((card) => cardHasStatus(card, ["waiting", "collecting"])).length,
       review: cards.filter((card) => cardHasStatus(card, ["submitted", "reviewed"])).length,
       issues: cards.filter((card) => cardHasStatus(card, ["expired"]) || cardHasIssue(card)).length,
@@ -408,7 +399,7 @@ export function ClientOnboardingManager({
       if (
         statusFilter === "issues"
           ? !cardHasStatus(card, ["expired"]) && !cardHasIssue(card)
-          : statusFilter !== "all" && !cardHasStatus(card, [statusFilter])
+          : statusFilter !== "all" && !cardMatchesStatus(card, statusFilter)
       ) {
         return false;
       }
@@ -421,23 +412,39 @@ export function ClientOnboardingManager({
       return !query || haystack.includes(query);
     });
   }, [cards, search, statusFilter]);
-  const legacyMatches = React.useMemo(() => {
+  const rosterMatches = React.useMemo(() => {
     const query = legacySearch.trim().toLocaleLowerCase();
-    return legacyClients.filter((client) => !query || `${client.fullName} ${client.email}`.toLocaleLowerCase().includes(query));
-  }, [legacyClients, legacySearch]);
+    return roster.filter(
+      (client) =>
+        client.approvalStatus === "approved" &&
+        (!query ||
+          `${client.fullName} ${client.email}`.toLocaleLowerCase().includes(query)),
+    );
+  }, [roster, legacySearch]);
 
   function showNotice(tone: Notice["tone"], title: string, message: string) {
     setNotice((current) => ({ id: (current?.id ?? 0) + 1, tone, title, message }));
   }
 
-  async function refreshSessions() {
+  async function refreshClients() {
     if (readOnlyPreview) return;
     const response = await fetch("/api/admin/client-onboarding", { cache: "no-store" });
     const body = await readJson(response);
-    if (!response.ok || !body || typeof body !== "object" || !Array.isArray((body as { sessions?: unknown }).sessions)) {
+    if (
+      !response.ok ||
+      !body ||
+      typeof body !== "object" ||
+      !Array.isArray((body as { sessions?: unknown }).sessions) ||
+      !Array.isArray((body as { roster?: unknown }).roster)
+    ) {
       throw new Error(errorMessage(body, "The client list could not be refreshed."));
     }
-    setSessions((body as { sessions: ClientOnboardingSessionDTO[] }).sessions);
+    const refreshed = body as {
+      sessions: ClientOnboardingSessionDTO[];
+      roster: ExistingClientRosterDTO[];
+    };
+    setSessions(refreshed.sessions);
+    setRoster(refreshed.roster);
   }
 
   async function copyLink(url: string) {
@@ -451,6 +458,7 @@ export function ClientOnboardingManager({
   }
 
   function openCreate(mode: DialogMode) {
+    setAssetTarget(null);
     setCreateMode(mode);
     setAssetChoice(mode === "new_client" ? "account" : "both");
     setSelectedLegacyId("");
@@ -471,7 +479,9 @@ export function ClientOnboardingManager({
   async function createInvitation() {
     if (!createMode || readOnlyPreview) return;
     const targetClientId =
-      createMode === "new_client" ? null : createMode === "add_assets" ? assetTarget?.key ?? null : selectedLegacyId || null;
+      createMode === "new_client"
+        ? null
+        : (assetTarget?.clientId ?? selectedLegacyId) || null;
     if (createMode !== "new_client" && !targetClientId) {
       setDialogError("Select an existing client.");
       return;
@@ -496,7 +506,7 @@ export function ClientOnboardingManager({
       }
       const nextInvitation = (body as { invitation: Invitation }).invitation;
       setInvitation(nextInvitation);
-      await refreshSessions();
+      await refreshClients();
       showNotice("success", "Onboarding link created", "The one-time link is ready to send to the client.");
     } catch (error) {
       setDialogError(error instanceof Error ? error.message : "The onboarding invitation could not be created.");
@@ -532,7 +542,7 @@ export function ClientOnboardingManager({
         if (!nextInvitation) throw new Error("The replacement link was not returned.");
       }
       try {
-        await refreshSessions();
+        await refreshClients();
       } catch (refreshError) {
         setActionTarget(null);
         if (nextInvitation) setInvitation(nextInvitation);
@@ -579,7 +589,9 @@ export function ClientOnboardingManager({
     try {
       const requests = [
         ...card.shopify.map(async (store) => {
-          const response = await fetch(`/api/admin/client-onboarding/shopify/${store.id}`, {
+          const segment =
+            store.source === "legacy" ? "legacy-shopify" : "shopify";
+          const response = await fetch(`/api/admin/client-onboarding/${segment}/${store.id}`, {
             method: "PATCH",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ action: "test" }),
@@ -599,7 +611,7 @@ export function ClientOnboardingManager({
       ];
       await Promise.all(requests);
       try {
-        await refreshSessions();
+        await refreshClients();
       } catch (refreshError) {
         showNotice(
           "error",
@@ -616,7 +628,7 @@ export function ClientOnboardingManager({
         `${card.shopify.length} Shopify store${card.shopify.length === 1 ? "" : "s"} and ${card.googleAds.length} Google Ads account${card.googleAds.length === 1 ? "" : "s"} were checked live.`,
       );
     } catch (error) {
-      await refreshSessions().catch(() => undefined);
+      await refreshClients().catch(() => undefined);
       showNotice("error", "Connection test failed", error instanceof Error ? error.message : "At least one live connection could not be verified.");
     } finally {
       setBusy(null);
@@ -637,7 +649,7 @@ export function ClientOnboardingManager({
         throw new Error(errorMessage(body, `${target.name} could not be disconnected.`));
       }
       try {
-        await refreshSessions();
+        await refreshClients();
       } catch (refreshError) {
         setDisconnectTarget(null);
         setRevokeCard(null);
@@ -677,7 +689,7 @@ export function ClientOnboardingManager({
           <p className="mt-0.5 text-[12px] text-[var(--text-secondary)]">Buttons are disabled and no API, database, Shopify, Google Ads, Windsor or billing request will be made.</p>
         </section>
       )}
-      {backendLoadFailed && (
+      {(backendLoadFailed || rosterLoadFailed) && (
         <div role="alert" className="rounded-[var(--radius-card)] border border-[var(--danger-red)]/30 bg-[var(--danger-red)]/8 px-4 py-3 text-[12px] text-[var(--text-secondary)]">
           The client list could not be loaded. Actions are temporarily unavailable.
         </div>
@@ -695,7 +707,7 @@ export function ClientOnboardingManager({
           <Button type="button" variant="primary" onClick={() => openCreate("new_client")} disabled={readOnlyPreview || backendLoadFailed}>
             <UserPlus aria-hidden /> New client
           </Button>
-          <Button type="button" onClick={() => openCreate("reconnect")} disabled={readOnlyPreview || backendLoadFailed || legacyLoadFailed}>
+          <Button type="button" onClick={() => openCreate("reconnect")} disabled={readOnlyPreview || backendLoadFailed || rosterLoadFailed}>
             <RefreshCw aria-hidden /> Reconnect existing
           </Button>
         </div>
@@ -722,6 +734,7 @@ export function ClientOnboardingManager({
                   <SelectItem value="submitted">Ready for review</SelectItem>
                   <SelectItem value="reviewed">Approved</SelectItem>
                   <SelectItem value="active">Active</SelectItem>
+                  <SelectItem value="pending_approval">Pending approval</SelectItem>
                   <SelectItem value="expired">Expired</SelectItem>
                   <SelectItem value="issues">Needs attention</SelectItem>
                 </SelectContent>
@@ -747,6 +760,13 @@ export function ClientOnboardingManager({
             {filteredCards.map((card) => {
               const session = card.session;
               const noAssets = card.shopify.length === 0 && card.googleAds.length === 0;
+              const legacyStores = card.shopify.filter(
+                (store): store is LegacyShopifyAssetDTO => store.source === "legacy",
+              );
+              const onboardingStores = card.shopify.filter(
+                (store): store is OnboardingShopifyAsset =>
+                  store.source === "onboarding",
+              );
               const accountOnly = card.sessions.every(
                 (entry) => entry.requestedAssets.length === 0,
               );
@@ -758,29 +778,34 @@ export function ClientOnboardingManager({
               );
               const canCancel = Boolean(openSession);
               const canRotate = Boolean(openSession);
-              const canDisconnectAssets = !noAssets;
+              const canDisconnectAssets =
+                onboardingStores.length > 0 || card.googleAds.length > 0;
               const hasOpenSession = card.sessions.some((entry) =>
                 entry.rawStatus === "pending" || entry.rawStatus === "collecting",
               );
-              const hasActiveWorkspace = cardHasStatus(card, ["active"]);
-              const canTargetAssets = Boolean(session.targetClientId || hasActiveWorkspace);
-              const disabled = readOnlyPreview || backendLoadFailed;
+              const hasActiveWorkspace = cardIsActive(card);
+              const canTargetAssets = Boolean(card.clientId && hasActiveWorkspace);
+              const disabled = readOnlyPreview || backendLoadFailed || rosterLoadFailed;
               return (
                 <article key={card.key} className="panel p-4 sm:p-5">
                   <div className="flex flex-col items-start gap-4">
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
                         <h3 className="text-[14px] font-semibold text-[var(--text-primary)]">{cardClientName(card)}</h3>
-                        {session.mode !== "new_client" && <Badge variant="neutral">{modeLabel(session.mode)}</Badge>}
-                        {statusBadge(session)}
-                        {hasActiveWorkspace && session.status !== "active" && (
+                        {session && session.mode !== "new_client" && <Badge variant="neutral">{modeLabel(session.mode)}</Badge>}
+                        {session
+                          ? statusBadge(session)
+                          : card.roster
+                            ? rosterStatusBadge(card.roster)
+                            : null}
+                        {session && hasActiveWorkspace && session.status !== "active" && (
                           <Badge variant="success">Active client</Badge>
                         )}
                         {noAssets && !accountOnly && <Badge variant="neutral">Assets not connected</Badge>}
                         {cardHasIssue(card) && <Badge variant="danger">Connection needs attention</Badge>}
                       </div>
                       <p className="mt-1 break-all text-[12px] text-[var(--text-secondary)]">{cardEmail(card) ?? "Waiting for client details"}</p>
-                      <p className="mt-1 text-[11px] text-[var(--text-muted)]">Updated {formatDate(session.updatedAt)}</p>
+                      <p className="mt-1 text-[11px] text-[var(--text-muted)]">Updated {formatDate(cardUpdatedAt(card))}</p>
                     </div>
                     <div className="flex flex-wrap justify-start gap-2">
                       <Button type="button" size="sm" loading={busy === `test:${card.key}`} disabled={disabled} onClick={() => void testConnections(card)}>
@@ -789,6 +814,11 @@ export function ClientOnboardingManager({
                       <Button type="button" size="sm" disabled={disabled || hasOpenSession || !canTargetAssets} onClick={() => { setAssetTarget(card); setCreateMode("add_assets"); setAssetChoice("both"); setInvitation(null); setDialogError(""); }}>
                         <Plus aria-hidden /> Add assets
                       </Button>
+                      {legacyStores.length > 0 && (
+                        <Button type="button" size="sm" disabled={disabled || hasOpenSession || !canTargetAssets} onClick={() => { setAssetTarget(card); setCreateMode("reconnect"); setAssetChoice("shopify"); setInvitation(null); setDialogError(""); }}>
+                          <RefreshCw aria-hidden /> Reconnect Shopify
+                        </Button>
+                      )}
                       {canRotate && openSession && <Button type="button" size="sm" disabled={disabled} onClick={() => setActionTarget({ session: openSession, action: "rotate" })}><RefreshCw aria-hidden /> Rotate link</Button>}
                       {reviewSession && (reviewSession.status === "submitted" || reviewSession.requestedAssets.length === 0) && <Button type="button" size="sm" variant={reviewSession.requestedAssets.length === 0 ? "primary" : "secondary"} disabled={disabled} onClick={() => setActionTarget({ session: reviewSession, action: "approve" })}><ShieldCheck aria-hidden /> {reviewSession.requestedAssets.length === 0 ? "Approve client" : "Approve connections"}</Button>}
                       {canCancel && openSession && <Button type="button" size="sm" variant="danger" disabled={disabled} onClick={() => setActionTarget({ session: openSession, action: "revoke" })}><Unplug aria-hidden /> Cancel onboarding</Button>}
@@ -808,9 +838,9 @@ export function ClientOnboardingManager({
                   </div>
 
                   <div className="mt-4 flex flex-wrap items-center gap-2 text-[11px] text-[var(--text-secondary)]">
-                    {session.requestedAssets.length > 0 && <Badge variant="neutral">{assetLabel(session.requestedAssets)}</Badge>}
-                    {session.inviteExpiresAt && <span>Link expires {formatDate(session.inviteExpiresAt)}</span>}
-                    {session.lastErrorCode && <Badge variant="danger">{session.lastErrorCode}</Badge>}
+                    {session?.requestedAssets.length ? <Badge variant="neutral">{assetLabel(session.requestedAssets)}</Badge> : null}
+                    {session?.inviteExpiresAt && <span>Link expires {formatDate(session.inviteExpiresAt)}</span>}
+                    {session?.lastErrorCode && <Badge variant="danger">{session.lastErrorCode}</Badge>}
                   </div>
                 </article>
               );
@@ -822,9 +852,9 @@ export function ClientOnboardingManager({
       <Dialog open={Boolean(createMode)} onOpenChange={(open) => !open && closeCreate()}>
         <DialogContent className="max-w-xl">
           <DialogHeader>
-            <DialogTitle>{invitation ? "Copy one-time link" : createMode === "new_client" ? "Onboard a new client" : createMode === "reconnect" ? "Reconnect an existing client" : "Add client assets"}</DialogTitle>
+            <DialogTitle>{invitation ? "Copy one-time link" : createMode === "new_client" ? "Onboard a new client" : createMode === "reconnect" ? assetTarget ? "Reconnect Shopify" : "Reconnect an existing client" : "Add client assets"}</DialogTitle>
             <DialogDescription>
-              {invitation ? "This private link is shown once. Copy it now and send it only to the intended client." : createMode === "new_client" ? "The client creates their dashboard account and either finishes without assets or completes Shopify and Google Ads setup." : createMode === "reconnect" ? "Choose the existing client and the connections they need to renew." : `Create a separate asset invitation for ${assetTarget ? cardClientName(assetTarget) : "this client"}.`}
+              {invitation ? "This private link is shown once. Copy it now and send it only to the intended client." : createMode === "new_client" ? "The client creates their dashboard account and either finishes without assets or completes Shopify & Google Ads setup." : createMode === "reconnect" ? assetTarget ? `Create a secure link for ${cardClientName(assetTarget)} to replace their existing Shopify connection.` : "Choose the existing client and the connections they need to renew." : `Create a separate asset invitation for ${assetTarget ? cardClientName(assetTarget) : "this client"}.`}
             </DialogDescription>
           </DialogHeader>
           {invitation ? (
@@ -835,16 +865,16 @@ export function ClientOnboardingManager({
             </div>
           ) : (
             <div className="space-y-4">
-              {createMode === "reconnect" && (
-                legacyLoadFailed ? (
+              {createMode === "reconnect" && !assetTarget && (
+                rosterLoadFailed ? (
                   <p role="alert" className="rounded-[10px] border border-[var(--danger-red)]/30 bg-[var(--danger-red)]/8 p-3 text-[12px] text-[var(--text-secondary)]">Existing clients could not be loaded. Close and refresh before creating a reconnect link.</p>
                 ) : (
                   <>
                     <div className="space-y-1.5"><Label htmlFor="legacy-client-search">Existing client</Label><div className="relative"><Search className="pointer-events-none absolute top-1/2 left-3 size-3.5 -translate-y-1/2 text-[var(--text-muted)]" aria-hidden /><Input id="legacy-client-search" value={legacySearch} onChange={(event) => setLegacySearch(event.target.value)} placeholder="Search name or email" className="pl-9" /></div></div>
                     <fieldset><legend className="sr-only">Select an existing client</legend><div className="max-h-64 space-y-2 overflow-y-auto pr-1">
-                      {legacyMatches.map((client) => {
-                        const staged = stagedClientIds.has(client.id);
-                        return <label key={client.id} className="block cursor-pointer"><input type="radio" name="legacy-client" className="peer sr-only" value={client.id} checked={selectedLegacyId === client.id} disabled={staged} onChange={() => setSelectedLegacyId(client.id)} /><span className="block rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3 peer-checked:border-[var(--accent-gold)]/60 peer-focus-visible:ring-2 peer-focus-visible:ring-[var(--accent-gold)]/40 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"><span className="flex justify-between gap-2"><span><span className="block text-[12.5px] font-medium text-[var(--text-primary)]">{client.fullName}</span><span className="block break-all text-[11.5px] text-[var(--text-secondary)]">{client.email}</span></span>{staged && <Badge variant="neutral">Already onboarded</Badge>}</span></span></label>;
+                      {rosterMatches.map((client) => {
+                        const linkOpen = clientsWithOpenLinks.has(client.clientId);
+                        return <label key={client.clientId} className="block cursor-pointer"><input type="radio" name="legacy-client" className="peer sr-only" value={client.clientId} checked={selectedLegacyId === client.clientId} disabled={linkOpen} onChange={() => setSelectedLegacyId(client.clientId)} /><span className="block rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3 peer-checked:border-[var(--accent-gold)]/60 peer-focus-visible:ring-2 peer-focus-visible:ring-[var(--accent-gold)]/40 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"><span className="flex justify-between gap-2"><span><span className="block text-[12.5px] font-medium text-[var(--text-primary)]">{client.fullName}</span><span className="block break-all text-[11.5px] text-[var(--text-secondary)]">{client.email}</span></span>{linkOpen && <Badge variant="neutral">Link already open</Badge>}</span></span></label>;
                       })}
                     </div></fieldset>
                   </>
@@ -852,7 +882,7 @@ export function ClientOnboardingManager({
               )}
               <AssetChoiceField value={assetChoice} onChange={setAssetChoice} newClient={createMode === "new_client"} />
               {dialogError && <p role="alert" className="text-[12px] text-[var(--danger-red)]">{dialogError}</p>}
-              <DialogFooter><Button type="button" variant="primary" loading={busy === "create"} disabled={readOnlyPreview || backendLoadFailed || createMode === "reconnect" && !selectedLegacyId} onClick={() => void createInvitation()}><Link2 aria-hidden /> Generate one-time link</Button></DialogFooter>
+              <DialogFooter><Button type="button" variant="primary" loading={busy === "create"} disabled={readOnlyPreview || backendLoadFailed || rosterLoadFailed || createMode === "reconnect" && !assetTarget && !selectedLegacyId} onClick={() => void createInvitation()}><Link2 aria-hidden /> Generate one-time link</Button></DialogFooter>
             </div>
           )}
         </DialogContent>
@@ -904,7 +934,7 @@ export function ClientOnboardingManager({
                 <DialogDescription>Each connection is revoked separately. Choosing an asset below opens a precise confirmation before anything changes.</DialogDescription>
               </DialogHeader>
               <div className="space-y-2">
-                {revokeCard?.shopify.map((store) => (
+                {revokeCard?.shopify.filter((store) => store.source === "onboarding").map((store) => (
                   <button key={store.id} type="button" className="flex w-full items-center justify-between gap-3 rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3 text-left transition-smooth hover:border-[var(--danger-red)]/40" onClick={() => setDisconnectTarget({ kind: "shopify", id: store.id, name: store.name, clientName: cardClientName(revokeCard) })}>
                     <span><span className="block text-[12.5px] font-medium text-[var(--text-primary)]">{store.name}</span><span className="block text-[11px] text-[var(--text-secondary)]">Shopify · {store.domain}</span></span><Unplug className="size-4 shrink-0 text-[var(--danger-red)]" aria-hidden />
                   </button>

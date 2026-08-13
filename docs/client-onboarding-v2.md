@@ -10,10 +10,10 @@ Este documento fixa a arquitetura usada pela primeira implementação. O schema 
 
 ## 1. Decisão resumida
 
-A transição mantém **duas superfícies de clientes em paralelo**. A página operacional atual continua disponível como **Clients (Legacy)**, sem alteração dos seus dados, ligações ou processos. Uma nova página **Clients** recebe o roster V2 inicialmente vazio, visualmente inspirado em `/admin/audit/connections`, mas com uma finalidade diferente: gerir identidade de portal e assets permanentes de reporting de cada cliente.
+A transição mantém **duas superfícies de clientes em paralelo**. A página operacional atual continua disponível como **Clients (Legacy)**, sem alteração dos seus dados, ligações ou processos. Uma nova página **Clients** reúne as identidades de portal existentes, as lojas Shopify ativas e os novos onboardings, visualmente inspirada em `/admin/audit/connections`, mas com uma finalidade diferente: gerir identidade de portal e assets permanentes de reporting de cada cliente.
 
-- A lista V2 não é preenchida automaticamente com os clientes legacy. Um cliente só aparece depois de concluir um onboarding V2 ou uma reconexão explicitamente iniciada pelo admin.
-- A lista legacy, as identidades, os assets e todos os registos financeiros permanecem intactos. “Vazio” é uma decisão de apresentação e rollout, não uma eliminação de dados.
+- A nova lista projeta os `portal_clients` existentes e as lojas Shopify legacy ativas sem copiar credenciais, criar sessões ou alterar o estado operacional.
+- A lista legacy, as identidades, os assets e todos os registos financeiros permanecem intactos e autoritativos até ao cutover final verificado.
 - Durante a coexistência, `/admin/clients` continua a servir a implementação atual e aparece na navegação como **Clients (Legacy)**. A nova superfície usa `/admin/client-onboarding` e aparece como **Clients**, com um badge temporário `New`.
 - Todos os clientes criados depois da ativação da V2 entram exclusivamente em **Clients**. Clientes atuais continuam em **Clients (Legacy)** até existir um cutover individual, explícito e aprovado.
 - Não existe dual-write entre os dois sistemas. Em cada momento, um cliente tem uma única superfície operacional; dados V2 ainda em onboarding são staging e não alimentam reporting ou billing.
@@ -44,7 +44,7 @@ A transição mantém **duas superfícies de clientes em paralelo**. A página o
 ## 3. Não objetivos da primeira entrega
 
 - Apagar, limpar ou reescrever automaticamente os dados legacy.
-- Importar automaticamente os portal clients atuais para o roster V2 sem reconexão.
+- Copiar credenciais legacy para as tabelas novas, fabricar sessões de onboarding ou alterar rollout/billing apenas para preencher o roster.
 - Alterar imediatamente Stripe, invoices, commissions, referrals ou datas de início/fim de billing.
 - Transformar a ligação de Audit Connections numa ligação permanente de reporting.
 - Pedir scopes Shopify de escrita ou scopes que não sejam necessários aos relatórios aprovados.
@@ -116,19 +116,20 @@ O estado por cliente é explícito e auditável:
 
 Não há estado em que Legacy e V2 possam executar simultaneamente writes de ligação, reporting ou billing para o mesmo asset. Para clientes ainda em Legacy, novos assets continuam no processo legacy, salvo quando a adição faz parte de uma sessão V2 de migração explicitamente aberta. Depois de `v2_active`, **Add Assets** existe apenas em Clients.
 
-### 6.2 Roster V2 inicialmente vazio
+### 6.2 Roster de transição
 
-O roster principal consulta apenas sessões/onboardings V2 concluídos ou iniciados. Não faz `SELECT` direto de todos os `portal_clients` para preencher cartões. Assim, pode começar vazio sem tocar nos dados atuais.
+O roster principal combina sessões/onboardings com uma projeção read-only de clientes existentes. A identidade continua a ser `portal_clients.id`; perfis admin, identidades rejeitadas e utilizadores que são apenas membros de outro workspace não criam cartões próprios. Clientes pendentes aparecem sem assets. Para clientes aprovados, apenas lojas `ad_accounts` ativas, marcadas como Shopify connected e com domínio válido são mostradas. Nenhuma credencial ou ligação Google Ads legacy é enviada ao browser ou importada para as tabelas novas.
+
+As lojas projetadas aceitam os scopes que já têm. O teste de conexão confirma a credencial e a identidade da loja em modo read-only, sem exigir igualdade com o novo profile de scopes. O admin pode gerar uma reconexão Shopify manual quando necessário. Assim que uma ligação nova existe para o mesmo domínio normalizado, ela substitui a representação legacy no roster; o registo legacy permanece por baixo até ao cutover final para preservar reporting, billing e rollback.
 
 O ecrã deve conter:
 
 - resumo de `Connected`, `Onboarding` e `Waiting on review`;
 - botão principal **Add client** alinhado à esquerda;
-- estado vazio que explica que os registos legacy continuam preservados;
-- lista V2 por cliente, com contagens independentes de Shopify e Google Ads;
+- lista única por cliente, com contagens independentes de Shopify e Google Ads;
 - estados de atenção orientados a ações concretas, não uma categoria ambígua;
 - atualizações ao vivo ou refresh explícito sem banners persistentes de sucesso;
-- acesso secundário a **Reconnect legacy client**, com pesquisa interna, sem importar o resultado para o roster antes da conclusão.
+- acesso secundário a **Reconnect existing**, com pesquisa interna, e ação **Reconnect Shopify** nos cartões com lojas existentes.
 
 Cada cliente tem as ações:
 
@@ -140,7 +141,7 @@ Cada cliente tem as ações:
 
 #### `new_client`
 
-- O admin escolhe Account only ou Complete setup (Shopify + Google Ads) e emite um link sem nome ou email pré-preenchidos.
+- O admin escolhe Account only ou Complete setup (Shopify & Google Ads) e emite um link sem nome ou email pré-preenchidos.
 - A abertura do link inicia o passo Account.
 - O cliente cria a própria identidade; só depois liga os assets pedidos.
 - A criação de conta é idempotente por sessão e email normalizado. Uma colisão com identidade existente exige login/recovery, nunca a criação silenciosa de uma segunda identidade.
@@ -392,7 +393,7 @@ Nenhuma destas ações faz `DELETE` de `portal_clients`, `ad_accounts`, invoices
 - Montar o roster V2 em `/admin/client-onboarding` com a label **Clients** e badge temporário `New`.
 - Colocar as duas entradas lado a lado na navegação de Growth.
 - Mostrar na página Legacy o estado de migração, sem alterar o comportamento dos clientes ainda `legacy_only`.
-- Não copiar automaticamente nenhum cliente para o roster V2.
+- Projetar de forma read-only os clientes existentes e as lojas Shopify ativas, sem copiar credenciais, criar sessões ou mudar rollout.
 - Manter a nova rota dentro do gate de admin; retirar a entrada de navegação esconde apenas Clients V2 e deixa Clients (Legacy) inalterado.
 
 ### Fase 2 — sessões e identidade — implementada
@@ -415,9 +416,10 @@ Nenhuma destas ações faz `DELETE` de `portal_clients`, `ad_accounts`, invoices
 - Implementar polling, correlação por link, seleção multi-account e conflitos.
 - Implementar leitura normal compatível com Basic e health check. O unlink Windsor permanece uma ação futura separada.
 
-### Fase 5 — reconexão controlada — próxima fase operacional
+### Fase 5 — reconexão controlada — em curso
 
-- Começar por um cliente interno/teste.
+- Mostrar os clientes existentes e validar as lojas Shopify já ligadas.
+- Ligar Google Ads novamente através da Windsor; nunca projetar a ligação Google legacy como concluída.
 - Reconciliar identidade, stores, contas Google Ads, mappings e billing binding.
 - Comparar dashboards/relatórios e passar os critérios abaixo.
 - Marcar `v2_active` apenas numa transação administrativa explícita; nesse momento Legacy torna-se read-only para esse cliente.
@@ -440,10 +442,10 @@ Nenhuma destas ações faz `DELETE` de `portal_clients`, `ad_accounts`, invoices
 
 ### Dados e rollout
 
-- Com o roster legacy atual preservado, o roster V2 abre vazio sem apagar ou alterar nenhum cliente existente.
+- Com os dados legacy preservados, a nova lista mostra as contas existentes e as lojas Shopify ativas sem criar novos logins nem alterar registos operacionais.
 - A navegação mostra simultaneamente **Clients** e **Clients (Legacy)** durante a coexistência.
 - `/admin/clients` continua a abrir a página operacional Legacy, com os handlers e ligações atuais funcionais.
-- `/admin/client-onboarding` começa vazio e recebe apenas clientes novos ou reconexões explicitamente iniciadas.
+- `/admin/client-onboarding` combina clientes existentes, lojas Shopify válidas e sessões novas, sem importar ligações Google Ads legacy.
 - Um cliente novo aparece apenas na V2 e não cria automaticamente um cliente/asset legacy.
 - Um cliente em migração tem um único estado explícito e nunca é writable nas duas superfícies ao mesmo tempo.
 - Um cliente `v2_active` fica read-only na superfície Legacy; um cliente `legacy_only` não é afetado pela V2.
@@ -453,7 +455,7 @@ Nenhuma destas ações faz `DELETE` de `portal_clients`, `ad_accounts`, invoices
 
 ### Link e identidade
 
-- Um admin consegue gerar um link de novo cliente para Account only ou Complete setup (Shopify + Google Ads). Links `add_assets` e `reconnect` permitem Shopify, Google Ads ou ambos.
+- Um admin consegue gerar um link de novo cliente para Account only ou Complete setup (Shopify & Google Ads). Links `add_assets` e `reconnect` permitem Shopify, Google Ads ou ambos.
 - O registo público legacy deixa de criar novos clientes; `/register` explica que o acesso é por convite e mantém login/recovery de utilizadores atuais.
 - O link de novo cliente não contém nome, email, client ID legível, API key ou outro PII/segredo.
 - Um novo cliente fornece primeiro nome, último nome, email e password e consegue entrar na dashboard após o fluxo aprovado.
