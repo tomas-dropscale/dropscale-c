@@ -166,6 +166,7 @@ export type Client = {
   id: string;
   full_name: string;
   email: string;
+  discord_handle: string | null;
   avatar_url: string | null;
   crm_client_id: string | null;
   approval_status: ClientApprovalStatus;
@@ -889,6 +890,7 @@ export type ClientOnboardingSession = {
   first_name: string | null;
   last_name: string | null;
   email: string | null;
+  discord_handle: string | null;
   created_by: string;
   created_at: string;
   updated_at: string;
@@ -1292,6 +1294,7 @@ export type Database = {
           | "first_name"
           | "last_name"
           | "email"
+          | "discord_handle"
           | "created_at"
           | "updated_at"
           | "identity_created_at"
@@ -1926,6 +1929,7 @@ export type Database = {
           | "stripe_customer_id"
           | "referral_code"
           | "referred_by"
+          | "discord_handle"
         >;
         Update: Partial<Client>;
         Relationships: [
@@ -2310,6 +2314,20 @@ export type Database = {
     };
     Views: Record<never, never>;
     Functions: {
+      update_portal_client_identity: {
+        Args: {
+          p_client_id: string;
+          p_full_name: string;
+          p_email: string;
+          p_discord_handle: string | null;
+          p_admin_id: string;
+        };
+        Returns: string;
+      };
+      archive_portal_client: {
+        Args: { p_client_id: string; p_admin_id: string };
+        Returns: string;
+      };
       disconnect_legacy_shopify_connection: {
         Args: { p_account_id: string; p_admin_id: string };
         Returns: string;
@@ -2358,6 +2376,7 @@ export type Database = {
           p_first_name: string;
           p_last_name: string;
           p_email: string;
+          p_discord_handle: string | null;
         };
         Returns: string;
       };

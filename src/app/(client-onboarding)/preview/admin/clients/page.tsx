@@ -20,6 +20,7 @@ const PREVIEW_ROSTER: ExistingClientRosterDTO[] = [
     clientId: "48f87d57-85d7-4010-a093-a1c06486038d",
     fullName: "Northwind Home",
     email: "owner@northwind.example",
+    discordHandle: "northwind.home",
     approvalStatus: "approved",
     createdAt: "2026-01-10T09:00:00.000Z",
     shopify: [
@@ -38,6 +39,7 @@ const PREVIEW_ROSTER: ExistingClientRosterDTO[] = [
     clientId: "1a1a08e0-d87a-45f7-beb7-e1b6c112495a",
     fullName: "Atlas Studio",
     email: "team@atlas.example",
+    discordHandle: "atlas.studio",
     approvalStatus: "approved",
     createdAt: "2026-02-01T09:00:00.000Z",
     shopify: [
@@ -56,6 +58,7 @@ const PREVIEW_ROSTER: ExistingClientRosterDTO[] = [
     clientId: "69aa2e3c-d3d1-48c2-83d7-692255bde599",
     fullName: "Cedar & Coast",
     email: "hello@cedar.example",
+    discordHandle: null,
     approvalStatus: "pending",
     createdAt: "2026-08-11T09:00:00.000Z",
     shopify: [],

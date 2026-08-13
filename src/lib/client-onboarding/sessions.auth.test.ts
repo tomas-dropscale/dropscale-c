@@ -53,15 +53,57 @@ describe("client onboarding invitation asset rules", () => {
     });
   });
 
-  it.each(["shopify", "google_ads"])(
-    "rejects a partial new-client setup requesting only %s",
-    async (asset) => {
+  it.each([
+    ["account only", []],
+    ["Account & Shopify", ["shopify"]],
+    ["complete setup", ["shopify", "google_ads"]],
+  ] as const)("creates a new-client invitation for %s", async (_label, requestedAssets) => {
+    const { rpc } = serviceFor(sessionRow());
+
+    await expect(
+      createClientOnboardingSession({
+        mode: "new_client",
+        requestedAssets,
+        adminId: OTHER_USER,
+      }),
+    ).resolves.toMatchObject({
+      mode: "new_client",
+      requestedAssets: [...requestedAssets].sort(),
+    });
+    expect(rpc).toHaveBeenCalledWith(
+      "create_client_onboarding_invitation",
+      expect.objectContaining({ p_requested_assets: [...requestedAssets].sort() }),
+    );
+  });
+
+  it("rejects a new-client setup requesting Google Ads without Shopify", async () => {
+    const { rpc } = serviceFor(sessionRow());
+
+    await expect(
+      createClientOnboardingSession({
+        mode: "new_client",
+        requestedAssets: ["google_ads"],
+        adminId: OTHER_USER,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_request", status: 400 });
+    expect(mocks.createClientOnboardingInvitationMaterial).not.toHaveBeenCalled();
+    expect(rpc).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["duplicate assets", ["shopify", "shopify"], undefined],
+    ["an unknown asset", ["shopify", "unknown"], undefined],
+    ["an existing-client target", ["shopify"], OWNER],
+  ] as const)(
+    "rejects a new-client invitation with %s",
+    async (_label, requestedAssets, targetClientId) => {
       const { rpc } = serviceFor(sessionRow());
 
       await expect(
         createClientOnboardingSession({
           mode: "new_client",
-          requestedAssets: [asset],
+          requestedAssets,
+          ...(targetClientId ? { targetClientId } : {}),
           adminId: OTHER_USER,
         }),
       ).rejects.toMatchObject({ code: "invalid_request", status: 400 });
@@ -253,6 +295,25 @@ describe("claimed existing-client onboarding authorization", () => {
     });
   });
 
+  it("rejects every onboarding request after the target client is archived", async () => {
+    const row = sessionRow({
+      mode: "add_assets",
+      requested_assets: ["shopify"],
+      target_client_id: OWNER,
+      claimed_user_id: OWNER,
+    });
+    const { query } = serviceFor(row);
+    query.maybeSingle
+      .mockResolvedValueOnce({ data: row, error: null })
+      .mockResolvedValueOnce({ data: { approval_status: "rejected" }, error: null });
+
+    await expect(authorizeClientOnboardingRequest(SESSION, TOKEN)).rejects.toMatchObject({
+      code: "invalid_invitation",
+      status: 404,
+    });
+    expect(mocks.getSessionProfile).not.toHaveBeenCalled();
+  });
+
   it("allows the matching target to resume and claim an open invitation after OAuth", async () => {
     serviceFor(
       sessionRow({
@@ -291,7 +352,15 @@ describe("claimed existing-client onboarding authorization", () => {
         error: null,
       })
       .mockResolvedValueOnce({
-        data: { full_name: "Casey Example", email: "casey@example.com" },
+        data: { approval_status: "approved" },
+        error: null,
+      })
+      .mockResolvedValueOnce({
+        data: {
+          full_name: "Casey Example",
+          email: "casey@example.com",
+          discord_handle: null,
+        },
         error: null,
       });
     mocks.getSessionProfile
@@ -379,6 +448,7 @@ describe("new-client identity recovery", () => {
         firstName: " Casey ",
         lastName: " Example ",
         email: "CASEY@example.com",
+        discordHandle: "@casey.example",
       }),
     ).resolves.toMatchObject({ alreadyCreated: true });
     expect(rpc).toHaveBeenCalledWith("claim_client_onboarding_identity", {
@@ -388,8 +458,28 @@ describe("new-client identity recovery", () => {
       p_first_name: "Casey",
       p_last_name: "Example",
       p_email: "casey@example.com",
+      p_discord_handle: "casey.example",
     });
   });
+
+  it.each(["@@casey", "two words", "discord.com/casey", "https://discord.com/users/casey"])(
+    "rejects an invalid Discord handle before claiming the identity: %s",
+    async (discordHandle) => {
+      const { rpc } = serviceFor(sessionRow());
+
+      await expect(
+        recoverClientOnboardingIdentity({
+          sessionId: SESSION,
+          invitationToken: TOKEN,
+          firstName: "Casey",
+          lastName: "Example",
+          email: "casey@example.com",
+          discordHandle,
+        }),
+      ).rejects.toMatchObject({ code: "invalid_request", status: 400 });
+      expect(rpc).not.toHaveBeenCalled();
+    },
+  );
 
   it("recovers a pre-existing Auth identity whose metadata was not updated by sign-up", async () => {
     const { rpc, updateUserById } = serviceFor(sessionRow());
@@ -405,6 +495,7 @@ describe("new-client identity recovery", () => {
         firstName: "Casey",
         lastName: "Example",
         email: "casey@example.com",
+        discordHandle: "casey.example",
       }),
     ).resolves.toMatchObject({ alreadyCreated: true });
     expect(rpc).toHaveBeenCalledWith(
@@ -446,6 +537,7 @@ describe("new-client identity recovery", () => {
         firstName: "Casey",
         lastName: "Example",
         email: "casey@example.com",
+        discordHandle: "casey.example",
       }),
     ).resolves.toMatchObject({ alreadyCreated: true });
     expect(rpc).toHaveBeenCalledWith(
@@ -474,6 +566,7 @@ describe("new-client identity recovery", () => {
         firstName: "Casey",
         lastName: "Example",
         email: "casey@example.com",
+        discordHandle: "casey.example",
       }),
     ).rejects.toMatchObject({ status: expect.any(Number) });
     expect(rpc).not.toHaveBeenCalled();

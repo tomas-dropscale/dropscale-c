@@ -15,7 +15,7 @@ import type {
 } from "@/lib/supabase/types";
 
 const SAFE_CLIENT_COLUMNS =
-  "id, full_name, email, approval_status, created_at" as const;
+  "id, full_name, email, discord_handle, approval_status, created_at" as const;
 const SAFE_PROFILE_COLUMNS = "id, role" as const;
 const SAFE_MEMBER_COLUMNS = "member_id" as const;
 const SAFE_ACCOUNT_COLUMNS =
@@ -23,7 +23,12 @@ const SAFE_ACCOUNT_COLUMNS =
 
 type LegacyClientRow = Pick<
   Client,
-  "id" | "full_name" | "email" | "approval_status" | "created_at"
+  | "id"
+  | "full_name"
+  | "email"
+  | "discord_handle"
+  | "approval_status"
+  | "created_at"
 >;
 type LegacyProfileRow = Pick<Profile, "id" | "role">;
 type LegacyMemberRow = Pick<ClientMember, "member_id">;
@@ -55,6 +60,7 @@ export type ExistingClientRosterDTO = {
   clientId: string;
   fullName: string;
   email: string;
+  discordHandle: string | null;
   approvalStatus: ClientApprovalStatus;
   createdAt: string;
   shopify: LegacyShopifyAssetDTO[];
@@ -184,6 +190,7 @@ export async function listExistingClientRoster(): Promise<ExistingClientRosterDT
       clientId: client.id,
       fullName: client.full_name,
       email: client.email,
+      discordHandle: client.discord_handle,
       approvalStatus: client.approval_status,
       createdAt: client.created_at,
       shopify:

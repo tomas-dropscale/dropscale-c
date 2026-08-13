@@ -56,6 +56,7 @@ function client(
     id,
     full_name: fullName,
     email: `${fullName.toLowerCase().replaceAll(" ", ".")}@example.com`,
+    discord_handle: `${fullName.toLowerCase().replaceAll(" ", ".")}`,
     approval_status: approvalStatus,
     created_at: "2026-01-01T00:00:00.000Z",
   };
@@ -115,7 +116,10 @@ describe("existing client roster", () => {
     await listExistingClientRoster();
 
     expect(mocks.select.mock.calls).toEqual([
-      ["portal_clients", "id, full_name, email, approval_status, created_at"],
+      [
+        "portal_clients",
+        "id, full_name, email, discord_handle, approval_status, created_at",
+      ],
       ["profiles", "id, role"],
       ["client_members", "member_id"],
       [
@@ -161,6 +165,9 @@ describe("existing client roster", () => {
       "Charlie Owner",
     ]);
     expect(roster.find((entry) => entry.clientId === PENDING)?.shopify).toEqual([]);
+    expect(roster.find((entry) => entry.clientId === OWNER)?.discordHandle).toBe(
+      "alpha.owner",
+    );
     expect(roster.find((entry) => entry.clientId === MEMBER_OWNER)?.shopify[0]).toMatchObject({
       id: "member-owner-store",
       grantedScopes: [],

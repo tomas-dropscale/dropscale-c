@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import {
+  Archive,
   Check,
   CheckCircle2,
   CircleAlert,
@@ -9,6 +10,7 @@ import {
   Clock3,
   Link2,
   Megaphone,
+  Pencil,
   Plus,
   RefreshCw,
   Search,
@@ -78,6 +80,16 @@ type ReconnectTarget = {
   name: string;
   domain: string;
 };
+type ClientManagementTarget = {
+  clientId: string;
+  name: string;
+  email: string;
+  discordHandle: string;
+};
+type ClientIdentityDraft = Pick<
+  ClientManagementTarget,
+  "name" | "email" | "discordHandle"
+>;
 type AssetConnectionState = {
   status: "testing" | "connected" | "failed";
   message?: string;
@@ -144,6 +156,28 @@ function cardEmail(card: ClientCard) {
     card.sessions.find((session) => session.email)?.email ??
     null
   );
+}
+
+function cardDiscordHandle(card: ClientCard) {
+  const roster = card.roster as
+    | (ExistingClientRosterDTO & { discordHandle?: unknown })
+    | null;
+  if (typeof roster?.discordHandle === "string") return roster.discordHandle;
+  return (
+    card.session?.discordHandle ??
+    card.sessions.find((session) => session.discordHandle)?.discordHandle ??
+    ""
+  );
+}
+
+function clientManagementTarget(card: ClientCard): ClientManagementTarget | null {
+  if (!card.clientId || !card.roster) return null;
+  return {
+    clientId: card.clientId,
+    name: cardClientName(card),
+    email: cardEmail(card) ?? "",
+    discordHandle: cardDiscordHandle(card),
+  };
 }
 
 function cardHasIssue(card: ClientCard) {
@@ -389,16 +423,19 @@ function AssetChoiceField({
         <SelectContent>
           {newClient ? (
             <>
-              <SelectItem value="account">Dashboard account only — no assets yet</SelectItem>
-              <SelectItem value="both">Complete setup — Shopify & Google Ads</SelectItem>
+              <SelectItem value="account">Account Only</SelectItem>
+              <SelectItem value="shopify">Account &amp; Shopify</SelectItem>
+              <SelectItem value="both">
+                Complete Setup - Account, Shopify &amp; Google
+              </SelectItem>
             </>
           ) : (
             <>
               {shopifyAvailable && (
-                <SelectItem value="shopify">Shopify store</SelectItem>
+                <SelectItem value="shopify">Shopify</SelectItem>
               )}
               {googleAvailable && (
-                <SelectItem value="google_ads">Google Ads account</SelectItem>
+                <SelectItem value="google_ads">Google Ads</SelectItem>
               )}
               {shopifyAvailable && googleAvailable && (
                 <SelectItem value="both">Shopify & Google Ads</SelectItem>
@@ -410,8 +447,10 @@ function AssetChoiceField({
       <p className="text-[11.5px] leading-relaxed text-[var(--text-secondary)]">
         {newClient
           ? value === "account"
-            ? "Creates dashboard access only. Assets can be requested later from the client card."
-            : "The client must connect all Shopify stores and Google Ads accounts they use before submitting."
+            ? "Creates dashboard access only. Shopify and Google Ads can be added later."
+            : value === "shopify"
+              ? "The client can connect one or more Shopify stores."
+              : "The client can connect one or more Shopify stores and Google Ads accounts."
           : availableAssets.length === 1
             ? `${onboardingAssetLabel(availableAssets)} is the only asset type without an open link.`
             : "The client can connect one or more of each requested asset."}
@@ -452,6 +491,13 @@ export function ClientOnboardingManager({
   const [invitation, setInvitation] = React.useState<Invitation | null>(null);
   const [actionTarget, setActionTarget] = React.useState<ActionTarget | null>(null);
   const [disconnectTarget, setDisconnectTarget] = React.useState<DisconnectTarget | null>(null);
+  const [editTarget, setEditTarget] = React.useState<ClientManagementTarget | null>(null);
+  const [editDraft, setEditDraft] = React.useState<ClientIdentityDraft>({
+    name: "",
+    email: "",
+    discordHandle: "",
+  });
+  const [removeTarget, setRemoveTarget] = React.useState<ClientManagementTarget | null>(null);
 
   const cards = React.useMemo(() => buildClientCards(sessions, roster), [sessions, roster]);
   const hasVisibleIssue = React.useCallback(
@@ -810,6 +856,127 @@ export function ClientOnboardingManager({
     }
   }
 
+  function openEditClient(card: ClientCard) {
+    const target = clientManagementTarget(card);
+    if (!target) return;
+    setEditTarget(target);
+    setEditDraft({
+      name: target.name,
+      email: target.email,
+      discordHandle: target.discordHandle,
+    });
+    setDialogError("");
+  }
+
+  function closeEditClient() {
+    setEditTarget(null);
+    setDialogError("");
+  }
+
+  async function updateClientIdentity(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!editTarget || readOnlyPreview) return;
+
+    const fullName = editDraft.name.trim();
+    const email = editDraft.email.trim();
+    const discordHandle = editDraft.discordHandle.trim();
+    if (!fullName || !email) {
+      setDialogError("Name and email are required.");
+      return;
+    }
+
+    const busyKey = `edit-client:${editTarget.clientId}`;
+    setBusy(busyKey);
+    setDialogError("");
+    try {
+      const response = await fetch(
+        `/api/admin/client-onboarding/client/${encodeURIComponent(editTarget.clientId)}`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            fullName,
+            email,
+            discordHandle: discordHandle || null,
+          }),
+        },
+      );
+      const body = await readJson(response);
+      if (!response.ok) {
+        throw new Error(errorMessage(body, "The client details could not be updated."));
+      }
+      try {
+        await refreshClients();
+      } catch (refreshError) {
+        setEditTarget(null);
+        showNotice(
+          "error",
+          "Client updated, but the list is stale",
+          refreshError instanceof Error
+            ? refreshError.message
+            : "Refresh the page before taking another action.",
+        );
+        return;
+      }
+      setEditTarget(null);
+      showNotice(
+        "success",
+        "Client details updated",
+        `Account details for ${fullName} are up to date.`,
+      );
+    } catch (error) {
+      setDialogError(
+        error instanceof Error
+          ? error.message
+          : "The client details could not be updated.",
+      );
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function removeClient(target: ClientManagementTarget) {
+    if (readOnlyPreview) return;
+    const busyKey = `remove-client:${target.clientId}`;
+    setBusy(busyKey);
+    setDialogError("");
+    try {
+      const response = await fetch(
+        `/api/admin/client-onboarding/client/${encodeURIComponent(target.clientId)}`,
+        { method: "DELETE" },
+      );
+      const body = await readJson(response);
+      if (!response.ok) {
+        throw new Error(errorMessage(body, "The client could not be removed."));
+      }
+      try {
+        await refreshClients();
+      } catch (refreshError) {
+        setRemoveTarget(null);
+        showNotice(
+          "error",
+          "Client removed, but the list is stale",
+          refreshError instanceof Error
+            ? refreshError.message
+            : "Refresh the page before taking another action.",
+        );
+        return;
+      }
+      setRemoveTarget(null);
+      showNotice(
+        "success",
+        "Client removed",
+        `${target.name} was archived. Connections, billing and history were preserved.`,
+      );
+    } catch (error) {
+      setDialogError(
+        error instanceof Error ? error.message : "The client could not be removed.",
+      );
+    } finally {
+      setBusy(null);
+    }
+  }
+
   const selectedActionSession = actionTarget?.session;
   const selectedAction = actionTarget?.action;
   const selectedActionPurpose = selectedActionSession
@@ -922,6 +1089,16 @@ export function ClientOnboardingManager({
                         <Plus aria-hidden /> Add assets
                       </Button>
                       {reviewSession && <Button type="button" size="sm" variant={reviewSession.requestedAssets.length === 0 ? "primary" : "secondary"} disabled={disabled} onClick={() => setActionTarget({ session: reviewSession, action: "approve" })}><ShieldCheck aria-hidden /> {approvalLabel(reviewSession)}</Button>}
+                      {card.clientId && card.roster && (
+                        <>
+                          <Button type="button" size="sm" disabled={disabled} onClick={() => openEditClient(card)}>
+                            <Pencil aria-hidden /> Edit client
+                          </Button>
+                          <Button type="button" size="sm" variant="danger" disabled={disabled} onClick={() => setRemoveTarget(clientManagementTarget(card))}>
+                            <Archive aria-hidden /> Remove client
+                          </Button>
+                        </>
+                      )}
                     </div>
                   </div>
 
@@ -1048,7 +1225,7 @@ export function ClientOnboardingManager({
           <DialogHeader>
             <DialogTitle>{invitation ? "Copy one-time link" : createMode === "new_client" ? "Onboard a new client" : createMode === "reconnect" ? "Reconnect Shopify" : "Add client assets"}</DialogTitle>
             <DialogDescription>
-              {invitation ? "This private link is shown once. Copy it now and send it only to the intended client." : createMode === "new_client" ? "The client creates their dashboard account and either finishes without assets or completes Shopify & Google Ads setup." : createMode === "reconnect" ? `Create a secure link for ${assetTarget ? cardClientName(assetTarget) : "this client"} to replace one specific Shopify connection.` : `Create a separate asset invitation for ${assetTarget ? cardClientName(assetTarget) : "this client"}.`}
+              {invitation ? "This private link is shown once. Copy it now and send it only to the intended client." : createMode === "new_client" ? "Create the client account on its own, with one or more Shopify stores, or with Shopify & Google Ads." : createMode === "reconnect" ? `Create a secure link for ${assetTarget ? cardClientName(assetTarget) : "this client"} to replace one specific Shopify connection.` : `Create a separate asset invitation for ${assetTarget ? cardClientName(assetTarget) : "this client"}.`}
             </DialogDescription>
           </DialogHeader>
           {invitation ? (
@@ -1123,6 +1300,100 @@ export function ClientOnboardingManager({
               <DialogFooter>
                 <Button type="button" onClick={() => { setDisconnectTarget(null); setDialogError(""); }}>Cancel</Button>
                 <Button type="button" variant="danger" loading={busy === `disconnect:${disconnectTarget.kind}:${disconnectTarget.id}`} onClick={() => void disconnectAsset(disconnectTarget)}><Unplug aria-hidden /> Remove asset</Button>
+              </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(editTarget)} onOpenChange={(open) => !open && closeEditClient()}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Edit client</DialogTitle>
+            <DialogDescription>
+              Update the client&apos;s account details. Connections, billing and history are unchanged.
+            </DialogDescription>
+          </DialogHeader>
+          {editTarget && (
+            <form className="space-y-4" onSubmit={updateClientIdentity}>
+              <div className="space-y-2">
+                <Label htmlFor="edit-client-name">Name</Label>
+                <Input
+                  id="edit-client-name"
+                  autoFocus
+                  required
+                  value={editDraft.name}
+                  onChange={(event) =>
+                    setEditDraft((current) => ({ ...current, name: event.target.value }))
+                  }
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="edit-client-email">Email</Label>
+                <Input
+                  id="edit-client-email"
+                  type="email"
+                  required
+                  value={editDraft.email}
+                  onChange={(event) =>
+                    setEditDraft((current) => ({ ...current, email: event.target.value }))
+                  }
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="edit-client-discord">Discord handle (optional)</Label>
+                <Input
+                  id="edit-client-discord"
+                  placeholder="@username"
+                  value={editDraft.discordHandle}
+                  onChange={(event) =>
+                    setEditDraft((current) => ({
+                      ...current,
+                      discordHandle: event.target.value,
+                    }))
+                  }
+                />
+              </div>
+              {dialogError && <p role="alert" className="text-[12px] text-[var(--danger-red)]">{dialogError}</p>}
+              <DialogFooter>
+                <Button type="button" onClick={closeEditClient}>Cancel</Button>
+                <Button
+                  type="submit"
+                  variant="primary"
+                  loading={busy === `edit-client:${editTarget.clientId}`}
+                >
+                  <Check aria-hidden /> Save changes
+                </Button>
+              </DialogFooter>
+            </form>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(removeTarget)} onOpenChange={(open) => { if (!open) { setRemoveTarget(null); setDialogError(""); } }}>
+        <DialogContent>
+          {removeTarget && (
+            <>
+              <DialogHeader>
+                <DialogTitle>Remove {removeTarget.name} from Clients?</DialogTitle>
+                <DialogDescription>
+                  This archives the client, removes them from this list and revokes their portal and onboarding access.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3 text-[12px] leading-relaxed text-[var(--text-secondary)]">
+                Shopify and Google Ads connections, billing and account history are preserved.
+              </div>
+              {dialogError && <p role="alert" className="text-[12px] text-[var(--danger-red)]">{dialogError}</p>}
+              <DialogFooter>
+                <Button type="button" onClick={() => { setRemoveTarget(null); setDialogError(""); }}>Cancel</Button>
+                <Button
+                  type="button"
+                  variant="danger"
+                  loading={busy === `remove-client:${removeTarget.clientId}`}
+                  onClick={() => void removeClient(removeTarget)}
+                >
+                  <Archive aria-hidden /> Remove client
+                </Button>
               </DialogFooter>
             </>
           )}

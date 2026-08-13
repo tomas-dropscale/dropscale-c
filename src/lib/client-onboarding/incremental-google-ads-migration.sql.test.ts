@@ -8,6 +8,7 @@ const MIGRATION = [
   "supabase/migrations/0046_client_shopify_reconnect_targets.sql",
   "supabase/migrations/0048_parallel_client_asset_invitations.sql",
   "supabase/migrations/0049_incremental_google_ads_accounts.sql",
+  "supabase/migrations/0050_new_client_shopify_setup.sql",
 ]
   .map((path) => readFileSync(path, "utf8"))
   .join("\n");
@@ -18,6 +19,8 @@ const CLIENT_B = "49000000-0000-4000-8000-000000000003";
 const OLD_SESSION = "49000000-0000-4000-8000-000000000004";
 const CURRENT_SESSION = "49000000-0000-4000-8000-000000000005";
 const OTHER_SESSION = "49000000-0000-4000-8000-000000000006";
+const NEW_CLIENT_SESSION = "49000000-0000-4000-8000-000000000007";
+const INVALID_NEW_CLIENT_SESSION = "49000000-0000-4000-8000-000000000008";
 const OLD_TOKEN = "a".repeat(64);
 const CURRENT_TOKEN = "b".repeat(64);
 const OTHER_TOKEN = "c".repeat(64);
@@ -233,6 +236,57 @@ beforeEach(async () => {
     [CLIENT_A, CLIENT_B, ADMIN],
   );
   await actAsService();
+});
+
+describe("new-client Shopify setup migration", () => {
+  it.each([
+    ["account only", []],
+    ["Account & Shopify", ["shopify"]],
+    ["complete setup", ["shopify", "google_ads"]],
+  ] as const)("persists %s", async (_label, requestedAssets) => {
+    const created = await db.query<{ id: string }>(
+      `select public.create_client_onboarding_invitation(
+         $1, 'new_client', $2::text[], null, $3,
+         now() + interval '1 day', $4
+       ) as id`,
+      [NEW_CLIENT_SESSION, [...requestedAssets], OLD_TOKEN, ADMIN],
+    );
+    expect(created.rows[0]).toEqual({ id: NEW_CLIENT_SESSION });
+
+    const saved = await db.query<{ requested_assets: string[] }>(
+      `select requested_assets
+       from public.client_onboarding_sessions
+       where id = $1`,
+      [NEW_CLIENT_SESSION],
+    );
+    expect(saved.rows[0]).toEqual({ requested_assets: [...requestedAssets].sort() });
+  });
+
+  it("rejects Google Ads without Shopify at the RPC and table constraints", async () => {
+    await expectSqlState(
+      db.query(
+        `select public.create_client_onboarding_invitation(
+           $1, 'new_client', array['google_ads']::text[], null, $2,
+           now() + interval '1 day', $3
+         )`,
+        [INVALID_NEW_CLIENT_SESSION, CURRENT_TOKEN, ADMIN],
+      ),
+      "22023",
+    );
+    await expectSqlState(
+      db.query(
+        `insert into public.client_onboarding_sessions (
+           id, mode, requested_assets, invite_token_hash,
+           invite_expires_at, created_by
+         ) values (
+           $1, 'new_client', array['google_ads']::text[], $2,
+           now() + interval '1 day', $3
+         )`,
+        [INVALID_NEW_CLIENT_SESSION, CURRENT_TOKEN, ADMIN],
+      ),
+      "23514",
+    );
+  });
 });
 
 describe("incremental Google Ads accounts migration", () => {

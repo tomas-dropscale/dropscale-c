@@ -29,11 +29,12 @@ export async function POST(request: NextRequest, { params }: Context) {
       return clientOnboardingResponse({ ok: true });
     }
     if (
-      isExactRecord(body, ["kind", "firstName", "lastName", "email"]) &&
+      isExactRecord(body, ["kind", "firstName", "lastName", "email", "discordHandle"]) &&
       body.kind === "recover" &&
       typeof body.firstName === "string" &&
       typeof body.lastName === "string" &&
       typeof body.email === "string" &&
+      typeof body.discordHandle === "string" &&
       invitationToken
     ) {
       const result = await recoverClientOnboardingIdentity({
@@ -42,15 +43,17 @@ export async function POST(request: NextRequest, { params }: Context) {
         firstName: body.firstName,
         lastName: body.lastName,
         email: body.email,
+        discordHandle: body.discordHandle,
       });
       return clientOnboardingResponse({ ok: true, ...result });
     }
     if (
-      !isExactRecord(body, ["kind", "firstName", "lastName", "email", "userId"]) ||
+      !isExactRecord(body, ["kind", "firstName", "lastName", "email", "discordHandle", "userId"]) ||
       body.kind !== "new" ||
       typeof body.firstName !== "string" ||
       typeof body.lastName !== "string" ||
       typeof body.email !== "string" ||
+      typeof body.discordHandle !== "string" ||
       typeof body.userId !== "string" ||
       !invitationToken
     ) {
@@ -62,6 +65,7 @@ export async function POST(request: NextRequest, { params }: Context) {
       firstName: body.firstName,
       lastName: body.lastName,
       email: body.email,
+      discordHandle: body.discordHandle,
       userId: body.userId,
     });
     return clientOnboardingResponse({ ok: true, ...result }, 201);

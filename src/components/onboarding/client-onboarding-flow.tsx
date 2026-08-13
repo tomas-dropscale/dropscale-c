@@ -231,6 +231,7 @@ export function ClientOnboardingFlow({ sessionId }: { sessionId: string }) {
     firstName: "",
     lastName: "",
     email: "",
+    discordHandle: "",
     password: "",
     confirmPassword: "",
   });
@@ -454,6 +455,7 @@ export function ClientOnboardingFlow({ sessionId }: { sessionId: string }) {
         options: {
           data: {
             full_name: `${account.firstName.trim()} ${account.lastName.trim()}`,
+            discord_handle: account.discordHandle.trim().replace(/^@/, ""),
             client_onboarding_id: sessionId,
           },
           emailRedirectTo: authRedirect(`/onboarding/client/${sessionId}`),
@@ -491,6 +493,7 @@ export function ClientOnboardingFlow({ sessionId }: { sessionId: string }) {
             firstName: account.firstName,
             lastName: account.lastName,
             email: account.email,
+            discordHandle: account.discordHandle,
             ...(recovery ? {} : { userId }),
           }),
         },
@@ -984,6 +987,24 @@ export function ClientOnboardingFlow({ sessionId }: { sessionId: string }) {
                       }
                       required
                     />
+                  </div>
+                  <div className="space-y-1.5 sm:col-span-2">
+                    <Label htmlFor="client-discord">Discord handle</Label>
+                    <Input
+                      id="client-discord"
+                      autoComplete="off"
+                      placeholder="@username"
+                      value={account.discordHandle}
+                      onChange={(event) =>
+                        setAccount({ ...account, discordHandle: event.target.value })
+                      }
+                      minLength={2}
+                      maxLength={65}
+                      required
+                    />
+                    <p className="text-[11px] text-[var(--text-muted)]">
+                      Used by Dropscale to identify you in Discord.
+                    </p>
                   </div>
                   <div className="space-y-1.5">
                     <Label htmlFor="client-password">Password</Label>

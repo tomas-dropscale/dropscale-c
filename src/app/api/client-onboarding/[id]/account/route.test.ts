@@ -69,6 +69,7 @@ describe("client onboarding account route", () => {
         firstName: "Casey",
         lastName: "Example",
         email: "casey@example.com",
+        discordHandle: "casey.example",
         userId: USER,
       }),
       { params: Promise.resolve({ id: SESSION }) },
@@ -80,6 +81,7 @@ describe("client onboarding account route", () => {
       firstName: "Casey",
       lastName: "Example",
       email: "casey@example.com",
+      discordHandle: "casey.example",
       userId: USER,
     });
     expect(JSON.stringify(mocks.createClientOnboardingIdentity.mock.calls)).not.toContain(
@@ -109,6 +111,7 @@ describe("client onboarding account route", () => {
         firstName: "Casey",
         lastName: "Example",
         email: "casey@example.com",
+        discordHandle: "casey.example",
         userId: USER,
         password: "must-not-cross-this-route",
       }),
@@ -125,6 +128,7 @@ describe("client onboarding account route", () => {
         firstName: "Casey",
         lastName: "Example",
         email: "casey@example.com",
+        discordHandle: "casey.example",
       }),
       { params: Promise.resolve({ id: SESSION }) },
     );
@@ -136,6 +140,7 @@ describe("client onboarding account route", () => {
       firstName: "Casey",
       lastName: "Example",
       email: "casey@example.com",
+      discordHandle: "casey.example",
     });
     const serializedCalls = JSON.stringify(mocks.recoverClientOnboardingIdentity.mock.calls);
     expect(serializedCalls).not.toContain("password");
@@ -150,6 +155,7 @@ describe("client onboarding account route", () => {
           firstName: "Casey",
           lastName: "Example",
           email: "casey@example.com",
+          discordHandle: "casey.example",
         },
         false,
       ),
@@ -170,6 +176,7 @@ describe("client onboarding account route", () => {
         firstName: "Casey",
         lastName: "Example",
         email: "casey@example.com",
+        discordHandle: "casey.example",
         [field]: value,
       }),
       { params: Promise.resolve({ id: SESSION }) },

@@ -21,7 +21,7 @@ import type {
 } from "@/lib/supabase/types";
 
 const SAFE_SESSION_COLUMNS =
-  "id, mode, requested_assets, status, invite_expires_at, failed_attempts, target_client_id, reconnect_legacy_ad_account_id, reconnect_shopify_connection_id, reconnect_completed_at, claimed_user_id, first_name, last_name, email, created_at, updated_at, identity_created_at, submitted_at, reviewed_at, activated_at, last_error_code" as const;
+  "id, mode, requested_assets, status, invite_expires_at, failed_attempts, target_client_id, reconnect_legacy_ad_account_id, reconnect_shopify_connection_id, reconnect_completed_at, claimed_user_id, first_name, last_name, email, discord_handle, created_at, updated_at, identity_created_at, submitted_at, reviewed_at, activated_at, last_error_code" as const;
 const AUTH_SESSION_COLUMNS = `${SAFE_SESSION_COLUMNS}, invite_token_hash, created_by` as const;
 const SAFE_SHOPIFY_COLUMNS =
   "id, session_id, client_id, status, shopify_name, shopify_domain, primary_domain, shopify_currency, granted_scopes, connected_at, last_verified_at, last_error_code" as const;
@@ -89,6 +89,7 @@ export type ClientOnboardingSessionDTO = {
   firstName: string | null;
   lastName: string | null;
   email: string | null;
+  discordHandle?: string | null;
   createdAt: string;
   updatedAt: string;
   submittedAt: string | null;
@@ -247,6 +248,7 @@ function toDTO(
     firstName: row.first_name,
     lastName: row.last_name,
     email: row.email,
+    discordHandle: row.discord_handle,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     submittedAt: row.submitted_at,
@@ -434,7 +436,40 @@ export async function listClientOnboardingSessions(): Promise<ClientOnboardingSe
       500,
     );
   }
-  return loadSessionBundle((data ?? []) as SafeSessionRow[], true);
+  const sessions = (data ?? []) as SafeSessionRow[];
+  const clientIds = [
+    ...new Set(
+      sessions
+        .flatMap((session) => [session.target_client_id, session.claimed_user_id])
+        .filter((id): id is string => Boolean(id)),
+    ),
+  ];
+  const clientsResult = clientIds.length
+    ? await service
+        .from("portal_clients")
+        .select("id, approval_status")
+        .in("id", clientIds)
+    : { data: [], error: null };
+  if (clientsResult.error) {
+    throw new ClientOnboardingError(
+      "database_error",
+      "Could not check archived clients.",
+      500,
+    );
+  }
+  const archived = new Set(
+    (clientsResult.data ?? [])
+      .filter((client) => client.approval_status === "rejected")
+      .map((client) => client.id),
+  );
+  return loadSessionBundle(
+    sessions.filter(
+      (session) =>
+        !archived.has(session.target_client_id ?? "") &&
+        !archived.has(session.claimed_user_id ?? ""),
+    ),
+    true,
+  );
 }
 
 function normaliseAssets(
@@ -446,7 +481,7 @@ function normaliseAssets(
   );
   const invalidShape =
     mode === "new_client"
-      ? assets.length === 1
+      ? assets.length === 1 && assets[0] !== "shopify"
       : mode === "reconnect"
         ? assets.length !== 1 || assets[0] !== "shopify"
         : assets.length === 0;
@@ -454,7 +489,7 @@ function normaliseAssets(
     throw new ClientOnboardingError(
       "invalid_request",
       mode === "new_client"
-        ? "Choose dashboard account only or complete Shopify and Google Ads setup."
+        ? "Choose account only, Account & Shopify, or complete Shopify and Google Ads setup."
         : mode === "reconnect"
           ? "A reconnect link must target exactly one Shopify store."
           : "Choose Shopify, Google Ads or both.",
@@ -620,6 +655,28 @@ export async function authorizeClientOnboardingRequest(
       404,
     );
   }
+  const ownerId = data.target_client_id ?? data.claimed_user_id;
+  if (ownerId) {
+    const { data: owner, error: ownerError } = await service
+      .from("portal_clients")
+      .select("approval_status")
+      .eq("id", ownerId)
+      .maybeSingle();
+    if (ownerError) {
+      throw new ClientOnboardingError(
+        "database_error",
+        "The client account could not be checked.",
+        500,
+      );
+    }
+    if (owner?.approval_status === "rejected") {
+      throw new ClientOnboardingError(
+        "invalid_invitation",
+        "This onboarding link is no longer available.",
+        404,
+      );
+    }
+  }
 
   const token = invitationToken?.trim() ?? "";
   // Once an existing workspace has been claimed, the original bearer is no
@@ -772,10 +829,12 @@ function normaliseIdentity(input: {
   firstName: string;
   lastName: string;
   email: string;
+  discordHandle: string;
 }) {
   const firstName = input.firstName.trim().replace(/\s+/g, " ");
   const lastName = input.lastName.trim().replace(/\s+/g, " ");
   const email = input.email.trim().toLowerCase();
+  const discordHandle = input.discordHandle.trim().replace(/^@/, "");
   if (
     firstName.length < 1 ||
     firstName.length > 80 ||
@@ -783,15 +842,20 @@ function normaliseIdentity(input: {
     lastName.length > 80 ||
     email.length < 3 ||
     email.length > 320 ||
-    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ||
+    discordHandle.length < 2 ||
+    discordHandle.length > 64 ||
+    discordHandle.startsWith("@") ||
+    /\s|[\u0000-\u001f\u007f]/.test(discordHandle) ||
+    /^(?:https?:\/\/|discord(?:app)?\.com\/|www\.)/i.test(discordHandle)
   ) {
     throw new ClientOnboardingError(
       "invalid_request",
-      "Enter a valid first name, last name and email.",
+      "Enter a valid first name, last name, email and Discord handle.",
       400,
     );
   }
-  return { firstName, lastName, email };
+  return { firstName, lastName, email, discordHandle };
 }
 
 export async function createClientOnboardingIdentity(input: {
@@ -800,6 +864,7 @@ export async function createClientOnboardingIdentity(input: {
   firstName: string;
   lastName: string;
   email: string;
+  discordHandle: string;
   userId: string;
 }) {
   if (!isClientOnboardingToken(input.invitationToken)) {
@@ -863,6 +928,7 @@ export async function createClientOnboardingIdentity(input: {
       p_first_name: identity.firstName,
       p_last_name: identity.lastName,
       p_email: identity.email,
+      p_discord_handle: identity.discordHandle,
     },
   );
   if (claimError || claimed !== input.sessionId) {
@@ -889,6 +955,7 @@ export async function recoverClientOnboardingIdentity(input: {
   firstName: string;
   lastName: string;
   email: string;
+  discordHandle: string;
 }) {
   if (!isClientOnboardingToken(input.invitationToken)) {
     throw new ClientOnboardingError("invalid_invitation", "Invalid onboarding link.", 404);
@@ -953,6 +1020,7 @@ export async function recoverClientOnboardingIdentity(input: {
     p_first_name: identity.firstName,
     p_last_name: identity.lastName,
     p_email: identity.email,
+    p_discord_handle: identity.discordHandle,
   });
   if (error || data !== input.sessionId) {
     throw new ClientOnboardingError(
@@ -1003,7 +1071,7 @@ export async function claimExistingClientOnboardingIdentity(input: {
   const service = serviceOrThrow();
   const { data: client, error: clientError } = await service
     .from("portal_clients")
-    .select("full_name, email")
+    .select("full_name, email, discord_handle")
     .eq("id", user.id)
     .maybeSingle();
   if (clientError || !client) {
@@ -1019,6 +1087,7 @@ export async function claimExistingClientOnboardingIdentity(input: {
     p_first_name: firstName,
     p_last_name: lastName,
     p_email: user.email.toLowerCase(),
+    p_discord_handle: client.discord_handle,
   });
   if (error || data !== input.sessionId) {
     throw new ClientOnboardingError(
