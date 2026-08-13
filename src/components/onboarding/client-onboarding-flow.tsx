@@ -1424,28 +1424,29 @@ export function ClientOnboardingFlow({ sessionId }: { sessionId: string }) {
                 </Button>
               </div>
 
-              {windsorUrl && (
-                <div className="rounded-[12px] border border-[var(--accent-gold)]/25 bg-[var(--accent-gold-dim)] p-4">
-                  <p className="text-[12.5px] font-medium text-[var(--text-primary)]">
-                    1. Open Windsor and complete Google authorization. 2. Return
-                    here and check accounts.
-                  </p>
-                  <div className="mt-3 flex flex-wrap gap-2">
+              <div className="rounded-[12px] border border-[var(--accent-gold)]/25 bg-[var(--accent-gold-dim)] p-4">
+                <p className="text-[12.5px] font-medium text-[var(--text-primary)]">
+                  {windsorUrl
+                    ? "Open Windsor and complete Google authorization, then return here and check your accounts."
+                    : "Already completed Google authorization? Check your accounts. Otherwise, create a Google link above."}
+                </p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {windsorUrl && (
                     <Button asChild variant="primary">
                       <Link href={windsorUrl} target="_blank" rel="noreferrer">
                         Open Windsor <ExternalLink aria-hidden />
                       </Link>
                     </Button>
-                    <Button
-                      type="button"
-                      loading={polling}
-                      onClick={() => void checkWindsor()}
-                    >
-                      <RefreshCw aria-hidden />I clicked Finish — check accounts
-                    </Button>
-                  </div>
+                  )}
+                  <Button
+                    type="button"
+                    loading={polling}
+                    onClick={() => void checkWindsor()}
+                  >
+                    <RefreshCw aria-hidden />Check accounts
+                  </Button>
                 </div>
-              )}
+              </div>
 
               {session.googleAds.length > 0 && (
                 <ul className="space-y-3">

@@ -154,21 +154,27 @@ describe("Windsor Google Ads server adapter", () => {
     const fetcher = mockFetch(
       jsonResponse([
         {
-          datasource: "google_ads",
-          account_id: "1234567890",
-          account_name: "  Primary   Ads  ",
-          access_token: ACCESS_TOKEN,
-          co_user_member_name: "private@example.com",
-        },
-        {
-          datasource: "google_ads",
-          account_id: "123-456-7890",
-          account_currency_code: "EUR",
-          account_time_zone: "Europe/Lisbon",
-        },
-        {
-          datasource: "facebook",
-          account_id: "not-a-google-id",
+          link: {
+            access_token: ACCESS_TOKEN,
+            co_user_member_name: "private@example.com",
+          },
+          accounts: [
+            {
+              datasource: "google_ads",
+              account_id: "1234567890",
+              account_name: "  Primary   Ads  ",
+            },
+            {
+              datasource: "google_ads",
+              account_id: "123-456-7890",
+              account_currency_code: "EUR",
+              account_time_zone: "Europe/Lisbon",
+            },
+            {
+              datasource: "facebook",
+              account_id: "not-a-google-id",
+            },
+          ],
         },
       ]),
     );
@@ -195,6 +201,70 @@ describe("Windsor Google Ads server adapter", () => {
     expect(upstream.searchParams.get("ds_id")).toBe("google_ads");
     expect(upstream.searchParams.get("access_token")).toBe(ACCESS_TOKEN);
     expect(upstream.searchParams.get("api_key")).toBe(API_KEY);
+  });
+
+  it("ignores deactivated linked accounts and treats an empty link as pending", async () => {
+    const fetcher = mockFetch(
+      jsonResponse([
+        {
+          link: { access_token: ACCESS_TOKEN },
+          accounts: [
+            {
+              datasource: "google_ads",
+              account_id: "123-456-7890",
+              account_name: "Inactive Ads",
+              is_deactivated: true,
+            },
+          ],
+        },
+      ]),
+      jsonResponse([{ link: { access_token: ACCESS_TOKEN }, accounts: [] }]),
+    );
+
+    await expect(
+      listLinkedGoogleAdsAccounts(ACCESS_TOKEN, {
+        fetcher: fetcher as typeof fetch,
+      }),
+    ).resolves.toEqual([]);
+    await expect(
+      listLinkedGoogleAdsAccounts(ACCESS_TOKEN, {
+        fetcher: fetcher as typeof fetch,
+      }),
+    ).resolves.toEqual([]);
+  });
+
+  it("rejects a nested active Google Ads account without a valid identifier", async () => {
+    const invalidId = "private-invalid-account-id";
+    const privateName = "Private Account Name";
+    const fetcher = mockFetch(
+      jsonResponse([
+        {
+          link: { access_token: ACCESS_TOKEN },
+          accounts: [
+            {
+              datasource: "google_ads",
+              account_id: invalidId,
+              account_name: privateName,
+              is_deactivated: false,
+            },
+          ],
+        },
+      ]),
+    );
+
+    let error: unknown;
+    try {
+      await listLinkedGoogleAdsAccounts(ACCESS_TOKEN, {
+        fetcher: fetcher as typeof fetch,
+      });
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toMatchObject({ code: "invalid_response" });
+    expect(String(error)).not.toContain(invalidId);
+    expect(String(error)).not.toContain(privateName);
+    expect(String(error)).not.toContain(ACCESS_TOKEN);
   });
 
   it("does not include upstream bodies, URLs, API keys or tokens in errors", async () => {

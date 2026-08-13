@@ -248,7 +248,12 @@ function mergeAccount(
 }
 
 function normalizeAccounts(value: unknown, keys: string[]): WindsorGoogleAdsAccount[] {
-  const rows = arrayPayload(value, keys);
+  const rows = arrayPayload(value, keys)
+    .flatMap((value) => {
+      const row = asRecord(value);
+      return row && Array.isArray(row.accounts) ? row.accounts : [value];
+    })
+    .filter((value) => asRecord(value)?.is_deactivated !== true);
   const accounts = new Map<string, WindsorGoogleAdsAccount>();
   let googleRows = 0;
 
