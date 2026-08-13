@@ -19,6 +19,12 @@ export type ClientCard = {
   googleAds: ClientOnboardingSessionDTO["googleAds"];
 };
 
+export type ClientCardStatus =
+  | "waiting_for_assets"
+  | "waiting_for_approval"
+  | "no_assets"
+  | "approved";
+
 export type AssetConnectionTestTarget = {
   key: string;
   kind: "shopify" | "google_ads";
@@ -114,6 +120,22 @@ export function actionableReviewSession(
     ) ??
     null
   );
+}
+
+export function clientCardStatus(card: ClientCard): ClientCardStatus {
+  if (openOnboardingSessions(card.sessions).length > 0) {
+    return "waiting_for_assets";
+  }
+  if (
+    actionableReviewSession(card.sessions) ||
+    card.roster?.approvalStatus === "pending"
+  ) {
+    return "waiting_for_approval";
+  }
+  if (card.shopify.length === 0 && card.googleAds.length === 0) {
+    return "no_assets";
+  }
+  return "approved";
 }
 
 export function assetConnectionKey(

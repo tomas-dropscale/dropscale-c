@@ -6,6 +6,7 @@ import {
   actionableReviewSession,
   availableOnboardingAssetKinds,
   buildClientCards,
+  clientCardStatus,
   connectionTestTargets,
   onboardingSessionPurpose,
   occupiedOnboardingAssetKinds,
@@ -134,6 +135,79 @@ describe("client roster merge", () => {
       name: "New connection",
       domain: "NORTHWIND-DEMO.myshopify.com",
     });
+  });
+});
+
+describe("client card status", () => {
+  it("waits for assets while any parallel link remains open", () => {
+    const open = onboardingSession({
+      id: "20000000-0000-4000-8000-000000000002",
+      status: "expired",
+      rawStatus: "pending",
+    });
+    const submitted = onboardingSession({
+      id: "20000000-0000-4000-8000-000000000003",
+      status: "submitted",
+      rawStatus: "submitted",
+    });
+    const [card] = buildClientCards([submitted, open], [roster()]);
+
+    expect(clientCardStatus(card)).toBe("waiting_for_assets");
+  });
+
+  it("waits for approval after the client submits", () => {
+    const submitted = onboardingSession({
+      status: "submitted",
+      rawStatus: "submitted",
+    });
+    const [card] = buildClientCards([submitted], [roster()]);
+
+    expect(clientCardStatus(card)).toBe("waiting_for_approval");
+  });
+
+  it("keeps a reviewed account-only setup waiting for activation", () => {
+    const reviewed = onboardingSession({
+      mode: "new_client",
+      requestedAssets: [],
+      status: "reviewed",
+      rawStatus: "reviewed",
+    });
+    const [card] = buildClientCards([reviewed], []);
+
+    expect(clientCardStatus(card)).toBe("waiting_for_approval");
+  });
+
+  it("keeps a pending legacy client waiting for approval", () => {
+    const [card] = buildClientCards(
+      [],
+      [{ ...roster(), approvalStatus: "pending", shopify: [] }],
+    );
+
+    expect(clientCardStatus(card)).toBe("waiting_for_approval");
+  });
+
+  it("marks an approved legacy client without assets as having no assets", () => {
+    const [card] = buildClientCards([], [{ ...roster(), shopify: [] }]);
+
+    expect(clientCardStatus(card)).toBe("no_assets");
+  });
+
+  it("marks an active account-only client as having no assets", () => {
+    const active = onboardingSession({
+      mode: "new_client",
+      requestedAssets: [],
+      status: "active",
+      rawStatus: "active",
+    });
+    const [card] = buildClientCards([active], []);
+
+    expect(clientCardStatus(card)).toBe("no_assets");
+  });
+
+  it("marks an approved client with an asset as approved", () => {
+    const [card] = buildClientCards([], [roster()]);
+
+    expect(clientCardStatus(card)).toBe("approved");
   });
 });
 

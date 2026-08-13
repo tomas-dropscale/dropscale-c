@@ -43,6 +43,7 @@ import {
   availableOnboardingAssetKinds,
   buildClientCards,
   cardUpdatedAt,
+  clientCardStatus,
   connectionTestTargets,
   onboardingAssetLabel,
   onboardingSessionPurpose,
@@ -51,6 +52,7 @@ import {
   runAssetConnectionTests,
   type AssetConnectionTestTarget,
   type ClientCard,
+  type ClientCardStatus,
   type OnboardingAssetKind,
 } from "@/components/admin/client-onboarding-card-model";
 import type { ExistingClientRosterDTO } from "@/lib/client-onboarding/legacy-roster";
@@ -115,12 +117,6 @@ function choiceForAvailableAssets(
   return assets.length === 2 ? "both" : assets[0] ?? "both";
 }
 
-function modeLabel(mode: ClientOnboardingMode) {
-  if (mode === "new_client") return "New client";
-  if (mode === "reconnect") return "Reconnect";
-  return "Add assets";
-}
-
 function approvalLabel(session: ClientOnboardingSessionDTO) {
   return session.requestedAssets.length
     ? `Approve ${onboardingAssetLabel(session.requestedAssets)}`
@@ -162,16 +158,6 @@ function cardHasIssue(card: ClientCard) {
 
 function cardIsActive(card: ClientCard) {
   return card.roster?.approvalStatus === "approved" || cardHasStatus(card, ["active"]);
-}
-
-function cardIsPendingApproval(card: ClientCard) {
-  return card.roster?.approvalStatus === "pending";
-}
-
-function cardMatchesStatus(card: ClientCard, status: string) {
-  if (status === "active") return cardIsActive(card);
-  if (status === "pending_approval") return cardIsPendingApproval(card);
-  return cardHasStatus(card, [status]);
 }
 
 function cardHasStatus(card: ClientCard, statuses: readonly string[]) {
@@ -230,21 +216,21 @@ function formatDate(value: string | null) {
   }).format(new Date(value));
 }
 
-function statusBadge(session: ClientOnboardingSessionDTO) {
-  if (session.status === "active") return <Badge variant="success">Active</Badge>;
-  if (session.status === "reviewed") return <Badge variant="success">Approved</Badge>;
-  if (session.status === "submitted") return <Badge variant="warning">Ready for review</Badge>;
+function linkStatusBadge(session: ClientOnboardingSessionDTO) {
   if (session.status === "expired") return <Badge variant="danger">Link expired</Badge>;
   if (session.status === "collecting") return <Badge variant="gold">In progress</Badge>;
   return <Badge variant="neutral">Waiting for client</Badge>;
 }
 
-function rosterStatusBadge(client: ExistingClientRosterDTO) {
-  return client.approvalStatus === "approved" ? (
-    <Badge variant="success">Active</Badge>
-  ) : (
-    <Badge variant="warning">Pending approval</Badge>
-  );
+function clientStatusBadge(status: ClientCardStatus) {
+  if (status === "approved") return <Badge variant="success">Approved</Badge>;
+  if (status === "waiting_for_approval") {
+    return <Badge variant="warning">Waiting for approval</Badge>;
+  }
+  if (status === "waiting_for_assets") {
+    return <Badge variant="gold">Waiting for assets</Badge>;
+  }
+  return <Badge variant="neutral">No assets</Badge>;
 }
 
 function ConnectionStatus({ state }: { state: AssetConnectionState }) {
@@ -478,9 +464,14 @@ export function ClientOnboardingManager({
   );
   const counts = React.useMemo(
     () => ({
-      active: cards.filter(cardIsActive).length,
-      onboarding: cards.filter((card) => cardHasStatus(card, ["waiting", "collecting"])).length,
-      review: cards.filter((card) => cardHasStatus(card, ["submitted", "reviewed"])).length,
+      approved: cards.filter((card) => clientCardStatus(card) === "approved").length,
+      review: cards.filter(
+        (card) => clientCardStatus(card) === "waiting_for_approval",
+      ).length,
+      onboarding: cards.filter(
+        (card) => clientCardStatus(card) === "waiting_for_assets",
+      ).length,
+      noAssets: cards.filter((card) => clientCardStatus(card) === "no_assets").length,
       issues: cards.filter(
         (card) => cardHasStatus(card, ["expired"]) || hasVisibleIssue(card),
       ).length,
@@ -490,11 +481,7 @@ export function ClientOnboardingManager({
   const filteredCards = React.useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
     return cards.filter((card) => {
-      if (
-        statusFilter === "issues"
-          ? !cardHasStatus(card, ["expired"]) && !hasVisibleIssue(card)
-          : statusFilter !== "all" && !cardMatchesStatus(card, statusFilter)
-      ) {
+      if (statusFilter !== "all" && clientCardStatus(card) !== statusFilter) {
         return false;
       }
       const haystack = [
@@ -505,7 +492,7 @@ export function ClientOnboardingManager({
       ].join(" ").toLocaleLowerCase();
       return !query || haystack.includes(query);
     });
-  }, [cards, hasVisibleIssue, search, statusFilter]);
+  }, [cards, search, statusFilter]);
 
   function showNotice(tone: Notice["tone"], title: string, message: string) {
     setNotice((current) => ({ id: (current?.id ?? 0) + 1, tone, title, message }));
@@ -848,10 +835,11 @@ export function ClientOnboardingManager({
       {notice && <NoticeBanner key={notice.id} notice={notice} dismiss={() => setNotice(null)} />}
 
       <div className="space-y-3">
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          <CountCard label="Active clients" value={counts.active} help="Clients with dashboard access" icon={Users} tone="success" />
-          <CountCard label="Onboarding" value={counts.onboarding} help="Waiting or in progress" icon={Clock3} />
-          <CountCard label="Setup approval" value={counts.review} help="Submitted or approved setups" icon={ShieldCheck} tone="warning" />
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
+          <CountCard label="Approved" value={counts.approved} help="Client setup approved" icon={CheckCircle2} tone="success" />
+          <CountCard label="In review" value={counts.review} help="Waiting for your approval" icon={ShieldCheck} tone="warning" />
+          <CountCard label="Onboarding" value={counts.onboarding} help="Waiting for client assets" icon={Clock3} />
+          <CountCard label="No assets" value={counts.noAssets} help="No stores or ad accounts connected" icon={Unplug} />
           <CountCard label="Needs attention" value={counts.issues} help="Expired links or reported errors" icon={CircleAlert} tone="danger" />
         </div>
         <div className="flex flex-wrap justify-start gap-2">
@@ -877,14 +865,10 @@ export function ClientOnboardingManager({
                 <SelectTrigger className="sm:w-48" aria-label="Filter by onboarding status"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">All statuses</SelectItem>
-                  <SelectItem value="waiting">Waiting for client</SelectItem>
-                  <SelectItem value="collecting">In progress</SelectItem>
-                  <SelectItem value="submitted">Ready for review</SelectItem>
-                  <SelectItem value="reviewed">Approved</SelectItem>
-                  <SelectItem value="active">Active</SelectItem>
-                  <SelectItem value="pending_approval">Pending approval</SelectItem>
-                  <SelectItem value="expired">Expired</SelectItem>
-                  <SelectItem value="issues">Needs attention</SelectItem>
+                  <SelectItem value="approved">Approved</SelectItem>
+                  <SelectItem value="waiting_for_approval">Waiting for approval</SelectItem>
+                  <SelectItem value="waiting_for_assets">Waiting for assets</SelectItem>
+                  <SelectItem value="no_assets">No assets</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -906,11 +890,7 @@ export function ClientOnboardingManager({
         ) : (
           <div className="space-y-3">
             {filteredCards.map((card) => {
-              const session = card.session;
-              const noAssets = card.shopify.length === 0 && card.googleAds.length === 0;
-              const accountOnly = card.sessions.every(
-                (entry) => entry.requestedAssets.length === 0,
-              );
+              const status = clientCardStatus(card);
               const openSessions = openOnboardingSessions(card.sessions);
               const availableAssets = availableOnboardingAssetKinds(card.sessions);
               const reviewSession = actionableReviewSession(card.sessions);
@@ -928,22 +908,7 @@ export function ClientOnboardingManager({
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
                         <h3 className="text-[14px] font-semibold text-[var(--text-primary)]">{cardClientName(card)}</h3>
-                        {openSessions.length ? (
-                          <Badge variant="neutral">
-                            {openSessions.length} open {openSessions.length === 1 ? "link" : "links"}
-                          </Badge>
-                        ) : (
-                          session && session.mode !== "new_client" && <Badge variant="neutral">{modeLabel(session.mode)}</Badge>
-                        )}
-                        {!openSessions.length && (session
-                          ? statusBadge(session)
-                          : card.roster
-                            ? rosterStatusBadge(card.roster)
-                            : null)}
-                        {session && hasActiveWorkspace && session.status !== "active" && (
-                          <Badge variant="success">Active client</Badge>
-                        )}
-                        {noAssets && !accountOnly && <Badge variant="neutral">Assets not connected</Badge>}
+                        {clientStatusBadge(status)}
                         {hasVisibleIssue(card) && <Badge variant="danger">Connection needs attention</Badge>}
                       </div>
                       <p className="mt-1 break-all text-[12px] text-[var(--text-secondary)]">{cardEmail(card) ?? "Waiting for client details"}</p>
@@ -973,7 +938,7 @@ export function ClientOnboardingManager({
                               <div className="min-w-0">
                                 <div className="flex flex-wrap items-center gap-2">
                                   <p className="text-[12.5px] font-medium text-[var(--text-primary)]">{purpose}</p>
-                                  {statusBadge(openSession)}
+                                  {linkStatusBadge(openSession)}
                                 </div>
                                 <p className="mt-1 text-[11px] text-[var(--text-secondary)]">
                                   {openSession.reconnectTarget?.domain && <><span className="break-all">{openSession.reconnectTarget.domain}</span><span aria-hidden> · </span></>}

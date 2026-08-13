@@ -63,7 +63,6 @@ const NAV_GROUPS: Group[] = [
         href: "/admin/client-onboarding",
         icon: UserPlus,
         label: (d) => d.nav.clients,
-        badge: (d) => d.nav.newBadge,
       },
       {
         href: "/admin/clients",
