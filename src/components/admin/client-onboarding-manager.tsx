@@ -771,7 +771,7 @@ export function ClientOnboardingManager({
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
                         <h3 className="text-[14px] font-semibold text-[var(--text-primary)]">{cardClientName(card)}</h3>
-                        <Badge variant={session.mode === "new_client" ? "gold" : "neutral"}>{modeLabel(session.mode)}</Badge>
+                        {session.mode !== "new_client" && <Badge variant="neutral">{modeLabel(session.mode)}</Badge>}
                         {statusBadge(session)}
                         {hasActiveWorkspace && session.status !== "active" && (
                           <Badge variant="success">Active client</Badge>
