@@ -7,7 +7,6 @@ import {
   availableOnboardingAssetKinds,
   buildClientCards,
   connectionTestTargets,
-  isAssetReconnecting,
   onboardingSessionPurpose,
   occupiedOnboardingAssetKinds,
   openReconnectForAsset,
@@ -169,11 +168,9 @@ describe("client onboarding card actions", () => {
         id: storeA.id,
       }),
     ).toBeNull();
-    expect(isAssetReconnecting([reconnectA], storeA)).toBe(true);
-    expect(isAssetReconnecting([reconnectA], storeB)).toBe(false);
   });
 
-  it("lists two exact reconnect targets beside Google Ads and clears a completed tag", () => {
+  it("lists two exact reconnect targets beside Google Ads", () => {
     const targetA = reconnectedSession().reconnectTarget!;
     const targetB = {
       ...targetA,
@@ -217,13 +214,6 @@ describe("client onboarding card actions", () => {
       "Reconnect Shopify · Old connection",
     );
     expect(onboardingSessionPurpose(googleAds)).toBe("Add Google Ads");
-
-    const completedA = {
-      ...reconnectA,
-      reconnectCompletedAt: "2026-02-03T00:00:00.000Z",
-    };
-    expect(openReconnectForAsset([completedA], targetA)).toBe(completedA);
-    expect(isAssetReconnecting([completedA], targetA)).toBe(false);
   });
 
   it("treats a combined open link as occupying both asset kinds", () => {

@@ -44,7 +44,6 @@ import {
   buildClientCards,
   cardUpdatedAt,
   connectionTestTargets,
-  isAssetReconnecting,
   onboardingAssetLabel,
   onboardingSessionPurpose,
   openReconnectForAsset,
@@ -120,6 +119,12 @@ function modeLabel(mode: ClientOnboardingMode) {
   if (mode === "new_client") return "New client";
   if (mode === "reconnect") return "Reconnect";
   return "Add assets";
+}
+
+function approvalLabel(session: ClientOnboardingSessionDTO) {
+  return session.requestedAssets.length
+    ? `Approve ${onboardingAssetLabel(session.requestedAssets)}`
+    : "Approve client";
 }
 
 function clientName(session: ClientOnboardingSessionDTO) {
@@ -951,7 +956,7 @@ export function ClientOnboardingManager({
                       <Button type="button" size="sm" disabled={disabled || availableAssets.length === 0 || !canTargetAssets} onClick={() => { setAssetTarget(card); setReconnectTarget(null); setCreateMode("add_assets"); setAssetChoice(choiceForAvailableAssets(availableAssets)); setInvitation(null); setDialogError(""); }}>
                         <Plus aria-hidden /> Add assets
                       </Button>
-                      {reviewSession && <Button type="button" size="sm" variant={reviewSession.requestedAssets.length === 0 ? "primary" : "secondary"} disabled={disabled} onClick={() => setActionTarget({ session: reviewSession, action: "approve" })}><ShieldCheck aria-hidden /> {reviewSession.requestedAssets.length === 0 ? "Approve client" : "Approve connections"}</Button>}
+                      {reviewSession && <Button type="button" size="sm" variant={reviewSession.requestedAssets.length === 0 ? "primary" : "secondary"} disabled={disabled} onClick={() => setActionTarget({ session: reviewSession, action: "approve" })}><ShieldCheck aria-hidden /> {approvalLabel(reviewSession)}</Button>}
                     </div>
                   </div>
 
@@ -997,10 +1002,6 @@ export function ClientOnboardingManager({
                             const exactReconnectOpen = Boolean(
                               openReconnectForAsset(card.sessions, store),
                             );
-                            const reconnecting = isAssetReconnecting(
-                              card.sessions,
-                              store,
-                            );
                             const state = connectionStates[key] ?? {
                               status:
                                 store.source === "onboarding" && store.lastErrorCode
@@ -1013,10 +1014,7 @@ export function ClientOnboardingManager({
                             return (
                               <li key={key} aria-busy={state.status === "testing"} className="flex flex-col gap-3 border-t border-[var(--border-subtle)] py-3 first:border-t-0 first:pt-0 last:pb-0 sm:flex-row sm:items-start sm:justify-between">
                                 <div className="min-w-0">
-                                  <div className="flex min-w-0 flex-wrap items-center gap-2">
-                                    <p className="truncate text-[12.5px] font-medium text-[var(--text-primary)]">{store.name}</p>
-                                    {reconnecting && <Badge variant="gold">Reconnecting</Badge>}
-                                  </div>
+                                  <p className="truncate text-[12.5px] font-medium text-[var(--text-primary)]">{store.name}</p>
                                   <p className="mt-0.5 break-all text-[11px] text-[var(--text-secondary)]">{store.domain}</p>
                                   {state.status === "failed" && state.message && <p className="mt-2 text-[11px] leading-relaxed text-[var(--danger-red)]">{state.message}</p>}
                                 </div>
@@ -1124,7 +1122,7 @@ export function ClientOnboardingManager({
       <Dialog open={Boolean(actionTarget)} onOpenChange={(open) => { if (!open) { setActionTarget(null); setDialogError(""); } }}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{selectedAction === "rotate" ? "Replace this open link?" : selectedAction === "approve" ? selectedActionSession?.requestedAssets.length === 0 ? "Approve this client?" : "Approve these connections?" : "Cancel this open link?"}</DialogTitle>
+            <DialogTitle>{selectedAction === "rotate" ? "Replace this open link?" : selectedAction === "approve" ? selectedActionSession ? `${approvalLabel(selectedActionSession)}?` : "Approve this setup?" : "Cancel this open link?"}</DialogTitle>
             <DialogDescription>
               {selectedAction === "rotate" ? `Only this link (${selectedActionPurpose}) will stop working immediately. The replacement will be shown once; other open links and client access are unchanged.` : selectedAction === "approve" ? selectedActionSession?.requestedAssets.length === 0 ? "This confirms the review and gives the client access to their dashboard." : "This approves the connected stores and ad accounts. Billing remains unchanged." : `Only this link (${selectedActionPurpose}) and connections added through it will be removed. Other open links and the client’s dashboard access are unchanged.`}
             </DialogDescription>
@@ -1133,7 +1131,7 @@ export function ClientOnboardingManager({
           {dialogError && <p role="alert" className="text-[12px] text-[var(--danger-red)]">{dialogError}</p>}
           <DialogFooter>
             <Button type="button" onClick={() => { setActionTarget(null); setDialogError(""); }}>Cancel</Button>
-            {selectedActionSession && selectedAction && <Button type="button" variant={selectedAction === "revoke" ? "danger" : selectedAction === "approve" && selectedActionSession.requestedAssets.length === 0 ? "primary" : "secondary"} loading={busy === `${selectedAction}:${selectedActionSession.id}`} onClick={() => void patchSession(selectedActionSession, selectedAction)}>{selectedAction === "revoke" ? <Unplug aria-hidden /> : selectedAction === "rotate" ? <RefreshCw aria-hidden /> : <Check aria-hidden />}{selectedAction === "rotate" ? "Replace link" : selectedAction === "approve" ? selectedActionSession.requestedAssets.length === 0 ? "Approve client" : "Approve connections" : "Cancel link"}</Button>}
+            {selectedActionSession && selectedAction && <Button type="button" variant={selectedAction === "revoke" ? "danger" : selectedAction === "approve" && selectedActionSession.requestedAssets.length === 0 ? "primary" : "secondary"} loading={busy === `${selectedAction}:${selectedActionSession.id}`} onClick={() => void patchSession(selectedActionSession, selectedAction)}>{selectedAction === "revoke" ? <Unplug aria-hidden /> : selectedAction === "rotate" ? <RefreshCw aria-hidden /> : <Check aria-hidden />}{selectedAction === "rotate" ? "Replace link" : selectedAction === "approve" ? approvalLabel(selectedActionSession) : "Cancel link"}</Button>}
           </DialogFooter>
         </DialogContent>
       </Dialog>

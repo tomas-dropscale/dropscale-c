@@ -22,6 +22,7 @@ import { GoogleButton } from "@/components/auth/google-button";
 import { PasswordInput } from "@/components/auth/password-input";
 import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
+import { hasCurrentShopify } from "@/components/onboarding/client-onboarding-progress";
 import { REPORTING_SHOPIFY_SCOPES_TEXT } from "@/lib/client-onboarding/shopify-scopes";
 import type { ClientOnboardingSessionDTO } from "@/lib/client-onboarding/sessions";
 import { authRedirect } from "@/lib/site";
@@ -49,12 +50,6 @@ function requestsShopify(session: ClientOnboardingSessionDTO) {
 
 function requestsGoogle(session: ClientOnboardingSessionDTO) {
   return session.requestedAssets.includes("google_ads");
-}
-
-function hasCurrentShopify(session: ClientOnboardingSessionDTO) {
-  return session.mode === "reconnect"
-    ? Boolean(session.reconnectCompletedAt)
-    : session.shopify.some((store) => store.sessionId === session.id);
 }
 
 function hasCurrentGoogleAds(session: ClientOnboardingSessionDTO) {
@@ -585,6 +580,11 @@ export function ClientOnboardingFlow({ sessionId }: { sessionId: string }) {
           responseError(body, "The Shopify store could not be connected."),
         );
       const updated = await fetchSession();
+      if (!hasCurrentShopify(updated)) {
+        throw new Error(
+          "Dropscale could not confirm that the Shopify connection was saved. Try again.",
+        );
+      }
       setShopify({
         domain: updated.reconnectTarget?.domain ?? "",
         clientId: "",
@@ -593,7 +593,9 @@ export function ClientOnboardingFlow({ sessionId }: { sessionId: string }) {
       setFeedback({
         tone: "success",
         message:
-          "Shopify reporting access was verified with read-only probes and saved securely.",
+          updated.mode === "reconnect"
+            ? "The Shopify reconnection was saved. Click Submit for review to finish."
+            : "Shopify reporting access was verified with read-only probes and saved securely.",
       });
     } catch (error) {
       setFeedback({
@@ -1123,7 +1125,9 @@ export function ClientOnboardingFlow({ sessionId }: { sessionId: string }) {
                       : ""}
                   </p>
                   <p className="mt-2 text-[10.5px] font-medium text-[var(--text-muted)]">
-                    Exact store selected by Dropscale
+                    {hasCurrentShopify(session)
+                      ? "Reconnection saved"
+                      : "Selected store · Not reconnected yet"}
                   </p>
                 </div>
               )}
@@ -1241,10 +1245,10 @@ export function ClientOnboardingFlow({ sessionId }: { sessionId: string }) {
                   </div>
                 )}
 
-              <details className="rounded-[12px] border border-[var(--border-subtle)] bg-[var(--bg-base)]">
-                <summary className="cursor-pointer px-4 py-3 text-[13px] font-medium text-[var(--text-primary)]">
+              <section className="rounded-[12px] border border-[var(--border-subtle)] bg-[var(--bg-base)]">
+                <h3 className="px-4 py-3 text-[13px] font-medium text-[var(--text-primary)]">
                   Shopify app setup and exact permissions
-                </summary>
+                </h3>
                 <div className="space-y-3 border-t border-[var(--border-subtle)] px-4 py-4 text-[12px] leading-relaxed text-[var(--text-secondary)]">
                   <ol className="list-decimal space-y-2 pl-4">
                     <li>
@@ -1306,7 +1310,7 @@ export function ClientOnboardingFlow({ sessionId }: { sessionId: string }) {
                     </Link>
                   </Button>
                 </div>
-              </details>
+              </section>
 
               {session.mode === "reconnect" && hasCurrentShopify(session) && (
                 <div
@@ -1314,7 +1318,8 @@ export function ClientOnboardingFlow({ sessionId }: { sessionId: string }) {
                   className="rounded-[12px] border border-[var(--success-green)]/25 bg-[var(--success-green)]/8 p-4 text-[12.5px] text-[var(--text-secondary)]"
                 >
                   The selected Shopify store was verified and reconnected. No
-                  other store was added.
+                  other store was added. Click Submit for review below to
+                  finish.
                 </div>
               )}
 
@@ -1364,6 +1369,12 @@ export function ClientOnboardingFlow({ sessionId }: { sessionId: string }) {
                   />
                 </div>
                 <div className="sm:col-span-2">
+                  <p className="mb-3 text-[11.5px] leading-relaxed text-[var(--text-secondary)]">
+                    Installing the app in Shopify does not finish this step.
+                    Return here, enter the Client ID and Client Secret, then
+                    click the button below. The connection is saved only after
+                    this page confirms success.
+                  </p>
                   <Button type="submit" loading={busy}>
                     {session.mode === "reconnect" ? (
                       <RefreshCw aria-hidden />

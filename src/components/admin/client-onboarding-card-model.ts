@@ -80,14 +80,6 @@ export function openReconnectForAsset(
   );
 }
 
-export function isAssetReconnecting(
-  sessions: readonly ClientOnboardingSessionDTO[],
-  asset: Pick<CardShopifyAsset, "source" | "id">,
-) {
-  const reconnect = openReconnectForAsset(sessions, asset);
-  return Boolean(reconnect && !reconnect.reconnectCompletedAt);
-}
-
 export function onboardingAssetLabel(assets: readonly OnboardingAssetKind[]) {
   const shopify = assets.includes("shopify");
   const google = assets.includes("google_ads");
