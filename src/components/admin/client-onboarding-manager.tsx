@@ -38,15 +38,15 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
+  assetConnectionKey,
   buildClientCards,
   cardUpdatedAt,
+  connectionTestTargets,
+  runAssetConnectionTests,
+  type AssetConnectionTestTarget,
   type ClientCard,
-  type OnboardingShopifyAsset,
 } from "@/components/admin/client-onboarding-card-model";
-import type {
-  ExistingClientRosterDTO,
-  LegacyShopifyAssetDTO,
-} from "@/lib/client-onboarding/legacy-roster";
+import type { ExistingClientRosterDTO } from "@/lib/client-onboarding/legacy-roster";
 import type { ClientOnboardingSessionDTO } from "@/lib/client-onboarding/sessions";
 import type { ClientOnboardingAsset, ClientOnboardingMode } from "@/lib/supabase/types";
 
@@ -55,8 +55,24 @@ type DialogMode = "new_client" | "reconnect" | "add_assets";
 type SessionAction = "rotate" | "approve" | "revoke";
 type ActionTarget = { session: ClientOnboardingSessionDTO; action: SessionAction };
 type DisconnectTarget =
-  | { kind: "shopify"; id: string; name: string; clientName: string }
+  | {
+      kind: "shopify";
+      source: "legacy" | "onboarding";
+      id: string;
+      name: string;
+      clientName: string;
+    }
   | { kind: "google_ads"; id: string; name: string; clientName: string };
+type ReconnectTarget = {
+  source: "legacy" | "onboarding";
+  id: string;
+  name: string;
+  domain: string;
+};
+type AssetConnectionState = {
+  status: "testing" | "connected" | "failed";
+  message?: string;
+};
 
 type Invitation = {
   id: string;
@@ -69,6 +85,11 @@ type Notice = {
   tone: "success" | "info" | "error";
   title: string;
   message: string;
+};
+
+type ConnectionResponse = {
+  ok?: unknown;
+  health?: { ok?: unknown; code?: unknown };
 };
 
 const SUCCESS_VISIBLE_MS = 4_000;
@@ -155,6 +176,34 @@ function errorMessage(body: unknown, fallback: string) {
   return fallback;
 }
 
+function connectionFailureMessage(
+  body: unknown,
+  target: AssetConnectionTestTarget,
+) {
+  if (
+    target.kind === "google_ads" &&
+    body &&
+    typeof body === "object" &&
+    "health" in body &&
+    (body as { health?: { code?: unknown } }).health?.code === "not_connected"
+  ) {
+    return "This Google Ads account is no longer connected.";
+  }
+  return errorMessage(
+    body,
+    target.kind === "shopify"
+      ? `${target.name} failed its Shopify reporting test.`
+      : `${target.name} failed its Google Ads test.`,
+  );
+}
+
+function connectionPassed(body: unknown) {
+  if (!body || typeof body !== "object") return false;
+  const response = body as ConnectionResponse;
+  if (response.ok === true) return true;
+  return response.health?.ok === true;
+}
+
 async function readJson(response: Response): Promise<unknown> {
   try {
     return await response.json();
@@ -185,6 +234,34 @@ function rosterStatusBadge(client: ExistingClientRosterDTO) {
     <Badge variant="success">Active</Badge>
   ) : (
     <Badge variant="warning">Pending approval</Badge>
+  );
+}
+
+function ConnectionStatus({ state }: { state: AssetConnectionState }) {
+  const testing = state.status === "testing";
+  const connected = state.status === "connected";
+  return (
+    <span
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      className={`inline-flex items-center gap-1.5 text-[11px] font-medium ${
+        testing
+          ? "text-[var(--accent-gold-strong)]"
+          : connected
+            ? "text-[var(--success-green)]"
+            : "text-[var(--danger-red)]"
+      }`}
+    >
+      {testing ? (
+        <RefreshCw className="size-3.5 animate-spin motion-reduce:animate-none" aria-hidden />
+      ) : connected ? (
+        <CheckCircle2 className="size-3.5" aria-hidden />
+      ) : (
+        <CircleAlert className="size-3.5" aria-hidden />
+      )}
+      {testing ? "Testing…" : connected ? "Connected" : "Failed"}
+    </span>
   );
 }
 
@@ -354,51 +431,46 @@ export function ClientOnboardingManager({
   const [search, setSearch] = React.useState("");
   const [statusFilter, setStatusFilter] = React.useState("all");
   const [busy, setBusy] = React.useState<string | null>(null);
+  const [connectionStates, setConnectionStates] = React.useState<
+    Record<string, AssetConnectionState>
+  >({});
   const [copiedUrl, setCopiedUrl] = React.useState<string | null>(null);
   const [dialogError, setDialogError] = React.useState("");
 
   const [createMode, setCreateMode] = React.useState<DialogMode | null>(null);
   const [assetChoice, setAssetChoice] = React.useState<AssetChoice>("both");
-  const [selectedLegacyId, setSelectedLegacyId] = React.useState("");
-  const [legacySearch, setLegacySearch] = React.useState("");
   const [assetTarget, setAssetTarget] = React.useState<ClientCard | null>(null);
+  const [reconnectTarget, setReconnectTarget] = React.useState<ReconnectTarget | null>(null);
   const [invitation, setInvitation] = React.useState<Invitation | null>(null);
   const [actionTarget, setActionTarget] = React.useState<ActionTarget | null>(null);
-  const [revokeCard, setRevokeCard] = React.useState<ClientCard | null>(null);
   const [disconnectTarget, setDisconnectTarget] = React.useState<DisconnectTarget | null>(null);
 
   const cards = React.useMemo(() => buildClientCards(sessions, roster), [sessions, roster]);
-  const clientsWithOpenLinks = React.useMemo(
-    () =>
-      new Set(
-        sessions
-          .filter(
-            (session) =>
-              session.rawStatus === "pending" || session.rawStatus === "collecting",
-          )
-          .flatMap((session) =>
-            [session.claimedUserId, session.targetClientId].filter(
-              (id): id is string => Boolean(id),
-            ),
-          ),
+  const hasVisibleIssue = React.useCallback(
+    (card: ClientCard) =>
+      cardHasIssue(card) ||
+      connectionTestTargets(card).some(
+        (target) => connectionStates[target.key]?.status === "failed",
       ),
-    [sessions],
+    [connectionStates],
   );
   const counts = React.useMemo(
     () => ({
       active: cards.filter(cardIsActive).length,
       onboarding: cards.filter((card) => cardHasStatus(card, ["waiting", "collecting"])).length,
       review: cards.filter((card) => cardHasStatus(card, ["submitted", "reviewed"])).length,
-      issues: cards.filter((card) => cardHasStatus(card, ["expired"]) || cardHasIssue(card)).length,
+      issues: cards.filter(
+        (card) => cardHasStatus(card, ["expired"]) || hasVisibleIssue(card),
+      ).length,
     }),
-    [cards],
+    [cards, hasVisibleIssue],
   );
   const filteredCards = React.useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
     return cards.filter((card) => {
       if (
         statusFilter === "issues"
-          ? !cardHasStatus(card, ["expired"]) && !cardHasIssue(card)
+          ? !cardHasStatus(card, ["expired"]) && !hasVisibleIssue(card)
           : statusFilter !== "all" && !cardMatchesStatus(card, statusFilter)
       ) {
         return false;
@@ -411,16 +483,7 @@ export function ClientOnboardingManager({
       ].join(" ").toLocaleLowerCase();
       return !query || haystack.includes(query);
     });
-  }, [cards, search, statusFilter]);
-  const rosterMatches = React.useMemo(() => {
-    const query = legacySearch.trim().toLocaleLowerCase();
-    return roster.filter(
-      (client) =>
-        client.approvalStatus === "approved" &&
-        (!query ||
-          `${client.fullName} ${client.email}`.toLocaleLowerCase().includes(query)),
-    );
-  }, [roster, legacySearch]);
+  }, [cards, hasVisibleIssue, search, statusFilter]);
 
   function showNotice(tone: Notice["tone"], title: string, message: string) {
     setNotice((current) => ({ id: (current?.id ?? 0) + 1, tone, title, message }));
@@ -459,10 +522,9 @@ export function ClientOnboardingManager({
 
   function openCreate(mode: DialogMode) {
     setAssetTarget(null);
+    setReconnectTarget(null);
     setCreateMode(mode);
     setAssetChoice(mode === "new_client" ? "account" : "both");
-    setSelectedLegacyId("");
-    setLegacySearch("");
     setInvitation(null);
     setDialogError("");
     setCopiedUrl(null);
@@ -471,6 +533,7 @@ export function ClientOnboardingManager({
   function closeCreate() {
     setCreateMode(null);
     setAssetTarget(null);
+    setReconnectTarget(null);
     setInvitation(null);
     setDialogError("");
     setCopiedUrl(null);
@@ -481,12 +544,17 @@ export function ClientOnboardingManager({
     const targetClientId =
       createMode === "new_client"
         ? null
-        : (assetTarget?.clientId ?? selectedLegacyId) || null;
+        : assetTarget?.clientId || null;
     if (createMode !== "new_client" && !targetClientId) {
       setDialogError("Select an existing client.");
       return;
     }
-    const assets = assetsForChoice(assetChoice);
+    if (createMode === "reconnect" && !reconnectTarget) {
+      setDialogError("Choose the Shopify store to reconnect.");
+      return;
+    }
+    const assets =
+      createMode === "reconnect" ? (["shopify"] as const) : assetsForChoice(assetChoice);
     if (createMode !== "new_client" && assets.length === 0) {
       setDialogError("Choose Shopify, Google Ads or both.");
       return;
@@ -498,7 +566,22 @@ export function ClientOnboardingManager({
       const response = await fetch("/api/admin/client-onboarding", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ mode, requestedAssets: assets, ...(targetClientId ? { targetClientId } : {}) }),
+        body: JSON.stringify(
+          createMode === "reconnect" && reconnectTarget
+            ? {
+                mode,
+                requestedAssets: assets,
+                targetShopify: {
+                  source: reconnectTarget.source,
+                  id: reconnectTarget.id,
+                },
+              }
+            : {
+                mode,
+                requestedAssets: assets,
+                ...(targetClientId ? { targetClientId } : {}),
+              },
+        ),
       });
       const body = await readJson(response);
       if (!response.ok || !body || typeof body !== "object" || !(body as { invitation?: Invitation }).invitation) {
@@ -572,9 +655,67 @@ export function ClientOnboardingManager({
     }
   }
 
+  async function testConnectionTargets(
+    card: ClientCard,
+    targets: readonly AssetConnectionTestTarget[],
+  ) {
+    if (readOnlyPreview || targets.length === 0) return;
+    setConnectionStates((current) => {
+      const next = { ...current };
+      for (const target of targets) next[target.key] = { status: "testing" };
+      return next;
+    });
+
+    const results = await runAssetConnectionTests(
+      targets,
+      async (target) => {
+        const response = await fetch(target.endpoint, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ action: "test" }),
+        });
+        const body = await readJson(response);
+        if (!response.ok || !connectionPassed(body)) {
+          return {
+            status: "failed" as const,
+            message: connectionFailureMessage(body, target),
+          };
+        }
+        return { status: "connected" as const };
+      },
+      (result) => {
+        setConnectionStates((current) => ({
+          ...current,
+          [result.key]: {
+            status: result.status,
+            ...(result.message ? { message: result.message } : {}),
+          },
+        }));
+      },
+    );
+
+    await refreshClients().catch(() => undefined);
+    const failed = results.filter((result) => result.status === "failed");
+    if (failed.length > 0) {
+      showNotice(
+        "info",
+        "Connection test complete",
+        `${failed.length} of ${results.length} connection${results.length === 1 ? "" : "s"} failed. See the result beside each asset.`,
+      );
+      return;
+    }
+    showNotice(
+      "success",
+      targets.length === 1 ? "Connection verified" : `${cardClientName(card)} connections verified`,
+      targets.length === 1
+        ? `${targets[0].name} is connected.`
+        : `All ${targets.length} connections passed their live test.`,
+    );
+  }
+
   async function testConnections(card: ClientCard) {
-    if (readOnlyPreview) return;
-    if (card.shopify.length === 0 && card.googleAds.length === 0) {
+    const targets = connectionTestTargets(card);
+    if (targets.length === 0) {
       const accountOnly = card.sessions.every((session) => session.requestedAssets.length === 0);
       showNotice(
         "info",
@@ -585,54 +726,7 @@ export function ClientOnboardingManager({
       );
       return;
     }
-    setBusy(`test:${card.key}`);
-    try {
-      const requests = [
-        ...card.shopify.map(async (store) => {
-          const segment =
-            store.source === "legacy" ? "legacy-shopify" : "shopify";
-          const response = await fetch(`/api/admin/client-onboarding/${segment}/${store.id}`, {
-            method: "PATCH",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ action: "test" }),
-          });
-          const body = await readJson(response);
-          if (!response.ok || !(body as { ok?: boolean } | null)?.ok) throw new Error(errorMessage(body, `${store.name} failed its Shopify reporting test.`));
-        }),
-        ...card.googleAds.map(async (account) => {
-          const response = await fetch(`/api/admin/client-onboarding/google/${account.id}`, {
-            method: "PATCH",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ action: "test" }),
-          });
-          const body = await readJson(response);
-          if (!response.ok || !(body as { ok?: boolean } | null)?.ok) throw new Error(errorMessage(body, `${account.accountName} failed its Google Ads test.`));
-        }),
-      ];
-      await Promise.all(requests);
-      try {
-        await refreshClients();
-      } catch (refreshError) {
-        showNotice(
-          "error",
-          "Connections passed, but the list is stale",
-          refreshError instanceof Error
-            ? refreshError.message
-            : "Refresh the page before taking another action.",
-        );
-        return;
-      }
-      showNotice(
-        "success",
-        `${cardClientName(card)} connections passed`,
-        `${card.shopify.length} Shopify store${card.shopify.length === 1 ? "" : "s"} and ${card.googleAds.length} Google Ads account${card.googleAds.length === 1 ? "" : "s"} were checked live.`,
-      );
-    } catch (error) {
-      await refreshClients().catch(() => undefined);
-      showNotice("error", "Connection test failed", error instanceof Error ? error.message : "At least one live connection could not be verified.");
-    } finally {
-      setBusy(null);
-    }
+    await testConnectionTargets(card, targets);
   }
 
   async function disconnectAsset(target: DisconnectTarget) {
@@ -640,7 +734,12 @@ export function ClientOnboardingManager({
     setBusy(`disconnect:${target.kind}:${target.id}`);
     setDialogError("");
     try {
-      const segment = target.kind === "shopify" ? "shopify" : "google";
+      const segment =
+        target.kind === "google_ads"
+          ? "google"
+          : target.source === "legacy"
+            ? "legacy-shopify"
+            : "shopify";
       const response = await fetch(`/api/admin/client-onboarding/${segment}/${target.id}`, {
         method: "DELETE",
       });
@@ -652,7 +751,6 @@ export function ClientOnboardingManager({
         await refreshClients();
       } catch (refreshError) {
         setDisconnectTarget(null);
-        setRevokeCard(null);
         showNotice(
           "error",
           `${target.name} was disconnected, but the list is stale`,
@@ -663,12 +761,20 @@ export function ClientOnboardingManager({
         return;
       }
       setDisconnectTarget(null);
-      setRevokeCard(null);
+      const key =
+        target.kind === "shopify"
+          ? assetConnectionKey("shopify", target.source, target.id)
+          : assetConnectionKey("google_ads", "onboarding", target.id);
+      setConnectionStates((current) => {
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
       showNotice(
         "success",
-        `${target.name} disconnected`,
+        `${target.name} removed`,
         target.kind === "shopify"
-          ? "The Shopify connection was removed. The client’s dashboard access and other connections are unchanged."
+          ? "The Shopify connection was removed. The client, other connections, billing and history are unchanged."
           : "The Google Ads connection was removed from Dropscale. The Windsor and Google authorization remains unchanged, as do the client’s dashboard access and other connections.",
       );
     } catch (error) {
@@ -707,9 +813,6 @@ export function ClientOnboardingManager({
           <Button type="button" variant="primary" onClick={() => openCreate("new_client")} disabled={readOnlyPreview || backendLoadFailed}>
             <UserPlus aria-hidden /> New client
           </Button>
-          <Button type="button" onClick={() => openCreate("reconnect")} disabled={readOnlyPreview || backendLoadFailed || rosterLoadFailed}>
-            <RefreshCw aria-hidden /> Reconnect existing
-          </Button>
         </div>
       </div>
 
@@ -747,7 +850,7 @@ export function ClientOnboardingManager({
           <div className="panel flex min-h-64 flex-col items-center justify-center p-6 text-center">
             <span className="flex size-11 items-center justify-center rounded-full bg-[var(--accent-gold-dim)] text-[var(--accent-gold-strong)]"><Users className="size-5" aria-hidden /></span>
             <p className="mt-3 text-[14px] font-medium text-[var(--text-primary)]">No clients yet</p>
-            <p className="mt-1 max-w-lg text-[12.5px] leading-relaxed text-[var(--text-secondary)]">Create an onboarding link for a new client, or reconnect an existing client.</p>
+            <p className="mt-1 max-w-lg text-[12.5px] leading-relaxed text-[var(--text-secondary)]">Create an onboarding link for a new client.</p>
           </div>
         ) : filteredCards.length === 0 ? (
           <div className="panel flex min-h-40 flex-col items-center justify-center p-6 text-center">
@@ -760,13 +863,6 @@ export function ClientOnboardingManager({
             {filteredCards.map((card) => {
               const session = card.session;
               const noAssets = card.shopify.length === 0 && card.googleAds.length === 0;
-              const legacyStores = card.shopify.filter(
-                (store): store is LegacyShopifyAssetDTO => store.source === "legacy",
-              );
-              const onboardingStores = card.shopify.filter(
-                (store): store is OnboardingShopifyAsset =>
-                  store.source === "onboarding",
-              );
               const accountOnly = card.sessions.every(
                 (entry) => entry.requestedAssets.length === 0,
               );
@@ -778,14 +874,17 @@ export function ClientOnboardingManager({
               );
               const canCancel = Boolean(openSession);
               const canRotate = Boolean(openSession);
-              const canDisconnectAssets =
-                onboardingStores.length > 0 || card.googleAds.length > 0;
               const hasOpenSession = card.sessions.some((entry) =>
                 entry.rawStatus === "pending" || entry.rawStatus === "collecting",
               );
               const hasActiveWorkspace = cardIsActive(card);
               const canTargetAssets = Boolean(card.clientId && hasActiveWorkspace);
               const disabled = readOnlyPreview || backendLoadFailed || rosterLoadFailed;
+              const testTargets = connectionTestTargets(card);
+              const targetsByKey = new Map(testTargets.map((target) => [target.key, target]));
+              const testingAll = testTargets.some(
+                (target) => connectionStates[target.key]?.status === "testing",
+              );
               return (
                 <article key={card.key} className="panel p-4 sm:p-5">
                   <div className="flex flex-col items-start gap-4">
@@ -802,39 +901,99 @@ export function ClientOnboardingManager({
                           <Badge variant="success">Active client</Badge>
                         )}
                         {noAssets && !accountOnly && <Badge variant="neutral">Assets not connected</Badge>}
-                        {cardHasIssue(card) && <Badge variant="danger">Connection needs attention</Badge>}
+                        {hasVisibleIssue(card) && <Badge variant="danger">Connection needs attention</Badge>}
                       </div>
                       <p className="mt-1 break-all text-[12px] text-[var(--text-secondary)]">{cardEmail(card) ?? "Waiting for client details"}</p>
                       <p className="mt-1 text-[11px] text-[var(--text-muted)]">Updated {formatDate(cardUpdatedAt(card))}</p>
                     </div>
                     <div className="flex flex-wrap justify-start gap-2">
-                      <Button type="button" size="sm" loading={busy === `test:${card.key}`} disabled={disabled} onClick={() => void testConnections(card)}>
-                        <CheckCircle2 aria-hidden /> Test connection
+                      <Button type="button" size="sm" loading={testingAll} disabled={disabled} onClick={() => void testConnections(card)}>
+                        <CheckCircle2 aria-hidden /> Test all connections
                       </Button>
                       <Button type="button" size="sm" disabled={disabled || hasOpenSession || !canTargetAssets} onClick={() => { setAssetTarget(card); setCreateMode("add_assets"); setAssetChoice("both"); setInvitation(null); setDialogError(""); }}>
                         <Plus aria-hidden /> Add assets
                       </Button>
-                      {legacyStores.length > 0 && (
-                        <Button type="button" size="sm" disabled={disabled || hasOpenSession || !canTargetAssets} onClick={() => { setAssetTarget(card); setCreateMode("reconnect"); setAssetChoice("shopify"); setInvitation(null); setDialogError(""); }}>
-                          <RefreshCw aria-hidden /> Reconnect Shopify
-                        </Button>
-                      )}
                       {canRotate && openSession && <Button type="button" size="sm" disabled={disabled} onClick={() => setActionTarget({ session: openSession, action: "rotate" })}><RefreshCw aria-hidden /> Rotate link</Button>}
                       {reviewSession && (reviewSession.status === "submitted" || reviewSession.requestedAssets.length === 0) && <Button type="button" size="sm" variant={reviewSession.requestedAssets.length === 0 ? "primary" : "secondary"} disabled={disabled} onClick={() => setActionTarget({ session: reviewSession, action: "approve" })}><ShieldCheck aria-hidden /> {reviewSession.requestedAssets.length === 0 ? "Approve client" : "Approve connections"}</Button>}
                       {canCancel && openSession && <Button type="button" size="sm" variant="danger" disabled={disabled} onClick={() => setActionTarget({ session: openSession, action: "revoke" })}><Unplug aria-hidden /> Cancel onboarding</Button>}
-                      {canDisconnectAssets && <Button type="button" size="sm" variant="danger" disabled={disabled} onClick={() => { setRevokeCard(card); setDisconnectTarget(null); setDialogError(""); }}><Unplug aria-hidden /> Revoke asset…</Button>}
                     </div>
                   </div>
 
-                  <div className="mt-4 grid gap-2 md:grid-cols-2">
-                    <div className="rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3">
+                  <div className="mt-4 grid gap-3 xl:grid-cols-2">
+                    <section className="rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3" aria-label="Shopify connections">
                       <p className="flex items-center gap-1.5 text-[11px] font-medium text-[var(--text-primary)]"><Store className="size-3.5 text-[var(--accent-gold-strong)]" aria-hidden /> Shopify · {card.shopify.length}</p>
-                      <p className="mt-1 text-[11px] text-[var(--text-secondary)]">{card.shopify.length ? card.shopify.map((store) => store.name).join(", ") : "No reporting stores connected"}</p>
-                    </div>
-                    <div className="rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3">
+                      {card.shopify.length ? (
+                        <ul className="mt-3">
+                          {card.shopify.map((store) => {
+                            const key = assetConnectionKey("shopify", store.source, store.id);
+                            const target = targetsByKey.get(key);
+                            const state = connectionStates[key] ?? {
+                              status:
+                                store.source === "onboarding" && store.lastErrorCode
+                                  ? "failed" as const
+                                  : "connected" as const,
+                              ...(store.source === "onboarding" && store.lastErrorCode
+                                ? { message: "The last connection test failed. Test again for details." }
+                                : {}),
+                            };
+                            return (
+                              <li key={key} aria-busy={state.status === "testing"} className="flex flex-col gap-3 border-t border-[var(--border-subtle)] py-3 first:border-t-0 first:pt-0 last:pb-0 sm:flex-row sm:items-start sm:justify-between">
+                                <div className="min-w-0">
+                                  <p className="truncate text-[12.5px] font-medium text-[var(--text-primary)]">{store.name}</p>
+                                  <p className="mt-0.5 break-all text-[11px] text-[var(--text-secondary)]">{store.domain}</p>
+                                  {state.status === "failed" && state.message && <p className="mt-2 text-[11px] leading-relaxed text-[var(--danger-red)]">{state.message}</p>}
+                                </div>
+                                <div className="shrink-0 space-y-2 sm:text-right">
+                                  <ConnectionStatus state={state} />
+                                  <div className="grid w-full grid-cols-3 gap-2 sm:flex sm:w-auto sm:justify-end">
+                                    <Button type="button" size="sm" loading={state.status === "testing"} disabled={disabled || !target} aria-label={`Test ${store.name} Shopify connection`} onClick={() => target && void testConnectionTargets(card, [target])}>Test</Button>
+                                    <Button type="button" size="sm" disabled={disabled || hasOpenSession || !canTargetAssets} aria-label={`Reconnect ${store.name} Shopify connection`} onClick={() => { setAssetTarget(card); setReconnectTarget({ source: store.source, id: store.id, name: store.name, domain: store.domain }); setCreateMode("reconnect"); setAssetChoice("shopify"); setInvitation(null); setDialogError(""); }}>Reconnect</Button>
+                                    <Button type="button" size="sm" variant="danger" disabled={disabled} aria-label={`Remove ${store.name} Shopify connection`} onClick={() => { setDisconnectTarget({ kind: "shopify", source: store.source, id: store.id, name: store.name, clientName: cardClientName(card) }); setDialogError(""); }}>Remove</Button>
+                                  </div>
+                                </div>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      ) : (
+                        <p className="mt-2 text-[11px] text-[var(--text-secondary)]">No reporting stores connected</p>
+                      )}
+                    </section>
+                    <section className="rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3" aria-label="Google Ads connections">
                       <p className="flex items-center gap-1.5 text-[11px] font-medium text-[var(--text-primary)]"><Megaphone className="size-3.5 text-[var(--accent-gold-strong)]" aria-hidden /> Google Ads · {card.googleAds.length}</p>
-                      <p className="mt-1 text-[11px] text-[var(--text-secondary)]">{card.googleAds.length ? card.googleAds.map((account) => account.accountName).join(", ") : "No ad accounts connected"}</p>
-                    </div>
+                      {card.googleAds.length ? (
+                        <ul className="mt-3">
+                          {card.googleAds.map((account) => {
+                            const key = assetConnectionKey("google_ads", "onboarding", account.id);
+                            const target = targetsByKey.get(key);
+                            const state = connectionStates[key] ?? {
+                              status: account.lastErrorCode ? "failed" as const : "connected" as const,
+                              ...(account.lastErrorCode
+                                ? { message: "The last connection test failed. Test again for details." }
+                                : {}),
+                            };
+                            return (
+                              <li key={key} aria-busy={state.status === "testing"} className="flex flex-col gap-3 border-t border-[var(--border-subtle)] py-3 first:border-t-0 first:pt-0 last:pb-0 sm:flex-row sm:items-start sm:justify-between">
+                                <div className="min-w-0">
+                                  <p className="truncate text-[12.5px] font-medium text-[var(--text-primary)]">{account.accountName}</p>
+                                  <p className="mt-0.5 break-all text-[11px] text-[var(--text-secondary)]">{account.customerId}</p>
+                                  {state.status === "failed" && state.message && <p className="mt-2 text-[11px] leading-relaxed text-[var(--danger-red)]">{state.message}</p>}
+                                </div>
+                                <div className="shrink-0 space-y-2 sm:text-right">
+                                  <ConnectionStatus state={state} />
+                                  <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto sm:justify-end">
+                                    <Button type="button" size="sm" loading={state.status === "testing"} disabled={disabled || !target} aria-label={`Test ${account.accountName} Google Ads connection`} onClick={() => target && void testConnectionTargets(card, [target])}>Test</Button>
+                                    <Button type="button" size="sm" variant="danger" disabled={disabled} aria-label={`Remove ${account.accountName} Google Ads connection`} onClick={() => { setDisconnectTarget({ kind: "google_ads", id: account.id, name: account.accountName, clientName: cardClientName(card) }); setDialogError(""); }}>Remove</Button>
+                                  </div>
+                                </div>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      ) : (
+                        <p className="mt-2 text-[11px] text-[var(--text-secondary)]">No ad accounts connected</p>
+                      )}
+                    </section>
                   </div>
 
                   <div className="mt-4 flex flex-wrap items-center gap-2 text-[11px] text-[var(--text-secondary)]">
@@ -852,9 +1011,9 @@ export function ClientOnboardingManager({
       <Dialog open={Boolean(createMode)} onOpenChange={(open) => !open && closeCreate()}>
         <DialogContent className="max-w-xl">
           <DialogHeader>
-            <DialogTitle>{invitation ? "Copy one-time link" : createMode === "new_client" ? "Onboard a new client" : createMode === "reconnect" ? assetTarget ? "Reconnect Shopify" : "Reconnect an existing client" : "Add client assets"}</DialogTitle>
+            <DialogTitle>{invitation ? "Copy one-time link" : createMode === "new_client" ? "Onboard a new client" : createMode === "reconnect" ? "Reconnect Shopify" : "Add client assets"}</DialogTitle>
             <DialogDescription>
-              {invitation ? "This private link is shown once. Copy it now and send it only to the intended client." : createMode === "new_client" ? "The client creates their dashboard account and either finishes without assets or completes Shopify & Google Ads setup." : createMode === "reconnect" ? assetTarget ? `Create a secure link for ${cardClientName(assetTarget)} to replace their existing Shopify connection.` : "Choose the existing client and the connections they need to renew." : `Create a separate asset invitation for ${assetTarget ? cardClientName(assetTarget) : "this client"}.`}
+              {invitation ? "This private link is shown once. Copy it now and send it only to the intended client." : createMode === "new_client" ? "The client creates their dashboard account and either finishes without assets or completes Shopify & Google Ads setup." : createMode === "reconnect" ? `Create a secure link for ${assetTarget ? cardClientName(assetTarget) : "this client"} to replace one specific Shopify connection.` : `Create a separate asset invitation for ${assetTarget ? cardClientName(assetTarget) : "this client"}.`}
             </DialogDescription>
           </DialogHeader>
           {invitation ? (
@@ -865,24 +1024,17 @@ export function ClientOnboardingManager({
             </div>
           ) : (
             <div className="space-y-4">
-              {createMode === "reconnect" && !assetTarget && (
-                rosterLoadFailed ? (
-                  <p role="alert" className="rounded-[10px] border border-[var(--danger-red)]/30 bg-[var(--danger-red)]/8 p-3 text-[12px] text-[var(--text-secondary)]">Existing clients could not be loaded. Close and refresh before creating a reconnect link.</p>
-                ) : (
-                  <>
-                    <div className="space-y-1.5"><Label htmlFor="legacy-client-search">Existing client</Label><div className="relative"><Search className="pointer-events-none absolute top-1/2 left-3 size-3.5 -translate-y-1/2 text-[var(--text-muted)]" aria-hidden /><Input id="legacy-client-search" value={legacySearch} onChange={(event) => setLegacySearch(event.target.value)} placeholder="Search name or email" className="pl-9" /></div></div>
-                    <fieldset><legend className="sr-only">Select an existing client</legend><div className="max-h-64 space-y-2 overflow-y-auto pr-1">
-                      {rosterMatches.map((client) => {
-                        const linkOpen = clientsWithOpenLinks.has(client.clientId);
-                        return <label key={client.clientId} className="block cursor-pointer"><input type="radio" name="legacy-client" className="peer sr-only" value={client.clientId} checked={selectedLegacyId === client.clientId} disabled={linkOpen} onChange={() => setSelectedLegacyId(client.clientId)} /><span className="block rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3 peer-checked:border-[var(--accent-gold)]/60 peer-focus-visible:ring-2 peer-focus-visible:ring-[var(--accent-gold)]/40 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"><span className="flex justify-between gap-2"><span><span className="block text-[12.5px] font-medium text-[var(--text-primary)]">{client.fullName}</span><span className="block break-all text-[11.5px] text-[var(--text-secondary)]">{client.email}</span></span>{linkOpen && <Badge variant="neutral">Link already open</Badge>}</span></span></label>;
-                      })}
-                    </div></fieldset>
-                  </>
-                )
+              {createMode === "reconnect" && reconnectTarget ? (
+                <div className="rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3">
+                  <p className="text-[12.5px] font-medium text-[var(--text-primary)]">{reconnectTarget.name}</p>
+                  <p className="mt-1 break-all text-[11px] text-[var(--text-secondary)]">{reconnectTarget.domain}</p>
+                  <p className="mt-2 text-[11px] leading-relaxed text-[var(--text-muted)]">The link can reconnect only this store. It cannot be used to add a different Shopify store.</p>
+                </div>
+              ) : (
+                <AssetChoiceField value={assetChoice} onChange={setAssetChoice} newClient={createMode === "new_client"} />
               )}
-              <AssetChoiceField value={assetChoice} onChange={setAssetChoice} newClient={createMode === "new_client"} />
               {dialogError && <p role="alert" className="text-[12px] text-[var(--danger-red)]">{dialogError}</p>}
-              <DialogFooter><Button type="button" variant="primary" loading={busy === "create"} disabled={readOnlyPreview || backendLoadFailed || rosterLoadFailed || createMode === "reconnect" && !assetTarget && !selectedLegacyId} onClick={() => void createInvitation()}><Link2 aria-hidden /> Generate one-time link</Button></DialogFooter>
+              <DialogFooter><Button type="button" variant="primary" loading={busy === "create"} disabled={readOnlyPreview || backendLoadFailed || rosterLoadFailed || createMode === "reconnect" && !reconnectTarget} onClick={() => void createInvitation()}><Link2 aria-hidden /> Generate one-time link</Button></DialogFooter>
             </div>
           )}
         </DialogContent>
@@ -905,16 +1057,18 @@ export function ClientOnboardingManager({
         </DialogContent>
       </Dialog>
 
-      <Dialog open={Boolean(revokeCard)} onOpenChange={(open) => { if (!open) { setRevokeCard(null); setDisconnectTarget(null); setDialogError(""); } }}>
+      <Dialog open={Boolean(disconnectTarget)} onOpenChange={(open) => { if (!open) { setDisconnectTarget(null); setDialogError(""); } }}>
         <DialogContent>
-          {disconnectTarget ? (
+          {disconnectTarget && (
             <>
               <DialogHeader>
-                <DialogTitle>Disconnect {disconnectTarget.name}?</DialogTitle>
+                <DialogTitle>Remove {disconnectTarget.name}?</DialogTitle>
                 <DialogDescription>
-                  {disconnectTarget.kind === "shopify"
-                    ? "This revokes only this Shopify reporting connection and destroys its stored credential."
-                    : "This removes only Dropscale's stored Google Ads connection. It does not unlink the account in Windsor or Google."} The client&apos;s dashboard access, other connections and billing remain unchanged.
+                  {disconnectTarget.kind === "google_ads"
+                    ? "This removes only Dropscale's stored Google Ads connection. It does not unlink the account in Windsor or Google."
+                    : disconnectTarget.source === "legacy"
+                      ? "This disconnects Shopify from this existing asset and removes its stored credential."
+                      : "This removes this Shopify reporting connection and destroys its stored credential."} The client, other connections, billing and history remain unchanged.
                 </DialogDescription>
               </DialogHeader>
               <div className="rounded-[10px] border border-[var(--danger-red)]/25 bg-[var(--danger-red)]/8 p-3 text-[12px] text-[var(--text-secondary)]">
@@ -923,28 +1077,9 @@ export function ClientOnboardingManager({
               </div>
               {dialogError && <p role="alert" className="text-[12px] text-[var(--danger-red)]">{dialogError}</p>}
               <DialogFooter>
-                <Button type="button" onClick={() => { setDisconnectTarget(null); setDialogError(""); }}>Back</Button>
-                <Button type="button" variant="danger" loading={busy === `disconnect:${disconnectTarget.kind}:${disconnectTarget.id}`} onClick={() => void disconnectAsset(disconnectTarget)}><Unplug aria-hidden /> Disconnect this asset</Button>
+                <Button type="button" onClick={() => { setDisconnectTarget(null); setDialogError(""); }}>Cancel</Button>
+                <Button type="button" variant="danger" loading={busy === `disconnect:${disconnectTarget.kind}:${disconnectTarget.id}`} onClick={() => void disconnectAsset(disconnectTarget)}><Unplug aria-hidden /> Remove asset</Button>
               </DialogFooter>
-            </>
-          ) : (
-            <>
-              <DialogHeader>
-                <DialogTitle>Choose one asset to disconnect</DialogTitle>
-                <DialogDescription>Each connection is revoked separately. Choosing an asset below opens a precise confirmation before anything changes.</DialogDescription>
-              </DialogHeader>
-              <div className="space-y-2">
-                {revokeCard?.shopify.filter((store) => store.source === "onboarding").map((store) => (
-                  <button key={store.id} type="button" className="flex w-full items-center justify-between gap-3 rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3 text-left transition-smooth hover:border-[var(--danger-red)]/40" onClick={() => setDisconnectTarget({ kind: "shopify", id: store.id, name: store.name, clientName: cardClientName(revokeCard) })}>
-                    <span><span className="block text-[12.5px] font-medium text-[var(--text-primary)]">{store.name}</span><span className="block text-[11px] text-[var(--text-secondary)]">Shopify · {store.domain}</span></span><Unplug className="size-4 shrink-0 text-[var(--danger-red)]" aria-hidden />
-                  </button>
-                ))}
-                {revokeCard?.googleAds.map((account) => (
-                  <button key={account.id} type="button" className="flex w-full items-center justify-between gap-3 rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3 text-left transition-smooth hover:border-[var(--danger-red)]/40" onClick={() => setDisconnectTarget({ kind: "google_ads", id: account.id, name: account.accountName, clientName: cardClientName(revokeCard) })}>
-                    <span><span className="block text-[12.5px] font-medium text-[var(--text-primary)]">{account.accountName}</span><span className="block text-[11px] text-[var(--text-secondary)]">Google Ads · {account.customerId}</span></span><Unplug className="size-4 shrink-0 text-[var(--danger-red)]" aria-hidden />
-                  </button>
-                ))}
-              </div>
             </>
           )}
         </DialogContent>

@@ -20,12 +20,23 @@ const mocks = vi.hoisted(() => {
       super(message);
     }
   }
+  class LegacyShopifyDisconnectError extends Error {
+    constructor(
+      public code: string,
+      message: string,
+      public status: number,
+    ) {
+      super(message);
+    }
+  }
   return {
     ClientOnboardingError,
+    LegacyShopifyDisconnectError,
     LegacyShopifyHealthError,
     isClientOnboardingId: vi.fn(() => true),
     requireClientOnboardingAdmin: vi.fn(),
     createServiceClient: vi.fn(),
+    disconnectLegacyShopifyConnection: vi.fn(),
     testLegacyShopifyConnection: vi.fn(),
   };
 });
@@ -60,6 +71,8 @@ vi.mock("@/lib/client-onboarding/http", () => ({
   readSmallJson: (request: Request) => request.json(),
 }));
 vi.mock("@/lib/client-onboarding/legacy-shopify", () => ({
+  disconnectLegacyShopifyConnection: mocks.disconnectLegacyShopifyConnection,
+  LegacyShopifyDisconnectError: mocks.LegacyShopifyDisconnectError,
   LegacyShopifyHealthError: mocks.LegacyShopifyHealthError,
   testLegacyShopifyConnection: mocks.testLegacyShopifyConnection,
 }));
@@ -71,9 +84,10 @@ vi.mock("@/lib/supabase/service", () => ({
   createServiceClient: mocks.createServiceClient,
 }));
 
-import { PATCH } from "./route";
+import { DELETE, PATCH } from "./route";
 
 const ID = "40000000-0000-4000-8000-000000000002";
+const ADMIN = "40000000-0000-4000-8000-000000000003";
 const HEALTH = {
   ok: true,
   limited: true,
@@ -97,12 +111,20 @@ function patch(body: unknown = { action: "test" }) {
   );
 }
 
+function remove() {
+  return new NextRequest(
+    `http://localhost/api/admin/client-onboarding/legacy-shopify/${ID}`,
+    { method: "DELETE" },
+  );
+}
+
 describe("admin legacy Shopify health route", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.isClientOnboardingId.mockReturnValue(true);
-    mocks.requireClientOnboardingAdmin.mockResolvedValue({ role: "admin" });
+    mocks.requireClientOnboardingAdmin.mockResolvedValue({ id: ADMIN, role: "admin" });
     mocks.createServiceClient.mockReturnValue({ kind: "service" });
+    mocks.disconnectLegacyShopifyConnection.mockResolvedValue(undefined);
     mocks.testLegacyShopifyConnection.mockResolvedValue(HEALTH);
   });
 
@@ -163,5 +185,48 @@ describe("admin legacy Shopify health route", () => {
     expect(serialised).toContain("invalid_credential");
     expect(serialised).not.toContain("shpat_");
     expect(serialised).not.toContain("encrypted-");
+  });
+
+  it("authenticates an admin before service-role access for removal", async () => {
+    mocks.requireClientOnboardingAdmin.mockRejectedValue(
+      new mocks.ClientOnboardingError("forbidden", "Forbidden.", 403),
+    );
+
+    const response = await DELETE(remove(), context());
+
+    expect(response.status).toBe(403);
+    expect(mocks.createServiceClient).not.toHaveBeenCalled();
+    expect(mocks.disconnectLegacyShopifyConnection).not.toHaveBeenCalled();
+  });
+
+  it("removes exactly one legacy Shopify connection through the atomic service RPC", async () => {
+    const response = await DELETE(remove(), context());
+
+    expect(response.status).toBe(200);
+    expect(mocks.disconnectLegacyShopifyConnection).toHaveBeenCalledWith({
+      accountId: ID,
+      adminId: ADMIN,
+      service: { kind: "service" },
+    });
+    expect(await response.json()).toEqual({ ok: true });
+    expect(response.headers.get("cache-control")).toContain("no-store");
+  });
+
+  it("returns a safe not-found error for an inactive or disconnected legacy asset", async () => {
+    mocks.disconnectLegacyShopifyConnection.mockRejectedValue(
+      new mocks.LegacyShopifyDisconnectError(
+        "not_found",
+        "Active legacy Shopify connection not found.",
+        404,
+      ),
+    );
+
+    const response = await DELETE(remove(), context());
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({
+      error: "Active legacy Shopify connection not found.",
+      code: "not_found",
+    });
   });
 });

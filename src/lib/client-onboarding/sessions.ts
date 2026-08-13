@@ -9,16 +9,19 @@ import {
 } from "@/lib/client-onboarding/invitations";
 import { getSessionProfile } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/service";
+import { normalizeShopDomain } from "@/lib/shopify/client";
 import type {
+  AdAccount,
   ClientGoogleAdsConnection,
   ClientOnboardingAsset,
   ClientOnboardingMode,
   ClientOnboardingSession,
+  ClientShopifyReconnectTargetSource,
   ClientShopifyConnection,
 } from "@/lib/supabase/types";
 
 const SAFE_SESSION_COLUMNS =
-  "id, mode, requested_assets, status, invite_expires_at, failed_attempts, target_client_id, claimed_user_id, first_name, last_name, email, created_at, updated_at, identity_created_at, submitted_at, reviewed_at, activated_at, last_error_code" as const;
+  "id, mode, requested_assets, status, invite_expires_at, failed_attempts, target_client_id, reconnect_legacy_ad_account_id, reconnect_shopify_connection_id, reconnect_completed_at, claimed_user_id, first_name, last_name, email, created_at, updated_at, identity_created_at, submitted_at, reviewed_at, activated_at, last_error_code" as const;
 const AUTH_SESSION_COLUMNS = `${SAFE_SESSION_COLUMNS}, invite_token_hash, created_by` as const;
 const SAFE_SHOPIFY_COLUMNS =
   "id, session_id, client_id, status, shopify_name, shopify_domain, primary_domain, shopify_currency, granted_scopes, connected_at, last_verified_at, last_error_code" as const;
@@ -58,6 +61,19 @@ export type ClientOnboardingGoogleDTO = {
   lastErrorCode: string | null;
 };
 
+export type ClientOnboardingShopifyReconnectTargetDTO = {
+  source: ClientShopifyReconnectTargetSource;
+  id: string;
+  name: string;
+  domain: string;
+  currency: string | null;
+};
+
+export type ClientOnboardingShopifyReconnectTarget = Pick<
+  ClientOnboardingShopifyReconnectTargetDTO,
+  "source" | "id"
+>;
+
 export type ClientOnboardingSessionDTO = {
   id: string;
   mode: ClientOnboardingMode;
@@ -67,6 +83,8 @@ export type ClientOnboardingSessionDTO = {
   inviteExpiresAt: string | null;
   targetClientId: string | null;
   targetClientName: string | null;
+  reconnectTarget: ClientOnboardingShopifyReconnectTargetDTO | null;
+  reconnectCompletedAt: string | null;
   claimedUserId: string | null;
   firstName: string | null;
   lastName: string | null;
@@ -197,6 +215,7 @@ function toDTO(
   googleAds: ClientGoogleAdsConnection[],
   mappings: Array<{ shopify_connection_id: string; google_ads_connection_id: string }>,
   aggregateByClient: boolean,
+  reconnectTargets: ReadonlyMap<string, ClientOnboardingShopifyReconnectTargetDTO>,
 ): ClientOnboardingSessionDTO {
   const ownerId = row.claimed_user_id ?? row.target_client_id;
   const shops = shopify
@@ -218,6 +237,12 @@ function toDTO(
     inviteExpiresAt: row.invite_expires_at,
     targetClientId: row.target_client_id,
     targetClientName,
+    reconnectTarget: row.reconnect_legacy_ad_account_id
+      ? reconnectTargets.get(`legacy:${row.reconnect_legacy_ad_account_id}`) ?? null
+      : row.reconnect_shopify_connection_id
+        ? reconnectTargets.get(`onboarding:${row.reconnect_shopify_connection_id}`) ?? null
+        : null,
+    reconnectCompletedAt: row.reconnect_completed_at,
     claimedUserId: row.claimed_user_id,
     firstName: row.first_name,
     lastName: row.last_name,
@@ -266,9 +291,33 @@ async function loadSessionBundle(
       ),
     ),
   ];
+  const legacyReconnectIds = [
+    ...new Set(
+      sessionRows.flatMap((session) =>
+        session.reconnect_legacy_ad_account_id
+          ? [session.reconnect_legacy_ad_account_id]
+          : [],
+      ),
+    ),
+  ];
+  const onboardingReconnectIds = [
+    ...new Set(
+      sessionRows.flatMap((session) =>
+        session.reconnect_shopify_connection_id
+          ? [session.reconnect_shopify_connection_id]
+          : [],
+      ),
+    ),
+  ];
   const connectionScope = aggregateByClient ? clientIds : ids;
   const connectionColumn = aggregateByClient ? "client_id" : "session_id";
-  const [shopsResult, adsResult, clientsResult] = await Promise.all([
+  const [
+    shopsResult,
+    adsResult,
+    clientsResult,
+    legacyReconnectResult,
+    onboardingReconnectResult,
+  ] = await Promise.all([
     connectionScope.length
       ? service
           .from("client_shopify_connections")
@@ -286,8 +335,26 @@ async function loadSessionBundle(
     targetIds.length
       ? service.from("portal_clients").select("id, full_name").in("id", targetIds)
       : Promise.resolve({ data: [], error: null }),
+    legacyReconnectIds.length
+      ? service
+          .from("ad_accounts")
+          .select("id, store_name, shopify_url, currency")
+          .in("id", legacyReconnectIds)
+      : Promise.resolve({ data: [], error: null }),
+    onboardingReconnectIds.length
+      ? service
+          .from("client_shopify_connections")
+          .select(SAFE_SHOPIFY_COLUMNS)
+          .in("id", onboardingReconnectIds)
+      : Promise.resolve({ data: [], error: null }),
   ]);
-  if (shopsResult.error || adsResult.error || clientsResult.error) {
+  if (
+    shopsResult.error ||
+    adsResult.error ||
+    clientsResult.error ||
+    legacyReconnectResult.error ||
+    onboardingReconnectResult.error
+  ) {
     throw new ClientOnboardingError(
       "database_error",
       "Could not load client onboarding assets.",
@@ -313,6 +380,32 @@ async function loadSessionBundle(
   const targetNames = new Map(
     (clientsResult.data ?? []).map((client) => [client.id, client.full_name]),
   );
+  const reconnectTargets = new Map<
+    string,
+    ClientOnboardingShopifyReconnectTargetDTO
+  >();
+  for (const row of (legacyReconnectResult.data ?? []) as Array<
+    Pick<AdAccount, "id" | "store_name" | "shopify_url" | "currency">
+  >) {
+    const domain = row.shopify_url ? normalizeShopDomain(row.shopify_url) : null;
+    if (!domain) continue;
+    reconnectTargets.set(`legacy:${row.id}`, {
+      source: "legacy",
+      id: row.id,
+      name: row.store_name.trim() || domain,
+      domain,
+      currency: row.currency,
+    });
+  }
+  for (const row of (onboardingReconnectResult.data ?? []) as ClientShopifyConnection[]) {
+    reconnectTargets.set(`onboarding:${row.id}`, {
+      source: "onboarding",
+      id: row.id,
+      name: row.shopify_name,
+      domain: row.shopify_domain,
+      currency: row.shopify_currency,
+    });
+  }
   return sessionRows.map((row) =>
     toDTO(
       row,
@@ -321,6 +414,7 @@ async function loadSessionBundle(
       adRows,
       mappingsResult.data ?? [],
       aggregateByClient,
+      reconnectTargets,
     ),
   );
 }
@@ -350,23 +444,48 @@ function normaliseAssets(
   const assets = [...new Set(value)].filter(
     (asset): asset is ClientOnboardingAsset => asset === "shopify" || asset === "google_ads",
   );
-  const invalidCount = mode === "new_client" ? assets.length === 1 : assets.length === 0;
-  if (assets.length !== value.length || invalidCount) {
+  const invalidShape =
+    mode === "new_client"
+      ? assets.length === 1
+      : mode === "reconnect"
+        ? assets.length !== 1 || assets[0] !== "shopify"
+        : assets.length === 0;
+  if (assets.length !== value.length || invalidShape) {
     throw new ClientOnboardingError(
       "invalid_request",
       mode === "new_client"
         ? "Choose dashboard account only or complete Shopify and Google Ads setup."
-        : "Choose Shopify, Google Ads or both.",
+        : mode === "reconnect"
+          ? "A reconnect link must target exactly one Shopify store."
+          : "Choose Shopify, Google Ads or both.",
       400,
     );
   }
   return assets.sort();
 }
 
+function normaliseReconnectTarget(
+  value: ClientOnboardingShopifyReconnectTarget | null | undefined,
+) {
+  if (
+    !value ||
+    !(["legacy", "onboarding"] as const).includes(value.source) ||
+    !isClientOnboardingId(value.id)
+  ) {
+    throw new ClientOnboardingError(
+      "invalid_request",
+      "Choose the exact Shopify store to reconnect.",
+      400,
+    );
+  }
+  return { source: value.source, id: value.id };
+}
+
 export async function createClientOnboardingSession(input: {
   mode: ClientOnboardingMode;
   requestedAssets: readonly string[];
   targetClientId?: string | null;
+  targetShopify?: ClientOnboardingShopifyReconnectTarget | null;
   adminId: string;
 }) {
   const service = serviceOrThrow();
@@ -377,26 +496,44 @@ export async function createClientOnboardingSession(input: {
   const targetClientId = input.targetClientId?.trim() || null;
   if (
     (input.mode === "new_client" && targetClientId) ||
-    (input.mode !== "new_client" && (!targetClientId || !isClientOnboardingId(targetClientId)))
+    (input.mode === "add_assets" &&
+      (!targetClientId || !isClientOnboardingId(targetClientId))) ||
+    (input.mode === "reconnect" && targetClientId) ||
+    (input.mode !== "reconnect" && input.targetShopify)
   ) {
     throw new ClientOnboardingError(
       "invalid_request",
       input.mode === "new_client"
         ? "A new-client link cannot target an existing client."
-        : "Select an existing client.",
+        : input.mode === "reconnect"
+          ? "Reconnect the selected Shopify store, not a general client workspace."
+          : "Select an existing client.",
       400,
     );
   }
+  const targetShopify =
+    input.mode === "reconnect"
+      ? normaliseReconnectTarget(input.targetShopify)
+      : null;
   const invitation = await createClientOnboardingInvitationMaterial();
-  const { data, error } = await service.rpc("create_client_onboarding_invitation", {
-    p_session_id: invitation.id,
-    p_mode: input.mode,
-    p_requested_assets: requestedAssets,
-    p_target_client_id: targetClientId,
-    p_token_hash: invitation.tokenHash,
-    p_expires_at: invitation.expiresAt,
-    p_created_by: input.adminId,
-  });
+  const { data, error } = targetShopify
+    ? await service.rpc("create_client_shopify_reconnect_invitation", {
+        p_session_id: invitation.id,
+        p_target_source: targetShopify.source,
+        p_target_id: targetShopify.id,
+        p_token_hash: invitation.tokenHash,
+        p_expires_at: invitation.expiresAt,
+        p_created_by: input.adminId,
+      })
+    : await service.rpc("create_client_onboarding_invitation", {
+        p_session_id: invitation.id,
+        p_mode: input.mode,
+        p_requested_assets: requestedAssets,
+        p_target_client_id: targetClientId,
+        p_token_hash: invitation.tokenHash,
+        p_expires_at: invitation.expiresAt,
+        p_created_by: input.adminId,
+      });
   if (error || data !== invitation.id) {
     throw new ClientOnboardingError(
       error?.code === "P0002"
@@ -405,7 +542,9 @@ export async function createClientOnboardingSession(input: {
           ? "invalid_state"
           : "database_error",
       error?.code === "P0002"
-        ? "The selected client no longer exists."
+        ? targetShopify
+          ? "The selected Shopify store is no longer available."
+          : "The selected client no longer exists."
         : error?.code === "23505"
           ? "This client already has an open onboarding link. Cancel or complete it first."
           : "Could not create the onboarding invitation.",
@@ -418,6 +557,7 @@ export async function createClientOnboardingSession(input: {
     expiresAt: invitation.expiresAt,
     mode: input.mode,
     requestedAssets,
+    targetShopify,
   };
 }
 
@@ -625,7 +765,7 @@ export async function getPublicClientOnboardingSession(
   // to an existing store without disclosing asset metadata to an unclaimed
   // bearer link.
   const [dto] = await loadSessionBundle([safe], Boolean(safe.claimed_user_id));
-  return dto;
+  return safe.claimed_user_id ? dto : { ...dto, reconnectTarget: null };
 }
 
 function normaliseIdentity(input: {

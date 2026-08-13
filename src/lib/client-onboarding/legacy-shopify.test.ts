@@ -34,6 +34,8 @@ vi.mock("@/lib/shopify/client", () => ({
 
 import { ShopifyError } from "@/lib/shopify/client";
 import {
+  disconnectLegacyShopifyConnection,
+  LegacyShopifyDisconnectError,
   LegacyShopifyHealthError,
   testLegacyShopifyConnection,
 } from "./legacy-shopify";
@@ -168,16 +170,24 @@ describe("legacy Shopify health", () => {
     expect(health).not.toHaveProperty("reconnectRecommended");
   });
 
-  it("does not pass a connection that cannot produce the core order report", async () => {
+  it("accepts an older app when the live order report works despite incomplete scope metadata", async () => {
     const { service } = serviceWith(row());
     mocks.decryptToken.mockResolvedValue(DIRECT_TOKEN);
     mocks.validateShopifyCredentials.mockResolvedValue(
       shop(["read_analytics", "read_reports"]),
     );
 
-    await expect(testLegacyShopifyConnection({ accountId: ID, service })).rejects.toMatchObject({
-      code: "reporting_unavailable",
-      status: 422,
+    const health = await testLegacyShopifyConnection({ accountId: ID, service });
+
+    expect(mocks.shopifyGraphql).toHaveBeenCalledWith(
+      DOMAIN,
+      ACCESS_TOKEN,
+      "{ orders(first: 1) { nodes { id } } }",
+    );
+    expect(health).toMatchObject({
+      ok: true,
+      limited: true,
+      capabilities: { orders: true },
     });
   });
 
@@ -221,5 +231,59 @@ describe("legacy Shopify health", () => {
     expect(caught).toMatchObject({ code: "invalid_credential", status: 422 });
     expect((caught as Error).message).not.toContain(DIRECT_TOKEN);
     expect((caught as Error).message).not.toContain(CIPHERTEXT);
+  });
+});
+
+describe("legacy Shopify disconnect", () => {
+  it("delegates the exact account and verified admin to the atomic RPC", async () => {
+    const rpc = vi.fn().mockResolvedValue({ data: ID, error: null });
+
+    await disconnectLegacyShopifyConnection({
+      accountId: ID,
+      adminId: "40000000-0000-4000-8000-000000000003",
+      service: { rpc } as never,
+    });
+
+    expect(rpc).toHaveBeenCalledWith("disconnect_legacy_shopify_connection", {
+      p_account_id: ID,
+      p_admin_id: "40000000-0000-4000-8000-000000000003",
+    });
+  });
+
+  it("classifies a non-active legacy connection without exposing database details", async () => {
+    const rpc = vi.fn().mockResolvedValue({
+      data: null,
+      error: { code: "P0002", message: "secret database detail" },
+    });
+
+    let caught: unknown;
+    try {
+      await disconnectLegacyShopifyConnection({
+        accountId: ID,
+        adminId: "40000000-0000-4000-8000-000000000003",
+        service: { rpc } as never,
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(LegacyShopifyDisconnectError);
+    expect(caught).toMatchObject({ code: "not_found", status: 404 });
+    expect((caught as Error).message).not.toContain("secret database detail");
+  });
+
+  it("fails closed when the RPC does not return the exact account", async () => {
+    const rpc = vi.fn().mockResolvedValue({
+      data: "40000000-0000-4000-8000-000000000099",
+      error: null,
+    });
+
+    await expect(
+      disconnectLegacyShopifyConnection({
+        accountId: ID,
+        adminId: "40000000-0000-4000-8000-000000000003",
+        service: { rpc } as never,
+      }),
+    ).rejects.toMatchObject({ code: "database_error", status: 500 });
   });
 });

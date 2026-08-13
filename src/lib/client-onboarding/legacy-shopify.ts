@@ -48,6 +48,46 @@ export class LegacyShopifyHealthError extends Error {
   }
 }
 
+export class LegacyShopifyDisconnectError extends Error {
+  constructor(
+    public readonly code: "not_found" | "database_error",
+    message: string,
+    public readonly status: number,
+  ) {
+    super(message);
+    this.name = "LegacyShopifyDisconnectError";
+  }
+}
+
+/** Atomically clears only the active legacy Shopify credential and connection state. */
+export async function disconnectLegacyShopifyConnection({
+  accountId,
+  adminId,
+  service,
+}: {
+  accountId: string;
+  adminId: string;
+  service: SupabaseClient<Database>;
+}): Promise<void> {
+  const { data, error } = await service.rpc(
+    "disconnect_legacy_shopify_connection",
+    { p_account_id: accountId, p_admin_id: adminId },
+  );
+  if (!error && data === accountId) return;
+  if (error?.code === "P0002") {
+    throw new LegacyShopifyDisconnectError(
+      "not_found",
+      "Active legacy Shopify connection not found.",
+      404,
+    );
+  }
+  throw new LegacyShopifyDisconnectError(
+    "database_error",
+    "The Shopify connection could not be removed.",
+    500,
+  );
+}
+
 function invalidCredential(): LegacyShopifyHealthError {
   return new LegacyShopifyHealthError(
     "invalid_credential",
@@ -158,13 +198,9 @@ export async function testLegacyShopifyConnection({
     const scopesMissing = REQUIRED_REPORTING_SHOPIFY_SCOPES.filter(
       (scope) => !hasScope(granted, scope),
     );
-    if (!hasScope(granted, "read_orders")) {
-      throw new LegacyShopifyHealthError(
-        "reporting_unavailable",
-        "This Shopify connection cannot read orders. Reconnect this store before using it for reporting.",
-        422,
-      );
-    }
+    // Older custom apps do not always report a complete scope list. The live
+    // reporting read is authoritative: keep the scope list as capability
+    // metadata, but do not reject a working connection from metadata alone.
     try {
       await shopifyGraphql<{ orders: { nodes: Array<{ id: string }> } }>(
         domain,
@@ -181,12 +217,14 @@ export async function testLegacyShopifyConnection({
       }
       throw error;
     }
+    const verifiedCapabilities = capabilities(granted);
+    verifiedCapabilities.orders = true;
     const limited = scopesMissing.length > 0;
     return {
       ok: true,
       limited,
       testedAt: now.toISOString(),
-      capabilities: capabilities(granted),
+      capabilities: verifiedCapabilities,
       scopesMissing: [...scopesMissing],
     };
   } catch (error) {

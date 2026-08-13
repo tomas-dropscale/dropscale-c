@@ -71,6 +71,7 @@ export class ClientShopifyConnectionError extends Error {
       | "health_check_failed"
       | "stored_identity_mismatch"
       | "invalid_session"
+      | "reconnect_target_mismatch"
       | "duplicate_store"
       | "not_found"
       | "server_not_configured"

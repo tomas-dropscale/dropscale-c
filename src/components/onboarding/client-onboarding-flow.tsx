@@ -40,7 +40,9 @@ function requestsGoogle(session: ClientOnboardingSessionDTO) {
 }
 
 function hasCurrentShopify(session: ClientOnboardingSessionDTO) {
-  return session.shopify.some((store) => store.sessionId === session.id);
+  return session.mode === "reconnect"
+    ? Boolean(session.reconnectCompletedAt)
+    : session.shopify.some((store) => store.sessionId === session.id);
 }
 
 function hasCurrentGoogleAds(session: ClientOnboardingSessionDTO) {
@@ -212,6 +214,12 @@ export function ClientOnboardingFlow({ sessionId }: { sessionId: string }) {
       }
       const nextSession = body.session;
       setSession(nextSession);
+      if (nextSession.reconnectTarget && !nextSession.reconnectCompletedAt) {
+        setShopify((current) => ({
+          ...current,
+          domain: nextSession.reconnectTarget?.domain ?? current.domain,
+        }));
+      }
       if (["submitted", "reviewed", "active"].includes(nextSession.rawStatus)) {
         setComplete(true);
       } else {
@@ -425,8 +433,12 @@ export function ClientOnboardingFlow({ sessionId }: { sessionId: string }) {
         throw new Error(
           responseError(body, "The Shopify store could not be connected."),
         );
-      await fetchSession();
-      setShopify({ domain: "", clientId: "", clientSecret: "" });
+      const updated = await fetchSession();
+      setShopify({
+        domain: updated.reconnectTarget?.domain ?? "",
+        clientId: "",
+        clientSecret: "",
+      });
       setFeedback({
         tone: "success",
         message:
@@ -543,7 +555,9 @@ export function ClientOnboardingFlow({ sessionId }: { sessionId: string }) {
         currentShopifyStores.map((storeItem) => storeItem.id),
       );
       const canRemapPreviousGoogle =
-        requestsShopify(session) && !requestsGoogle(session);
+        session.mode !== "reconnect" &&
+        requestsShopify(session) &&
+        !requestsGoogle(session);
       const mappingPayload = Object.entries(mappings).flatMap(
         ([googleAdsConnectionId, shopifyConnectionId]) => {
           const accountItem = session.googleAds.find(
@@ -561,10 +575,11 @@ export function ClientOnboardingFlow({ sessionId }: { sessionId: string }) {
         },
       );
       const canEditMappings =
-        (session.shopify.length > 0 && currentGoogleAccounts.length > 0) ||
+        session.mode !== "reconnect" &&
+        ((session.shopify.length > 0 && currentGoogleAccounts.length > 0) ||
         (canRemapPreviousGoogle &&
           currentShopifyStores.length > 0 &&
-          previousGoogleAccounts.length > 0);
+          previousGoogleAccounts.length > 0));
       if (canEditMappings) {
         const mappingResponse = await fetch(
           `/api/client-onboarding/${sessionId}/mappings`,
@@ -899,17 +914,41 @@ export function ClientOnboardingFlow({ sessionId }: { sessionId: string }) {
               <div>
                 <p className="label-caps">Step 2 · Shopify</p>
                 <h2 className="mt-1 text-[17px] font-semibold text-[var(--text-primary)]">
-                  Connect your Shopify stores for reporting
+                  {session.mode === "reconnect" && session.reconnectTarget
+                    ? `Reconnect ${session.reconnectTarget.name}`
+                    : "Connect your Shopify stores for reporting"}
                 </h2>
                 <p className="mt-1 max-w-2xl text-[12px] leading-relaxed text-[var(--text-secondary)]">
-                  Shopify is connected directly to Dropscale, not Windsor. The
-                  app is read-only and covers orders and attribution, reports,
-                  products, inventory, locations, returns and Shopify Payments
-                  payouts.
+                  {session.mode === "reconnect" && session.reconnectTarget
+                    ? `This invitation is locked to ${session.reconnectTarget.domain}. A different or additional store cannot be connected with this link.`
+                    : "Shopify is connected directly to Dropscale, not Windsor. The app is read-only and covers orders and attribution, reports, products, inventory, locations, returns and Shopify Payments payouts."}
                 </p>
               </div>
 
-              {session.shopify.length > 0 && (
+              {session.mode === "reconnect" && session.reconnectTarget && (
+                <div className="rounded-[12px] border border-[var(--accent-gold)]/25 bg-[var(--accent-gold-dim)] p-4">
+                  <div className="flex items-center gap-2">
+                    <ShoppingBag
+                      className="size-4 text-[var(--accent-gold-strong)]"
+                      aria-hidden
+                    />
+                    <p className="truncate text-[13px] font-semibold text-[var(--text-primary)]">
+                      {session.reconnectTarget.name}
+                    </p>
+                  </div>
+                  <p className="mt-1 truncate text-[11.5px] text-[var(--text-secondary)]">
+                    {session.reconnectTarget.domain}
+                    {session.reconnectTarget.currency
+                      ? ` · ${session.reconnectTarget.currency}`
+                      : ""}
+                  </p>
+                  <p className="mt-2 text-[10.5px] font-medium text-[var(--text-muted)]">
+                    Exact store selected by Dropscale
+                  </p>
+                </div>
+              )}
+
+              {session.mode !== "reconnect" && session.shopify.length > 0 && (
                 <ul className="grid gap-3 sm:grid-cols-2">
                   {session.shopify.map((storeItem) => (
                     <li
@@ -939,6 +978,7 @@ export function ClientOnboardingFlow({ sessionId }: { sessionId: string }) {
               )}
 
               {requestsShopify(session) &&
+                session.mode !== "reconnect" &&
                 !requestsGoogle(session) &&
                 currentShopifyStores.length > 0 &&
                 previousGoogleAccounts.length > 0 && (
@@ -1088,16 +1128,28 @@ export function ClientOnboardingFlow({ sessionId }: { sessionId: string }) {
                 </div>
               </details>
 
-              <form
-                onSubmit={connectShopify}
-                className="grid gap-4 rounded-[12px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-4 sm:grid-cols-2"
-              >
+              {session.mode === "reconnect" && hasCurrentShopify(session) && (
+                <div
+                  role="status"
+                  className="rounded-[12px] border border-[var(--success-green)]/25 bg-[var(--success-green)]/8 p-4 text-[12.5px] text-[var(--text-secondary)]"
+                >
+                  The selected Shopify store was verified and reconnected. No
+                  other store was added.
+                </div>
+              )}
+
+              {(session.mode !== "reconnect" || !hasCurrentShopify(session)) && (
+                <form
+                  onSubmit={connectShopify}
+                  className="grid gap-4 rounded-[12px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-4 sm:grid-cols-2"
+                >
                 <div className="space-y-1.5 sm:col-span-2">
                   <Label htmlFor="shop-domain">.myshopify.com domain</Label>
                   <Input
                     id="shop-domain"
                     placeholder="store-name.myshopify.com"
                     value={shopify.domain}
+                    readOnly={session.mode === "reconnect"}
                     onChange={(event) =>
                       setShopify({ ...shopify, domain: event.target.value })
                     }
@@ -1133,13 +1185,20 @@ export function ClientOnboardingFlow({ sessionId }: { sessionId: string }) {
                 </div>
                 <div className="sm:col-span-2">
                   <Button type="submit" loading={busy}>
-                    <Plus aria-hidden />
-                    {hasCurrentShopify(session)
-                      ? "Connect another store"
-                      : "Connect store"}
+                    {session.mode === "reconnect" ? (
+                      <RefreshCw aria-hidden />
+                    ) : (
+                      <Plus aria-hidden />
+                    )}
+                    {session.mode === "reconnect"
+                      ? "Reconnect selected store"
+                      : hasCurrentShopify(session)
+                        ? "Connect another store"
+                        : "Connect store"}
                   </Button>
                 </div>
-              </form>
+                </form>
+              )}
             </div>
           )}
 

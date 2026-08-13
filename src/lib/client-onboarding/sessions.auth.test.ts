@@ -14,6 +14,10 @@ vi.mock("@/lib/supabase/server", () => ({
 vi.mock("@/lib/supabase/service", () => ({
   createServiceClient: mocks.createServiceClient,
 }));
+vi.mock("@/lib/shopify/client", () => ({
+  normalizeShopDomain: (value: string) =>
+    value.trim().toLowerCase().replace(/^https?:\/\//, "").split("/")[0],
+}));
 vi.mock("@/lib/client-onboarding/invitations", () => ({
   clientOnboardingInvitationUrl: vi.fn(),
   createClientOnboardingInvitationMaterial: mocks.createClientOnboardingInvitationMaterial,
@@ -65,21 +69,72 @@ describe("client onboarding invitation asset rules", () => {
     },
   );
 
-  it.each([
-    ["add_assets", "shopify"],
-    ["reconnect", "google_ads"],
-  ] as const)("keeps %s links with only %s valid", async (mode, asset) => {
+  it("keeps a purpose-bound Add assets link valid", async () => {
     const { rpc } = serviceFor(sessionRow());
 
     await expect(
       createClientOnboardingSession({
-        mode,
-        requestedAssets: [asset],
+        mode: "add_assets",
+        requestedAssets: ["google_ads"],
         targetClientId: OWNER,
         adminId: OTHER_USER,
       }),
-    ).resolves.toMatchObject({ mode, requestedAssets: [asset] });
-    expect(rpc).toHaveBeenCalledOnce();
+    ).resolves.toMatchObject({
+      mode: "add_assets",
+      requestedAssets: ["google_ads"],
+    });
+    expect(rpc).toHaveBeenCalledWith(
+      "create_client_onboarding_invitation",
+      expect.objectContaining({ p_target_client_id: OWNER }),
+    );
+  });
+
+  it("creates reconnect through the exact Shopify-target RPC without a client id", async () => {
+    const { rpc } = serviceFor(sessionRow());
+
+    await expect(
+      createClientOnboardingSession({
+        mode: "reconnect",
+        requestedAssets: ["shopify"],
+        targetShopify: { source: "legacy", id: OTHER_SESSION },
+        adminId: OTHER_USER,
+      }),
+    ).resolves.toMatchObject({
+      mode: "reconnect",
+      requestedAssets: ["shopify"],
+      targetShopify: { source: "legacy", id: OTHER_SESSION },
+    });
+    expect(rpc).toHaveBeenCalledWith(
+      "create_client_shopify_reconnect_invitation",
+      {
+        p_session_id: SESSION,
+        p_target_source: "legacy",
+        p_target_id: OTHER_SESSION,
+        p_token_hash: TOKEN_HASH,
+        p_expires_at: expect.any(String),
+        p_created_by: OTHER_USER,
+      },
+    );
+    expect(JSON.stringify(rpc.mock.calls)).not.toContain("p_target_client_id");
+  });
+
+  it.each([
+    ["a missing target", ["shopify"], undefined],
+    ["Google Ads", ["google_ads"], { source: "legacy", id: OTHER_SESSION }],
+    ["a general client id", ["shopify"], { source: "legacy", id: OTHER_SESSION }],
+  ] as const)("rejects reconnect with %s", async (_label, requestedAssets, targetShopify) => {
+    const { rpc } = serviceFor(sessionRow());
+
+    await expect(
+      createClientOnboardingSession({
+        mode: "reconnect",
+        requestedAssets,
+        ...(targetShopify ? { targetShopify } : {}),
+        ...(_label === "a general client id" ? { targetClientId: OWNER } : {}),
+        adminId: OTHER_USER,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_request", status: 400 });
+    expect(rpc).not.toHaveBeenCalled();
   });
 });
 
@@ -94,6 +149,9 @@ function sessionRow(overrides: Record<string, unknown> = {}) {
     failed_attempts: 0,
     last_attempt_at: null,
     target_client_id: null,
+    reconnect_legacy_ad_account_id: null,
+    reconnect_shopify_connection_id: null,
+    reconnect_completed_at: null,
     claimed_user_id: null,
     first_name: null,
     last_name: null,

@@ -19,6 +19,78 @@ export type ClientCard = {
   googleAds: ClientOnboardingSessionDTO["googleAds"];
 };
 
+export type AssetConnectionTestTarget = {
+  key: string;
+  kind: "shopify" | "google_ads";
+  source: "legacy" | "onboarding";
+  id: string;
+  name: string;
+  endpoint: string;
+};
+
+export type AssetConnectionTestResult = {
+  key: string;
+  status: "connected" | "failed";
+  message?: string;
+};
+
+export function assetConnectionKey(
+  kind: AssetConnectionTestTarget["kind"],
+  source: AssetConnectionTestTarget["source"],
+  id: string,
+) {
+  return `${kind}:${source}:${id}`;
+}
+
+export function connectionTestTargets(card: ClientCard): AssetConnectionTestTarget[] {
+  return [
+    ...card.shopify.map((store) => ({
+      key: assetConnectionKey("shopify", store.source, store.id),
+      kind: "shopify" as const,
+      source: store.source,
+      id: store.id,
+      name: store.name,
+      endpoint: `/api/admin/client-onboarding/${
+        store.source === "legacy" ? "legacy-shopify" : "shopify"
+      }/${store.id}`,
+    })),
+    ...card.googleAds.map((account) => ({
+      key: assetConnectionKey("google_ads", "onboarding", account.id),
+      kind: "google_ads" as const,
+      source: "onboarding" as const,
+      id: account.id,
+      name: account.accountName,
+      endpoint: `/api/admin/client-onboarding/google/${account.id}`,
+    })),
+  ];
+}
+
+export async function runAssetConnectionTests(
+  targets: readonly AssetConnectionTestTarget[],
+  test: (target: AssetConnectionTestTarget) => Promise<Omit<AssetConnectionTestResult, "key">>,
+  onResult?: (result: AssetConnectionTestResult) => void,
+) {
+  return Promise.all(
+    targets.map(async (target) => {
+      let result: AssetConnectionTestResult;
+      try {
+        result = { key: target.key, ...(await test(target)) };
+      } catch (error) {
+        result = {
+          key: target.key,
+          status: "failed",
+          message:
+            error instanceof Error && error.message.trim()
+              ? error.message
+              : `${target.name} could not be verified.`,
+        };
+      }
+      onResult?.(result);
+      return result;
+    }),
+  );
+}
+
 function canonicalClientKey(session: ClientOnboardingSessionDTO) {
   return session.claimedUserId ?? session.targetClientId ?? session.id;
 }

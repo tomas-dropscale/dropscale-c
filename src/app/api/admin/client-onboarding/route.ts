@@ -11,6 +11,7 @@ import {
   createClientOnboardingSession,
   listClientOnboardingSessions,
   requireClientOnboardingAdmin,
+  type ClientOnboardingShopifyReconnectTarget,
 } from "@/lib/client-onboarding/sessions";
 import type { ClientOnboardingMode } from "@/lib/supabase/types";
 
@@ -32,9 +33,18 @@ export async function POST(request: NextRequest) {
   try {
     const admin = await requireClientOnboardingAdmin();
     const body = await readSmallJson(request, 4_096);
-    if (!isExactRecord(body, ["mode", "requestedAssets"], ["targetClientId"])) {
+    if (
+      !isExactRecord(
+        body,
+        ["mode", "requestedAssets"],
+        ["targetClientId", "targetShopify"],
+      )
+    ) {
       return clientOnboardingResponse(
-        { error: "Send mode, requestedAssets and an optional targetClientId." },
+        {
+          error:
+            "Send mode and requestedAssets, plus either a client or exact Shopify target when required.",
+        },
         400,
       );
     }
@@ -44,7 +54,12 @@ export async function POST(request: NextRequest) {
       !body.requestedAssets.every((asset) => typeof asset === "string") ||
       (body.targetClientId !== undefined &&
         body.targetClientId !== null &&
-        typeof body.targetClientId !== "string")
+        typeof body.targetClientId !== "string") ||
+      (body.targetShopify !== undefined &&
+        body.targetShopify !== null &&
+        (!isExactRecord(body.targetShopify, ["source", "id"]) ||
+          typeof body.targetShopify.source !== "string" ||
+          typeof body.targetShopify.id !== "string"))
     ) {
       return clientOnboardingResponse({ error: "Invalid onboarding invitation request." }, 400);
     }
@@ -52,6 +67,10 @@ export async function POST(request: NextRequest) {
       mode: body.mode as ClientOnboardingMode,
       requestedAssets: body.requestedAssets,
       targetClientId: body.targetClientId as string | null | undefined,
+      targetShopify: body.targetShopify as
+        | ClientOnboardingShopifyReconnectTarget
+        | null
+        | undefined,
       adminId: admin.id,
     });
     return clientOnboardingResponse({ ok: true, invitation }, 201);

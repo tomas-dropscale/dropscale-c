@@ -3,10 +3,12 @@ import { readFileSync } from "node:fs";
 import { PGlite } from "@electric-sql/pglite";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 
-const MIGRATION = readFileSync(
+const MIGRATION = [
   "supabase/migrations/0044_client_onboarding_v2.sql",
-  "utf8",
-);
+  "supabase/migrations/0046_client_shopify_reconnect_targets.sql",
+]
+  .map((path) => readFileSync(path, "utf8"))
+  .join("\n");
 
 const ADMIN = "44000000-0000-4000-8000-000000000001";
 const USER = "44000000-0000-4000-8000-000000000002";
@@ -76,7 +78,16 @@ create table public.portal_clients (
 create table public.ad_accounts (
   id uuid primary key default gen_random_uuid(),
   client_id uuid not null references public.portal_clients(id),
-  store_name text not null
+  store_name text not null,
+  status text not null default 'active',
+  currency text not null default 'EUR',
+  shopify_url text,
+  shopify_connected boolean not null default false,
+  shopify_client_id text,
+  shopify_scopes text,
+  shopify_admin_token text,
+  shopify_token_last4 text,
+  shopify_connected_at timestamptz
 );
 create table public.account_requests (
   id uuid primary key default gen_random_uuid(),
@@ -125,13 +136,12 @@ async function createAssetInvitation(
   tokenHash: string,
   assets: string[],
   targetClientId = USER,
-  mode: "add_assets" | "reconnect" = "add_assets",
 ) {
   return db.query(
     `select public.create_client_onboarding_invitation(
        $1, $2, $3::text[], $4, $5, now() + interval '1 day', $6
      ) as id`,
-    [sessionId, mode, assets, targetClientId, tokenHash, ADMIN],
+    [sessionId, "add_assets", assets, targetClientId, tokenHash, ADMIN],
   );
 }
 
@@ -345,115 +355,97 @@ describe("client onboarding V2 migration", () => {
     expect(created.rows[0]).toEqual({ id: SESSION_C });
   });
 
-  it.each(["add_assets", "reconnect"] as const)(
-    "clears a cancelled %s rollout pointer when no V2 session survives",
-    async (mode) => {
-      await db.query(
-        `insert into public.portal_clients (id, full_name, email)
-         values ($1, 'Casey Example', 'casey@example.com')`,
-        [USER],
-      );
-      await createAssetInvitation(
-        SESSION_B,
-        TOKEN_HASH_B,
-        ["shopify"],
-        USER,
-        mode,
-      );
+  it("clears a cancelled add-assets rollout pointer when no V2 session survives", async () => {
+    await db.query(
+      `insert into public.portal_clients (id, full_name, email)
+       values ($1, 'Casey Example', 'casey@example.com')`,
+      [USER],
+    );
+    await createAssetInvitation(SESSION_B, TOKEN_HASH_B, ["shopify"], USER);
 
-      const before = await db.query<{
-        operational_surface: string;
-        onboarding_session_id: string | null;
-      }>(
-        `select operational_surface, onboarding_session_id
-         from public.client_rollout_states where client_id = $1`,
-        [USER],
-      );
-      expect(before.rows[0]).toEqual({
-        operational_surface: "v2_onboarding",
-        onboarding_session_id: SESSION_B,
-      });
+    const before = await db.query<{
+      operational_surface: string;
+      onboarding_session_id: string | null;
+    }>(
+      `select operational_surface, onboarding_session_id
+       from public.client_rollout_states where client_id = $1`,
+      [USER],
+    );
+    expect(before.rows[0]).toEqual({
+      operational_surface: "v2_onboarding",
+      onboarding_session_id: SESSION_B,
+    });
 
-      await db.query("select public.revoke_client_onboarding_session($1, $2)", [
-        SESSION_B,
-        ADMIN,
-      ]);
-      const after = await db.query<{
-        operational_surface: string;
-        onboarding_session_id: string | null;
-      }>(
-        `select operational_surface, onboarding_session_id
-         from public.client_rollout_states where client_id = $1`,
-        [USER],
-      );
-      expect(after.rows[0]).toEqual({
-        operational_surface: "legacy_only",
-        onboarding_session_id: null,
-      });
-    },
-  );
+    await db.query("select public.revoke_client_onboarding_session($1, $2)", [
+      SESSION_B,
+      ADMIN,
+    ]);
+    const after = await db.query<{
+      operational_surface: string;
+      onboarding_session_id: string | null;
+    }>(
+      `select operational_surface, onboarding_session_id
+       from public.client_rollout_states where client_id = $1`,
+      [USER],
+    );
+    expect(after.rows[0]).toEqual({
+      operational_surface: "legacy_only",
+      onboarding_session_id: null,
+    });
+  });
 
-  it.each(["add_assets", "reconnect"] as const)(
-    "keeps an active workspace live and restores its surviving session after cancelling %s",
-    async (mode) => {
-      await createNewInvitation([]);
-      await claim();
-      await db.query(
-        "update auth.users set email_confirmed_at = now() where id = $1",
-        [USER],
-      );
-      await db.query("select public.submit_client_onboarding_session($1, $2)", [
-        SESSION,
-        TOKEN_HASH,
-      ]);
-      await db.query(
-        "select public.review_client_onboarding_session($1, $2, true)",
-        [SESSION, ADMIN],
-      );
+  it("keeps an active workspace live and restores its surviving session after cancelling add-assets", async () => {
+    await createNewInvitation([]);
+    await claim();
+    await db.query(
+      "update auth.users set email_confirmed_at = now() where id = $1",
+      [USER],
+    );
+    await db.query("select public.submit_client_onboarding_session($1, $2)", [
+      SESSION,
+      TOKEN_HASH,
+    ]);
+    await db.query(
+      "select public.review_client_onboarding_session($1, $2, true)",
+      [SESSION, ADMIN],
+    );
 
-      await createAssetInvitation(
-        SESSION_B,
-        TOKEN_HASH_B,
-        ["google_ads"],
-        USER,
-        mode,
-      );
-      const during = await db.query<{
-        operational_surface: string;
-        onboarding_session_id: string | null;
-      }>(
-        `select operational_surface, onboarding_session_id
-         from public.client_rollout_states where client_id = $1`,
-        [USER],
-      );
-      expect(during.rows[0]).toEqual({
-        operational_surface: "v2_active",
-        onboarding_session_id: SESSION_B,
-      });
+    await createAssetInvitation(SESSION_B, TOKEN_HASH_B, ["google_ads"], USER);
+    const during = await db.query<{
+      operational_surface: string;
+      onboarding_session_id: string | null;
+    }>(
+      `select operational_surface, onboarding_session_id
+       from public.client_rollout_states where client_id = $1`,
+      [USER],
+    );
+    expect(during.rows[0]).toEqual({
+      operational_surface: "v2_active",
+      onboarding_session_id: SESSION_B,
+    });
 
-      await db.query("select public.revoke_client_onboarding_session($1, $2)", [
-        SESSION_B,
-        ADMIN,
-      ]);
-      const after = await db.query<{
-        operational_surface: string;
-        onboarding_session_id: string | null;
-        cancelled_status: string;
-      }>(
-        `select rollout.operational_surface, rollout.onboarding_session_id,
-                cancelled.status as cancelled_status
-         from public.client_rollout_states rollout
-         join public.client_onboarding_sessions cancelled on cancelled.id = $2
-         where rollout.client_id = $1`,
-        [USER, SESSION_B],
-      );
-      expect(after.rows[0]).toEqual({
-        operational_surface: "v2_active",
-        onboarding_session_id: SESSION,
-        cancelled_status: "revoked",
-      });
-    },
-  );
+    await db.query("select public.revoke_client_onboarding_session($1, $2)", [
+      SESSION_B,
+      ADMIN,
+    ]);
+    const after = await db.query<{
+      operational_surface: string;
+      onboarding_session_id: string | null;
+      cancelled_status: string;
+    }>(
+      `select rollout.operational_surface, rollout.onboarding_session_id,
+              cancelled.status as cancelled_status
+       from public.client_rollout_states rollout
+       join public.client_onboarding_sessions cancelled on cancelled.id = $2
+       where rollout.client_id = $1`,
+      [USER, SESSION_B],
+    );
+    expect(after.rows[0]).toEqual({
+      operational_surface: "v2_active",
+      onboarding_session_id: SESSION,
+      cancelled_status: "revoked",
+    });
+  });
 
   it("restores the latest reviewed session and ready surface after cancellation", async () => {
     await db.query(
@@ -485,7 +477,6 @@ describe("client onboarding V2 migration", () => {
       TOKEN_HASH_C,
       ["google_ads"],
       USER,
-      "reconnect",
     );
     await db.query("select public.revoke_client_onboarding_session($1, $2)", [
       SESSION_C,

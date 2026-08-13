@@ -863,6 +863,7 @@ export type CogsCollectionTier = {
 
 export type ClientOnboardingMode = "new_client" | "add_assets" | "reconnect";
 export type ClientOnboardingAsset = "shopify" | "google_ads";
+export type ClientShopifyReconnectTargetSource = "legacy" | "onboarding";
 export type ClientOnboardingStatus =
   | "pending"
   | "collecting"
@@ -881,6 +882,9 @@ export type ClientOnboardingSession = {
   failed_attempts: number;
   last_attempt_at: string | null;
   target_client_id: string | null;
+  reconnect_legacy_ad_account_id: string | null;
+  reconnect_shopify_connection_id: string | null;
+  reconnect_completed_at: string | null;
   claimed_user_id: string | null;
   first_name: string | null;
   last_name: string | null;
@@ -1281,6 +1285,9 @@ export type Database = {
           | "failed_attempts"
           | "last_attempt_at"
           | "target_client_id"
+          | "reconnect_legacy_ad_account_id"
+          | "reconnect_shopify_connection_id"
+          | "reconnect_completed_at"
           | "claimed_user_id"
           | "first_name"
           | "last_name"
@@ -1302,6 +1309,20 @@ export type Database = {
             columns: ["target_client_id"];
             isOneToOne: false;
             referencedRelation: "portal_clients";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "client_onboarding_sessions_reconnect_legacy_ad_account_id_fkey";
+            columns: ["reconnect_legacy_ad_account_id"];
+            isOneToOne: false;
+            referencedRelation: "ad_accounts";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "client_onboarding_sessions_reconnect_shopify_connection_id_fkey";
+            columns: ["reconnect_shopify_connection_id"];
+            isOneToOne: false;
+            referencedRelation: "client_shopify_connections";
             referencedColumns: ["id"];
           },
           {
@@ -2289,12 +2310,27 @@ export type Database = {
     };
     Views: Record<never, never>;
     Functions: {
+      disconnect_legacy_shopify_connection: {
+        Args: { p_account_id: string; p_admin_id: string };
+        Returns: string;
+      };
       create_client_onboarding_invitation: {
         Args: {
           p_session_id: string;
           p_mode: ClientOnboardingMode;
           p_requested_assets: ClientOnboardingAsset[];
           p_target_client_id: string | null;
+          p_token_hash: string;
+          p_expires_at: string;
+          p_created_by: string;
+        };
+        Returns: string;
+      };
+      create_client_shopify_reconnect_invitation: {
+        Args: {
+          p_session_id: string;
+          p_target_source: ClientShopifyReconnectTargetSource;
+          p_target_id: string;
           p_token_hash: string;
           p_expires_at: string;
           p_created_by: string;

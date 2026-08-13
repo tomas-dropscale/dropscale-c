@@ -102,6 +102,13 @@ function serviceOrThrow(): SupabaseClient<ReportingShopifyDatabase> {
 }
 
 function throwCompleteError(error: DatabaseError): never {
+  if (error?.code === "P4409") {
+    throw new ClientShopifyConnectionError(
+      "reconnect_target_mismatch",
+      "The verified Shopify store does not match the store selected for this reconnect link.",
+      409,
+    );
+  }
   if (error?.code === "23505") {
     throw new ClientShopifyConnectionError(
       "duplicate_store",

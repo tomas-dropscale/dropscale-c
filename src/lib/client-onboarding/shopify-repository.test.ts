@@ -109,6 +109,23 @@ describe("Supabase reporting Shopify repository", () => {
     });
   });
 
+  it("maps an exact reconnect identity mismatch without exposing database details", async () => {
+    mocks.createServiceClient.mockReturnValue({
+      rpc: vi.fn().mockResolvedValue({
+        data: null,
+        error: { code: "P4409", message: "sensitive target details" },
+      }),
+    });
+    const repo = createReportingShopifyRepository();
+
+    await expect(repo.complete(completion())).rejects.toMatchObject({
+      code: "reconnect_target_mismatch",
+      status: 409,
+      message:
+        "The verified Shopify store does not match the store selected for this reconnect link.",
+    });
+  });
+
   it("loads connection metadata and ciphertext from separate service-only tables", async () => {
     const connectionQuery = query({
       id: CONNECTION_ID,

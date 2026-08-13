@@ -8,6 +8,8 @@ import {
 } from "@/lib/client-onboarding/http";
 import { isClientOnboardingId } from "@/lib/client-onboarding/invitations";
 import {
+  disconnectLegacyShopifyConnection,
+  LegacyShopifyDisconnectError,
   LegacyShopifyHealthError,
   testLegacyShopifyConnection,
 } from "@/lib/client-onboarding/legacy-shopify";
@@ -20,6 +22,19 @@ import { createServiceClient } from "@/lib/supabase/service";
 export const dynamic = "force-dynamic";
 
 type Context = { params: Promise<{ id: string }> };
+
+function errorResponse(error: unknown, fallback: string) {
+  if (
+    error instanceof LegacyShopifyHealthError ||
+    error instanceof LegacyShopifyDisconnectError
+  ) {
+    return clientOnboardingResponse(
+      { error: error.message, code: error.code },
+      error.status,
+    );
+  }
+  return clientOnboardingErrorResponse(error, fallback);
+}
 
 export async function PATCH(request: NextRequest, { params }: Context) {
   try {
@@ -43,15 +58,32 @@ export async function PATCH(request: NextRequest, { params }: Context) {
     const health = await testLegacyShopifyConnection({ accountId: id, service });
     return clientOnboardingResponse(health);
   } catch (error) {
-    if (error instanceof LegacyShopifyHealthError) {
-      return clientOnboardingResponse(
-        { error: error.message, code: error.code },
-        error.status,
+    return errorResponse(error, "The Shopify connection test failed.");
+  }
+}
+
+export async function DELETE(_request: NextRequest, { params }: Context) {
+  try {
+    const admin = await requireClientOnboardingAdmin();
+    const { id } = await params;
+    if (!isClientOnboardingId(id)) {
+      return clientOnboardingResponse({ error: "Not found." }, 404);
+    }
+    const service = createServiceClient();
+    if (!service) {
+      throw new ClientOnboardingError(
+        "server_not_configured",
+        "Client onboarding is not configured on the server.",
+        503,
       );
     }
-    return clientOnboardingErrorResponse(
-      error,
-      "The Shopify connection test failed.",
-    );
+    await disconnectLegacyShopifyConnection({
+      accountId: id,
+      adminId: admin.id,
+      service,
+    });
+    return clientOnboardingResponse({ ok: true });
+  } catch (error) {
+    return errorResponse(error, "The Shopify connection could not be removed.");
   }
 }

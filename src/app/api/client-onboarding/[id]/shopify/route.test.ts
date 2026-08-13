@@ -208,4 +208,25 @@ describe("public client reporting Shopify route", () => {
     });
     expect(JSON.stringify(payload)).not.toContain(BODY.clientSecret);
   });
+
+  it("rejects a verified store that differs from the exact reconnect target", async () => {
+    mocks.connectReportingShopifyStore.mockRejectedValue(
+      new mocks.ClientShopifyConnectionError(
+        "reconnect_target_mismatch",
+        "The verified Shopify store does not match the store selected for this reconnect link.",
+        409,
+      ),
+    );
+
+    const result = await POST(post({ ...BODY, shopDomain: "other.myshopify.com" }), context());
+
+    expect(result.status).toBe(409);
+    const payload = await result.json();
+    expect(payload).toEqual({
+      error:
+        "The verified Shopify store does not match the store selected for this reconnect link.",
+      code: "reconnect_target_mismatch",
+    });
+    expect(JSON.stringify(payload)).not.toContain(BODY.clientSecret);
+  });
 });
