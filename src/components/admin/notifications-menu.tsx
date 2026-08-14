@@ -101,8 +101,8 @@ export function NotificationsMenu({ counts }: { counts: PendingCounts }) {
     };
   }, [router, recount]);
 
-  // Each row carries its own destination: the first three are cleared on
-  // Clients, submitted creatives on their own screen.
+  // Each row carries its own destination: client identity in onboarding,
+  // financial/account work in Billing, and submissions in Creatives.
   const rows: {
     icon: LucideIcon;
     label: string;
@@ -115,21 +115,21 @@ export function NotificationsMenu({ counts }: { counts: PendingCounts }) {
       label: d.notifications.newClients,
       help: d.notifications.newClientsHelp,
       count: current.clients,
-      href: "/admin/clients",
+      href: "/admin/client-onboarding",
     },
     {
       icon: Store,
       label: d.notifications.pendingAccounts,
       help: d.notifications.pendingAccountsHelp,
       count: current.accounts,
-      href: "/admin/clients",
+      href: "/admin/billing#financial-operations",
     },
     {
       icon: Ticket,
       label: d.notifications.pendingRequests,
       help: d.notifications.pendingRequestsHelp,
       count: current.requests,
-      href: "/admin/clients",
+      href: "/admin/billing#financial-operations",
     },
     {
       icon: Clapperboard,

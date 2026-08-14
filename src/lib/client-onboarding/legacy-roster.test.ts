@@ -121,7 +121,7 @@ describe("existing client roster", () => {
         "id, full_name, email, discord_handle, approval_status, created_at",
       ],
       ["profiles", "id, role"],
-      ["client_members", "member_id"],
+      ["client_members", "client_id, member_id"],
       [
         "ad_accounts",
         "id, client_id, store_name, status, currency, shopify_url, shopify_connected, shopify_scopes, shopify_connected_at, created_at",
@@ -142,11 +142,11 @@ describe("existing client roster", () => {
     ];
     results.profiles.data = [{ id: ADMIN, role: "admin" }];
     results.client_members.data = [
-      { member_id: MEMBER },
-      { member_id: MEMBER_OWNER },
+      { client_id: OWNER, member_id: PENDING },
+      { client_id: OWNER, member_id: MEMBER },
+      { client_id: OWNER, member_id: MEMBER_OWNER },
     ];
     results.ad_accounts.data = [
-      account({ client_id: PENDING, id: "pending-client-store" }),
       account({
         client_id: MEMBER_OWNER,
         id: "member-owner-store",
@@ -165,6 +165,9 @@ describe("existing client roster", () => {
       "Charlie Owner",
     ]);
     expect(roster.find((entry) => entry.clientId === PENDING)?.shopify).toEqual([]);
+    expect(roster.find((entry) => entry.clientId === PENDING)?.partnerOf).toEqual([
+      "Alpha Owner",
+    ]);
     expect(roster.find((entry) => entry.clientId === OWNER)?.discordHandle).toBe(
       "alpha.owner",
     );

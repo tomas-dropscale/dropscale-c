@@ -6,6 +6,16 @@
 
 **Âmbito:** coexistência entre `/admin/clients` (Legacy) e `/admin/client-onboarding` (V2), portal do cliente, ligações Shopify para reporting e ligações Google Ads através da Windsor.ai
 
+> **Atualização operacional — 2026-08-14:** a coexistência visual descrita
+> abaixo terminou. `/admin/clients` é agora apenas um redirect autenticado para
+> `/admin/client-onboarding`; os controlos exclusivos de Google/billing foram
+> movidos para `/admin/billing#financial-operations`. As tabelas `ad_accounts`,
+> métricas, credenciais e todo o histórico financeiro legacy continuam
+> preservados. A migration 0054 faz o cutover através de bindings explícitos e
+> auditados, sem copiar nem reescrever esse histórico. O restante documento
+> conserva o desenho e as invariantes da fase de coexistência como registo
+> histórico, não como contrato atual de navegação.
+
 Este documento fixa a arquitetura usada pela primeira implementação. O schema V2 foi revisto e materializado de forma aditiva; continua proibido qualquer corte destrutivo das ligações atuais ou alteração implícita de faturação.
 
 ## 1. Decisão resumida

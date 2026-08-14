@@ -196,7 +196,7 @@ export function formatAdminEvent(
           emoji: "👤",
           title: "Cliente novo",
           facts: [name ? escapeHtml(name) : null, email ? escapeHtml(email) : null],
-          action: { label: "Aprovar", href: "/admin/clients" },
+          action: { label: "Aprovar", href: "/admin/client-onboarding" },
         });
       }
 
@@ -235,7 +235,7 @@ export function formatAdminEvent(
         emoji: "🚀",
         title: "Loja verificada",
         facts: [store ? escapeHtml(store) : null, by(str(record, "reviewed_by"), names)],
-        action: { label: "Ver clientes", href: "/admin/clients" },
+        action: { label: "Ver operações", href: "/admin/billing#financial-operations" },
       });
     }
 
@@ -250,7 +250,7 @@ export function formatAdminEvent(
           store ? escapeHtml(store) : null,
           customerId ? `<code>${escapeHtml(customerId)}</code>` : "sem ID Google",
         ],
-        action: { label: "Verificar Google", href: "/admin/clients" },
+        action: { label: "Verificar Google", href: "/admin/billing#financial-operations" },
       });
     }
 
@@ -273,7 +273,7 @@ export function formatAdminEvent(
               shop ? escapeHtml(shop) : null,
               code ? `código <code>${escapeHtml(code)}</code>` : null,
             ],
-        action: { label: "Ver pedido", href: "/admin/clients" },
+        action: { label: "Ver pedido", href: "/admin/billing#financial-operations" },
       });
     }
 

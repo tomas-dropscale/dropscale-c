@@ -18,6 +18,7 @@ type ReportingShopifyDatabase = {
         Row: {
           id: string;
           shopify_shop_id: string;
+          shopify_name: string;
           shopify_domain: string;
           status: "connected" | "revoked";
         };
@@ -219,6 +220,28 @@ async function recordHealth(
       );
     }
     throw databaseFailure("The Shopify health result could not be recorded.");
+  }
+
+  if (!input.ok) return;
+  const shop = input.verifiedShop;
+  if (!shop?.name.trim()) {
+    throw databaseFailure("The verified Shopify store name could not be saved.");
+  }
+  const renameResult = await service
+    .from("client_shopify_connections")
+    .update({ shopify_name: shop.name.trim() })
+    .eq("id", input.connectionId)
+    .eq("status", "connected")
+    .eq("shopify_shop_id", shop.shopId)
+    .eq("shopify_domain", shop.myshopifyDomain)
+    .select("id")
+    .maybeSingle();
+  if (
+    renameResult.error ||
+    !renameResult.data ||
+    renameResult.data.id !== input.connectionId
+  ) {
+    throw databaseFailure("The verified Shopify store name could not be saved.");
   }
 }
 

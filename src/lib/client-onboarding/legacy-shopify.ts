@@ -158,9 +158,12 @@ export async function testLegacyShopifyConnection({
     );
   }
 
+  const storedShopifyUrl = data.shopify_url;
   const domain =
-    typeof data.shopify_url === "string" ? normalizeShopDomain(data.shopify_url) : null;
-  if (!domain) {
+    typeof storedShopifyUrl === "string"
+      ? normalizeShopDomain(storedShopifyUrl)
+      : null;
+  if (typeof storedShopifyUrl !== "string" || !domain) {
     throw new LegacyShopifyHealthError(
       "invalid_domain",
       "The stored Shopify domain is invalid. Reconnect this store.",
@@ -229,6 +232,23 @@ export async function testLegacyShopifyConnection({
     }
     const verifiedCapabilities = capabilities(granted);
     verifiedCapabilities.orders = true;
+    const authoritativeName = shop.name.trim();
+    const renameResult = await service
+      .from("ad_accounts")
+      .update({ store_name: authoritativeName })
+      .eq("id", data.id)
+      .eq("status", "active")
+      .eq("shopify_connected", true)
+      .eq("shopify_url", storedShopifyUrl)
+      .select("id")
+      .maybeSingle();
+    if (renameResult.error || renameResult.data?.id !== data.id) {
+      throw new LegacyShopifyHealthError(
+        "database_error",
+        "The verified Shopify store name could not be saved.",
+        500,
+      );
+    }
     const limited = scopesMissing.length > 0;
     return {
       ok: true,

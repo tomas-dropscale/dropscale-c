@@ -114,7 +114,7 @@ async function main() {
       "Ana Dias",
       "<code>ana@loja.pt</code>",
       "",
-      '<a href="https://dropscale.app/admin/clients">Aprovar no painel</a>',
+      '<a href="https://dropscale.app/admin/client-onboarding">Aprovar no painel</a>',
     ].join("\n"),
   });
 

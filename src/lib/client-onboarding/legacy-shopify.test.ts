@@ -70,9 +70,21 @@ function serviceWith(
   };
   query.select.mockReturnValue(query);
   query.eq.mockReturnValue(query);
+  const renameQuery = {
+    select: vi.fn(),
+    eq: vi.fn(),
+    maybeSingle: vi.fn().mockResolvedValue({ data: { id: ID }, error: null }),
+  };
+  renameQuery.select.mockReturnValue(renameQuery);
+  renameQuery.eq.mockReturnValue(renameQuery);
+  const update = vi.fn().mockReturnValue(renameQuery);
+  const from = vi.fn().mockReturnValueOnce(query).mockReturnValueOnce({ update });
   return {
-    service: { from: vi.fn(() => query) } as never,
+    service: { from } as never,
+    from,
     query,
+    renameQuery,
+    update,
   };
 }
 
@@ -104,7 +116,7 @@ describe("legacy Shopify health", () => {
   });
 
   it("loads only an active connected account and verifies a direct token server-side", async () => {
-    const { service, query } = serviceWith(row());
+    const { service, query, renameQuery, update } = serviceWith(row());
     mocks.decryptToken.mockResolvedValue(DIRECT_TOKEN);
 
     const health = await testLegacyShopifyConnection({
@@ -126,6 +138,14 @@ describe("legacy Shopify health", () => {
       ACCESS_TOKEN,
       "{ orders(first: 1) { nodes { id } } }",
     );
+    expect(mocks.shopifyGraphql).toHaveBeenCalledBefore(update);
+    expect(update).toHaveBeenCalledWith({ store_name: "Private merchant name" });
+    expect(renameQuery.eq.mock.calls).toEqual([
+      ["id", ID],
+      ["status", "active"],
+      ["shopify_connected", true],
+      ["shopify_url", DOMAIN],
+    ]);
     expect(health).toMatchObject({
       ok: true,
       limited: false,
@@ -192,7 +212,7 @@ describe("legacy Shopify health", () => {
   });
 
   it("fails safely when the live order probe is rejected", async () => {
-    const { service } = serviceWith(row());
+    const { service, update } = serviceWith(row());
     mocks.decryptToken.mockResolvedValue(DIRECT_TOKEN);
     mocks.shopifyGraphql.mockRejectedValue(
       new ShopifyError("Access denied for orders", 403),
@@ -202,6 +222,22 @@ describe("legacy Shopify health", () => {
       code: "reporting_unavailable",
       status: 422,
     });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("never renames when Shopify returns a different store domain", async () => {
+    const { service, update } = serviceWith(row());
+    mocks.decryptToken.mockResolvedValue(DIRECT_TOKEN);
+    mocks.validateShopifyCredentials.mockResolvedValue(
+      { ...shop(), myshopifyDomain: "another-store.myshopify.com" },
+    );
+
+    await expect(testLegacyShopifyConnection({ accountId: ID, service })).rejects.toMatchObject({
+      code: "domain_mismatch",
+      status: 409,
+    });
+    expect(mocks.shopifyGraphql).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
   });
 
   it("classifies invalid stored domains before decrypting", async () => {

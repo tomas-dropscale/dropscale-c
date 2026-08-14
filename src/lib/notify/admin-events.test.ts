@@ -50,7 +50,9 @@ describe("message shape", () => {
     expect(lines).toHaveLength(3);
     expect(lines[0]).toBe("👤 <b>Cliente novo</b>");
     expect(lines[1]).toBe("Ana Dias · ana@loja.pt");
-    expect(lines[2]).toBe('<a href="https://dropscale.app/admin/clients">Aprovar →</a>');
+    expect(lines[2]).toBe(
+      '<a href="https://dropscale.app/admin/client-onboarding">Aprovar →</a>',
+    );
   });
 
   it("drops the action line when there is nothing for the team to do", () => {
@@ -109,6 +111,7 @@ describe("approval queue", () => {
     )!;
     expect(message).toContain("Loja por ativar");
     expect(message).toContain("sem ID Google");
+    expect(message).toContain("https://dropscale.app/admin/billing#financial-operations");
   });
 
   it("distinguishes a Google Ads request from a Shopify one", () => {
@@ -125,6 +128,7 @@ describe("approval queue", () => {
     )!;
     expect(google).toContain("Pedido Google Ads");
     expect(google).toContain("111-222-3333");
+    expect(google).toContain("https://dropscale.app/admin/billing#financial-operations");
 
     const shopify = formatAdminEvent(
       payload({
@@ -139,6 +143,7 @@ describe("approval queue", () => {
     )!;
     expect(shopify).toContain("Pedido Shopify");
     expect(shopify).toContain("loja-x.myshopify.com");
+    expect(shopify).toContain("https://dropscale.app/admin/billing#financial-operations");
   });
 
   it("points submitted creatives at the creatives screen", () => {
@@ -220,6 +225,7 @@ describe("queue closing — who handled it", () => {
     expect(message).toContain("Loja verificada");
     expect(message).toContain("Casa Bonita");
     expect(message).toContain("por Tomás");
+    expect(message).toContain("https://dropscale.app/admin/billing#financial-operations");
   });
 });
 
@@ -357,6 +363,8 @@ describe("payloads that say nothing", () => {
 
   it("falls back to the production origin when the site url is unset", () => {
     delete process.env.NEXT_PUBLIC_SITE_URL;
-    expect(formatAdminEvent(payload())).toContain("https://dropscale.app/admin/clients");
+    expect(formatAdminEvent(payload())).toContain(
+      "https://dropscale.app/admin/client-onboarding",
+    );
   });
 });

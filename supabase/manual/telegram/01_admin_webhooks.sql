@@ -1,5 +1,5 @@
 -- =============================================================================
--- 0034 - Push the admin approval inbox to Telegram.
+-- Manual Telegram step 1 - Push the admin approval inbox to Telegram.
 --
 -- The bell in the admin chrome only alerts somebody already looking at the
 -- panel. These four triggers post the same events to /api/notify/telegram, so

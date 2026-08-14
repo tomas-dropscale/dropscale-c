@@ -152,8 +152,9 @@ workaround.
 ## Baseline activation
 
 After all migrations commit, deploy the application with issuance still
-disabled. In `/admin/clients`, use **Verify Google & start tracking** for every
-active or suspended client account that lacks a billing start.
+disabled. In `/admin/billing#financial-operations`, use **Verify Google & start
+tracking** for every active or suspended client account that lacks a billing
+start.
 
 That action performs this sequence atomically from the operator's perspective:
 
@@ -176,6 +177,31 @@ Set the production values as encrypted Worker secrets, never committed vars:
 - `SUPABASE_SERVICE_ROLE_KEY`
 - `CRON_SECRET`
 - `BILLING_ISSUANCE_ENABLED`
+
+Automatic invoice issuance remains disabled. A narrowly scoped repair for
+expired automation items that already have an exact `billing_cycle_skips`
+decision has two additional encrypted gates:
+
+- `BILLING_AUTOMATION_ENABLED`
+- `BILLING_AUTOMATION_RECOVERY_ARMED`
+
+The new recovery arm defaults closed. A normal GET or POST to
+`/api/billing/cron` still performs Stripe reconciliation only. After migration
+0053 is applied and reviewed, the operator must keep
+`BILLING_ISSUANCE_ENABLED` unset/false, temporarily set the two recovery gates
+to the exact lowercase value `true`, and deliberately call:
+
+```text
+POST /api/billing/cron?mode=recovery
+Authorization: Bearer <CRON_SECRET>
+```
+
+That path starts a non-issuance run and can reclaim at most two expired
+`processing` items whose exact client/week has an immutable skip and no
+invoice. It records amount owed as zero while preserving the authoritative
+Google billable-spend snapshot. It cannot seed or claim the general billing
+queue and cannot create or send a Stripe invoice. Verify both durable receipts,
+then immediately unset `BILLING_AUTOMATION_RECOVERY_ARMED`.
 
 Use a current `sb_secret_…` server secret (preferred) or a legacy JWT whose
 payload role is genuinely `service_role`. A browser anon JWT, including one

@@ -80,15 +80,16 @@ yet.
 
 ## 4. Point Supabase at the route
 
-Migration `0034_telegram_admin_webhooks.sql` creates all four triggers in one
-go. Print it with the secret filled in and paste it into **Supabase → SQL
-Editor**:
+The manual SQL bundle under `supabase/manual/telegram` creates and updates all
+of the triggers. It deliberately is not part of the numbered migration chain:
+the generated function contains the production notification secret. Print the
+bundle with the secret filled in and paste it into **Supabase → SQL Editor**:
 
 ```bash
 node scripts/telegram-webhooks-sql.mjs
 ```
 
-The migration in git carries a `__NOTIFY_SECRET__` placeholder; the script
+The templates in git carry a `__NOTIFY_SECRET__` placeholder; the script
 substitutes it to stdout and never writes the filled-in version to disk. Point
 the triggers elsewhere with `--url https://staging.example.com`.
 

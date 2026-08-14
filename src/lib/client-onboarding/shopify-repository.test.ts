@@ -155,9 +155,12 @@ describe("Supabase reporting Shopify repository", () => {
     expect(from).toHaveBeenNthCalledWith(2, "client_shopify_credentials");
   });
 
-  it("records health and revokes through admin-bound atomic RPCs", async () => {
+  it("records health, syncs the exact verified name, and revokes", async () => {
     const rpc = vi.fn().mockResolvedValue({ data: CONNECTION_ID, error: null });
-    mocks.createServiceClient.mockReturnValue({ rpc });
+    const renameQuery = query({ id: CONNECTION_ID });
+    const update = vi.fn().mockReturnValue(renameQuery);
+    const from = vi.fn().mockReturnValue({ update });
+    mocks.createServiceClient.mockReturnValue({ rpc, from });
     const repo = createReportingShopifyRepository();
 
     await repo.recordHealth({
@@ -166,6 +169,11 @@ describe("Supabase reporting Shopify repository", () => {
       ok: true,
       testedAt: "2026-08-12T19:00:00.000Z",
       errorCode: null,
+      verifiedShop: {
+        shopId: "gid://shopify/Shop/123",
+        name: "Northwind Demo Store",
+        myshopifyDomain: "northwind-demo.myshopify.com",
+      },
     });
     await repo.revoke(CONNECTION_ID, ADMIN_ID);
     expect(rpc).toHaveBeenNthCalledWith(1, "record_client_shopify_health", {
@@ -175,10 +183,36 @@ describe("Supabase reporting Shopify repository", () => {
       p_tested_at: "2026-08-12T19:00:00.000Z",
       p_error_code: null,
     });
+    expect(from).toHaveBeenCalledWith("client_shopify_connections");
+    expect(update).toHaveBeenCalledWith({ shopify_name: "Northwind Demo Store" });
+    expect(renameQuery.eq.mock.calls).toEqual([
+      ["id", CONNECTION_ID],
+      ["status", "connected"],
+      ["shopify_shop_id", "gid://shopify/Shop/123"],
+      ["shopify_domain", "northwind-demo.myshopify.com"],
+    ]);
     expect(rpc).toHaveBeenNthCalledWith(2, "revoke_client_shopify_connection", {
       p_connection_id: CONNECTION_ID,
       p_admin_id: ADMIN_ID,
     });
+  });
+
+  it("never renames a store after a failed health test", async () => {
+    const rpc = vi.fn().mockResolvedValue({ data: CONNECTION_ID, error: null });
+    const from = vi.fn();
+    mocks.createServiceClient.mockReturnValue({ rpc, from });
+    const repo = createReportingShopifyRepository();
+
+    await repo.recordHealth({
+      connectionId: CONNECTION_ID,
+      adminId: ADMIN_ID,
+      ok: false,
+      testedAt: "2026-08-12T19:00:00.000Z",
+      errorCode: "health_check_failed",
+      verifiedShop: null,
+    });
+
+    expect(from).not.toHaveBeenCalled();
   });
 
   it("classifies removal during an exact reconnect as a conflict", async () => {

@@ -243,6 +243,11 @@ describe("client reporting Shopify connection service", () => {
       ok: true,
       testedAt: "2026-08-12T19:00:00.000Z",
       errorCode: null,
+      verifiedShop: {
+        shopId: "gid://shopify/Shop/123",
+        name: "Northwind Demo Store",
+        myshopifyDomain: "northwind-demo.myshopify.com",
+      },
     });
     expect(result).toEqual(health());
   });
@@ -267,8 +272,31 @@ describe("client reporting Shopify connection service", () => {
         adminId: ADMIN_ID,
         ok: false,
         errorCode: "stored_identity_mismatch",
+        verifiedShop: null,
       }),
     );
+  });
+
+  it("does not offer a store name for persistence when reporting probes fail", async () => {
+    const repo = repository();
+    mocks.testReportingShopConnection.mockResolvedValue(
+      health({ ok: false, limited: true }),
+    );
+
+    await testStoredReportingShopifyStore({
+      connectionId: CONNECTION_ID,
+      adminId: ADMIN_ID,
+      repository: repo,
+    });
+
+    expect(repo.recordHealth).toHaveBeenCalledWith({
+      connectionId: CONNECTION_ID,
+      adminId: ADMIN_ID,
+      ok: false,
+      testedAt: "2026-08-12T19:00:00.000Z",
+      errorCode: "health_check_failed",
+      verifiedShop: null,
+    });
   });
 
   it("delegates revoke to the atomic credential-destruction boundary", async () => {

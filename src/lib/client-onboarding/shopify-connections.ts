@@ -39,6 +39,10 @@ export type ShopifyHealthRecord = {
   ok: boolean;
   testedAt: string;
   errorCode: string | null;
+  verifiedShop: Pick<
+    VerifiedReportingShop,
+    "shopId" | "name" | "myshopifyDomain"
+  > | null;
 };
 
 /**
@@ -205,6 +209,13 @@ export async function testStoredReportingShopifyStore({
       ok: health.ok,
       testedAt,
       errorCode: health.ok ? null : "health_check_failed",
+      verifiedShop: health.ok
+        ? {
+            shopId: shop.shopId,
+            name: shop.name,
+            myshopifyDomain: shop.myshopifyDomain,
+          }
+        : null,
     });
     return health;
   } catch (error) {
@@ -215,6 +226,7 @@ export async function testStoredReportingShopifyStore({
         ok: false,
         testedAt,
         errorCode: safeHealthErrorCode(error),
+        verifiedShop: null,
       });
     } catch {
       // Preserve the original verification failure. The admin receives the

@@ -14,9 +14,7 @@ import {
   Target,
   TrendingUp,
   Truck,
-  UserCheck,
   UserPlus,
-  Users,
   type LucideIcon,
 } from "lucide-react";
 
@@ -64,18 +62,15 @@ const NAV_GROUPS: Group[] = [
         icon: UserPlus,
         label: (d) => d.nav.clients,
       },
-      {
-        href: "/admin/clients",
-        icon: UserCheck,
-        label: (d) => d.nav.clientsLegacy,
-      },
       { href: "/admin/referrals", icon: BadgePercent, label: () => "Referrals" },
-      // Next to Campaigns on purpose: the creatives clients hand in are the raw
-      // material for the screen right below it.
-      { href: "/admin/creatives", icon: Clapperboard, label: (d) => d.nav.creatives },
+    ],
+  },
+  {
+    label: () => "Google",
+    items: [
       { href: "/admin/campaigns", icon: Target, label: (d) => d.nav.campaigns },
-      { href: "/admin/leads", icon: Users, label: (d) => d.nav.leads },
       { href: "/admin/analytics", icon: BarChart3, label: (d) => d.nav.analytics },
+      { href: "/admin/creatives", icon: Clapperboard, label: (d) => d.nav.creatives },
     ],
   },
   {
@@ -126,7 +121,11 @@ export function Sidebar({
   // Counts live on the screen that clears them: approvals on Clients, unreviewed
   // submissions on Creatives.
   const count = (href: string) =>
-    href === "/admin/clients" ? pendingClients : href === "/admin/creatives" ? newCreatives : 0;
+    href === "/admin/client-onboarding"
+      ? pendingClients
+      : href === "/admin/creatives"
+        ? newCreatives
+        : 0;
 
   const renderItem = ({ href, label, icon, badge: badgeLabel }: Item) => {
     const countBadge = count(href);

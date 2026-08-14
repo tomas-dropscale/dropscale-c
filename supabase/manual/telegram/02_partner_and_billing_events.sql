@@ -1,7 +1,7 @@
 -- =============================================================================
--- 0035 - Add partner and billing events to the Telegram alerts.
+-- Manual Telegram step 2 - Add partner and billing events to the alerts.
 --
--- 0034 covered the approval queue, which is all creations. These two are state
+-- Step 1 covered the approval queue, which is all creations. These two are state
 -- CHANGES: an invite becomes access, an invoice becomes issued or paid. So the
 -- trigger function has to start sending the previous row as well — without it
 -- the route cannot tell "is paid now" from "was already paid and something else
@@ -19,7 +19,7 @@
 -- print this with the secret already substituted from .env.local.
 -- =============================================================================
 
--- Same function as 0034, now carrying OLD on updates. Built with an IF rather
+-- Same function as step 1, now carrying OLD on updates. Built with an IF rather
 -- than a CASE: in an INSERT trigger the OLD record is unassigned, and touching
 -- it at all raises "record 'old' is not assigned yet".
 create or replace function public.notify_admin_telegram()

@@ -76,8 +76,8 @@ function formatGoogleDay(day: string) {
 }
 
 /**
- * Admin-side client management. English-only for now (the rest of the admin
- * is EN/PT — translate when the flows settle).
+ * Admin-side client and financial operations. English-only for now (the rest
+ * of the admin is EN/PT — translate when the flows settle).
  *
  * Ordinary management actions are RLS-checked browser writes. Starting Google
  * billing is different: the browser calls an admin-only server route, which
@@ -95,6 +95,7 @@ export function ClientsManager({
   pendingRequests,
   partnerOf,
   adminId,
+  financialOnly = false,
 }: {
   clients: (Client & {
     accounts: number;
@@ -122,6 +123,8 @@ export function ClientsManager({
    */
   partnerOf: Record<string, string[]>;
   adminId: string;
+  /** Billing reuses only the operational account and boundary controls. */
+  financialOnly?: boolean;
 }) {
   const router = useRouter();
   const [error, setError] = React.useState<string | null>(null);
@@ -330,6 +333,7 @@ export function ClientsManager({
       )}
 
       {/* ---- clients awaiting approval --------------------------------- */}
+      {!financialOnly && (
       <section className="space-y-3">
         <h2 className="label-caps">New client accounts ({pendingClients.length})</h2>
         {pendingClients.length === 0 ? (
@@ -403,11 +407,17 @@ export function ClientsManager({
           </ul>
         )}
       </section>
+      )}
 
       {/* ---- pending ad accounts -------------------------------------- */}
       <section className="space-y-3">
         <h2 className="label-caps">Pending ad accounts ({pendingAccounts.length})</h2>
-        {pendingAccounts.length === 0 ? (
+        {billingStartAuditFailed ? (
+          <FormAlert>
+            Pending Google accounts could not be audited. Refresh before approving or starting
+            tracking.
+          </FormAlert>
+        ) : pendingAccounts.length === 0 ? (
           <p className="text-[13px] text-[var(--text-muted)]">Nothing waiting for approval.</p>
         ) : (
           <ul className="space-y-2">
@@ -672,6 +682,8 @@ export function ClientsManager({
         )}
       </section>
 
+      {!financialOnly && (
+        <>
       {/* ---- portal clients --------------------------------------------- */}
       <section className="space-y-3">
         <h2 className="label-caps">Portal clients ({clients.length})</h2>
@@ -819,6 +831,8 @@ export function ClientsManager({
           </ul>
         )}
       </section>
+        </>
+      )}
 
       <Dialog
         open={Boolean(endTarget)}

@@ -298,6 +298,73 @@ export type BillingIssueLease = {
   released_at: string | null;
 };
 
+export type BillingAutomationRunStatus =
+  | "running"
+  | "succeeded"
+  | "partial"
+  | "failed";
+
+/** Durable aggregate receipt for one automatic billing invocation (0036). */
+export type BillingAutomationRun = {
+  id: string;
+  started_at: string;
+  finished_at: string | null;
+  status: BillingAutomationRunStatus;
+  issuance_enabled: boolean;
+  seeded_items: number;
+  claimed_items: number;
+  issued_items: number;
+  no_charge_items: number;
+  blocked_items: number;
+  historical_rollovers_checked: number;
+  exact_refresh_requested: number;
+  exact_refresh_completed: number;
+  reconciliation_checked: number;
+  reconciliation_updated: number;
+  error_count: number;
+};
+
+export type BillingAutomationItemState =
+  | "pending"
+  | "processing"
+  | "blocked"
+  | "issued"
+  | "no_charge";
+
+export type BillingAutomationItemStage =
+  | "discovered"
+  | "preview"
+  | "google_evidence"
+  | "stripe_issue"
+  | "complete";
+
+/** One fenced, retryable client/week work receipt (0036 + 0053). */
+export type BillingAutomationItem = {
+  id: string;
+  client_id: string;
+  period_start: string;
+  period_end: string;
+  state: BillingAutomationItemState;
+  stage: BillingAutomationItemStage;
+  blocker_code: string | null;
+  safe_message: string | null;
+  invoice_id: string | null;
+  amount_snapshot: number | string | null;
+  billable_spend_snapshot: number | string | null;
+  evidence_account_count: number;
+  attempt_count: number;
+  first_seen_at: string;
+  last_attempted_at: string | null;
+  resolved_at: string | null;
+  last_run_id: string | null;
+  claimed_by_run_id: string | null;
+  claim_version: number;
+  claim_expires_at: string | null;
+  no_charge_reason: "exact_zero" | "cycle_skipped" | null;
+  billing_cycle_skip_id: string | null;
+  updated_at: string;
+};
+
 /** A week's agency commission, billed to one portal client (migration 0013). */
 export type Invoice = {
   id: string;
@@ -1273,6 +1340,86 @@ export type Database = {
             columns: ["issued_by"];
             isOneToOne: false;
             referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      billing_automation_runs: {
+        Row: Row<BillingAutomationRun>;
+        Insert: Insert<
+          BillingAutomationRun,
+          | "id"
+          | "started_at"
+          | "finished_at"
+          | "status"
+          | "seeded_items"
+          | "claimed_items"
+          | "issued_items"
+          | "no_charge_items"
+          | "blocked_items"
+          | "historical_rollovers_checked"
+          | "exact_refresh_requested"
+          | "exact_refresh_completed"
+          | "reconciliation_checked"
+          | "reconciliation_updated"
+          | "error_count"
+        >;
+        Update: Partial<BillingAutomationRun>;
+        Relationships: [];
+      };
+      billing_automation_items: {
+        Row: Row<BillingAutomationItem>;
+        Insert: Insert<
+          BillingAutomationItem,
+          | "id"
+          | "state"
+          | "stage"
+          | "blocker_code"
+          | "safe_message"
+          | "invoice_id"
+          | "amount_snapshot"
+          | "billable_spend_snapshot"
+          | "evidence_account_count"
+          | "attempt_count"
+          | "first_seen_at"
+          | "last_attempted_at"
+          | "resolved_at"
+          | "last_run_id"
+          | "claimed_by_run_id"
+          | "claim_version"
+          | "claim_expires_at"
+          | "no_charge_reason"
+          | "billing_cycle_skip_id"
+          | "updated_at"
+        >;
+        Update: Partial<BillingAutomationItem>;
+        Relationships: [
+          {
+            foreignKeyName: "billing_automation_items_client_id_fkey";
+            columns: ["client_id"];
+            isOneToOne: false;
+            referencedRelation: "portal_clients";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "billing_automation_items_invoice_id_fkey";
+            columns: ["invoice_id"];
+            isOneToOne: true;
+            referencedRelation: "invoices";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "billing_automation_items_last_run_id_fkey";
+            columns: ["last_run_id"];
+            isOneToOne: false;
+            referencedRelation: "billing_automation_runs";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "billing_automation_items_claimed_by_run_id_fkey";
+            columns: ["claimed_by_run_id"];
+            isOneToOne: false;
+            referencedRelation: "billing_automation_runs";
             referencedColumns: ["id"];
           },
         ];
@@ -2678,6 +2825,64 @@ export type Database = {
           p_issue_error: string;
         };
         Returns: boolean;
+      };
+      begin_billing_automation_run: {
+        Args: { p_issuance_enabled: boolean };
+        Returns: BillingAutomationRun[];
+      };
+      seed_billing_automation_items: {
+        Args: { p_run_id: string; p_closed_through: string };
+        Returns: number;
+      };
+      claim_billing_automation_items: {
+        Args: { p_run_id: string; p_limit?: number };
+        Returns: BillingAutomationItem[];
+      };
+      claim_expired_skipped_billing_automation_items: {
+        Args: { p_run_id: string; p_limit?: number };
+        Returns: BillingAutomationItem[];
+      };
+      record_billing_automation_item_result: {
+        Args: {
+          p_item_id: string;
+          p_run_id: string;
+          p_claim_version: number;
+          p_state: Extract<
+            BillingAutomationItemState,
+            "blocked" | "issued" | "no_charge"
+          >;
+          p_stage: Exclude<BillingAutomationItemStage, "discovered">;
+          p_code?: string | null;
+          p_invoice_id?: string | null;
+          p_amount?: number | null;
+          p_billable_spend?: number | null;
+          p_evidence_account_count?: number;
+        };
+        Returns: BillingAutomationItem[];
+      };
+      finish_billing_automation_run: {
+        Args: {
+          p_run_id: string;
+          p_status: Exclude<BillingAutomationRunStatus, "running">;
+          p_historical_rollovers_checked: number;
+          p_exact_refresh_requested: number;
+          p_exact_refresh_completed: number;
+          p_reconciliation_checked: number;
+          p_reconciliation_updated: number;
+          p_error_count: number;
+        };
+        Returns: BillingAutomationRun[];
+      };
+      manual_invoice_authoritative_rows: {
+        Args: {
+          p_client_id: string;
+          p_period_start: string;
+          p_period_end: string;
+        };
+        Returns: {
+          account_id: string;
+          billable_gross_micros: string | number;
+        }[];
       };
       /** Atomically creates one manual invoice and consumes its Google ledger rows (0028). */
       create_manual_invoice: {

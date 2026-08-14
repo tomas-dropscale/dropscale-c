@@ -1,7 +1,7 @@
 -- =============================================================================
--- 0036 - Announce the closing half of the approval queue, and by whom.
+-- Manual Telegram step 3 - Announce the closing half of the approval queue.
 --
--- 0034 and 0035 report work arriving. This reports it being finished: a client
+-- Steps 1 and 2 report work arriving. This reports it being finished: a client
 -- approved or rejected, a store verified and put into billing.
 --
 -- That reverses the rule the earlier migrations set — "an UPDATE is usually the

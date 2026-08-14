@@ -17,7 +17,7 @@ import type {
 const SAFE_CLIENT_COLUMNS =
   "id, full_name, email, discord_handle, approval_status, created_at" as const;
 const SAFE_PROFILE_COLUMNS = "id, role" as const;
-const SAFE_MEMBER_COLUMNS = "member_id" as const;
+const SAFE_MEMBER_COLUMNS = "client_id, member_id" as const;
 const SAFE_ACCOUNT_COLUMNS =
   "id, client_id, store_name, status, currency, shopify_url, shopify_connected, shopify_scopes, shopify_connected_at, created_at" as const;
 
@@ -31,7 +31,7 @@ type LegacyClientRow = Pick<
   | "created_at"
 >;
 type LegacyProfileRow = Pick<Profile, "id" | "role">;
-type LegacyMemberRow = Pick<ClientMember, "member_id">;
+type LegacyMemberRow = Pick<ClientMember, "client_id" | "member_id">;
 type LegacyAccountRow = Pick<
   AdAccount,
   | "id"
@@ -63,6 +63,7 @@ export type ExistingClientRosterDTO = {
   discordHandle: string | null;
   approvalStatus: ClientApprovalStatus;
   createdAt: string;
+  partnerOf?: string[];
   shopify: LegacyShopifyAssetDTO[];
 };
 
@@ -172,6 +173,15 @@ export async function listExistingClientRoster(): Promise<ExistingClientRosterDT
     profiles.filter((profile) => profile.role === "admin").map((profile) => profile.id),
   );
   const memberIds = new Set(members.map((member) => member.member_id));
+  const nameById = new Map(clients.map((client) => [client.id, client.full_name]));
+  const partnerOf = new Map<string, string[]>();
+  for (const member of members) {
+    const ownerName = nameById.get(member.client_id);
+    if (!ownerName) continue;
+    const owners = partnerOf.get(member.member_id) ?? [];
+    owners.push(ownerName);
+    partnerOf.set(member.member_id, owners);
+  }
   const accountsByClient = new Map<string, LegacyAccountRow[]>();
   for (const account of accounts) {
     const owned = accountsByClient.get(account.client_id) ?? [];
@@ -184,7 +194,9 @@ export async function listExistingClientRoster(): Promise<ExistingClientRosterDT
       (client) =>
         client.approval_status !== "rejected" &&
         !adminIds.has(client.id) &&
-        (!memberIds.has(client.id) || accountsByClient.has(client.id)),
+        (client.approval_status === "pending" ||
+          !memberIds.has(client.id) ||
+          accountsByClient.has(client.id)),
     )
     .map((client) => ({
       clientId: client.id,
@@ -193,6 +205,7 @@ export async function listExistingClientRoster(): Promise<ExistingClientRosterDT
       discordHandle: client.discord_handle,
       approvalStatus: client.approval_status,
       createdAt: client.created_at,
+      partnerOf: (partnerOf.get(client.id) ?? []).sort(compareText),
       shopify:
         client.approval_status === "approved"
           ? projectShopifyAssets(accountsByClient.get(client.id) ?? [])

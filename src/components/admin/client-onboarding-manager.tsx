@@ -20,6 +20,7 @@ import {
   Unplug,
   UserPlus,
   Users,
+  X,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -60,6 +61,7 @@ import {
 } from "@/components/admin/client-onboarding-card-model";
 import type { ExistingClientRosterDTO } from "@/lib/client-onboarding/legacy-roster";
 import type { ClientOnboardingSessionDTO } from "@/lib/client-onboarding/sessions";
+import { createClient } from "@/lib/supabase/client";
 import type { ClientOnboardingAsset, ClientOnboardingMode } from "@/lib/supabase/types";
 
 type AssetChoice = "account" | "shopify" | "google_ads" | "both";
@@ -465,12 +467,14 @@ export function ClientOnboardingManager({
   initialRoster,
   backendLoadFailed,
   rosterLoadFailed,
+  adminId = "",
   readOnlyPreview = false,
 }: {
   initialSessions: ClientOnboardingSessionDTO[];
   initialRoster: ExistingClientRosterDTO[];
   backendLoadFailed: boolean;
   rosterLoadFailed: boolean;
+  adminId?: string;
   readOnlyPreview?: boolean;
 }) {
   const [sessions, setSessions] = React.useState(initialSessions);
@@ -1021,6 +1025,55 @@ export function ClientOnboardingManager({
     }
   }
 
+  async function reviewRosterClient(
+    card: ClientCard,
+    approvalStatus: "approved" | "rejected",
+  ) {
+    if (
+      readOnlyPreview ||
+      !adminId ||
+      !card.clientId ||
+      card.roster?.approvalStatus !== "pending" ||
+      card.sessions.length > 0
+    ) {
+      return;
+    }
+    const busyKey = `${approvalStatus}-client:${card.clientId}`;
+    setBusy(busyKey);
+    setNotice(null);
+    try {
+      const { data, error } = await createClient()
+        .from("portal_clients")
+        .update({
+          approval_status: approvalStatus,
+          approved_at: new Date().toISOString(),
+          approved_by: adminId,
+        })
+        .eq("id", card.clientId)
+        .eq("approval_status", "pending")
+        .select("id")
+        .maybeSingle();
+      if (error) throw error;
+      if (!data) {
+        throw new Error("This client was already reviewed. Refresh and try again.");
+      }
+      await refreshClients();
+      showNotice(
+        "success",
+        approvalStatus === "approved" ? "Client approved" : "Client rejected",
+        `${cardClientName(card)} was ${approvalStatus}.`,
+      );
+    } catch (error) {
+      showNotice(
+        "error",
+        "Client review failed",
+        error instanceof Error ? error.message : "The client could not be reviewed.",
+      );
+    } finally {
+      setBusy(null);
+    }
+  }
+
   const selectedActionSession = actionTarget?.session;
   const selectedAction = actionTarget?.action;
   const selectedActionPurpose = selectedActionSession
@@ -1105,6 +1158,8 @@ export function ClientOnboardingManager({
               const openSessions = openOnboardingSessions(card.sessions);
               const availableAssets = availableOnboardingAssetKinds(card.sessions);
               const reviewSession = actionableReviewSession(card.sessions);
+              const pendingRosterOnly =
+                card.roster?.approvalStatus === "pending" && card.sessions.length === 0;
               const hasActiveWorkspace = cardIsActive(card);
               const canTargetAssets = Boolean(card.clientId && hasActiveWorkspace);
               const disabled = readOnlyPreview || backendLoadFailed || rosterLoadFailed;
@@ -1123,9 +1178,39 @@ export function ClientOnboardingManager({
                         {hasVisibleIssue(card) && <Badge variant="danger">Connection needs attention</Badge>}
                       </div>
                       <p className="mt-1 break-all text-[12px] text-[var(--text-secondary)]">{cardEmail(card) ?? "Waiting for client details"}</p>
+                      {pendingRosterOnly && (card.roster?.partnerOf?.length ?? 0) > 0 && (
+                        <p className="mt-1 text-[12px] text-[var(--accent-gold-strong)]">
+                          Partner of {card.roster?.partnerOf?.join(", ")} — rejecting also removes
+                          that access.
+                        </p>
+                      )}
                       <p className="mt-1 text-[11px] text-[var(--text-muted)]">Updated {formatDate(cardUpdatedAt(card))}</p>
                     </div>
                     <div className="flex flex-wrap justify-start gap-2">
+                      {pendingRosterOnly && (
+                        <>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="primary"
+                            loading={busy === `approved-client:${card.clientId}`}
+                            disabled={disabled || !adminId || Boolean(busy)}
+                            onClick={() => void reviewRosterClient(card, "approved")}
+                          >
+                            <Check aria-hidden /> Approve
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="danger"
+                            loading={busy === `rejected-client:${card.clientId}`}
+                            disabled={disabled || !adminId || Boolean(busy)}
+                            onClick={() => void reviewRosterClient(card, "rejected")}
+                          >
+                            <X aria-hidden /> Reject
+                          </Button>
+                        </>
+                      )}
                       <Button type="button" size="sm" loading={testingAll} disabled={disabled} onClick={() => void testConnections(card)}>
                         <CheckCircle2 aria-hidden /> Test all connections
                       </Button>

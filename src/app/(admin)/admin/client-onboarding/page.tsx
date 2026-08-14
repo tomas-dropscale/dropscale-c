@@ -10,6 +10,7 @@ import {
   listClientOnboardingSessions,
   type ClientOnboardingSessionDTO,
 } from "@/lib/client-onboarding/sessions";
+import { getSessionProfile } from "@/lib/supabase/server";
 
 export const metadata: Metadata = { title: "Clients" };
 export const dynamic = "force-dynamic";
@@ -17,8 +18,8 @@ export const dynamic = "force-dynamic";
 /**
  * The V2 workspace lives inside the authenticated admin route group. During
  * transition it may read a deliberately narrow legacy projection for an
- * explicit reconnect, but never mutates or replaces the operational records
- * managed at /admin/clients.
+ * explicit reconnect, but never mutates or replaces the operational records;
+ * Google spend baselines and billing boundaries are managed in Billing.
  */
 export default async function ClientOnboardingPage() {
   const sessionsPromise: Promise<{
@@ -33,9 +34,10 @@ export default async function ClientOnboardingPage() {
   }> = listExistingClientRoster()
     .then((roster) => ({ roster, failed: false }))
     .catch(() => ({ roster: [], failed: true }));
-  const [sessionBundle, rosterBundle] = await Promise.all([
+  const [sessionBundle, rosterBundle, { profile }] = await Promise.all([
     sessionsPromise,
     rosterPromise,
+    getSessionProfile(),
   ]);
 
   return (
@@ -48,6 +50,7 @@ export default async function ClientOnboardingPage() {
         initialRoster={rosterBundle.roster}
         backendLoadFailed={sessionBundle.failed}
         rosterLoadFailed={rosterBundle.failed}
+        adminId={profile?.id ?? ""}
       />
     </PageContainer>
   );
