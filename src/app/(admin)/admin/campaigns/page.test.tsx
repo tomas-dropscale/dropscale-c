@@ -110,6 +110,9 @@ describe("Campaigns page approved summary", () => {
         commission: 420,
         activeCampaigns: 3,
         connectedAccounts: 2,
+        currency: "EUR",
+        currencies: ["EUR"],
+        rollupComplete: true,
       },
     });
     mocks.listCampaignActionViewState.mockResolvedValue({
@@ -157,5 +160,32 @@ describe("Campaigns page approved summary", () => {
       from: "2026-07-16",
       to: "2026-08-14",
     });
+  });
+
+  it("does not present mixed currencies as a single portfolio total", async () => {
+    mocks.fetchAdminCampaigns.mockResolvedValueOnce({
+      configured: true,
+      clients: [],
+      internal: [],
+      totals: {
+        revenue: null,
+        profit: null,
+        roas: null,
+        rollupSpend: null,
+        spend: null,
+        commission: null,
+        activeCampaigns: 3,
+        connectedAccounts: 2,
+        currency: null,
+        currencies: ["EUR", "USD"],
+        rollupComplete: true,
+      },
+    });
+
+    const page = await AdminCampaignsPage({ searchParams: Promise.resolve({}) });
+    const html = renderToStaticMarkup(page);
+
+    expect(html).toContain("reporting currencies are mixed (EUR, USD)");
+    expect(html).not.toContain("€0.00");
   });
 });

@@ -13,12 +13,16 @@ import {
   listAdminAnalyticsClients,
   type AdminAnalyticsClient,
 } from "@/lib/admin/analytics";
-import { listCampaignActionActivity } from "@/lib/admin/campaign-actions";
 import {
   analyticsClientHref,
   analyticsStoreHref,
 } from "@/lib/admin/analytics-view";
 import { fetchClientOverview } from "@/lib/admin/client-overview";
+import {
+  ensureAdminAnalyticsRollupCoverage,
+  fetchAdminStoreAnalytics,
+  type AdminAnalyticsFamily,
+} from "@/lib/admin/store-analytics";
 import { getServerDictionary } from "@/lib/i18n/server";
 import { parseRange, type RangeSelection } from "@/lib/portal/range";
 
@@ -225,7 +229,7 @@ export default async function AnalyticsPage({
     );
   }
 
-  const overview = await fetchClientOverview(selectedClient.id, range);
+  let overview = await fetchClientOverview(selectedClient.id, range);
   if (!overview || overview.clientId !== selectedClient.id) {
     return (
       <ClientChooser
@@ -241,21 +245,60 @@ export default async function AnalyticsPage({
   const selectedStore = requestedStoreId
     ? overview.stores.find((store) => store.accountId === requestedStoreId) ?? null
     : null;
-  const activityAccountIds = selectedStore
-    ? selectedStore.activityAccountIds
-    : overview.activityAccountIds;
-  const activity = await listCampaignActionActivity(
-    selectedClient.id,
-    activityAccountIds,
-  );
+  const storeAnalytics = selectedStore
+    ? await fetchAdminStoreAnalytics({
+        clientId: selectedClient.id,
+        store: selectedStore,
+        range,
+      })
+    : null;
+  const rollupCoverage: AdminAnalyticsFamily<unknown> = storeAnalytics
+    ? storeAnalytics.rollupCoverage
+    : await ensureAdminAnalyticsRollupCoverage({
+        clientId: selectedClient.id,
+        stores: overview.stores,
+        range,
+      });
+
+  // The coverage loader materialises any missing days in this exact window.
+  // Re-read the rollup afterwards so the KPI cards and the detailed sections
+  // are built from the same completed timeframe rather than a pre-refresh
+  // snapshot.
+  if (rollupCoverage.state === "ready") {
+    const refreshedOverview = await fetchClientOverview(selectedClient.id, range);
+    if (!refreshedOverview || refreshedOverview.clientId !== selectedClient.id) {
+      return (
+        <ClientChooser
+          clients={clients}
+          range={range}
+          query={query}
+          error="That client’s refreshed reporting overview is unavailable. Choose another client."
+        />
+      );
+    }
+    overview = refreshedOverview;
+    if (
+      selectedStore &&
+      !overview.stores.some((store) => store.accountId === selectedStore.accountId)
+    ) {
+      return (
+        <ClientChooser
+          clients={clients}
+          range={range}
+          query={query}
+          error="That store’s reporting topology changed during refresh. Choose the store again."
+        />
+      );
+    }
+  }
 
   return (
     <AnalyticsView
       clients={clients}
       overview={overview}
       selectedStoreId={requestedStoreId}
-      activity={activity.history}
-      activityTruncated={activity.truncated}
+      storeAnalytics={storeAnalytics}
+      rollupCoverage={rollupCoverage}
       range={range}
     />
   );

@@ -706,7 +706,13 @@ async function syncAccountWindow(
   ) {
     const token = await decryptToken(secret.google_ads_refresh_token);
     try {
-      google = await fetchLiveDailyBreakdown(account.google_ads_customer_id, token, from, to);
+      google = await fetchLiveDailyBreakdown(
+        account.google_ads_customer_id,
+        token,
+        from,
+        to,
+        account.currency,
+      );
       googleSynced = true;
     } catch (error) {
       // A revoked authorisation can't be retried, so stop pretending the

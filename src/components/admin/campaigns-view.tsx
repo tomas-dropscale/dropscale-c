@@ -34,10 +34,14 @@ import {
   type ProjectedCampaignClient,
 } from "@/lib/admin/campaigns-view";
 import { money, multiplier } from "@/lib/format";
+import type { RangeSelection } from "@/lib/portal/range";
 import { cn } from "@/lib/utils";
 
+// Header, total and campaign rows are separate grids. Keep the budget track at
+// the same intrinsic minimum in every row so their centre line cannot drift
+// with a shorter row value (for example €40 vs the €242 total).
 const CAMPAIGN_GRID =
-  "xl:grid-cols-[minmax(190px,1.65fr)_repeat(7,minmax(88px,1fr))]";
+  "xl:grid-cols-[minmax(190px,1.65fr)_repeat(3,minmax(88px,1fr))_minmax(196px,1fr)_repeat(3,minmax(88px,1fr))]";
 
 const SCALE_DATE = new Intl.DateTimeFormat("en-GB", {
   day: "2-digit",
@@ -53,6 +57,21 @@ const SCALE_DATE_TIME = new Intl.DateTimeFormat("en-GB", {
 });
 
 type ActionResult = { ok: true } | { ok: false; error: string };
+
+function analyticsStoreHref(
+  clientId: string,
+  storeId: string,
+  range: RangeSelection,
+): string {
+  const params = new URLSearchParams({
+    client: clientId,
+    store: storeId,
+    range: range.key,
+    from: range.from,
+    to: range.to,
+  });
+  return `/admin/analytics?${params.toString()}`;
+}
 
 type BudgetActionBody = {
   requestId: string;
@@ -301,7 +320,7 @@ function BudgetControl({
   const editorPosition = anchor && editing ? floatingPosition(anchor, 280) : null;
 
   return (
-    <div className="flex min-w-0 items-center gap-1.5 xl:grid xl:grid-cols-[1.75rem_minmax(0,auto)_1.75rem] xl:justify-center">
+    <div className="flex min-w-0 items-center gap-1.5 xl:grid xl:grid-cols-[1.75rem_max-content_1.75rem] xl:justify-center">
       <span className="hidden size-7 xl:block" aria-hidden />
       <span className="whitespace-nowrap text-[13px] font-semibold tabular-nums text-[var(--text-primary)]">
         {campaign.dailyBudget === null ? "—" : money(campaign.dailyBudget, campaign.currency)}
@@ -562,6 +581,7 @@ function CampaignRow({
 function StoreGroup({
   clientId,
   store,
+  range,
   pending,
   statusErrors,
   onBudgetChange,
@@ -569,6 +589,7 @@ function StoreGroup({
 }: {
   clientId: string;
   store: ProjectedCampaignClient["stores"][number];
+  range: RangeSelection;
   pending: Set<string>;
   statusErrors: Record<string, string>;
   onBudgetChange: (campaign: ProjectedCampaign, nextDailyBudget: string) => Promise<ActionResult>;
@@ -612,7 +633,7 @@ function StoreGroup({
           className="size-10 shrink-0 justify-self-center xl:size-8"
         >
           <Link
-            href={`/admin/analytics?client=${encodeURIComponent(clientId)}&store=${encodeURIComponent(store.id)}`}
+            href={analyticsStoreHref(clientId, store.id, range)}
             aria-label={`Open store analytics for ${store.name}`}
             title={`Open store analytics for ${store.name}`}
           >
@@ -653,7 +674,9 @@ function StoreGroup({
           </span>
           <CampaignMetric label="Type">—</CampaignMetric>
           <CampaignMetric label="Status">—</CampaignMetric>
-          <CampaignMetric label="Spend">{money(spend, store.currency)}</CampaignMetric>
+          <CampaignMetric label="Spend">
+            {spend === null ? "—" : money(spend, store.currency)}
+          </CampaignMetric>
           <CampaignMetric label="Daily budget">
             {dailyBudget === null ? "—" : money(dailyBudget, store.currency)}
             {dailyBudget !== null && (
@@ -676,9 +699,17 @@ function StoreGroup({
             {store.campaignState === "partial" &&
               "Some Google Ads sources could not be loaded; the rows below are partial."}
             {store.campaignState === "failed" &&
-              "Campaign reporting failed for this store. Its verified rollup total is still shown above."}
+              (store.rollupComplete
+                ? "Campaign reporting failed for this store. Its verified rollup total is still shown above."
+                : "Campaign reporting and the complete selected-period rollup could not be verified for this store.")}
             {store.campaignState === "disconnected" &&
               "Campaign reporting is unavailable until this Google Ads connection is restored."}
+          </li>
+        )}
+
+        {!store.rollupComplete && store.campaignState === "ready" && (
+          <li className="border-t border-[var(--border-subtle)] bg-[var(--bg-base)] px-5 py-4 text-[12.5px] text-[var(--warning-orange)]">
+            Store totals are unavailable because every reporting account and selected day could not be verified.
           </li>
         )}
 
@@ -702,6 +733,7 @@ function StoreGroup({
 
 function ClientSection({
   client,
+  range,
   open,
   pending,
   statusErrors,
@@ -710,6 +742,7 @@ function ClientSection({
   onStatusChange,
 }: {
   client: ProjectedCampaignClient;
+  range: RangeSelection;
   open: boolean;
   pending: Set<string>;
   statusErrors: Record<string, string>;
@@ -755,9 +788,15 @@ function ClientSection({
         </span>
 
         <ClientMetric label="Revenue">
-          {client.revenue === null ? "—" : money(client.revenue, client.currency)}
+          {client.revenue === null || client.currency === null
+            ? "—"
+            : money(client.revenue, client.currency)}
         </ClientMetric>
-        <ClientMetric label="Ad spend">{money(client.adSpend, client.currency)}</ClientMetric>
+        <ClientMetric label="Ad spend">
+          {client.adSpend === null || client.currency === null
+            ? "—"
+            : money(client.adSpend, client.currency)}
+        </ClientMetric>
         <ClientMetric label="Real ROAS">
           {client.realRoas === null ? "—" : multiplier(client.realRoas)}
         </ClientMetric>
@@ -775,6 +814,7 @@ function ClientSection({
               key={store.id}
               clientId={client.id}
               store={store}
+              range={range}
               pending={pending}
               statusErrors={statusErrors}
               onBudgetChange={onBudgetChange}
@@ -791,10 +831,12 @@ export function CampaignsView({
   clients,
   history,
   historyTruncated,
+  range,
 }: {
   clients: CampaignViewClient[];
   history: CampaignActionHistory[];
   historyTruncated: boolean;
+  range: RangeSelection;
 }) {
   const router = useRouter();
   const inFlight = React.useRef(new Set<string>());
@@ -971,6 +1013,7 @@ export function CampaignsView({
           <ClientSection
             key={client.id}
             client={client}
+            range={range}
             open={openClients.has(client.id)}
             pending={pending}
             statusErrors={statusErrors}

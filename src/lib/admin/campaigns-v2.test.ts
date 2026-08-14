@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   sumMetrics: vi.fn(),
   resolveReportingSources: vi.fn(),
   fetchGoogleReportingCampaigns: vi.fn(),
+  ensureAdminCampaignRollups: vi.fn(),
 }));
 
 vi.mock("@/lib/supabase/server", () => ({ createClient: mocks.createClient }));
@@ -54,6 +55,9 @@ vi.mock("@/lib/reporting/sources", () => ({
 }));
 vi.mock("@/lib/reporting/google", () => ({
   fetchGoogleReportingCampaigns: mocks.fetchGoogleReportingCampaigns,
+}));
+vi.mock("./campaign-rollup", () => ({
+  ensureAdminCampaignRollups: mocks.ensureAdminCampaignRollups,
 }));
 
 import { fetchAdminCampaigns } from "./campaigns";
@@ -189,6 +193,21 @@ describe("admin V2 campaign inventory", () => {
     mocks.hasWindsorEnv.mockReturnValue(true);
     mocks.fetchHstClientKeys.mockResolvedValue({ crmIds: new Set(), names: new Set() });
     mocks.fetchDailyMetrics.mockResolvedValue([]);
+    mocks.ensureAdminCampaignRollups.mockImplementation(
+      async (_service, scopes, range) => {
+        const accountIds = scopes.flatMap((scope: { accountIds: string[] }) => scope.accountIds);
+        const rows = await mocks.fetchDailyMetrics(accountIds, range.from, range.to);
+        return {
+          rows,
+          completeScopeIds: new Set(
+            scopes
+              .filter((scope: { accountIds: string[] }) => scope.accountIds.length > 0)
+              .map((scope: { id: string }) => scope.id),
+          ),
+          refreshed: false,
+        };
+      },
+    );
     mocks.groupByAccount.mockImplementation((rows: Array<{ ad_account_id: string }>) => {
       const grouped = new Map<string, Array<{ ad_account_id: string }>>();
       for (const row of rows) {
@@ -386,13 +405,14 @@ describe("admin V2 campaign inventory", () => {
       expect.objectContaining({ spend: 25, commission: 2.5, connected: true }),
     );
     expect(overview.clients[0]).toEqual(
-      expect.objectContaining({ revenue: null, rollupSpend: 25, realRoas: 0 }),
+      expect.objectContaining({ revenue: null, rollupSpend: 25, realRoas: null }),
     );
     expect(mocks.fetchLiveCampaignsDetailed).toHaveBeenCalledWith(
       "1234567890",
       "refresh-token",
       "legacy",
       { key: "custom", from: "2026-08-01", to: "2026-08-14" },
+      "EUR",
     );
     expect(mocks.resolveReportingSources).not.toHaveBeenCalled();
     expect(mocks.fetchGoogleReportingCampaigns).not.toHaveBeenCalled();
@@ -463,6 +483,107 @@ describe("admin V2 campaign inventory", () => {
       }),
     );
     expect(overview.totals.spend).toBe(72.56);
+  });
+
+  it("never adds or formats mixed reporting currencies as one portfolio", async () => {
+    const eur = account("legacy-eur", "client-1", {
+      status: "active",
+      currency: "EUR",
+      google_ads_connected: true,
+      google_ads_customer_id: "1234567890",
+    });
+    const usd = account("legacy-usd", "client-1", {
+      status: "active",
+      currency: "USD",
+      google_ads_connected: true,
+      google_ads_customer_id: "2222222222",
+    });
+    mocks.createClient.mockResolvedValue(supabaseFor([eur, usd], "ciphertext"));
+    mocks.createServiceClient.mockReturnValue({ from: vi.fn(() => query([])) });
+    mocks.decryptToken.mockResolvedValue("refresh-token");
+    mocks.fetchLiveCampaignsDetailed.mockResolvedValue([]);
+    mocks.fetchDailyMetrics.mockResolvedValue([
+      { ad_account_id: "legacy-eur" },
+      { ad_account_id: "legacy-usd" },
+    ]);
+    mocks.sumMetrics.mockImplementation((rows: Array<{ ad_account_id?: string }>) => ({
+      ...emptyRollup,
+      attributedRevenue: rows.length > 0 ? 100 : null,
+      revenue: rows.length * 100,
+      adSpend: rows.length * 50,
+    }));
+
+    const overview = await fetchAdminCampaigns({
+      key: "today",
+      from: "2026-08-14",
+      to: "2026-08-14",
+    });
+
+    expect(overview.clients[0]).toEqual(
+      expect.objectContaining({
+        currency: null,
+        currencies: ["EUR", "USD"],
+        revenue: null,
+        spend: null,
+        rollupSpend: null,
+        realRoas: null,
+      }),
+    );
+    expect(overview.totals).toEqual(
+      expect.objectContaining({
+        currency: null,
+        currencies: ["EUR", "USD"],
+        revenue: null,
+        spend: null,
+        commission: null,
+        roas: null,
+      }),
+    );
+  });
+
+  it("keeps campaign rows but hides partial selected-period rollups", async () => {
+    const legacy = account("legacy", "client-1", {
+      status: "active",
+      google_ads_connected: true,
+      google_ads_customer_id: "1234567890",
+    });
+    mocks.createClient.mockResolvedValue(supabaseFor([legacy], "ciphertext"));
+    mocks.createServiceClient.mockReturnValue({ from: vi.fn(() => query([])) });
+    mocks.decryptToken.mockResolvedValue("refresh-token");
+    mocks.fetchLiveCampaignsDetailed.mockResolvedValue([
+      {
+        id: "gads-legacy-1",
+        ad_account_id: "legacy",
+        providerCampaignId: "77",
+        name: "Still visible",
+        status: "active",
+        spend: 20,
+      },
+    ]);
+    mocks.ensureAdminCampaignRollups.mockResolvedValueOnce({
+      rows: [{ ad_account_id: "legacy" }],
+      completeScopeIds: new Set(),
+      refreshed: true,
+    });
+
+    const overview = await fetchAdminCampaigns({
+      key: "today",
+      from: "2026-08-14",
+      to: "2026-08-14",
+    });
+
+    expect(overview.clients[0].accounts[0]).toEqual(
+      expect.objectContaining({
+        rollupComplete: false,
+        campaigns: [expect.objectContaining({ name: "Still visible" })],
+      }),
+    );
+    expect(overview.clients[0]).toEqual(
+      expect.objectContaining({ revenue: null, spend: null, rollupSpend: null }),
+    );
+    expect(overview.totals).toEqual(
+      expect.objectContaining({ rollupComplete: false, revenue: null, spend: null }),
+    );
   });
 
   it("does not fall back to legacy when rollout authority is unavailable", async () => {

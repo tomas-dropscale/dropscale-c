@@ -4,8 +4,11 @@ vi.mock("server-only", () => ({}));
 
 import type { CanonicalReportingSource } from "@/lib/reporting/sources";
 import {
+  fetchGoogleReportingCampaignBreakdowns,
   fetchGoogleReportingCampaigns,
   fetchGoogleReportingDailyMetrics,
+  fetchGoogleReportingDemandGenAds,
+  fetchGoogleReportingPmaxProducts,
 } from "./google";
 
 const source: CanonicalReportingSource = {
@@ -184,5 +187,145 @@ describe("Google V2 reporting adapter", () => {
         fetcher,
       ),
     ).rejects.toThrow(/different Google Ads reporting identity/);
+  });
+
+  it("projects exact Demand Gen ads into the unified campaign detail contract", async () => {
+    const fetcher = vi.fn(async () => [
+      {
+        accountId: "111-222-3333",
+        customerId: "1112223333",
+        currency: "EUR",
+        timeZone: "Europe/Lisbon",
+        campaignId: "42",
+        adId: "9001",
+        name: "Summer creative",
+        type: "DEMAND_GEN_MULTI_ASSET_AD",
+        status: "ENABLED" as const,
+        spend: 25,
+        impressions: 2_000,
+        clicks: 80,
+        conversions: 3,
+        conversionValue: 120,
+      },
+    ]);
+
+    await expect(
+      fetchGoogleReportingDemandGenAds(
+        source,
+        "2026-08-08",
+        "2026-08-14",
+        fetcher,
+      ),
+    ).resolves.toEqual([
+      {
+        accountId: source.adAccountId,
+        campaignId: "42",
+        provider: "google_ads",
+        kind: "creative",
+        id: "9001",
+        name: "Summer creative",
+        detail: "DEMAND_GEN_MULTI_ASSET_AD",
+        spend: 25,
+        impressions: 2_000,
+        clicks: 80,
+        conversions: 3,
+        googleRevenue: 120,
+      },
+    ]);
+    expect(fetcher).toHaveBeenCalledWith(
+      "111-222-3333",
+      "2026-08-08",
+      "2026-08-14",
+    );
+  });
+
+  it("projects exact PMax products with a collision-safe Merchant identity", async () => {
+    const fetcher = vi.fn(async () => [
+      {
+        accountId: "111-222-3333",
+        customerId: "1112223333",
+        currency: "EUR",
+        timeZone: "Europe/Lisbon",
+        campaignId: "84",
+        merchantId: "123456789",
+        feedLabel: "PT",
+        language: "languageConstants/1014",
+        country: "geoTargetConstants/2620",
+        channel: "ONLINE",
+        itemId: "shopify_PT_123_456",
+        title: "Linen dress",
+        brand: "Northwind",
+        spend: 25.25,
+        impressions: 2_000,
+        clicks: 80,
+        conversions: 3.5,
+        conversionValue: 120,
+      },
+    ]);
+
+    const [product] = await fetchGoogleReportingPmaxProducts(
+      source,
+      "2026-08-08",
+      "2026-08-14",
+      fetcher,
+    );
+    expect(product).toEqual({
+      accountId: source.adAccountId,
+      campaignId: "84",
+      provider: "google_ads",
+      kind: "product",
+      id: expect.stringContaining("shopify_PT_123_456"),
+      name: "Linen dress",
+      detail: "Northwind",
+      spend: 25.25,
+      impressions: 2_000,
+      clicks: 80,
+      conversions: 3.5,
+      googleRevenue: 120,
+    });
+  });
+
+  it("fails detail closed on source identity mismatch and preserves provider errors", async () => {
+    const mismatchFetcher = vi.fn(async () => [
+      {
+        accountId: "111-222-3333",
+        customerId: "1112223333",
+        currency: "USD",
+        timeZone: "Europe/Lisbon",
+        campaignId: "42",
+        adId: "9001",
+        name: null,
+        type: "DEMAND_GEN_CAROUSEL_AD",
+        status: "PAUSED" as const,
+        spend: 0,
+        impressions: 0,
+        clicks: 0,
+        conversions: 0,
+        conversionValue: 0,
+      },
+    ]);
+    await expect(
+      fetchGoogleReportingDemandGenAds(
+        source,
+        "2026-08-14",
+        "2026-08-14",
+        mismatchFetcher,
+      ),
+    ).rejects.toThrow(/different Google Ads reporting identity/);
+
+    const providerFailure = new Error("provider-specific failure");
+    const demandGenFetcher = vi.fn(async () => {
+      throw providerFailure;
+    });
+    const productFetcher = vi.fn(async () => []);
+    await expect(
+      fetchGoogleReportingCampaignBreakdowns(
+        source,
+        "2026-08-14",
+        "2026-08-14",
+        demandGenFetcher,
+        productFetcher,
+      ),
+    ).rejects.toBe(providerFailure);
   });
 });

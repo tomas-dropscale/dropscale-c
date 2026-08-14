@@ -6,8 +6,9 @@ import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
 import { fetchLiveCampaignsDetailed, type LiveCampaign } from "@/lib/google-ads/portal";
 import { markIfAuthRevoked } from "@/lib/google-ads/revoked";
 import { fetchHstClientKeys } from "@/lib/admin/hst";
+import { ensureAdminCampaignRollups } from "./campaign-rollup";
 import { googleProfit, googleRoas } from "@/lib/admin/google-attribution";
-import { fetchDailyMetrics, groupByAccount, sumMetrics } from "@/lib/metrics/queries";
+import { groupByAccount, sumMetrics } from "@/lib/metrics/queries";
 import { ACCOUNT_COLUMNS } from "@/lib/portal/data";
 import type { AdAccount } from "@/lib/supabase/types";
 import type { RangeSelection } from "@/lib/portal/range";
@@ -52,6 +53,10 @@ export type AdminAccountCampaigns = {
   rollupRevenue: number | null;
   /** Reporting-rollup spend paired with rollupRevenue. */
   rollupSpend: number;
+  /** This store's full physical account × selected-day rollup was proved. */
+  rollupComplete: boolean;
+  /** At least one connected, active reporting source is expected to materialise. */
+  rollupRequired: boolean;
 };
 
 export type AdminLiveCampaign = LiveCampaign & {
@@ -74,11 +79,14 @@ export type AdminClientCampaigns = {
    */
   inHst: boolean;
   accounts: AdminAccountCampaigns[];
-  spend: number;
-  commission: number;
+  spend: number | null;
+  commission: number | null;
   revenue: number | null;
-  rollupSpend: number;
-  realRoas: number;
+  rollupSpend: number | null;
+  realRoas: number | null;
+  currency: string | null;
+  currencies: string[];
+  rollupComplete: boolean;
 };
 
 export type AdminCampaignsOverview = {
@@ -91,8 +99,8 @@ export type AdminCampaignsOverview = {
   internal: AdminClientCampaigns[];
   configured: boolean;
   totals: {
-    spend: number;
-    commission: number;
+    spend: number | null;
+    commission: number | null;
     activeCampaigns: number;
     connectedAccounts: number;
     /**
@@ -118,9 +126,12 @@ export type AdminCampaignsOverview = {
      * got lucky count for as much as one spending €5,000, which is how a book
      * of business ends up reporting a return nobody actually earned.
      */
-    roas: number;
+    roas: number | null;
     /** Rollup ad spend — the denominator above. See the note in fetchAdminCampaigns. */
-    rollupSpend: number;
+    rollupSpend: number | null;
+    currency: string | null;
+    currencies: string[];
+    rollupComplete: boolean;
   };
 };
 
@@ -130,6 +141,7 @@ type AdminAccountInventory = {
   account: AdAccount;
   googleSources: CanonicalReportingSource[] | null;
   metricAccountIds: string[];
+  revenueMetricAccountIds: string[];
   commissionRateByMetricAccount: Map<string, number>;
   /** Campaign mutations remain marker-gated even when Windsor is used read-only before cutover. */
   campaignControlsEnabled: boolean;
@@ -142,13 +154,12 @@ function projectedShopDomain(source: CanonicalReportingSource): string {
 async function adminAccountInventory(
   allAccounts: AdAccount[],
   adminIds: Set<string>,
+  service: NonNullable<ReturnType<typeof createServiceClient>>,
 ): Promise<AdminAccountInventory[]> {
   const accounts = allAccounts.filter((account) => !adminIds.has(account.client_id));
   const clientIds = [...new Set(accounts.map((account) => account.client_id))];
   if (clientIds.length === 0) return [];
 
-  const service = createServiceClient();
-  if (!service) throw new Error("Admin reporting inventory is unavailable.");
   const { data, error } = await service
     .from("client_rollout_states")
     .select("client_id, operational_surface, reporting_cutover_at")
@@ -182,15 +193,23 @@ async function adminAccountInventory(
 
   const legacy = accounts
     .filter((account) => !v2ClientIds.includes(account.client_id))
-    .map((account) => ({
-      account,
-      googleSources: null,
-      metricAccountIds: [account.id],
-      commissionRateByMetricAccount: new Map([
-        [account.id, Number(account.commission_rate)],
-      ]),
-      campaignControlsEnabled: false,
-    }));
+    .map((account) => {
+      const materializable =
+        account.status !== "pending" &&
+        ((account.google_ads_connected && Boolean(account.google_ads_customer_id)) ||
+          (account.shopify_connected && Boolean(account.shopify_url)));
+      return {
+        account,
+        googleSources: null,
+        metricAccountIds: materializable ? [account.id] : [],
+        revenueMetricAccountIds:
+          materializable && account.shopify_connected ? [account.id] : [],
+        commissionRateByMetricAccount: new Map([
+          [account.id, Number(account.commission_rate)],
+        ]),
+        campaignControlsEnabled: false,
+      };
+    });
   if (v2ClientIds.length === 0) return legacy;
 
   const sources = await resolveReportingSources({
@@ -236,6 +255,7 @@ async function adminAccountInventory(
       },
       googleSources: grouped.filter((source) => source.googleAds !== null),
       metricAccountIds: grouped.map((source) => source.adAccountId),
+      revenueMetricAccountIds: [anchor.adAccountId],
       commissionRateByMetricAccount: new Map(
         grouped.map((source) => [
           source.adAccountId,
@@ -267,6 +287,7 @@ async function adminAccountInventory(
       },
       googleSources: [source],
       metricAccountIds: [source.adAccountId],
+      revenueMetricAccountIds: [],
       commissionRateByMetricAccount: new Map([
         [source.adAccountId, Number(base.commission_rate)],
       ]),
@@ -292,7 +313,21 @@ function groupByOwner(
   entries: AdminAccountCampaigns[],
   owners: Map<string, Owner>,
 ): AdminClientCampaigns[] {
-  const byClient = new Map<string, AdminClientCampaigns>();
+  type Group = {
+    clientId: string;
+    clientName: string;
+    clientEmail: string;
+    inHst: boolean;
+    accounts: AdminAccountCampaigns[];
+    spend: number;
+    commission: number;
+    revenue: number | null;
+    rollupSpend: number;
+    currencies: Set<string>;
+    required: number;
+    complete: number;
+  };
+  const byClient = new Map<string, Group>();
 
   for (const entry of entries) {
     const owner = owners.get(entry.account.client_id);
@@ -306,28 +341,58 @@ function groupByOwner(
       commission: 0,
       revenue: null,
       rollupSpend: 0,
-      realRoas: 0,
+      currencies: new Set<string>(),
+      required: 0,
+      complete: 0,
     };
     group.accounts.push(entry);
-    group.spend += entry.spend;
-    group.commission += entry.commission;
-    if (entry.rollupRevenue !== null) {
-      group.revenue = (group.revenue ?? 0) + entry.rollupRevenue;
+    if (entry.rollupRequired) {
+      group.required += 1;
+      group.currencies.add(entry.account.currency);
     }
-    group.rollupSpend += entry.rollupSpend;
+    if (entry.rollupComplete) {
+      group.complete += 1;
+      group.spend += entry.spend;
+      group.commission += entry.commission;
+      if (entry.rollupRevenue !== null) {
+        group.revenue = (group.revenue ?? 0) + entry.rollupRevenue;
+      }
+      group.rollupSpend += entry.rollupSpend;
+    }
     byClient.set(entry.account.client_id, group);
   }
 
   return [...byClient.values()]
-    .map((client) => ({
-      ...client,
-      realRoas: googleRoas(client.revenue, client.rollupSpend),
-    }))
-    .sort((a, b) => b.spend - a.spend);
+    .map((group): AdminClientCampaigns => {
+      const currencies = [...group.currencies].sort();
+      const rollupComplete = group.required > 0 && group.complete === group.required;
+      const financialReady = rollupComplete && currencies.length === 1;
+      return {
+        clientId: group.clientId,
+        clientName: group.clientName,
+        clientEmail: group.clientEmail,
+        inHst: group.inHst,
+        accounts: group.accounts,
+        spend: financialReady ? group.spend : null,
+        commission: financialReady ? group.commission : null,
+        revenue: financialReady ? group.revenue : null,
+        rollupSpend: financialReady ? group.rollupSpend : null,
+        realRoas:
+          financialReady && group.revenue !== null && group.rollupSpend > 0
+            ? googleRoas(group.revenue, group.rollupSpend)
+            : null,
+        currency: financialReady ? currencies[0] : null,
+        currencies,
+        rollupComplete,
+      };
+    })
+    .sort((a, b) => (b.spend ?? -1) - (a.spend ?? -1));
 }
 
 export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminCampaignsOverview> {
   await requireClientOnboardingAdmin();
+  const service = createServiceClient();
+  if (!service) throw new Error("Admin reporting inventory is unavailable.");
   const supabase = await createClient();
   const googleConfigured = hasGoogleAdsEnv();
   const windsorConfigured = hasWindsorEnv();
@@ -348,7 +413,7 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
 
   const allAccounts = (accountsRes.data as AdAccount[] | null) ?? [];
   const internalAccounts = allAccounts.filter((account) => adminIds.has(account.client_id));
-  const inventory = await adminAccountInventory(allAccounts, adminIds);
+  const inventory = await adminAccountInventory(allAccounts, adminIds, service);
   const owners = new Map<string, Owner>(
     (clientsRes.data ?? []).map((client) => [
       client.id,
@@ -399,6 +464,7 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
               await decryptToken(cipher),
               account.id,
               range,
+              account.currency,
             )).map((campaign) => ({
               ...campaign,
               reportingBindingId: null,
@@ -467,6 +533,8 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
         commission: (spend * Number(account.commission_rate)) / 100,
         rollupRevenue: null,
         rollupSpend: 0,
+        rollupComplete: false,
+        rollupRequired: false,
       };
     }),
   );
@@ -485,88 +553,114 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
     commission: 0,
     rollupRevenue: null,
     rollupSpend: 0,
+    rollupComplete: false,
+    rollupRequired: false,
   }));
 
   /**
-   * Revenue for the strip, from the rollup rather than from Google.
-   *
-   * Everything above this line is a LIVE Google Ads query, but Google knows
-   * nothing about what the shops sold — revenue only exists in daily_metrics,
-   * joined there from Shopify. So the portfolio figures are read, not fetched.
-   *
-   * Deliberately no recompute first, unlike the client report: this page holds
-   * every client at once, and refreshing them all would turn one page load into
-   * dozens of Google and Shopify round trips. The hourly cron already keeps the
-   * rollup current, and opening a client's own report refreshes that client.
-   *
-   * The consequence is that ROAS and profit divide by the ROLLUP's ad spend,
-   * not the live figure in the "Ad spend" card beside them. Both come from the
-   * same Google account and converge once the rollup runs; using the live spend
-   * as the denominator for rollup revenue would be worse — two sources, one
-   * ratio, and a number that moves when neither the revenue nor the spend did.
+   * Portfolio money comes from one exact account-by-day rollup grid. The
+   * coverage helper checks the selected inclusive window, refreshes missing
+   * families once, and leaves the affected totals unavailable if the grid is
+   * still incomplete. Live campaign rows never substitute for that financial
+   * evidence: Google campaign delivery and Shopify revenue are different data
+   * families and must not be mixed into one partially verified ratio.
    */
-  const metricRows = await fetchDailyMetrics(
-    inventory.flatMap((entry) => entry.metricAccountIds),
-    range.from,
-    range.to,
+  const coverage = await ensureAdminCampaignRollups(
+    service,
+    inventory.map((entry) => ({
+      id: entry.account.id,
+      accountIds: entry.metricAccountIds,
+      revenueAccountIds: entry.revenueMetricAccountIds,
+    })),
+    range,
   );
+  const metricRows = coverage.rows;
   const metricRowsByAccount = groupByAccount(metricRows);
   const accountsWithRollups = perAccount.map((entry, index) => {
     const inventoryEntry = inventory[index];
-    const rows = inventoryEntry.metricAccountIds.flatMap(
-      (accountId) => metricRowsByAccount.get(accountId) ?? [],
-    );
+    const rollupComplete = coverage.completeScopeIds.has(inventoryEntry.account.id);
+    const rows = rollupComplete
+      ? inventoryEntry.metricAccountIds.flatMap(
+          (accountId) => metricRowsByAccount.get(accountId) ?? [],
+        )
+      : [];
     const totals = sumMetrics(rows);
-    const commission = inventoryEntry.metricAccountIds.reduce((total, accountId) => {
-      const accountRate = inventoryEntry.commissionRateByMetricAccount.get(accountId);
-      if (typeof accountRate !== "number" || !Number.isFinite(accountRate)) {
-        throw new Error("Admin reporting inventory is unavailable.");
-      }
-      const accountTotals = sumMetrics(metricRowsByAccount.get(accountId) ?? []);
-      return total + (accountTotals.adSpend * accountRate) / 100;
-    }, 0);
+    const commission = rollupComplete
+      ? inventoryEntry.metricAccountIds.reduce((total, accountId) => {
+          const accountRate = inventoryEntry.commissionRateByMetricAccount.get(accountId);
+          if (typeof accountRate !== "number" || !Number.isFinite(accountRate)) {
+            throw new Error("Admin reporting inventory is unavailable.");
+          }
+          const accountTotals = sumMetrics(metricRowsByAccount.get(accountId) ?? []);
+          return total + (accountTotals.adSpend * accountRate) / 100;
+        }, 0)
+      : 0;
     return {
       ...entry,
       spend: totals.adSpend,
       commission,
       rollupRevenue: totals.attributedRevenue,
       rollupSpend: totals.adSpend,
+      rollupComplete,
+      rollupRequired: inventoryEntry.metricAccountIds.length > 0,
     };
   });
-  const rollup = sumMetrics(metricRows);
+  const completeAccountIds = new Set(
+    inventory.flatMap((entry) =>
+      coverage.completeScopeIds.has(entry.account.id) ? entry.metricAccountIds : [],
+    ),
+  );
+  const verifiedMetricRows = metricRows.filter((row) =>
+    completeAccountIds.has(row.ad_account_id),
+  );
+  const rollup = sumMetrics(verifiedMetricRows);
   const revenue = rollup.attributedRevenue;
 
   const spend = accountsWithRollups.reduce((sum, entry) => sum + entry.spend, 0);
   const commission = accountsWithRollups.reduce((sum, entry) => sum + entry.commission, 0);
+  const requiredScopes = inventory.filter((entry) => entry.metricAccountIds.length > 0);
+  const rollupComplete =
+    requiredScopes.length > 0 &&
+    requiredScopes.every((entry) => coverage.completeScopeIds.has(entry.account.id));
+  const currencies = [
+    ...new Set(requiredScopes.map((entry) => entry.account.currency)),
+  ].sort();
+  const financialReady = rollupComplete && currencies.length === 1;
 
   // Costs are recorded per day for the whole shop, so only the Google share of
   // them is charged here — see lib/admin/google-attribution.ts. Our own fee is
   // not among them: see the note on `profit` in the type above.
-  const profit = googleProfit(revenue, {
+  const profit = financialReady ? googleProfit(revenue, {
     revenue: rollup.revenue,
     refunds: rollup.refunds,
     productCost: rollup.productCost,
     paymentFees: rollup.paymentFees,
     shippingCost: rollup.shippingCost,
     adSpend: rollup.adSpend,
-  });
+  }) : null;
 
   return {
     clients: groupByOwner(accountsWithRollups, owners),
     internal: groupByOwner(internalEntries, owners),
     configured,
     totals: {
-      spend,
-      commission,
+      spend: financialReady ? spend : null,
+      commission: financialReady ? commission : null,
       activeCampaigns: perAccount.reduce(
         (sum, entry) => sum + entry.campaigns.filter((c) => c.status === "active").length,
         0,
       ),
       connectedAccounts: accountsWithRollups.filter((entry) => entry.connected).length,
-      revenue,
+      revenue: financialReady ? revenue : null,
       profit,
-      roas: googleRoas(revenue, rollup.adSpend),
-      rollupSpend: rollup.adSpend,
+      roas:
+        financialReady && revenue !== null && rollup.adSpend > 0
+          ? googleRoas(revenue, rollup.adSpend)
+          : null,
+      rollupSpend: financialReady ? rollup.adSpend : null,
+      currency: financialReady ? currencies[0] : null,
+      currencies,
+      rollupComplete,
     },
   };
 }

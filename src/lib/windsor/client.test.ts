@@ -10,6 +10,8 @@ import {
   encryptWindsorAccessToken,
   fetchGoogleAdsCampaignBreakdown,
   fetchGoogleAdsDailyBreakdown,
+  fetchGoogleAdsDemandGenAdBreakdown,
+  fetchGoogleAdsPmaxProductBreakdown,
   listLinkedGoogleAdsAccounts,
   normalizeGoogleAdsCustomerId,
   pollLinkedGoogleAdsAccounts,
@@ -579,7 +581,7 @@ describe("Windsor Google Ads server adapter", () => {
     ).rejects.toMatchObject({ code: "invalid_response", status: 502 });
   });
 
-  it("deduplicates identical days and rejects divergent duplicates", async () => {
+  it("rejects the daily sentinel before deduplicating and rejects divergent duplicates", async () => {
     const row = {
       date: "2026-08-12",
       account_id: "123-456-7890",
@@ -593,6 +595,7 @@ describe("Windsor Google Ads server adapter", () => {
     };
     const fetcher = mockFetch(
       jsonResponse({ data: [row, { ...row }] }),
+      jsonResponse({ data: [row, { ...row }] }),
       jsonResponse({ data: [row, { ...row, spend: 2 }] }),
     );
 
@@ -600,9 +603,14 @@ describe("Windsor Google Ads server adapter", () => {
       fetchGoogleAdsDailyBreakdown("123-456-7890", "2026-08-12", "2026-08-12", {
         fetcher: fetcher as typeof fetch,
       }),
+    ).rejects.toMatchObject({ code: "invalid_response", status: 502 });
+    await expect(
+      fetchGoogleAdsDailyBreakdown("123-456-7890", "2026-08-11", "2026-08-12", {
+        fetcher: fetcher as typeof fetch,
+      }),
     ).resolves.toHaveLength(1);
     await expect(
-      fetchGoogleAdsDailyBreakdown("123-456-7890", "2026-08-12", "2026-08-12", {
+      fetchGoogleAdsDailyBreakdown("123-456-7890", "2026-08-11", "2026-08-12", {
         fetcher: fetcher as typeof fetch,
       }),
     ).rejects.toMatchObject({ code: "invalid_response", status: 502 });
@@ -840,6 +848,242 @@ describe("Windsor Google Ads server adapter", () => {
 
     expect(result.ok).toBe(true);
     expect(result.recentDataAvailable).toBe(false);
+  });
+
+  it("reads bounded Demand Gen ad rows for the exact account and range", async () => {
+    const fetcher = mockFetch(
+      jsonResponse({
+        data: [
+          {
+            account_id: "123-456-7890",
+            account_currency_code: "EUR",
+            account_time_zone: "Europe/Lisbon",
+            campaign_id: "42",
+            advertising_channel_type: "DEMAND_GEN",
+            ad_id: "9001",
+            ad_group_ad_ad_name: "Summer creative",
+            ad_type: "DEMAND_GEN_MULTI_ASSET_AD",
+            ad_group_ad_status: "ENABLED",
+            spend: "125.5",
+            impressions: "10000",
+            clicks: "250",
+            conversions: "12",
+            conversion_value: "490",
+          },
+        ],
+      }),
+    );
+
+    await expect(
+      fetchGoogleAdsDemandGenAdBreakdown(
+        "1234567890",
+        "2026-08-08",
+        "2026-08-14",
+        { fetcher: fetcher as typeof fetch },
+      ),
+    ).resolves.toEqual([
+      {
+        accountId: "123-456-7890",
+        customerId: "1234567890",
+        currency: "EUR",
+        timeZone: "Europe/Lisbon",
+        campaignId: "42",
+        adId: "9001",
+        name: "Summer creative",
+        type: "DEMAND_GEN_MULTI_ASSET_AD",
+        status: "ENABLED",
+        spend: 125.5,
+        impressions: 10000,
+        clicks: 250,
+        conversions: 12,
+        conversionValue: 490,
+      },
+    ]);
+
+    const upstream = requestedUrl(fetcher);
+    expect(upstream.searchParams.get("date_from")).toBe("2026-08-08");
+    expect(upstream.searchParams.get("date_to")).toBe("2026-08-14");
+    expect(upstream.searchParams.get("_max_rows")).toBe("1001");
+    expect(upstream.searchParams.get("filter")).toBe(JSON.stringify([
+      ["account_id", "eq", "123-456-7890"],
+      "and",
+      ["advertising_channel_type", "eq", "DEMAND_GEN"],
+    ]));
+    const fields = upstream.searchParams.get("fields")?.split(",") ?? [];
+    expect(fields).toEqual(expect.arrayContaining([
+      "campaign_id",
+      "ad_id",
+      "ad_group_ad_ad_name",
+      "ad_type",
+      "ad_group_ad_status",
+      "spend",
+    ]));
+    expect(fields).not.toContain("date");
+  });
+
+  it("reads exact PMax products and keeps the full Merchant identity", async () => {
+    const fetcher = mockFetch(
+      jsonResponse({
+        data: [
+          {
+            account_id: "123-456-7890",
+            account_currency_code: "EUR",
+            account_time_zone: "Europe/Lisbon",
+            campaign_id: "84",
+            advertising_channel_type: "PERFORMANCE_MAX",
+            product_merchant_id: 123456789,
+            product_feed_label: "PT",
+            product_language: "languageConstants/1014",
+            product_country: "geoTargetConstants/2620",
+            product_channel: "ONLINE",
+            product_item_id: "shopify_PT_123_456",
+            product_title: "Linen dress",
+            product_brand: "Northwind",
+            spend: "25.25",
+            impressions: "2000",
+            clicks: "80",
+            conversions: "3.5",
+            conversion_value: "120",
+          },
+        ],
+      }),
+    );
+
+    await expect(
+      fetchGoogleAdsPmaxProductBreakdown(
+        "123-456-7890",
+        "2026-08-08",
+        "2026-08-14",
+        { fetcher: fetcher as typeof fetch },
+      ),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        accountId: "123-456-7890",
+        customerId: "1234567890",
+        campaignId: "84",
+        merchantId: "123456789",
+        feedLabel: "PT",
+        language: "languageConstants/1014",
+        country: "geoTargetConstants/2620",
+        channel: "ONLINE",
+        itemId: "shopify_PT_123_456",
+        title: "Linen dress",
+        brand: "Northwind",
+        spend: 25.25,
+        conversions: 3.5,
+        conversionValue: 120,
+      }),
+    ]);
+
+    const upstream = requestedUrl(fetcher);
+    expect(upstream.searchParams.get("_max_rows")).toBe("10001");
+    expect(upstream.searchParams.get("filter")).toBe(JSON.stringify([
+      ["account_id", "eq", "123-456-7890"],
+      "and",
+      ["advertising_channel_type", "eq", "PERFORMANCE_MAX"],
+      "and",
+      ["spend", "gt", 0],
+    ]));
+    const fields = upstream.searchParams.get("fields")?.split(",") ?? [];
+    expect(fields).toEqual(expect.arrayContaining([
+      "product_merchant_id",
+      "product_feed_label",
+      "product_language",
+      "product_country",
+      "product_channel",
+      "product_item_id",
+      "product_title",
+      "product_brand",
+      "spend",
+    ]));
+    expect(fields).not.toContain("date");
+  });
+
+  it("fails campaign detail closed on identity escape and sentinel truncation", async () => {
+    const fetcher = mockFetch(
+      jsonResponse({
+        data: [
+          {
+            account_id: "987-654-3210",
+            account_currency_code: "EUR",
+            account_time_zone: "Europe/Lisbon",
+            campaign_id: "42",
+            advertising_channel_type: "DEMAND_GEN",
+            ad_id: "1",
+            ad_group_ad_ad_name: null,
+            ad_type: "DEMAND_GEN_CAROUSEL_AD",
+            ad_group_ad_status: "PAUSED",
+            spend: 0,
+            impressions: 0,
+            clicks: 0,
+            conversions: 0,
+            conversion_value: 0,
+          },
+        ],
+      }),
+      jsonResponse({ data: Array.from({ length: 10_001 }, () => ({})) }),
+    );
+
+    await expect(
+      fetchGoogleAdsDemandGenAdBreakdown(
+        "123-456-7890",
+        "2026-08-14",
+        "2026-08-14",
+        { fetcher: fetcher as typeof fetch },
+      ),
+    ).rejects.toMatchObject({ code: "invalid_response", status: 502 });
+    await expect(
+      fetchGoogleAdsPmaxProductBreakdown(
+        "123-456-7890",
+        "2026-08-14",
+        "2026-08-14",
+        { fetcher: fetcher as typeof fetch },
+      ),
+    ).rejects.toMatchObject({ code: "invalid_response", status: 502 });
+  });
+
+  it("rejects zero-spend and non-unique stable Windsor product identities", async () => {
+    const product = (title: string, brand: string, spend: number) => ({
+      account_id: "123-456-7890",
+      account_currency_code: "EUR",
+      account_time_zone: "Europe/Lisbon",
+      campaign_id: "84",
+      advertising_channel_type: "PERFORMANCE_MAX",
+      product_merchant_id: 123456789,
+      product_feed_label: "PT",
+      product_language: "languageConstants/1014",
+      product_country: "geoTargetConstants/2620",
+      product_channel: "ONLINE",
+      product_item_id: "shopify_PT_123_456",
+      product_title: title,
+      product_brand: brand,
+      spend,
+      impressions: 10,
+      clicks: 2,
+      conversions: 1,
+      conversion_value: 5,
+    });
+    const fetcher = mockFetch(
+      jsonResponse({ data: [product("Old title", "Old brand", 1), product("New title", "New brand", 2)] }),
+      jsonResponse({ data: [product("Current title", "Current brand", 0)] }),
+    );
+
+    await expect(
+      fetchGoogleAdsPmaxProductBreakdown(
+        "123-456-7890",
+        "2026-08-08",
+        "2026-08-14",
+        { fetcher: fetcher as typeof fetch },
+      ),
+    ).rejects.toMatchObject({ code: "invalid_response", status: 502 });
+    await expect(
+      fetchGoogleAdsPmaxProductBreakdown(
+        "123-456-7890",
+        "2026-08-08",
+        "2026-08-14",
+        { fetcher: fetcher as typeof fetch },
+      ),
+    ).rejects.toMatchObject({ code: "invalid_response", status: 502 });
   });
 
   it("encrypts the co-user correlation token before persistence", async () => {

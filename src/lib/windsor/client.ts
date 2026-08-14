@@ -19,6 +19,7 @@ const CONNECTORS_ORIGIN = "https://connectors.windsor.ai";
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 const AUTHORIZATION_REQUEST_TIMEOUT_MS = 25_000;
 const MAX_JSON_CHARS = 1_000_000;
+const MAX_PRODUCT_JSON_CHARS = 8_000_000;
 const MAX_SECRET_CHARS = 4_096;
 const MAX_REPORTING_RANGE_DAYS = 366;
 
@@ -112,6 +113,46 @@ export type WindsorGoogleAdsCampaignRow = {
   conversionValue: number;
 };
 
+/** One range-aggregated Demand Gen ad for an exact Windsor account. */
+export type WindsorGoogleAdsDemandGenAdRow = {
+  accountId: string;
+  customerId: string;
+  currency: string;
+  timeZone: string;
+  campaignId: string;
+  adId: string;
+  name: string | null;
+  type: string;
+  status: "ENABLED" | "PAUSED" | "REMOVED";
+  spend: number;
+  impressions: number;
+  clicks: number;
+  conversions: number;
+  conversionValue: number;
+};
+
+/** One range-aggregated PMax product row, retaining the full Merchant tuple. */
+export type WindsorGoogleAdsPmaxProductRow = {
+  accountId: string;
+  customerId: string;
+  currency: string;
+  timeZone: string;
+  campaignId: string;
+  merchantId: string;
+  feedLabel: string;
+  language: string;
+  country: string;
+  channel: string;
+  itemId: string;
+  title: string;
+  brand: string | null;
+  spend: number;
+  impressions: number;
+  clicks: number;
+  conversions: number;
+  conversionValue: number;
+};
+
 export type WindsorGoogleAdsHealth =
   | {
       ok: true;
@@ -133,6 +174,10 @@ export type WindsorRequestOptions = {
   fetcher?: typeof fetch;
   signal?: AbortSignal;
   timeoutMs?: number;
+};
+
+type WindsorInternalRequestOptions = WindsorRequestOptions & {
+  maxJsonChars?: number;
 };
 
 export type WindsorPollOptions = WindsorRequestOptions & {
@@ -371,6 +416,112 @@ function invalidCampaignResponse(): WindsorError {
   );
 }
 
+function invalidDemandGenResponse(): WindsorError {
+  return new WindsorError(
+    "invalid_response",
+    "Windsor returned invalid Google Ads Demand Gen ads.",
+    502,
+  );
+}
+
+function invalidPmaxProductResponse(): WindsorError {
+  return new WindsorError(
+    "invalid_response",
+    "Windsor returned invalid Google Ads PMax products.",
+    502,
+  );
+}
+
+type ReportingIdentity = {
+  accountId: string;
+  customerId: string;
+  currency: string;
+  timeZone: string;
+};
+
+function exactReportingIdentity(
+  raw: Record<string, unknown>,
+  expectedCustomerId: string,
+  invalid: () => WindsorError,
+): ReportingIdentity {
+  if (typeof raw.account_id !== "string") throw invalid();
+  let reported: { accountId: string; customerId: string };
+  try {
+    reported = normalizeGoogleAdsCustomerId(raw.account_id);
+  } catch {
+    throw invalid();
+  }
+  const currency = typeof raw.account_currency_code === "string"
+    ? raw.account_currency_code.trim().toUpperCase()
+    : "";
+  const timeZone = typeof raw.account_time_zone === "string"
+    ? raw.account_time_zone.trim()
+    : "";
+  if (
+    reported.customerId !== expectedCustomerId ||
+    !/^[A-Z]{3}$/.test(currency) ||
+    !timeZone ||
+    timeZone.length > 100 ||
+    /[\u0000-\u001f\u007f]/.test(timeZone)
+  ) {
+    throw invalid();
+  }
+  return { ...reported, currency, timeZone };
+}
+
+function breakdownNumber(
+  value: unknown,
+  invalid: () => WindsorError,
+  integer = false,
+): number {
+  if (
+    (typeof value !== "number" && typeof value !== "string") ||
+    (typeof value === "string" && value.trim() === "")
+  ) {
+    throw invalid();
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0 || (integer && !Number.isSafeInteger(parsed))) {
+    throw invalid();
+  }
+  return parsed === 0 ? 0 : parsed;
+}
+
+function breakdownText(
+  value: unknown,
+  invalid: () => WindsorError,
+  maxLength: number,
+): string {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!text || text.length > maxLength || /[\u0000-\u001f\u007f]/.test(text)) {
+    throw invalid();
+  }
+  return text;
+}
+
+function optionalBreakdownText(
+  value: unknown,
+  invalid: () => WindsorError,
+  maxLength: number,
+): string | null {
+  if (value == null || value === "") return null;
+  return breakdownText(value, invalid, maxLength);
+}
+
+function breakdownIntegerId(
+  value: unknown,
+  invalid: () => WindsorError,
+  maxLength = 30,
+): string {
+  const text = typeof value === "string"
+    ? value.trim()
+    : typeof value === "number" && Number.isSafeInteger(value)
+      ? String(value)
+      : "";
+  if (!new RegExp(`^\\d{1,${maxLength}}$`).test(text)) throw invalid();
+  return text;
+}
+
 function dailyNumber(value: unknown): number {
   if (
     (typeof value !== "number" && typeof value !== "string") ||
@@ -496,10 +647,11 @@ function timedSignal(external: AbortSignal | undefined, timeoutMs: number) {
 
 async function requestJson(
   url: URL,
-  options: WindsorRequestOptions = {},
+  options: WindsorInternalRequestOptions = {},
 ): Promise<unknown> {
   const apiKey = requireApiKey();
   const timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const maxJsonChars = options.maxJsonChars ?? MAX_JSON_CHARS;
   if (!Number.isFinite(timeoutMs) || timeoutMs < 250 || timeoutMs > 30_000) {
     throw new WindsorError("invalid_request", "Windsor request timeout is invalid.", 400);
   }
@@ -521,7 +673,7 @@ async function requestJson(
     if (!response.ok) throw upstreamError(response);
 
     const declaredLength = Number(response.headers.get("content-length") ?? "0");
-    if (Number.isFinite(declaredLength) && declaredLength > MAX_JSON_CHARS) {
+    if (Number.isFinite(declaredLength) && declaredLength > maxJsonChars) {
       throw new WindsorError(
         "invalid_response",
         "Windsor returned a response that is too large.",
@@ -539,7 +691,7 @@ async function requestJson(
         502,
       );
     }
-    if (text.length > MAX_JSON_CHARS) {
+    if (text.length > maxJsonChars) {
       throw new WindsorError(
         "invalid_response",
         "Windsor returned a response that is too large.",
@@ -788,7 +940,7 @@ export async function fetchGoogleAdsDailyBreakdown(
     await requestJson(url, options),
     ["data", "results", "rows"],
   );
-  if (rawRows.length > maxRows) throw invalidDailyResponse();
+  if (rawRows.length >= maxRows) throw invalidDailyResponse();
 
   const byDay = new Map<string, WindsorGoogleAdsDailyRow>();
   let currency: string | null = null;
@@ -986,6 +1138,187 @@ export async function fetchGoogleAdsCampaignBreakdown(
 
   return [...campaigns.values()].sort(
     (left, right) => right.spend - left.spend || left.campaignId.localeCompare(right.campaignId),
+  );
+}
+
+/**
+ * Reads one aggregate row per Demand Gen ad. The account/channel filters and
+ * omitted date dimension keep the response exact and bounded for the range.
+ */
+export async function fetchGoogleAdsDemandGenAdBreakdown(
+  accountId: string,
+  from: string,
+  to: string,
+  options: WindsorRequestOptions = {},
+): Promise<WindsorGoogleAdsDemandGenAdRow[]> {
+  const ids = normalizeGoogleAdsCustomerId(accountId);
+  reportingRange(from, to);
+  const maxRows = 1_001;
+  const url = new URL(`/${WINDSOR_DATASOURCE}`, CONNECTORS_ORIGIN);
+  url.searchParams.set(
+    "fields",
+    "account_id,account_currency_code,account_time_zone,campaign_id," +
+      "advertising_channel_type,ad_id,ad_group_ad_ad_name,ad_type," +
+      "ad_group_ad_status,spend,impressions,clicks,conversions,conversion_value",
+  );
+  url.searchParams.set("date_from", from);
+  url.searchParams.set("date_to", to);
+  url.searchParams.set(
+    "filter",
+    JSON.stringify([
+      ["account_id", "eq", ids.accountId],
+      "and",
+      ["advertising_channel_type", "eq", "DEMAND_GEN"],
+    ]),
+  );
+  url.searchParams.set("_max_rows", String(maxRows));
+  url.searchParams.set("_renderer", "json");
+
+  const rawRows = arrayPayload(
+    await requestJson(url, options),
+    ["data", "results", "rows"],
+  );
+  if (rawRows.length >= maxRows) throw invalidDemandGenResponse();
+
+  const rows = new Map<string, WindsorGoogleAdsDemandGenAdRow>();
+  for (const value of rawRows) {
+    const raw = asRecord(value);
+    if (!raw) throw invalidDemandGenResponse();
+    const invalid = invalidDemandGenResponse;
+    const identity = exactReportingIdentity(raw, ids.customerId, invalid);
+    const campaignId = breakdownIntegerId(raw.campaign_id, invalid);
+    const adId = breakdownIntegerId(raw.ad_id, invalid);
+    const channel = breakdownText(raw.advertising_channel_type, invalid, 80).toUpperCase();
+    const type = breakdownText(raw.ad_type, invalid, 100).toUpperCase();
+    const status = breakdownText(raw.ad_group_ad_status, invalid, 40).toUpperCase();
+    if (
+      channel !== "DEMAND_GEN" ||
+      !/^DEMAND_GEN_[A-Z0-9_]{1,80}$/.test(type) ||
+      !["ENABLED", "PAUSED", "REMOVED"].includes(status)
+    ) {
+      throw invalid();
+    }
+    const row: WindsorGoogleAdsDemandGenAdRow = {
+      ...identity,
+      campaignId,
+      adId,
+      name: optionalBreakdownText(raw.ad_group_ad_ad_name, invalid, 500),
+      type,
+      status: status as WindsorGoogleAdsDemandGenAdRow["status"],
+      spend: breakdownNumber(raw.spend, invalid),
+      impressions: breakdownNumber(raw.impressions, invalid, true),
+      clicks: breakdownNumber(raw.clicks, invalid, true),
+      conversions: breakdownNumber(raw.conversions, invalid),
+      conversionValue: breakdownNumber(raw.conversion_value, invalid),
+    };
+    const key = `${campaignId}\u0000${adId}`;
+    if (rows.has(key)) throw invalid();
+    rows.set(key, row);
+  }
+  return [...rows.values()].sort(
+    (left, right) =>
+      right.spend - left.spend ||
+      left.campaignId.localeCompare(right.campaignId) ||
+      left.adId.localeCompare(right.adId),
+  );
+}
+
+/** Exact PMax shopping-product performance, retaining every Merchant key dimension. */
+export async function fetchGoogleAdsPmaxProductBreakdown(
+  accountId: string,
+  from: string,
+  to: string,
+  options: WindsorRequestOptions = {},
+): Promise<WindsorGoogleAdsPmaxProductRow[]> {
+  const ids = normalizeGoogleAdsCustomerId(accountId);
+  reportingRange(from, to);
+  const maxRows = 10_001;
+  const url = new URL(`/${WINDSOR_DATASOURCE}`, CONNECTORS_ORIGIN);
+  url.searchParams.set(
+    "fields",
+    "account_id,account_currency_code,account_time_zone,campaign_id," +
+      "advertising_channel_type,product_merchant_id,product_feed_label," +
+      "product_language,product_country,product_channel,product_item_id," +
+      "product_title,product_brand,spend,impressions,clicks,conversions," +
+      "conversion_value",
+  );
+  url.searchParams.set("date_from", from);
+  url.searchParams.set("date_to", to);
+  url.searchParams.set(
+    "filter",
+    JSON.stringify([
+      ["account_id", "eq", ids.accountId],
+      "and",
+      ["advertising_channel_type", "eq", "PERFORMANCE_MAX"],
+      "and",
+      ["spend", "gt", 0],
+    ]),
+  );
+  url.searchParams.set("_max_rows", String(maxRows));
+  url.searchParams.set("_renderer", "json");
+
+  const rawRows = arrayPayload(
+    await requestJson(url, { ...options, maxJsonChars: MAX_PRODUCT_JSON_CHARS }),
+    ["data", "results", "rows"],
+  );
+  if (rawRows.length >= maxRows) throw invalidPmaxProductResponse();
+
+  const rows = new Map<string, WindsorGoogleAdsPmaxProductRow>();
+  for (const value of rawRows) {
+    const raw = asRecord(value);
+    if (!raw) throw invalidPmaxProductResponse();
+    const invalid = invalidPmaxProductResponse;
+    const identity = exactReportingIdentity(raw, ids.customerId, invalid);
+    const campaignId = breakdownIntegerId(raw.campaign_id, invalid);
+    if (
+      breakdownText(raw.advertising_channel_type, invalid, 80).toUpperCase() !==
+      "PERFORMANCE_MAX"
+    ) {
+      throw invalid();
+    }
+    const merchantId = breakdownIntegerId(raw.product_merchant_id, invalid);
+    const feedLabel = breakdownText(raw.product_feed_label, invalid, 100);
+    const language = breakdownText(raw.product_language, invalid, 120);
+    const country = breakdownText(raw.product_country, invalid, 120);
+    const channel = breakdownText(raw.product_channel, invalid, 40).toUpperCase();
+    const itemId = breakdownText(raw.product_item_id, invalid, 500);
+    const title = breakdownText(raw.product_title, invalid, 1_000);
+    const brand = optionalBreakdownText(raw.product_brand, invalid, 500);
+    const key = [
+      campaignId,
+      merchantId,
+      feedLabel,
+      language,
+      country,
+      channel,
+      itemId,
+    ].join("\u0000");
+    if (rows.has(key)) throw invalid();
+    const spend = breakdownNumber(raw.spend, invalid);
+    if (spend <= 0) throw invalid();
+    rows.set(key, {
+      ...identity,
+      campaignId,
+      merchantId,
+      feedLabel,
+      language,
+      country,
+      channel,
+      itemId,
+      title,
+      brand,
+      spend,
+      impressions: breakdownNumber(raw.impressions, invalid, true),
+      clicks: breakdownNumber(raw.clicks, invalid, true),
+      conversions: breakdownNumber(raw.conversions, invalid),
+      conversionValue: breakdownNumber(raw.conversion_value, invalid),
+    });
+  }
+  return [...rows.values()].sort(
+    (left, right) =>
+      right.spend - left.spend ||
+      left.campaignId.localeCompare(right.campaignId) ||
+      left.itemId.localeCompare(right.itemId),
   );
 }
 

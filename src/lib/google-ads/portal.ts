@@ -8,8 +8,23 @@ import type { RangeSelection } from "@/lib/portal/range";
  * presets), so GAQL always gets a BETWEEN. The dates are regex-validated ISO
  * at parse time — safe to inline in the query string.
  */
-const dateClause = (range: RangeSelection) =>
-  `segments.date BETWEEN '${range.from}' AND '${range.to}'`;
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+const MAX_CAMPAIGN_ROWS = 1_001;
+const MAX_CREATIVE_ROWS = 1_001;
+const MAX_PRODUCT_ROWS = 10_001;
+
+function isDay(value: string): boolean {
+  if (!ISO_DAY.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+const dateClause = (range: Pick<RangeSelection, "from" | "to">) => {
+  if (!isDay(range.from) || !isDay(range.to) || range.from > range.to) {
+    throw new Error("Invalid Google Ads reporting range.");
+  }
+  return `segments.date BETWEEN '${range.from}' AND '${range.to}'`;
+};
 
 const STATUS: Record<string, CampaignStatus> = {
   ENABLED: "active",
@@ -19,6 +34,90 @@ const STATUS: Record<string, CampaignStatus> = {
 
 const micros = (value: unknown) => Number(value ?? 0) / 1_000_000;
 const num = (value: unknown) => Number(value ?? 0);
+
+function integerText(value: unknown, label: string, maxLength = 30): string {
+  const text = typeof value === "string"
+    ? value.trim()
+    : typeof value === "number" && Number.isSafeInteger(value)
+      ? String(value)
+      : "";
+  if (!new RegExp(`^\\d{1,${maxLength}}$`).test(text)) {
+    throw new Error(`Google Ads returned an invalid ${label}.`);
+  }
+  return text;
+}
+
+function cleanText(value: unknown, label: string, maxLength = 500): string {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!text || text.length > maxLength || /[\u0000-\u001f\u007f]/.test(text)) {
+    throw new Error(`Google Ads returned an invalid ${label}.`);
+  }
+  return text;
+}
+
+function optionalText(value: unknown, label: string, maxLength = 500): string | null {
+  if (value == null || value === "") return null;
+  return cleanText(value, label, maxLength);
+}
+
+function nonNegative(value: unknown, label: string, integer = false): number {
+  if (
+    (typeof value !== "number" && typeof value !== "string") ||
+    (typeof value === "string" && value.trim() === "")
+  ) {
+    throw new Error(`Google Ads returned a missing ${label}.`);
+  }
+  const parsed = Number(value);
+  if (
+    !Number.isFinite(parsed) ||
+    parsed < 0 ||
+    (integer && !Number.isSafeInteger(parsed))
+  ) {
+    throw new Error(`Google Ads returned an invalid ${label}.`);
+  }
+  return parsed === 0 ? 0 : parsed;
+}
+
+function exactCustomer(
+  row: GaqlRow,
+  requestedCustomerId: string,
+): { customerId: string; currency: string; timeZone: string } {
+  const expected = requestedCustomerId.replace(/\D/g, "");
+  if (!/^\d{10}$/.test(expected)) {
+    throw new Error("Invalid Google Ads customer identity.");
+  }
+  const customer = row.customer ?? {};
+  const customerId = integerText(customer.id, "customer identity", 10);
+  const currency = cleanText(customer.currencyCode, "customer currency", 12).toUpperCase();
+  const timeZone = cleanText(customer.timeZone, "customer time zone", 100);
+  let validTimeZone = true;
+  try {
+    new Intl.DateTimeFormat("en", { timeZone }).format(0);
+  } catch {
+    validTimeZone = false;
+  }
+  if (customerId !== expected || !/^[A-Z]{3}$/.test(currency) || !validTimeZone) {
+    throw new Error("Google Ads returned a different customer identity.");
+  }
+  return { customerId, currency, timeZone };
+}
+
+function detailMetrics(row: GaqlRow) {
+  const metrics = row.metrics ?? {};
+  return {
+    spend: nonNegative(metrics.costMicros, "spend") / 1_000_000,
+    impressions: nonNegative(metrics.impressions, "impressions", true),
+    clicks: nonNegative(metrics.clicks, "clicks", true),
+    conversions: nonNegative(metrics.conversions, "conversions"),
+    conversionValue: nonNegative(metrics.conversionsValue, "conversion value"),
+  };
+}
+
+function assertBounded(rows: GaqlRow[], report: string, sentinel: number) {
+  if (rows.length >= sentinel) {
+    throw new Error(`Google Ads returned too many ${report} rows for an exact report.`);
+  }
+}
 
 function hasShoppingFeed(campaign: Record<string, unknown>): boolean {
   const value = campaign.shoppingSetting;
@@ -79,8 +178,326 @@ export type LiveCampaign = Campaign & {
   /** True only when Google reports a Merchant Center id for this campaign. */
   shoppingFeed: boolean;
   /** Google conversion value divided by Google spend. */
-  googleRoas: number;
+  googleRoas: number | null;
 };
+
+/** One exact range-aggregated Demand Gen ad from a legacy Google connection. */
+export type LiveDemandGenAdPerformance = {
+  adAccountId: string;
+  customerId: string;
+  currency: string;
+  timeZone: string;
+  providerCampaignId: string;
+  providerAdId: string;
+  name: string | null;
+  type: string;
+  status: CampaignStatus;
+  spend: number;
+  impressions: number;
+  clicks: number;
+  conversions: number;
+  conversionValue: number;
+};
+
+/**
+ * One exact provider product row. The full Merchant feed tuple is retained:
+ * offer ids alone are not globally unique across feeds, countries or channels.
+ */
+export type LivePmaxProductPerformance = {
+  adAccountId: string;
+  customerId: string;
+  currency: string;
+  timeZone: string;
+  providerCampaignId: string;
+  merchantId: string;
+  feedLabel: string;
+  language: string;
+  country: string;
+  channel: string;
+  itemId: string;
+  title: string;
+  brand: string | null;
+  spend: number;
+  impressions: number;
+  clicks: number;
+  conversions: number;
+  conversionValue: number;
+};
+
+/** Unified row consumed by the Analytics campaign expansion. */
+export type GoogleCampaignBreakdownRow = {
+  /** Internal ad_accounts UUID, never the provider customer id. */
+  accountId: string;
+  campaignId: string;
+  provider: "google_ads";
+  kind: "creative" | "product";
+  /** Provider ad id, or the complete encoded Merchant product tuple. */
+  id: string;
+  name: string | null;
+  detail: string | null;
+  spend: number;
+  impressions: number;
+  clicks: number;
+  conversions: number;
+  googleRevenue: number;
+};
+
+/**
+ * Exact, bounded Demand Gen ad performance for every campaign in one account.
+ * The date is deliberately absent from SELECT so each row covers the requested
+ * inclusive range rather than multiplying the row count by day.
+ */
+export async function fetchLiveDemandGenAdPerformance(
+  customerId: string,
+  refreshToken: string,
+  accountId: string,
+  range: Pick<RangeSelection, "from" | "to">,
+): Promise<LiveDemandGenAdPerformance[]> {
+  const rows = await searchGoogleAds(
+    customerId,
+    refreshToken,
+    `SELECT
+      customer.id,
+      customer.currency_code,
+      customer.time_zone,
+      campaign.id,
+      campaign.advertising_channel_type,
+      ad_group_ad.ad.id,
+      ad_group_ad.ad.name,
+      ad_group_ad.ad.type,
+      ad_group_ad.status,
+      metrics.cost_micros,
+      metrics.impressions,
+      metrics.clicks,
+      metrics.conversions,
+      metrics.conversions_value
+    FROM ad_group_ad
+    WHERE campaign.advertising_channel_type = 'DEMAND_GEN'
+      AND ${dateClause(range)}
+    ORDER BY metrics.cost_micros DESC, campaign.id, ad_group_ad.ad.id
+    LIMIT ${MAX_CREATIVE_ROWS}`,
+  );
+  assertBounded(rows, "Demand Gen ad", MAX_CREATIVE_ROWS);
+
+  const seen = new Set<string>();
+  return rows.map((row) => {
+    const identity = exactCustomer(row, customerId);
+    const campaign = row.campaign ?? {};
+    const adGroupAd = row.adGroupAd ?? {};
+    const ad = adGroupAd.ad && typeof adGroupAd.ad === "object" && !Array.isArray(adGroupAd.ad)
+      ? adGroupAd.ad as Record<string, unknown>
+      : {};
+    const providerCampaignId = integerText(campaign.id, "campaign identity");
+    const providerAdId = integerText(ad.id, "ad identity");
+    const channel = cleanText(
+      campaign.advertisingChannelType,
+      "campaign channel",
+      80,
+    ).toUpperCase();
+    const type = cleanText(ad.type, "Demand Gen ad type", 100).toUpperCase();
+    const providerStatus = cleanText(adGroupAd.status, "ad status", 40).toUpperCase();
+    if (
+      channel !== "DEMAND_GEN" ||
+      !/^DEMAND_GEN_[A-Z0-9_]{1,80}$/.test(type) ||
+      !(providerStatus in STATUS)
+    ) {
+      throw new Error("Google Ads returned an invalid Demand Gen ad row.");
+    }
+    const key = `${providerCampaignId}\u0000${providerAdId}`;
+    if (seen.has(key)) {
+      throw new Error("Google Ads returned duplicate Demand Gen ad identity.");
+    }
+    seen.add(key);
+    return {
+      adAccountId: accountId,
+      ...identity,
+      providerCampaignId,
+      providerAdId,
+      name: optionalText(ad.name, "Demand Gen ad name"),
+      type,
+      status: STATUS[providerStatus],
+      ...detailMetrics(row),
+    };
+  });
+}
+
+/** Exact, bounded product performance for all PMax retail campaigns in one account. */
+export async function fetchLivePmaxProductPerformance(
+  customerId: string,
+  refreshToken: string,
+  accountId: string,
+  range: Pick<RangeSelection, "from" | "to">,
+): Promise<LivePmaxProductPerformance[]> {
+  const rows = await searchGoogleAds(
+    customerId,
+    refreshToken,
+    `SELECT
+      customer.id,
+      customer.currency_code,
+      customer.time_zone,
+      campaign.id,
+      campaign.advertising_channel_type,
+      segments.product_merchant_id,
+      segments.product_feed_label,
+      segments.product_language,
+      segments.product_country,
+      segments.product_channel,
+      segments.product_item_id,
+      segments.product_title,
+      segments.product_brand,
+      metrics.cost_micros,
+      metrics.impressions,
+      metrics.clicks,
+      metrics.conversions,
+      metrics.conversions_value
+    FROM shopping_performance_view
+    WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+      AND ${dateClause(range)}
+      AND metrics.cost_micros > 0
+    ORDER BY metrics.cost_micros DESC, campaign.id, segments.product_item_id
+    LIMIT ${MAX_PRODUCT_ROWS}`,
+  );
+  assertBounded(rows, "Performance Max product", MAX_PRODUCT_ROWS);
+
+  const seen = new Set<string>();
+  return rows.map((row) => {
+    const identity = exactCustomer(row, customerId);
+    const campaign = row.campaign ?? {};
+    const segments = row.segments ?? {};
+    const providerCampaignId = integerText(campaign.id, "campaign identity");
+    if (
+      cleanText(campaign.advertisingChannelType, "campaign channel", 80).toUpperCase() !==
+      "PERFORMANCE_MAX"
+    ) {
+      throw new Error("Google Ads returned a non-PMax product row.");
+    }
+    const merchantId = integerText(segments.productMerchantId, "product merchant identity");
+    const feedLabel = cleanText(segments.productFeedLabel, "product feed label", 100);
+    const language = cleanText(segments.productLanguage, "product language", 120);
+    const country = cleanText(segments.productCountry, "product country", 120);
+    const channel = cleanText(segments.productChannel, "product channel", 40).toUpperCase();
+    const itemId = cleanText(segments.productItemId, "product item identity", 500);
+    const title = cleanText(segments.productTitle, "product title", 1_000);
+    const brand = optionalText(segments.productBrand, "product brand", 500);
+    const key = [
+      providerCampaignId,
+      merchantId,
+      feedLabel,
+      language,
+      country,
+      channel,
+      itemId,
+    ].join("\u0000");
+    if (seen.has(key)) {
+      throw new Error("Google Ads returned a non-unique PMax product identity.");
+    }
+    seen.add(key);
+    const metrics = detailMetrics(row);
+    if (metrics.spend <= 0) {
+      throw new Error("Google Ads returned a PMax product without spend.");
+    }
+    return {
+      adAccountId: accountId,
+      ...identity,
+      providerCampaignId,
+      merchantId,
+      feedLabel,
+      language,
+      country,
+      channel,
+      itemId,
+      title,
+      brand,
+      ...metrics,
+    };
+  });
+}
+
+function merchantProductKey(product: LivePmaxProductPerformance): string {
+  return [
+    product.merchantId,
+    product.feedLabel,
+    product.language,
+    product.country,
+    product.channel,
+    product.itemId,
+  ].map(encodeURIComponent).join("/");
+}
+
+/** Unified legacy Demand Gen family; independent so callers can fail open by type. */
+export async function fetchLiveGoogleDemandGenBreakdowns(
+  customerId: string,
+  refreshToken: string,
+  accountId: string,
+  range: Pick<RangeSelection, "from" | "to">,
+): Promise<GoogleCampaignBreakdownRow[]> {
+  const creatives = await fetchLiveDemandGenAdPerformance(
+    customerId,
+    refreshToken,
+    accountId,
+    range,
+  );
+  return creatives.map((creative): GoogleCampaignBreakdownRow => ({
+    accountId,
+    campaignId: creative.providerCampaignId,
+    provider: "google_ads",
+    kind: "creative",
+    id: creative.providerAdId,
+    name: creative.name,
+    detail: creative.type,
+    spend: creative.spend,
+    impressions: creative.impressions,
+    clicks: creative.clicks,
+    conversions: creative.conversions,
+    googleRevenue: creative.conversionValue,
+  }));
+}
+
+/** Unified legacy PMax product family; independent so callers can fail open by type. */
+export async function fetchLiveGooglePmaxProductBreakdowns(
+  customerId: string,
+  refreshToken: string,
+  accountId: string,
+  range: Pick<RangeSelection, "from" | "to">,
+): Promise<GoogleCampaignBreakdownRow[]> {
+  const products = await fetchLivePmaxProductPerformance(
+    customerId,
+    refreshToken,
+    accountId,
+    range,
+  );
+  return products.map((product): GoogleCampaignBreakdownRow => ({
+    accountId,
+    campaignId: product.providerCampaignId,
+    provider: "google_ads",
+    kind: "product",
+    id: merchantProductKey(product),
+    name: product.title,
+    detail: product.brand,
+    spend: product.spend,
+    impressions: product.impressions,
+    clicks: product.clicks,
+    conversions: product.conversions,
+    googleRevenue: product.conversionValue,
+  }));
+}
+
+/**
+ * Both exact legacy detail families for one account. Provider errors are not
+ * converted to empty rows, allowing the caller to expose an honest failure.
+ */
+export async function fetchLiveGoogleCampaignBreakdowns(
+  customerId: string,
+  refreshToken: string,
+  accountId: string,
+  range: Pick<RangeSelection, "from" | "to">,
+): Promise<GoogleCampaignBreakdownRow[]> {
+  const [creatives, products] = await Promise.all([
+    fetchLiveGoogleDemandGenBreakdowns(customerId, refreshToken, accountId, range),
+    fetchLiveGooglePmaxProductBreakdowns(customerId, refreshToken, accountId, range),
+  ]);
+  return [...creatives, ...products];
+}
 
 /** Live campaigns for one customer, with everything Google will give us. */
 export async function fetchLiveCampaignsDetailed(
@@ -88,9 +505,13 @@ export async function fetchLiveCampaignsDetailed(
   refreshToken: string,
   accountId: string,
   range: RangeSelection,
+  expectedCurrency?: string,
 ): Promise<LiveCampaign[]> {
   const query = `
     SELECT
+      customer.id,
+      customer.currency_code,
+      customer.time_zone,
       campaign.id,
       campaign.name,
       campaign.status,
@@ -101,29 +522,60 @@ export async function fetchLiveCampaignsDetailed(
       metrics.cost_micros,
       metrics.impressions,
       metrics.clicks,
-      metrics.ctr,
-      metrics.average_cpc,
       metrics.conversions,
       metrics.conversions_value
     FROM campaign
     WHERE ${dateClause(range)}
-    ORDER BY metrics.cost_micros DESC
+    ORDER BY metrics.cost_micros DESC, campaign.id
+    LIMIT ${MAX_CAMPAIGN_ROWS}
   `;
 
   const rows = await searchGoogleAds(customerId, refreshToken, query);
+  assertBounded(rows, "campaign", MAX_CAMPAIGN_ROWS);
+  const seen = new Set<string>();
 
   // The REST API serialises fields as camelCase (costMicros, startDateTime), even
   // though the GAQL query above uses the proto snake_case names.
   return rows.map((row: GaqlRow): LiveCampaign => {
+    const identity = exactCustomer(row, customerId);
+    if (expectedCurrency && identity.currency !== expectedCurrency) {
+      throw new Error("Google Ads returned a different campaign currency.");
+    }
     const campaign = row.campaign ?? {};
-    const metrics = row.metrics ?? {};
     const budget = row.campaignBudget ?? {};
-    const spend = micros(metrics.costMicros);
-    const conversionValue = num(metrics.conversionsValue);
+    const metrics = detailMetrics(row);
+    const spend = metrics.spend;
+    const conversionValue = metrics.conversionValue;
     const providerCampaignId = String(campaign.id ?? "").trim();
     if (!/^\d{1,30}$/.test(providerCampaignId)) {
       throw new Error("Google Ads returned an invalid campaign identity.");
     }
+    if (seen.has(providerCampaignId)) {
+      throw new Error("Google Ads returned duplicate campaign identity.");
+    }
+    seen.add(providerCampaignId);
+    const name = cleanText(campaign.name, "campaign name");
+    const providerStatus = cleanText(campaign.status, "campaign status", 40).toUpperCase();
+    const status = STATUS[providerStatus];
+    if (!status) throw new Error("Google Ads returned an invalid campaign status.");
+    const advertisingChannelType = cleanText(
+      campaign.advertisingChannelType,
+      "campaign channel",
+      100,
+    ).toUpperCase();
+    const rawStart = campaign.startDateTime;
+    let startDate: string | null = null;
+    if (rawStart != null && rawStart !== "") {
+      const startText = cleanText(rawStart, "campaign start date", 100);
+      const candidate = startText.slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}(?:[ T].*)?$/.test(startText) || !isDay(candidate)) {
+        throw new Error("Google Ads returned an invalid campaign start date.");
+      }
+      startDate = candidate;
+    }
+    const dailyBudget = budget.amountMicros == null
+      ? null
+      : nonNegative(budget.amountMicros, "daily budget") / 1_000_000;
 
     return {
       // Not a DB uuid — the table is never written in the live path. Prefixed
@@ -131,28 +583,24 @@ export async function fetchLiveCampaignsDetailed(
       id: `gads-${accountId}-${providerCampaignId}`,
       providerCampaignId,
       ad_account_id: accountId,
-      name: String(campaign.name ?? "—"),
-      status: STATUS[String(campaign.status ?? "")] ?? "paused",
+      name,
+      status,
       spend,
-      impressions: num(metrics.impressions),
-      clicks: num(metrics.clicks),
-      ctr: num(metrics.ctr),
-      cpc: micros(metrics.averageCpc),
-      daily_budget: budget.amountMicros != null ? micros(budget.amountMicros) : null,
+      impressions: metrics.impressions,
+      clicks: metrics.clicks,
+      ctr: metrics.impressions > 0 ? metrics.clicks / metrics.impressions : 0,
+      cpc: metrics.clicks > 0 ? spend / metrics.clicks : 0,
+      daily_budget: dailyBudget,
       updated_at: new Date().toISOString(),
       // v23 replaced campaign.start_date with start_date_time. Google returns
       // the latter in the customer's local time (YYYY-MM-DD HH:mm:ss); this
       // view only needs the calendar day, so keep the exact ISO-day prefix.
-      startDate:
-        typeof campaign.startDateTime === "string" &&
-        /^\d{4}-\d{2}-\d{2}(?:[ T].*)?$/.test(campaign.startDateTime)
-          ? campaign.startDateTime.slice(0, 10)
-          : null,
-      conversions: num(metrics.conversions),
+      startDate,
+      conversions: metrics.conversions,
       conversionValue,
-      advertisingChannelType: String(campaign.advertisingChannelType ?? "UNKNOWN"),
+      advertisingChannelType,
       shoppingFeed: hasShoppingFeed(campaign),
-      googleRoas: spend > 0 ? conversionValue / spend : 0,
+      googleRoas: spend > 0 ? conversionValue / spend : null,
     };
   });
 }
@@ -291,9 +739,30 @@ export async function fetchLiveDailyBreakdown(
   refreshToken: string,
   from: string,
   to: string,
+  expectedCurrency: string,
 ): Promise<DailyBreakdown[]> {
+  if (!/^[A-Z]{3}$/.test(expectedCurrency)) {
+    throw new Error("Invalid Google Ads reporting currency.");
+  }
+  const fromTimestamp = Date.parse(`${from}T00:00:00.000Z`);
+  const toTimestamp = Date.parse(`${to}T00:00:00.000Z`);
+  const dayCount = Math.round((toTimestamp - fromTimestamp) / 86_400_000) + 1;
+  if (
+    !isDay(from) ||
+    !isDay(to) ||
+    from > to ||
+    !Number.isSafeInteger(dayCount) ||
+    dayCount < 1 ||
+    dayCount > 366
+  ) {
+    throw new Error("Invalid Google Ads daily reporting range.");
+  }
+  const maxRows = dayCount + 1;
   const query = `
     SELECT
+      customer.id,
+      customer.currency_code,
+      customer.time_zone,
       segments.date,
       metrics.cost_micros,
       metrics.impressions,
@@ -301,24 +770,32 @@ export async function fetchLiveDailyBreakdown(
       metrics.conversions,
       metrics.conversions_value
     FROM customer
-    WHERE segments.date BETWEEN '${from}' AND '${to}'
+    WHERE ${dateClause({ from, to })}
+    ORDER BY segments.date ASC
+    LIMIT ${maxRows}
   `;
 
   const rows = await searchGoogleAds(customerId, refreshToken, query);
-
-  return rows
-    .map((row) => {
-      const metrics = row.metrics ?? {};
-      return {
-        date: String((row.segments ?? {}).date ?? ""),
-        spend: micros(metrics.costMicros),
-        impressions: num(metrics.impressions),
-        clicks: num(metrics.clicks),
-        conversions: num(metrics.conversions),
-        conversionValue: num(metrics.conversionsValue),
-      };
-    })
-    .filter((entry) => entry.date !== "");
+  assertBounded(rows, "daily metric", maxRows);
+  const byDay = new Map<string, DailyBreakdown>();
+  let reportedTimeZone: string | null = null;
+  for (const row of rows) {
+    const identity = exactCustomer(row, customerId);
+    if (identity.currency !== expectedCurrency) {
+      throw new Error("Google Ads returned a different daily reporting currency.");
+    }
+    if (reportedTimeZone !== null && identity.timeZone !== reportedTimeZone) {
+      throw new Error("Google Ads returned inconsistent daily reporting identity.");
+    }
+    reportedTimeZone = identity.timeZone;
+    const date = typeof row.segments?.date === "string" ? row.segments.date.trim() : "";
+    if (!isDay(date) || date < from || date > to || byDay.has(date)) {
+      throw new Error("Google Ads returned an invalid daily reporting day.");
+    }
+    const metrics = detailMetrics(row);
+    byDay.set(date, { date, ...metrics });
+  }
+  return [...byDay.values()].sort((left, right) => left.date.localeCompare(right.date));
 }
 
 /** One creative from the account's asset library. */

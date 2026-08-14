@@ -244,10 +244,13 @@ export type SyncedOrder = {
   lines: SyncedOrderLine[];
 };
 
-// Orders per page × page cap. 2 500 orders per recompute window is plenty for
-// the 7-day incremental sync; a bigger backfill just runs again next window.
+// Each temporal chunk reads at most 10 × 250 orders. A saturated multi-day
+// chunk is split deterministically; a saturated single reporting day fails
+// closed instead of returning a truncated financial rollup.
 const PAGE_SIZE = 250;
 const MAX_PAGES = 10;
+const MAX_REPORTING_DAYS = 366;
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 
 // Which financial statuses count as "the customer paid". This does NOT gate the
 // dashboard's revenue (that is the TOTAL of all real orders, to match Shopify) —
@@ -258,6 +261,111 @@ const PAID_FINANCIAL_STATUSES = new Set([
   "PARTIALLY_REFUNDED",
   "REFUNDED",
 ]);
+
+function validIsoDay(value: string): boolean {
+  if (!ISO_DAY.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+function shiftedDay(value: string, amount: number): string {
+  const date = new Date(`${value}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + amount);
+  return date.toISOString().slice(0, 10);
+}
+
+function reportingDayCount(from: string, to: string): number {
+  if (!validIsoDay(from) || !validIsoDay(to) || from > to) {
+    throw new ShopifyError("The Shopify reporting range is invalid.");
+  }
+  const days = Math.round(
+    (Date.parse(`${to}T00:00:00.000Z`) - Date.parse(`${from}T00:00:00.000Z`)) /
+      86_400_000,
+  ) + 1;
+  if (!Number.isSafeInteger(days) || days < 1 || days > MAX_REPORTING_DAYS) {
+    throw new ShopifyError("The Shopify reporting range is too large.");
+  }
+  return days;
+}
+
+function reportingFormatter(timeZone: string) {
+  try {
+    return new Intl.DateTimeFormat("en-GB", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
+    });
+  } catch {
+    throw new ShopifyError("Shopify returned an invalid reporting time zone.");
+  }
+}
+
+function formatterParts(formatter: Intl.DateTimeFormat, instant: Date) {
+  const parts = formatter.formatToParts(instant);
+  const number = (type: Intl.DateTimeFormatPartTypes) =>
+    Number(parts.find((entry) => entry.type === type)?.value ?? Number.NaN);
+  const result = {
+    year: number("year"),
+    month: number("month"),
+    day: number("day"),
+    hour: number("hour"),
+    minute: number("minute"),
+    second: number("second"),
+  };
+  if (Object.values(result).some((value) => !Number.isFinite(value))) {
+    throw new ShopifyError("Shopify returned an invalid reporting time zone.");
+  }
+  return result;
+}
+
+function reportingMidnight(day: string, formatter: Intl.DateTimeFormat): string {
+  const [year, month, date] = day.split("-").map(Number);
+  const target = Date.UTC(year, month - 1, date);
+  let instant = target;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const represented = formatterParts(formatter, new Date(instant));
+    const representedAsUtc = Date.UTC(
+      represented.year,
+      represented.month - 1,
+      represented.day,
+      represented.hour,
+      represented.minute,
+      represented.second,
+    );
+    const difference = representedAsUtc - target;
+    if (difference === 0) return new Date(instant).toISOString();
+    instant -= difference;
+  }
+  throw new ShopifyError("Shopify reporting midnight could not be resolved exactly.");
+}
+
+function reportingDay(timestamp: string, formatter: Intl.DateTimeFormat): string {
+  const instant = new Date(timestamp);
+  if (!Number.isFinite(instant.getTime())) {
+    throw new ShopifyError("Shopify returned an invalid order timestamp.");
+  }
+  const parts = formatterParts(formatter, instant);
+  return `${parts.year}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`;
+}
+
+function finiteNonNegative(value: unknown, label: string): number {
+  if (
+    (typeof value !== "number" && typeof value !== "string") ||
+    (typeof value === "string" && value.trim() === "")
+  ) {
+    throw new ShopifyError(`Shopify returned a missing ${label}.`);
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new ShopifyError(`Shopify returned an invalid ${label}.`);
+  }
+  return parsed === 0 ? 0 : parsed;
+}
 
 /**
  * Per-day sales for [from, to] (ISO dates, inclusive), plus the currency the
@@ -278,6 +386,137 @@ export async function fetchDailySales(
   to: string,
   graphql: ShopifyGraphqlExecutor = shopifyGraphql,
 ): Promise<{ currency: string | null; days: DailySales[]; orders: SyncedOrder[] }> {
+  type OrderNode = {
+    id: string;
+    createdAt: string;
+    test: boolean;
+    cancelledAt: string | null;
+    displayFinancialStatus: string | null;
+    customerJourneySummary: {
+      firstVisit: {
+        landingPage: string | null;
+        source: string | null;
+        referrerUrl: string | null;
+        utmParameters: { source: string | null } | null;
+      } | null;
+    } | null;
+    totalPriceSet: { shopMoney: { amount: string } } | null;
+    totalRefundedSet: { shopMoney: { amount: string } } | null;
+    lineItems: {
+      pageInfo: { hasNextPage: boolean };
+      nodes: Array<{
+        title: string;
+        sku: string | null;
+        quantity: number;
+        originalUnitPriceSet: { shopMoney: { amount: string } } | null;
+      }>;
+    };
+  };
+  type OrdersResponse = {
+    orders: {
+      pageInfo: { hasNextPage: boolean; endCursor: string | null };
+      nodes: OrderNode[];
+    };
+  };
+
+  reportingDayCount(from, to);
+  const metadata = await graphql<{
+    shop: { currencyCode: string; ianaTimezone: string };
+  }>(
+    shopDomain,
+    accessToken,
+    `query DropscaleDailySalesShop {
+      shop { currencyCode ianaTimezone }
+    }`,
+  );
+  const currency = metadata.shop?.currencyCode?.trim().toUpperCase() ?? "";
+  const timeZone = metadata.shop?.ianaTimezone?.trim() ?? "";
+  if (!/^[A-Z]{3}$/.test(currency) || !timeZone) {
+    throw new ShopifyError("Shopify returned invalid reporting metadata.");
+  }
+  const formatter = reportingFormatter(timeZone);
+
+  const fetchChunk = async (
+    chunkFrom: string,
+    chunkTo: string,
+  ): Promise<OrderNode[]> => {
+    const fromInclusive = reportingMidnight(chunkFrom, formatter);
+    const toExclusive = reportingMidnight(shiftedDay(chunkTo, 1), formatter);
+    const nodes: OrderNode[] = [];
+    const cursors = new Set<string>();
+    let cursor: string | null = null;
+
+    for (let page = 0; page < MAX_PAGES; page += 1) {
+      const data: OrdersResponse = await graphql<OrdersResponse>(
+        shopDomain,
+        accessToken,
+        `query DropscaleDailySalesOrders($q: String!, $cursor: String) {
+          orders(first: ${PAGE_SIZE}, after: $cursor, query: $q, sortKey: CREATED_AT) {
+            pageInfo { hasNextPage endCursor }
+            nodes {
+              id
+              createdAt
+              test
+              cancelledAt
+              displayFinancialStatus
+              customerJourneySummary {
+                firstVisit {
+                  landingPage
+                  source
+                  referrerUrl
+                  utmParameters { source }
+                }
+              }
+              totalPriceSet { shopMoney { amount } }
+              totalRefundedSet { shopMoney { amount } }
+              lineItems(first: 100) {
+                pageInfo { hasNextPage }
+                nodes {
+                  title
+                  sku
+                  quantity
+                  originalUnitPriceSet { shopMoney { amount } }
+                }
+              }
+            }
+          }
+        }`,
+        {
+          q: `created_at:>='${fromInclusive}' AND created_at:<'${toExclusive}'`,
+          cursor,
+        },
+      );
+      if (
+        !data.orders ||
+        !Array.isArray(data.orders.nodes) ||
+        data.orders.nodes.length > PAGE_SIZE
+      ) {
+        throw new ShopifyError("Shopify returned invalid order pagination.");
+      }
+      nodes.push(...data.orders.nodes);
+      if (!data.orders.pageInfo.hasNextPage) return nodes;
+      const next: string | null = data.orders.pageInfo.endCursor;
+      if (!next || cursors.has(next)) {
+        throw new ShopifyError("Shopify returned invalid order pagination.");
+      }
+      cursors.add(next);
+      cursor = next;
+    }
+
+    if (chunkFrom === chunkTo) {
+      throw new ShopifyError(
+        "A single Shopify reporting day has too many orders for an exact report.",
+      );
+    }
+    const days = reportingDayCount(chunkFrom, chunkTo);
+    const leftTo = shiftedDay(chunkFrom, Math.ceil(days / 2) - 1);
+    const rightFrom = shiftedDay(leftTo, 1);
+    const left = await fetchChunk(chunkFrom, leftTo);
+    const right = await fetchChunk(rightFrom, chunkTo);
+    return [...left, ...right];
+  };
+
+  const orderNodes = await fetchChunk(from, to);
   const byDay = new Map<
     string,
     {
@@ -290,144 +529,96 @@ export async function fetchDailySales(
     }
   >();
   const syncedOrders: SyncedOrder[] = [];
-  let currency: string | null = null;
+  const seenOrders = new Set<string>();
 
-  let cursor: string | null = null;
-  for (let page = 0; page < MAX_PAGES; page++) {
-    const data: {
-      shop: { currencyCode: string };
-      orders: {
-        pageInfo: { hasNextPage: boolean; endCursor: string | null };
-        nodes: {
-          createdAt: string;
-          test: boolean;
-          cancelledAt: string | null;
-          displayFinancialStatus: string | null;
-          customerJourneySummary: {
-            firstVisit: {
-              landingPage: string | null;
-              source: string | null;
-              referrerUrl: string | null;
-              utmParameters: { source: string | null } | null;
-            } | null;
-          } | null;
-          totalPriceSet: { shopMoney: { amount: string } } | null;
-          totalRefundedSet: { shopMoney: { amount: string } } | null;
-          lineItems: {
-            nodes: {
-              title: string;
-              sku: string | null;
-              quantity: number;
-              originalUnitPriceSet: { shopMoney: { amount: string } } | null;
-            }[];
-          };
-        }[];
-      };
-    } = await graphql(
-      shopDomain,
-      accessToken,
-      `query ($q: String!, $cursor: String) {
-        shop { currencyCode }
-        orders(first: ${PAGE_SIZE}, after: $cursor, query: $q) {
-          pageInfo { hasNextPage endCursor }
-          nodes {
-            createdAt
-            test
-            cancelledAt
-            displayFinancialStatus
-            customerJourneySummary {
-              firstVisit {
-                landingPage
-                source
-                referrerUrl
-                utmParameters { source }
-              }
-            }
-            totalPriceSet { shopMoney { amount } }
-            totalRefundedSet { shopMoney { amount } }
-            lineItems(first: 100) {
-              nodes {
-                title
-                sku
-                quantity
-                originalUnitPriceSet { shopMoney { amount } }
-              }
-            }
-          }
-        }
-      }`,
-      { q: `created_at:>='${from}' AND created_at:<='${to}T23:59:59Z'`, cursor },
-    );
-
-    currency = data.shop.currencyCode;
-
-    for (const order of data.orders.nodes) {
-      // Shopify Analytics excludes test-gateway and cancelled orders from its
-      // sales reports; include them and our numbers drift from the report the
-      // client trusts. Filtered here, in code — the search-query syntax for
-      // these is less reliable than the fields themselves.
-      if (order.test || order.cancelledAt) continue;
-
-      // Every real order counts toward revenue (matching Shopify). Payment
-      // status is kept per order, not used to exclude — only the revenue share
-      // narrows to paid orders.
-      const paid =
-        !!order.displayFinancialStatus &&
-        PAID_FINANCIAL_STATUSES.has(order.displayFinancialStatus);
-
-      const day = order.createdAt.slice(0, 10);
-      // GROSS order total (before refunds). Refunds are subtracted ONCE via
-      // totalRefundedSet below — using currentTotalPriceSet here (already net of
-      // refunds) would double-count them and understate net revenue.
-      const total = Number(order.totalPriceSet?.shopMoney.amount ?? 0);
-      const lines = order.lineItems.nodes.map((line) => ({
-        productKey: line.sku?.trim() || line.title,
-        title: line.title,
-        quantity: line.quantity,
-        unitPrice: Number(line.originalUnitPriceSet?.shopMoney.amount ?? 0),
-      }));
-
-      // The store's conversions: every real order except the ones Instagram or
-      // Facebook referred. An order whose journey Shopify does not report at all
-      // stays counted — see referrer.ts on why unknown is not Meta.
-      const visit = order.customerJourneySummary?.firstVisit;
-      const fromMeta = isMetaReferral({
-        source: visit?.source,
-        referrerUrl: visit?.referrerUrl,
-        utmSource: visit?.utmParameters?.source,
-      });
-
-      const entry =
-        byDay.get(day) ??
-        {
-          revenue: 0,
-          orders: 0,
-          refunds: 0,
-          units: 0,
-          attributedOrders: 0,
-          attributedRevenue: 0,
-        };
-      entry.revenue += total;
-      entry.refunds += Number(order.totalRefundedSet?.shopMoney.amount ?? 0);
-      entry.orders += 1;
-      if (!fromMeta) {
-        entry.attributedOrders += 1;
-        entry.attributedRevenue += total;
-      }
-      entry.units += lines.reduce((sum, line) => sum + line.quantity, 0);
-      byDay.set(day, entry);
-
-      syncedOrders.push({
-        date: day,
-        total,
-        paid,
-        landingPath: visit?.landingPage ?? null,
-        lines,
-      });
+  for (const order of orderNodes) {
+    if (!/^gid:\/\/shopify\/Order\/\d+$/.test(order.id) || seenOrders.has(order.id)) {
+      throw new ShopifyError("Shopify returned invalid order identity.");
     }
+    seenOrders.add(order.id);
+    const day = reportingDay(order.createdAt, formatter);
+    if (day < from || day > to) {
+      throw new ShopifyError("Shopify returned an order outside its reporting range.");
+    }
+    // Shopify Analytics excludes test-gateway and cancelled orders from its
+    // sales reports; include them and our numbers drift from the report the
+    // client trusts. Filtered here, in code — the search-query syntax for
+    // these is less reliable than the fields themselves.
+    if (order.test || order.cancelledAt) continue;
 
-    if (!data.orders.pageInfo.hasNextPage) break;
-    cursor = data.orders.pageInfo.endCursor;
+    // Every real order counts toward revenue (matching Shopify). Payment
+    // status is kept per order, not used to exclude — only the revenue share
+    // narrows to paid orders.
+    const paid =
+      !!order.displayFinancialStatus &&
+      PAID_FINANCIAL_STATUSES.has(order.displayFinancialStatus);
+
+    // GROSS order total (before refunds). Refunds are subtracted ONCE via
+    // totalRefundedSet below — using currentTotalPriceSet here (already net of
+    // refunds) would double-count them and understate net revenue.
+    const total = finiteNonNegative(
+      order.totalPriceSet?.shopMoney.amount,
+      "order total",
+    );
+    const refunded = order.totalRefundedSet === null
+      ? 0
+      : finiteNonNegative(order.totalRefundedSet?.shopMoney.amount, "order refund");
+    if (order.lineItems.pageInfo.hasNextPage) {
+      throw new ShopifyError("A Shopify order has too many lines for an exact report.");
+    }
+    const lines = order.lineItems.nodes.map((line) => {
+      const title = typeof line.title === "string" ? line.title.trim() : "";
+      if (!title || !Number.isSafeInteger(line.quantity) || line.quantity < 0) {
+        throw new ShopifyError("Shopify returned an invalid order line.");
+      }
+      return {
+        productKey: line.sku?.trim() || title,
+        title,
+        quantity: line.quantity,
+        unitPrice: finiteNonNegative(
+          line.originalUnitPriceSet?.shopMoney.amount,
+          "order line price",
+        ),
+      };
+    });
+
+    // The store's conversions: every real order except the ones Instagram or
+    // Facebook referred. An order whose journey Shopify does not report at all
+    // stays counted — see referrer.ts on why unknown is not Meta.
+    const visit = order.customerJourneySummary?.firstVisit;
+    const fromMeta = isMetaReferral({
+      source: visit?.source,
+      referrerUrl: visit?.referrerUrl,
+      utmSource: visit?.utmParameters?.source,
+    });
+
+    const entry =
+      byDay.get(day) ??
+      {
+        revenue: 0,
+        orders: 0,
+        refunds: 0,
+        units: 0,
+        attributedOrders: 0,
+        attributedRevenue: 0,
+      };
+    entry.revenue += total;
+    entry.refunds += refunded;
+    entry.orders += 1;
+    if (!fromMeta) {
+      entry.attributedOrders += 1;
+      entry.attributedRevenue += total;
+    }
+    entry.units += lines.reduce((sum, line) => sum + line.quantity, 0);
+    byDay.set(day, entry);
+
+    syncedOrders.push({
+      date: day,
+      total,
+      paid,
+      landingPath: visit?.landingPage ?? null,
+      lines,
+    });
   }
 
   return {

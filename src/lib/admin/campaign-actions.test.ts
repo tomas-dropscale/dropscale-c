@@ -452,7 +452,7 @@ describe("campaign action history projection", () => {
       previous_daily_budget_micros: "25000000",
       next_daily_budget_micros: "30000000",
       currency: "EUR",
-      completed_at: "2026-08-14T09:00:00.000Z",
+      completed_at: "2026-08-14T09:00:00+00:00",
       requested_by: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     } as CampaignActionOperation;
 
@@ -472,7 +472,7 @@ describe("campaign action history projection", () => {
         previousDailyBudget: 25,
         nextDailyBudget: 30,
         currency: "EUR",
-        occurredAt: "2026-08-14T09:00:00.000Z",
+        occurredAt: "2026-08-14T09:00:00+00:00",
         actorName: "Agency Operator",
       },
     ]);
@@ -491,7 +491,7 @@ describe("campaign action history projection", () => {
       previous_daily_budget_micros: null,
       next_daily_budget_micros: null,
       currency: "EUR",
-      completed_at: "2026-08-14T09:00:00.000Z",
+      completed_at: "2026-08-14T09:00:00+00:00",
       requested_by: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     } as CampaignActionOperation;
     const operations: Record<string, ReturnType<typeof vi.fn>> = {};
@@ -519,6 +519,7 @@ describe("campaign action history projection", () => {
       listCampaignActionActivity(
         "55555555-5555-4555-8555-555555555555",
         [operation.ad_account_id, operation.ad_account_id],
+        { from: "2026-08-14", to: "2026-08-14" },
       ),
     ).resolves.toEqual({
       history: [
@@ -526,6 +527,7 @@ describe("campaign action history projection", () => {
           id: operation.id,
           actorName: "Agency Operator",
           action: "campaign_paused",
+          occurredAt: "2026-08-14T09:00:00+00:00",
         }),
       ],
       truncated: false,
@@ -535,6 +537,9 @@ describe("campaign action history projection", () => {
       "55555555-5555-4555-8555-555555555555",
     );
     expect(operations.in).toHaveBeenCalledWith("ad_account_id", [operation.ad_account_id]);
+    expect(operations.or).toHaveBeenCalledWith(
+      "and(completed_at.gte.2026-08-13T23:00:00.000Z,completed_at.lt.2026-08-14T23:00:00.000Z),and(completed_at.is.null,requested_at.gte.2026-08-13T23:00:00.000Z,requested_at.lt.2026-08-14T23:00:00.000Z)",
+    );
     expect(operations.eq).not.toHaveBeenCalledWith("status", "succeeded");
   });
 

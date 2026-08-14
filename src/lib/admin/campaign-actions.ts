@@ -47,6 +47,16 @@ type CampaignOperationHistory = {
   truncated: boolean;
 };
 
+export type CampaignActivityRange = {
+  from: string;
+  to: string;
+};
+
+type CampaignActivityBounds = {
+  fromInclusive: string;
+  toExclusive: string;
+};
+
 type BudgetRequest = {
   requestId: string;
   bindingId: string;
@@ -75,6 +85,55 @@ const MAX_DAILY_BUDGET_MICROS = 1_000_000_000_000;
 
 function invalid(message: string): never {
   throw new ClientOnboardingError("invalid_request", message, 400);
+}
+
+function activityBounds(range: CampaignActivityRange): CampaignActivityBounds {
+  const parseDay = (value: string) => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) invalid("Invalid campaign activity range.");
+    const parsed = new Date(`${value}T00:00:00.000Z`);
+    if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) {
+      invalid("Invalid campaign activity range.");
+    }
+    return parsed;
+  };
+  const fromDay = parseDay(range.from);
+  const toDay = parseDay(range.to);
+  if (fromDay > toDay) invalid("Invalid campaign activity range.");
+  toDay.setUTCDate(toDay.getUTCDate() + 1);
+  const lisbonMidnight = (day: Date) => {
+    const target = Date.UTC(
+      day.getUTCFullYear(),
+      day.getUTCMonth(),
+      day.getUTCDate(),
+    );
+    const formatter = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Europe/Lisbon",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
+    });
+    const parts = formatter.formatToParts(new Date(target));
+    const part = (type: Intl.DateTimeFormatPartTypes) =>
+      Number(parts.find((entry) => entry.type === type)?.value ?? NaN);
+    const representedAsUtc = Date.UTC(
+      part("year"),
+      part("month") - 1,
+      part("day"),
+      part("hour"),
+      part("minute"),
+      part("second"),
+    );
+    if (!Number.isFinite(representedAsUtc)) invalid("Invalid campaign activity range.");
+    return new Date(target - (representedAsUtc - target)).toISOString();
+  };
+  return {
+    fromInclusive: lisbonMidnight(fromDay),
+    toExclusive: lisbonMidnight(toDay),
+  };
 }
 
 function conflict(message: string): never {
@@ -727,9 +786,63 @@ async function loadScopedCampaignActivity(
   service: CampaignActionService,
   clientId: string,
   adAccountIds: string[],
+  bounds: CampaignActivityBounds | null,
 ): Promise<CampaignOperationHistory> {
   const operations: CampaignActionOperation[] = [];
   const allowedAccountIds = new Set(adAccountIds);
+  const escapedScope = (operation: CampaignActionOperation) => {
+    if (
+      operation.client_id !== clientId ||
+      !allowedAccountIds.has(operation.ad_account_id) ||
+      !["requested", "succeeded", "failed", "uncertain"].includes(operation.status)
+    ) {
+      return true;
+    }
+    if (!bounds) return false;
+    const occurredAt = operation.completed_at ?? operation.requested_at;
+    const occurredTimestamp = occurredAt ? Date.parse(occurredAt) : Number.NaN;
+    return (
+      !Number.isFinite(occurredTimestamp) ||
+      occurredTimestamp < Date.parse(bounds.fromInclusive) ||
+      occurredTimestamp >= Date.parse(bounds.toExclusive)
+    );
+  };
+
+  // Analytics always supplies a bounded range. Fetch one sentinel row after
+  // the display cap so the occurred-at predicate is applied before truncation
+  // without composing multiple ambiguous PostgREST `or` parameters.
+  if (bounds) {
+    const query = service
+      .from("campaign_action_operations")
+      .select("*")
+      .eq("client_id", clientId)
+      .in("ad_account_id", adAccountIds)
+      .order("requested_at", { ascending: false })
+      .order("id", { ascending: false })
+      .or(
+        `and(completed_at.gte.${bounds.fromInclusive},completed_at.lt.${bounds.toExclusive}),and(completed_at.is.null,requested_at.gte.${bounds.fromInclusive},requested_at.lt.${bounds.toExclusive})`,
+      );
+    const { data, error } = await query.limit(HISTORY_PAGE_SIZE + 1);
+    if (error || !data) {
+      throw new ClientOnboardingError(
+        "database_error",
+        "Campaign action history is unavailable.",
+        500,
+      );
+    }
+    if (data.some(escapedScope)) {
+      throw new ClientOnboardingError(
+        "database_error",
+        "Campaign action activity escaped its exact scope.",
+        500,
+      );
+    }
+    return {
+      operations: data.slice(0, HISTORY_PAGE_SIZE),
+      truncated: data.length > HISTORY_PAGE_SIZE,
+    };
+  }
+
   let cursor: { requestedAt: string; id: string } | null = null;
   for (let page = 0; page <= MAX_HISTORY_PAGES; page += 1) {
     let query = service
@@ -754,14 +867,7 @@ async function loadScopedCampaignActivity(
         500,
       );
     }
-    if (
-      data.some(
-        (operation) =>
-          operation.client_id !== clientId ||
-          !allowedAccountIds.has(operation.ad_account_id) ||
-          !["requested", "succeeded", "failed", "uncertain"].includes(operation.status),
-      )
-    ) {
+    if (data.some(escapedScope)) {
       throw new ClientOnboardingError(
         "database_error",
         "Campaign action activity escaped its exact scope.",
@@ -818,6 +924,7 @@ export function projectCampaignActionHistory(
 export async function listCampaignActionActivity(
   clientId: string,
   adAccountIds: string[],
+  range?: CampaignActivityRange,
 ): Promise<{ history: CampaignActionHistory[]; truncated: boolean }> {
   await requireClientOnboardingAdmin();
   if (!UUID.test(clientId) || adAccountIds.some((id) => !UUID.test(id))) {
@@ -826,7 +933,12 @@ export async function listCampaignActionActivity(
   const uniqueAccountIds = [...new Set(adAccountIds)];
   if (uniqueAccountIds.length === 0) return { history: [], truncated: false };
   const service = serviceOrThrow();
-  const result = await loadScopedCampaignActivity(service, clientId, uniqueAccountIds);
+  const result = await loadScopedCampaignActivity(
+    service,
+    clientId,
+    uniqueAccountIds,
+    range ? activityBounds(range) : null,
+  );
   const actorNames = await loadCampaignActorNames(service, result.operations);
   return {
     history: projectCampaignActionHistory(result.operations, actorNames),

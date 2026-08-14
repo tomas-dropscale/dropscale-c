@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { ShieldAlert } from "lucide-react";
+import { AlertTriangle, ShieldAlert } from "lucide-react";
 
 import { CampaignsView } from "@/components/admin/campaigns-view";
 import { CampaignsToolbar } from "@/components/admin/campaigns-toolbar";
@@ -64,15 +64,15 @@ export default async function AdminCampaignsPage({
           {
             label: "Revenue",
             value:
-              overview.totals.revenue === null
+              overview.totals.revenue === null || overview.totals.currency === null
                 ? "—"
-                : money(overview.totals.revenue, intl),
+                : money(overview.totals.revenue, intl, overview.totals.currency),
             hint: "Non-Meta Shopify revenue in the reporting rollup",
           },
           {
             label: "Real ROAS",
             value:
-              overview.totals.revenue === null ? "—" : multiplier(overview.totals.roas),
+              overview.totals.roas === null ? "—" : multiplier(overview.totals.roas),
             hint: "Non-Meta Shopify revenue ÷ rollup ad spend",
           },
         ].map((item) => (
@@ -95,12 +95,18 @@ export default async function AdminCampaignsPage({
         {[
           {
             label: "Ad spend",
-            value: money(overview.totals.spend, intl),
+            value:
+              overview.totals.spend === null || overview.totals.currency === null
+                ? "—"
+                : money(overview.totals.spend, intl, overview.totals.currency),
             hint: "Across mapped ad accounts",
           },
           {
             label: "Agency commission",
-            value: money(overview.totals.commission, intl),
+            value:
+              overview.totals.commission === null || overview.totals.currency === null
+                ? "—"
+                : money(overview.totals.commission, intl, overview.totals.currency),
             hint: "Based on each store rate",
           },
           {
@@ -130,10 +136,20 @@ export default async function AdminCampaignsPage({
         </div>
       )}
 
+      {(!overview.totals.rollupComplete || overview.totals.currency === null) && (
+        <div className="panel mb-4 flex items-center gap-2 border-[var(--warning-orange)]/25 px-5 py-3 text-[12.5px] text-[var(--warning-orange)]">
+          <AlertTriangle className="size-4 shrink-0" aria-hidden />
+          {overview.totals.currencies.length > 1
+            ? `Portfolio totals are unavailable because reporting currencies are mixed (${overview.totals.currencies.join(", ")}).`
+            : "Portfolio totals are unavailable because every mapped account and selected day could not be verified."}
+        </div>
+      )}
+
       <CampaignsView
         clients={campaignView.clients}
         history={campaignView.history}
         historyTruncated={campaignView.historyTruncated}
+        range={range}
       />
 
       {overview.internal.length > 0 && (

@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { AdminAnalyticsClient } from "@/lib/admin/analytics";
 import type { AdminClientOverview } from "@/lib/admin/client-overview";
 import type { CampaignActionHistory } from "@/lib/admin/campaigns-view";
+import type { AdminStoreAnalytics } from "@/lib/admin/store-analytics";
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn() }),
@@ -16,7 +17,12 @@ vi.mock("@/components/portal/range-picker", () => ({
 
 vi.mock("@/components/admin/performance-charts", () => ({
   SpendDevelopmentChart: () => <div>Store spend development chart</div>,
+  FunnelDevelopmentChart: () => <div>Funnel Development chart</div>,
 }));
+
+vi.mock("@/components/admin/store-analytics-sections", async () =>
+  import("./store-analytics-sections"),
+);
 
 vi.mock("@/components/ui/badge", () => ({
   Badge: ({ children }: { children: ReactNode }) => <span>{children}</span>,
@@ -147,6 +153,120 @@ function activity(
   };
 }
 
+function storeAnalytics(rows: CampaignActionHistory[] = []): AdminStoreAnalytics {
+  return {
+    clientId: "client-1",
+    storeAccountId: "store-gbp",
+    currency: "GBP",
+    range: { from: "2026-08-01", to: "2026-08-07" },
+    funnel: {
+      state: "ready",
+      data: {
+        daily: [
+          {
+            day: "2026-08-07",
+            sessions: 200,
+            addedToCart: 44,
+            reachedCheckout: 19,
+            completedCheckout: 8,
+          },
+        ],
+        totals: {
+          sessions: 200,
+          addedToCart: 44,
+          reachedCheckout: 19,
+          completedCheckout: 8,
+        },
+      },
+    },
+    campaigns: {
+      state: "ready",
+      data: {
+        rows: [
+          {
+            accountId: "google-child",
+            campaignId: "123456789",
+            name: "PMax · Best sellers",
+            status: "active",
+            type: "PERFORMANCE_MAX",
+            shoppingFeed: true,
+            budget: 90,
+            spend: 250,
+            impressions: 10_000,
+            clicks: 400,
+            conversions: 12,
+            googleRevenue: 800,
+            shopifySessions: 190,
+            shopifyOrders: 8,
+            shopifyRevenue: 625,
+            ctr: 0.04,
+            cpc: 0.625,
+            cpm: 25,
+            cpa: 20.83,
+            googleRoas: 3.2,
+            realRoas: 2.5,
+            attributionState: "matched",
+            breakdown: {
+              state: "unavailable",
+              reason: "Asset detail is not available for this reporting source.",
+              rows: [],
+              sources: [
+                {
+                  provider: "google_ads",
+                  source: "pmax_products",
+                  state: "unavailable",
+                  reason: "Google asset detail is unavailable.",
+                },
+                {
+                  provider: "shopify",
+                  source: "campaign_products",
+                  state: "unavailable",
+                  reason: "Shopify product attribution is unavailable.",
+                },
+              ],
+            },
+          },
+        ],
+      },
+    },
+    collections: {
+      state: "ready",
+      data: {
+        rows: [
+          {
+            collectionId: "collection-1",
+            title: "Best sellers",
+            products: [
+              { productId: "product-1", title: "Lamp", revenue: 300, units: 3 },
+            ],
+            revenue: 625,
+            units: 8,
+            spend: null,
+            roas: null,
+          },
+        ],
+      },
+    },
+    spend: {
+      state: "ready",
+      data: { daily: [{ day: "2026-08-07", spend: 250 }] },
+    },
+    rollupCoverage: {
+      state: "ready",
+      data: { dayCount: 7, refreshed: false },
+    },
+    activity: {
+      state: rows.length ? "ready" : "empty",
+      data: { rows, truncated: false },
+    },
+  };
+}
+
+const verifiedRollup = {
+  state: "ready" as const,
+  data: { dayCount: 7, refreshed: false },
+};
+
 describe("AnalyticsView", () => {
   it("renders store-scoped real metrics, daily spend and newest-first activity", () => {
     const html = renderToStaticMarkup(
@@ -155,11 +275,11 @@ describe("AnalyticsView", () => {
         overview={overview()}
         selectedStoreId="store-gbp"
         range={{ key: "custom", from: "2026-08-01", to: "2026-08-07" }}
-        activity={[
+        storeAnalytics={storeAnalytics([
           activity("older", "2026-08-02T10:00:00Z", "campaign_paused"),
           activity("newest", "2026-08-07T10:00:00Z", "budget_changed"),
-        ]}
-        activityTruncated
+        ])}
+        rollupCoverage={verifiedRollup}
       />,
     );
 
@@ -175,7 +295,6 @@ describe("AnalyticsView", () => {
     expect(html).toContain("grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5");
     expect(html).toContain("Campaign and budget changes for Northwind UK.");
     expect(html).toContain("Budget updated");
-    expect(html).toContain("1,000 most recent verified changes");
     expect(html.indexOf("Campaign newest")).toBeLessThan(html.indexOf("Campaign older"));
     const orderedSections = [
       "Funnel Development",
@@ -187,9 +306,38 @@ describe("AnalyticsView", () => {
     ].map((label) => html.indexOf(label));
     expect(orderedSections.every((index) => index >= 0)).toBe(true);
     expect(orderedSections).toEqual([...orderedSections].sort((a, b) => a - b));
-    expect(html).toContain("Per-campaign Shopify revenue");
-    expect(html).toContain("Collection attribution is not materialised");
+    expect(html).toContain("PMax · Best sellers");
+    expect(html).toContain("PMAX (SF)");
+    expect(html).toContain("Best sellers");
+    expect(html).toContain("200");
+    expect(html).not.toContain("not materialised");
     expect(html).not.toContain("Campaign launched");
+  });
+
+  it("does not present KPI values as complete when exact daily coverage fails", () => {
+    const analytics = storeAnalytics();
+    analytics.spend = {
+      state: "failed",
+      message: "Spend could not be loaded for the complete selected period.",
+    };
+    analytics.rollupCoverage = {
+      state: "failed",
+      message: "The complete selected-period rollup could not be verified.",
+    };
+    const html = renderToStaticMarkup(
+      <AnalyticsView
+        clients={clients}
+        overview={overview()}
+        selectedStoreId="store-gbp"
+        range={{ key: "custom", from: "2026-08-01", to: "2026-08-07" }}
+        storeAnalytics={analytics}
+        rollupCoverage={analytics.rollupCoverage}
+      />,
+    );
+
+    expect(html).toContain("The complete selected-period rollup could not be verified.");
+    expect(html).toContain("Spend could not be loaded for the complete selected period.");
+    expect(html).not.toContain("GBP 2000.00");
   });
 
   it("renders immediate scope controls and the approved all-stores table", () => {
@@ -199,8 +347,8 @@ describe("AnalyticsView", () => {
         overview={overview()}
         selectedStoreId={null}
         range={{ key: "d7", from: "2026-08-01", to: "2026-08-07" }}
-        activity={[]}
-        activityTruncated={false}
+        storeAnalytics={null}
+        rollupCoverage={verifiedRollup}
       />,
     );
 
@@ -220,6 +368,26 @@ describe("AnalyticsView", () => {
     expect(html).not.toContain("Campaign Performance");
   });
 
+  it("does not publish all-store totals when exact coverage cannot be proved", () => {
+    const html = renderToStaticMarkup(
+      <AnalyticsView
+        clients={clients}
+        overview={overview()}
+        selectedStoreId={null}
+        range={{ key: "d7", from: "2026-08-01", to: "2026-08-07" }}
+        storeAnalytics={null}
+        rollupCoverage={{
+          state: "failed",
+          message: "All-store coverage could not be verified.",
+        }}
+      />,
+    );
+
+    expect(html).toContain("All-store coverage could not be verified.");
+    expect(html).not.toContain("GBP 5000.00");
+    expect(html).not.toContain("GBP 2000.00");
+  });
+
   it("shows a dash instead of 0.00x for a fresh spend-only scope", () => {
     const spendOnly = overview();
     spendOnly.mixedCurrency = false;
@@ -236,8 +404,8 @@ describe("AnalyticsView", () => {
         overview={spendOnly}
         selectedStoreId="store-gbp"
         range={{ key: "d7", from: "2026-08-01", to: "2026-08-07" }}
-        activity={[]}
-        activityTruncated={false}
+        storeAnalytics={storeAnalytics()}
+        rollupCoverage={verifiedRollup}
       />,
     );
 
@@ -256,8 +424,8 @@ describe("AnalyticsView", () => {
         overview={empty}
         selectedStoreId="store-gbp"
         range={{ key: "d7", from: "2026-08-01", to: "2026-08-07" }}
-        activity={[]}
-        activityTruncated={false}
+        storeAnalytics={storeAnalytics()}
+        rollupCoverage={verifiedRollup}
       />,
     );
 

@@ -18,6 +18,8 @@ export type RangeSelection = {
 };
 
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+const REPORTING_TIME_ZONE = "Europe/Lisbon";
+const MAX_RANGE_DAYS = 366;
 
 /** YYYY-MM-DD in local time — avoids toISOString() shifting the day. */
 export function isoDay(date: Date): string {
@@ -27,29 +29,43 @@ export function isoDay(date: Date): string {
   return `${y}-${m}-${d}`;
 }
 
-function shifted(days: number): string {
-  const date = new Date();
-  date.setDate(date.getDate() + days);
-  return isoDay(date);
+function reportingDay(now: Date): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: REPORTING_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now);
+  const part = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((entry) => entry.type === type)?.value;
+  const year = part("year");
+  const month = part("month");
+  const day = part("day");
+  if (!year || !month || !day) throw new Error("The reporting day is unavailable.");
+  return `${year}-${month}-${day}`;
 }
 
-export function presetSelection(key: RangePreset): RangeSelection {
-  const today = isoDay(new Date());
+function shifted(day: string, days: number): string {
+  const date = new Date(`${day}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+export function presetSelection(key: RangePreset, now = new Date()): RangeSelection {
+  const today = reportingDay(now);
   switch (key) {
     case "today":
       return { key, from: today, to: today };
     case "yesterday":
-      return { key, from: shifted(-1), to: shifted(-1) };
+      return { key, from: shifted(today, -1), to: shifted(today, -1) };
     case "d7":
-      return { key, from: shifted(-6), to: today };
+      return { key, from: shifted(today, -6), to: today };
     case "d30":
-      return { key, from: shifted(-29), to: today };
-    case "mtd": {
-      const now = new Date();
-      return { key, from: isoDay(new Date(now.getFullYear(), now.getMonth(), 1)), to: today };
-    }
+      return { key, from: shifted(today, -29), to: today };
+    case "mtd":
+      return { key, from: `${today.slice(0, 8)}01`, to: today };
     case "ytd":
-      return { key, from: isoDay(new Date(new Date().getFullYear(), 0, 1)), to: today };
+      return { key, from: `${today.slice(0, 4)}-01-01`, to: today };
   }
 }
 
@@ -62,35 +78,74 @@ type RangeParams = {
 const first = (value: string | string[] | undefined) =>
   typeof value === "string" ? value : Array.isArray(value) ? value[0] : undefined;
 
+function validIsoDay(value: string): boolean {
+  if (!ISO_DAY.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+function validExplicitRange(
+  key: RangeKey,
+  from: string | undefined,
+  to: string | undefined,
+): from is string {
+  if (!from || !to || !validIsoDay(from) || !validIsoDay(to) || from > to) return false;
+  const days = inclusiveDayCount(from, to);
+  if (!Number.isSafeInteger(days) || days < 1 || days > MAX_RANGE_DAYS) return false;
+  switch (key) {
+    case "today":
+    case "yesterday":
+      return days === 1;
+    case "d7":
+      return days === 7;
+    case "d30":
+      return days === 30;
+    case "mtd":
+      return from === `${to.slice(0, 8)}01`;
+    case "ytd":
+      return from === `${to.slice(0, 4)}-01-01`;
+    case "custom":
+      return true;
+  }
+}
+
 export function parseRange(params: RangeParams): RangeSelection {
   const range = first(params.range);
   const from = first(params.from);
   const to = first(params.to);
 
-  if (range === "custom" && from && to && ISO_DAY.test(from) && ISO_DAY.test(to) && from <= to) {
-    return { key: "custom", from, to };
-  }
   if (range && (RANGE_PRESETS as readonly string[]).includes(range)) {
-    return presetSelection(range as RangePreset);
+    const key = range as RangePreset;
+    return validExplicitRange(key, from, to) && to
+      ? { key, from, to }
+      : presetSelection(key);
+  }
+  if (range === "custom" && validExplicitRange("custom", from, to) && to) {
+    return { key: "custom", from, to };
   }
   return presetSelection("today");
 }
 
-/** ?range=… (presets) or ?range=custom&from=…&to=… — for link-based pickers. */
+/** Always preserves the concrete reporting dates selected in the browser. */
 export function rangeQuery(selection: RangeSelection): string {
-  return selection.key === "custom"
-    ? `?range=custom&from=${selection.from}&to=${selection.to}`
-    : selection.key === "today"
-      ? ""
-      : `?range=${selection.key}`;
+  const params = new URLSearchParams({
+    range: selection.key,
+    from: selection.from,
+    to: selection.to,
+  });
+  return `?${params.toString()}`;
 }
 
 /** Inclusive day count of the window. */
-export function rangeDays(selection: RangeSelection): number {
-  const [fy, fm, fd] = selection.from.split("-").map(Number);
-  const [ty, tm, td] = selection.to.split("-").map(Number);
-  const ms = new Date(ty, tm - 1, td).getTime() - new Date(fy, fm - 1, fd).getTime();
+function inclusiveDayCount(from: string, to: string): number {
+  const [fy, fm, fd] = from.split("-").map(Number);
+  const [ty, tm, td] = to.split("-").map(Number);
+  const ms = Date.UTC(ty, tm - 1, td) - Date.UTC(fy, fm - 1, fd);
   return Math.round(ms / 86_400_000) + 1;
+}
+
+export function rangeDays(selection: RangeSelection): number {
+  return inclusiveDayCount(selection.from, selection.to);
 }
 
 /**

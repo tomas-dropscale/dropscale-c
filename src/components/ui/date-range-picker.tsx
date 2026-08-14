@@ -28,6 +28,12 @@ import { cn } from "@/lib/utils";
 
 type Draft = { start: string | null; end: string | null };
 
+function calendarView(day: string) {
+  const [year, month] = day.split("-").map(Number);
+  const previousMonth = new Date(year, month - 2, 1);
+  return { year: previousMonth.getFullYear(), month: previousMonth.getMonth() };
+}
+
 function monthLabel(year: number, month: number, intl: string) {
   return new Date(year, month, 1).toLocaleDateString(intl, { month: "long", year: "numeric" });
 }
@@ -129,20 +135,26 @@ export function DateRangePicker({
   footer?: React.ReactNode;
 }) {
   const { d, intl } = useI18n();
-  const today = isoDay(new Date());
+  // Keep the disabled-day boundary on the same Europe/Lisbon reporting day
+  // used to resolve presets. A browser outside Lisbon must not make a date
+  // selectable that the server would treat as tomorrow (or hide Lisbon's
+  // current day around midnight).
+  const today = presetSelection("today").to;
 
   const [open, setOpen] = React.useState(false);
-  const [draft, setDraft] = React.useState<Draft>({ start: null, end: null });
-  // Left month of the pair; right is +1.
-  const [view, setView] = React.useState(() => {
-    const now = new Date();
-    return { year: now.getFullYear(), month: now.getMonth() - 1 };
+  const [draft, setDraft] = React.useState<Draft>({
+    start: value.from,
+    end: value.to,
   });
+  // Left month of the pair; right is +1.
+  const [view, setView] = React.useState(() => calendarView(value.to));
 
-  const label =
-    value.key === "custom"
-      ? `${shortLabel(value.from, intl)} – ${shortLabel(value.to, intl)}`
-      : d.ranges[value.key];
+  const concreteRange = value.from === value.to
+    ? shortLabel(value.from, intl)
+    : `${shortLabel(value.from, intl)} – ${shortLabel(value.to, intl)}`;
+  const label = value.key === "custom"
+    ? concreteRange
+    : `${d.ranges[value.key]} · ${concreteRange}`;
 
   function pick(day: string) {
     setDraft((current) => {
@@ -166,12 +178,25 @@ export function DateRangePicker({
 
   function applyCustom() {
     if (!draft.start) return;
-    onApply({ key: "custom", from: draft.start, to: draft.end ?? draft.start });
+    const to = draft.end ?? draft.start;
+    onApply(
+      draft.start === value.from && to === value.to
+        ? value
+        : { key: "custom", from: draft.start, to },
+    );
     setOpen(false);
   }
 
+  function changeOpen(nextOpen: boolean) {
+    if (nextOpen) {
+      setDraft({ start: value.from, end: value.to });
+      setView(calendarView(value.to));
+    }
+    setOpen(nextOpen);
+  }
+
   return (
-    <DropdownMenu open={open} onOpenChange={setOpen}>
+    <DropdownMenu open={open} onOpenChange={changeOpen}>
       <DropdownMenuTrigger className="transition-smooth flex h-9 items-center gap-2 rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-panel)] px-3.5 text-[13px] font-medium text-[var(--text-primary)] outline-none hover:border-[var(--border-strong)] hover:bg-[var(--bg-panel-hover)]">
         <Calendar className="size-3.5 text-[var(--accent-gold)]" />
         {label}

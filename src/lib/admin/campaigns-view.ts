@@ -29,7 +29,8 @@ export type CampaignViewStore = {
   domain: string;
   currency: string;
   realRoas: number | null;
-  rollupSpend: number;
+  rollupSpend: number | null;
+  rollupComplete: boolean;
   campaignState: CampaignViewLoadState;
   campaigns: CampaignViewCampaign[];
 };
@@ -38,9 +39,9 @@ export type CampaignViewClient = {
   id: string;
   name: string;
   email: string;
-  currency: string;
+  currency: string | null;
   revenue: number | null;
-  adSpend: number;
+  adSpend: number | null;
   realRoas: number | null;
   stores: CampaignViewStore[];
 };
@@ -246,17 +247,20 @@ export function projectAdminCampaignsView(
     id: client.clientId,
     name: client.clientName,
     email: client.clientEmail,
-    currency: client.accounts[0]?.account.currency ?? "EUR",
+    currency: client.currency,
     revenue: client.revenue,
     adSpend: client.rollupSpend,
-    realRoas: storeRealRoas(client.revenue, client.rollupSpend),
+    realRoas: client.realRoas,
     stores: client.accounts.map((entry) => ({
       id: entry.account.id,
       name: entry.account.store_name,
       domain: storeDomain(entry.account.shopify_url),
       currency: entry.account.currency,
-      realRoas: storeRealRoas(entry.rollupRevenue, entry.rollupSpend),
-      rollupSpend: entry.rollupSpend,
+      realRoas: entry.rollupComplete
+        ? storeRealRoas(entry.rollupRevenue, entry.rollupSpend)
+        : null,
+      rollupSpend: entry.rollupComplete ? entry.rollupSpend : null,
+      rollupComplete: entry.rollupComplete,
       campaignState: entry.campaignState,
       campaigns: entry.campaigns.map((campaign): CampaignViewCampaign => {
         const bindingId = campaign.reportingBindingId ?? "";

@@ -35,6 +35,12 @@ export type PerformanceChartPoint = {
   conversions: number;
 };
 
+export type FunnelChartPoint = Pick<
+  PerformanceChartPoint,
+  "date" | "sessions" | "addToCarts" | "checkouts" | "conversions"
+>;
+export type SpendChartPoint = Pick<PerformanceChartPoint, "date" | "googleSpend">;
+
 export type RoasEvolutionWindows = {
   d30: number | null;
   d14: number | null;
@@ -42,12 +48,6 @@ export type RoasEvolutionWindows = {
   d3: number | null;
   yesterday: number | null;
   today: number | null;
-};
-
-type ChartProps = {
-  points: PerformanceChartPoint[];
-  currency: string;
-  granularity: PerformanceChartGranularity;
 };
 
 function dateLabel(value: string, granularity: PerformanceChartGranularity, long = false) {
@@ -126,7 +126,7 @@ function TimelineLabels({
   points,
   granularity,
 }: {
-  points: PerformanceChartPoint[];
+  points: Array<{ date: string }>;
   granularity: PerformanceChartGranularity;
 }) {
   if (points.length === 1) {
@@ -213,7 +213,15 @@ function EmptyChart({ title }: { title: string }) {
   );
 }
 
-export function SpendDevelopmentChart({ points, currency, granularity }: ChartProps) {
+export function SpendDevelopmentChart({
+  points,
+  currency,
+  granularity,
+}: {
+  points: SpendChartPoint[];
+  currency: string;
+  granularity: PerformanceChartGranularity;
+}) {
   const [active, setActive] = React.useState<number | null>(null);
   const reactId = React.useId().replace(/:/g, "");
 
@@ -334,11 +342,19 @@ export function SpendDevelopmentChart({ points, currency, granularity }: ChartPr
   );
 }
 
-export function FunnelDevelopmentChart({ points, granularity }: ChartProps) {
+export function FunnelDevelopmentChart({
+  points,
+  granularity,
+}: {
+  points: FunnelChartPoint[];
+  granularity: PerformanceChartGranularity;
+  /** Retained for existing callers; funnel counts are currencyless. */
+  currency?: string;
+}) {
   const [active, setActive] = React.useState<number | null>(null);
   const reactId = React.useId().replace(/:/g, "");
 
-  if (points.length === 0) return <EmptyChart title="Shopify Funnel Chart" />;
+  if (points.length === 0) return <EmptyChart title="Funnel Development" />;
 
   const sessions = points.map((point) => Math.max(0, point.sessions ?? 0));
   const sessionMaximum = Math.max(1, ...sessions);
@@ -399,7 +415,7 @@ export function FunnelDevelopmentChart({ points, granularity }: ChartProps) {
       <header className="mb-4 flex flex-wrap items-start justify-between gap-x-5 gap-y-2">
         <div>
           <h2 className="text-[14px] font-semibold text-[var(--text-primary)]">
-            Shopify Funnel Chart
+            Funnel Development
           </h2>
           <p className="mt-0.5 text-[10.5px] text-[var(--text-muted)]">
             Traffic and conversion development · per {granularity}
@@ -426,7 +442,7 @@ export function FunnelDevelopmentChart({ points, granularity }: ChartProps) {
         className="relative h-[200px] min-w-0 select-none rounded-[8px] outline-none focus-visible:ring-2 focus-visible:ring-[#5cc7d8]/30"
         role="group"
         tabIndex={0}
-        aria-label="Shopify funnel chart. Use the left and right arrow keys to inspect each period."
+        aria-label="Funnel development chart. Use the left and right arrow keys to inspect each period."
         onMouseMove={(event) => setActive(hoverIndex(event, points.length))}
         onMouseLeave={() => setActive(null)}
         onFocus={() => setActive((current) => current ?? points.length - 1)}

@@ -4,19 +4,17 @@ import {
   ArrowLeft,
   ChevronRight,
   History,
-  Layers3,
-  MousePointerClick,
-  PackageSearch,
   ShoppingBag,
   Store,
   Users,
-  type LucideIcon,
 } from "lucide-react";
 
 import {
-  SpendDevelopmentChart,
-  type PerformanceChartPoint,
-} from "@/components/admin/performance-charts";
+  CampaignPerformanceSection,
+  CollectionReturnSection,
+  StoreFunnelSections,
+  StoreSpendSection,
+} from "@/components/admin/store-analytics-sections";
 import { AnalyticsScopeControls } from "./analytics-scope-controls";
 import { RangePicker } from "@/components/portal/range-picker";
 import { Badge } from "@/components/ui/badge";
@@ -31,6 +29,10 @@ import {
 import type { AdminAnalyticsClient } from "@/lib/admin/analytics";
 import type { AdminClientOverview } from "@/lib/admin/client-overview";
 import type { CampaignActionHistory } from "@/lib/admin/campaigns-view";
+import type {
+  AdminAnalyticsFamily,
+  AdminStoreAnalytics,
+} from "@/lib/admin/store-analytics";
 import { integer, money, multiplier } from "@/lib/format";
 import type { RangeSelection } from "@/lib/portal/range";
 import { cn } from "@/lib/utils";
@@ -39,9 +41,10 @@ export type AnalyticsViewProps = {
   clients: AdminAnalyticsClient[];
   overview: AdminClientOverview;
   selectedStoreId: string | null;
-  /** Already authorised and scoped by the server to the selected client/store. */
-  activity: CampaignActionHistory[];
-  activityTruncated: boolean;
+  /** Server-only upstream families, revalidated for this exact client/store/range. */
+  storeAnalytics: AdminStoreAnalytics | null;
+  /** Exact daily Shopify/Google rollup proof for the selected scope. */
+  rollupCoverage: AdminAnalyticsFamily<unknown>;
   range: RangeSelection;
 };
 
@@ -155,69 +158,14 @@ export function AnalyticsScopeSelector({
   );
 }
 
-function StoreSpendDevelopment({ store }: { store: AdminClientOverview["stores"][number] }) {
-  /* This chart consumes only verified daily Google spend. Funnel fields are
-     deliberately left absent because daily_metrics does not materialise them. */
-  const points = validTimestamp(store.updatedAt)
-    ? store.days.map((day) => ({
-        date: day.day,
-        googleSpend: day.adSpend,
-      })) as PerformanceChartPoint[]
-    : [];
-
-  return (
-    <SpendDevelopmentChart points={points} currency={store.currency} granularity="day" />
-  );
-}
-
-function UnavailableSection({
-  id,
-  title,
-  description,
-  explanation,
-  icon: Icon,
-  minHeight = "min-h-36",
-}: {
-  id: string;
-  title: string;
-  description: string;
-  explanation: string;
-  icon: LucideIcon;
-  minHeight?: string;
-}) {
-  return (
-    <section className="panel overflow-hidden" aria-labelledby={id}>
-      <header className="flex flex-wrap items-start justify-between gap-3 border-b border-[var(--border-subtle)] px-4 py-3.5 sm:px-5">
-        <div>
-          <h2 id={id} className="text-[14px] font-semibold text-[var(--text-primary)]">
-            {title}
-          </h2>
-          <p className="mt-0.5 text-[11px] text-[var(--text-muted)]">{description}</p>
-        </div>
-        <Badge variant="neutral">Unavailable</Badge>
-      </header>
-      <div
-        role="status"
-        className={cn(
-          minHeight,
-          "flex flex-col items-center justify-center px-5 py-8 text-center",
-        )}
-      >
-        <span className="flex size-9 items-center justify-center rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-base)] text-[var(--text-muted)]">
-          <Icon className="size-4" aria-hidden />
-        </span>
-        <p className="mt-3 max-w-2xl text-sm text-[var(--text-muted)]">{explanation}</p>
-      </div>
-    </section>
-  );
-}
-
 function AllStoresTable({
   overview,
   range,
+  rollupVerified,
 }: {
   overview: AdminClientOverview;
   range: RangeSelection;
+  rollupVerified: boolean;
 }) {
   return (
     <section className="panel overflow-hidden" aria-labelledby="all-stores-title">
@@ -250,7 +198,7 @@ function AllStoresTable({
             </thead>
             <tbody>
               {overview.stores.map((store) => {
-                const verified = validTimestamp(store.updatedAt);
+                const verified = rollupVerified && validTimestamp(store.updatedAt);
                 const revenue = verified && store.googleRevenue !== null
                   ? money(store.googleRevenue, store.currency)
                   : "—";
@@ -381,14 +329,14 @@ function activityPresentation(entry: CampaignActionHistory) {
 
 function StoreActivityLog({
   activity,
-  truncated,
   storeName,
 }: {
-  activity: CampaignActionHistory[];
-  truncated: boolean;
+  activity: AdminStoreAnalytics["activity"];
   storeName: string | null;
 }) {
-  const entries = sortAnalyticsActivity(activity);
+  const available = activity.state === "ready" || activity.state === "empty";
+  const entries = sortAnalyticsActivity(available ? activity.data.rows : []);
+  const truncated = available ? activity.data.truncated : false;
   const activityGrid =
     "lg:grid-cols-[minmax(150px,.7fr)_minmax(170px,.85fr)_minmax(220px,1.25fr)_minmax(190px,1fr)_minmax(140px,.7fr)]";
 
@@ -415,7 +363,12 @@ function StoreActivityLog({
         </div>
       </header>
 
-      {entries.length === 0 ? (
+      {!available ? (
+        <p className="flex items-center justify-center gap-2 px-5 py-6 text-center text-sm text-[var(--warning-orange)]" role="alert">
+          <AlertTriangle className="size-4 shrink-0" aria-hidden />
+          {activity.message}
+        </p>
+      ) : entries.length === 0 ? (
         <p className="px-5 py-10 text-center text-sm text-[var(--text-muted)]">
           {storeName
             ? "No campaign changes have been recorded for this store yet."
@@ -492,11 +445,19 @@ export function AnalyticsView({
   clients,
   overview,
   selectedStoreId,
-  activity,
-  activityTruncated,
+  storeAnalytics,
+  rollupCoverage,
   range,
 }: AnalyticsViewProps) {
   const scope = projectAnalyticsScope(overview, selectedStoreId);
+  const exactStoreRollup = rollupCoverage.state === "ready";
+  const displayedMetrics = exactStoreRollup
+    ? scope.metrics
+    : scope.metrics.map((metric) => ({
+        ...metric,
+        value: null,
+        hint: "The complete selected-period rollup could not be verified.",
+      }));
 
   return (
     <PageContainer
@@ -535,54 +496,52 @@ export function AnalyticsView({
           </p>
         )}
 
+        {rollupCoverage.state !== "ready" && (
+          <p
+            role="status"
+            className="panel flex items-center gap-2 border-[var(--warning-orange)]/25 px-4 py-3 text-sm text-[var(--warning-orange)]"
+          >
+            <AlertTriangle className="size-4 shrink-0" aria-hidden />
+            {"message" in rollupCoverage
+              ? rollupCoverage.message
+              : "The complete selected-period rollup could not be verified."}
+          </p>
+        )}
+
         <section aria-label={`${scope.label} key performance indicators`}>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
-            {scope.metrics.map((metric) => (
+            {displayedMetrics.map((metric) => (
               <KpiCard key={metric.key} metric={metric} currency={scope.currency} />
             ))}
           </div>
         </section>
 
-        {scope.selectedStore ? (
+        {scope.selectedStore && storeAnalytics ? (
           <>
-            <UnavailableSection
-              id="funnel-development-title"
-              title="Funnel Development"
-              description="Traffic and conversion development · per day"
-              explanation="Sessions, add-to-cart and checkout events are not materialised in the current daily reporting rollup, so no funnel curve is shown."
-              icon={MousePointerClick}
-              minHeight="min-h-[260px]"
+            <StoreFunnelSections analytics={storeAnalytics} />
+            <StoreSpendSection
+              spend={storeAnalytics.spend}
+              currency={scope.selectedStore.currency}
             />
-            <UnavailableSection
-              id="shopify-funnel-title"
-              title="Shopify Funnel"
-              description="Store behaviour across the selected period."
-              explanation="Shopify funnel event totals are not available for this reporting scope yet. Conversions are not substituted for missing visits or checkout events."
-              icon={Users}
+            <CampaignPerformanceSection
+              campaigns={storeAnalytics.campaigns}
+              currency={scope.selectedStore.currency}
             />
-            <StoreSpendDevelopment store={scope.selectedStore} />
-            <UnavailableSection
-              id="campaign-performance-title"
-              title="Campaign Performance"
-              description="Demand Gen opens creatives; PMax opens only products with spend."
-              explanation="Per-campaign Shopify revenue and verified creative or product breakdowns are not materialised in this overview, so campaign return is not estimated from account totals."
-              icon={PackageSearch}
-            />
-            <UnavailableSection
-              id="collection-return-title"
-              title="Return by Collection"
-              description="Open a collection to see the products behind its return."
-              explanation="Collection attribution is not materialised in the reporting rollup yet. Revenue and ad spend are not assigned to a collection without a verified Shopify mapping."
-              icon={Layers3}
+            <CollectionReturnSection
+              collections={storeAnalytics.collections}
+              currency={scope.selectedStore.currency}
             />
             <StoreActivityLog
-              activity={activity}
-              truncated={activityTruncated}
+              activity={storeAnalytics.activity}
               storeName={scope.selectedStore.storeName}
             />
           </>
         ) : (
-          <AllStoresTable overview={overview} range={range} />
+          <AllStoresTable
+            overview={overview}
+            range={range}
+            rollupVerified={exactStoreRollup}
+          />
         )}
       </div>
     </PageContainer>

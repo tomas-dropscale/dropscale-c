@@ -1069,6 +1069,7 @@ describe("V2 daily-metrics recompute", () => {
       "legacy-token",
       DAY,
       DAY,
+      "EUR",
     );
     expect(mocks.fetchGoogleReportingDailyMetrics).not.toHaveBeenCalled();
     expect(db.upserts.flat()[0]).toMatchObject({ ad_spend: 12, revenue: 0 });

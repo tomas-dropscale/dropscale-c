@@ -1,13 +1,20 @@
 import "server-only";
 
-import type { LiveCampaign } from "@/lib/google-ads/portal";
+import type {
+  GoogleCampaignBreakdownRow,
+  LiveCampaign,
+} from "@/lib/google-ads/portal";
 import type { GoogleDailyMetric } from "@/lib/reporting/daily-metrics";
 import type { CanonicalReportingSource } from "@/lib/reporting/sources";
 import {
   fetchGoogleAdsCampaignBreakdown,
   fetchGoogleAdsDailyBreakdown,
+  fetchGoogleAdsDemandGenAdBreakdown,
+  fetchGoogleAdsPmaxProductBreakdown,
   type WindsorGoogleAdsCampaignRow,
   type WindsorGoogleAdsDailyRow,
+  type WindsorGoogleAdsDemandGenAdRow,
+  type WindsorGoogleAdsPmaxProductRow,
 } from "../windsor/client";
 
 export class GoogleReportingAdapterError extends Error {
@@ -29,9 +36,65 @@ type CampaignFetcher = (
   to: string,
 ) => Promise<WindsorGoogleAdsCampaignRow[]>;
 
+type DemandGenAdFetcher = (
+  accountId: string,
+  from: string,
+  to: string,
+) => Promise<WindsorGoogleAdsDemandGenAdRow[]>;
+
+type PmaxProductFetcher = (
+  accountId: string,
+  from: string,
+  to: string,
+) => Promise<WindsorGoogleAdsPmaxProductRow[]>;
+
 export type ReportingCampaign = LiveCampaign & {
   biddingStrategyType: string | null;
 };
+
+export type { GoogleCampaignBreakdownRow };
+
+function verifiedGoogleIdentity(source: CanonicalReportingSource) {
+  const google = source.googleAds;
+  if (!google?.currency || !google.timeZone) {
+    throw new GoogleReportingAdapterError(
+      "This reporting source has no verified Google Ads identity.",
+    );
+  }
+  return google;
+}
+
+function assertBreakdownIdentity(
+  row: {
+    accountId: string;
+    customerId: string;
+    currency: string;
+    timeZone: string;
+  },
+  google: NonNullable<CanonicalReportingSource["googleAds"]>,
+) {
+  if (
+    row.accountId !== google.accountId ||
+    row.customerId !== google.customerId ||
+    row.currency !== google.currency ||
+    row.timeZone !== google.timeZone
+  ) {
+    throw new GoogleReportingAdapterError(
+      "Windsor returned a different Google Ads reporting identity.",
+    );
+  }
+}
+
+function merchantProductKey(product: WindsorGoogleAdsPmaxProductRow): string {
+  return [
+    product.merchantId,
+    product.feedLabel,
+    product.language,
+    product.country,
+    product.channel,
+    product.itemId,
+  ].map(encodeURIComponent).join("/");
+}
 
 /**
  * Reads one exact bound Google Ads source through Windsor and converts it to
@@ -123,7 +186,81 @@ export async function fetchGoogleReportingCampaigns(
       shoppingFeed: row.shoppingFeed,
       biddingStrategyType: row.biddingStrategyType,
       conversionValue: row.conversionValue,
-      googleRoas: row.spend > 0 ? row.conversionValue / row.spend : 0,
+      googleRoas: row.spend > 0 ? row.conversionValue / row.spend : null,
     };
   });
+}
+
+/** Demand Gen ad detail for one exact V2 reporting source. */
+export async function fetchGoogleReportingDemandGenAds(
+  source: CanonicalReportingSource,
+  from: string,
+  to: string,
+  fetcher: DemandGenAdFetcher = fetchGoogleAdsDemandGenAdBreakdown,
+): Promise<GoogleCampaignBreakdownRow[]> {
+  const google = verifiedGoogleIdentity(source);
+  const rows = await fetcher(google.accountId, from, to);
+  return rows.map((row): GoogleCampaignBreakdownRow => {
+    assertBreakdownIdentity(row, google);
+    return {
+      accountId: source.adAccountId,
+      campaignId: row.campaignId,
+      provider: "google_ads",
+      kind: "creative",
+      id: row.adId,
+      name: row.name,
+      detail: row.type,
+      spend: row.spend,
+      impressions: row.impressions,
+      clicks: row.clicks,
+      conversions: row.conversions,
+      googleRevenue: row.conversionValue,
+    };
+  });
+}
+
+/** PMax Merchant product detail for one exact V2 reporting source. */
+export async function fetchGoogleReportingPmaxProducts(
+  source: CanonicalReportingSource,
+  from: string,
+  to: string,
+  fetcher: PmaxProductFetcher = fetchGoogleAdsPmaxProductBreakdown,
+): Promise<GoogleCampaignBreakdownRow[]> {
+  const google = verifiedGoogleIdentity(source);
+  const rows = await fetcher(google.accountId, from, to);
+  return rows.map((row): GoogleCampaignBreakdownRow => {
+    assertBreakdownIdentity(row, google);
+    return {
+      accountId: source.adAccountId,
+      campaignId: row.campaignId,
+      provider: "google_ads",
+      kind: "product",
+      id: merchantProductKey(row),
+      name: row.title,
+      detail: row.brand,
+      spend: row.spend,
+      impressions: row.impressions,
+      clicks: row.clicks,
+      conversions: row.conversions,
+      googleRevenue: row.conversionValue,
+    };
+  });
+}
+
+/**
+ * Unified detail family for Analytics. Both provider reads are exact and any
+ * provider error remains visible to the caller instead of becoming fake empty data.
+ */
+export async function fetchGoogleReportingCampaignBreakdowns(
+  source: CanonicalReportingSource,
+  from: string,
+  to: string,
+  demandGenFetcher: DemandGenAdFetcher = fetchGoogleAdsDemandGenAdBreakdown,
+  pmaxProductFetcher: PmaxProductFetcher = fetchGoogleAdsPmaxProductBreakdown,
+): Promise<GoogleCampaignBreakdownRow[]> {
+  const [creatives, products] = await Promise.all([
+    fetchGoogleReportingDemandGenAds(source, from, to, demandGenFetcher),
+    fetchGoogleReportingPmaxProducts(source, from, to, pmaxProductFetcher),
+  ]);
+  return [...creatives, ...products];
 }

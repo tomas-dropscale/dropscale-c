@@ -32,6 +32,7 @@ const clients: CampaignViewClient[] = [
         currency: "EUR",
         realRoas: 2.4,
         rollupSpend: 100,
+        rollupComplete: true,
         campaignState: "ready",
         campaigns: [
           {
@@ -68,6 +69,7 @@ const clients: CampaignViewClient[] = [
         currency: "EUR",
         realRoas: null,
         rollupSpend: 0,
+        rollupComplete: true,
         campaignState: "empty",
         campaigns: [],
       },
@@ -210,6 +212,9 @@ describe("Campaigns view model", () => {
         revenue: 200,
         rollupSpend: 80,
         realRoas: 2.5,
+        currency: "EUR",
+        currencies: ["EUR"],
+        rollupComplete: true,
         accounts: [{
           account: {
             id: "store-1",
@@ -225,6 +230,8 @@ describe("Campaigns view model", () => {
           commission: 10,
           rollupRevenue: 200,
           rollupSpend: 80,
+          rollupComplete: true,
+          rollupRequired: true,
           campaigns: [
             {
               id: "campaign-live",
@@ -312,6 +319,7 @@ describe("Campaigns view model", () => {
     ]);
 
     overview.clients[0].rollupSpend = 0;
+    overview.clients[0].realRoas = null;
     expect(
       projectAdminCampaignsView(overview as unknown as AdminCampaignsOverview, state).clients[0]
         .realRoas,
