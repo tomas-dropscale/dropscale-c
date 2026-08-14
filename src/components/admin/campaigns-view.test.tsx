@@ -167,6 +167,10 @@ describe("CampaignsView approved visual structure", () => {
     expect(html).toContain('aria-label="Pause DGEN · Summer Living · Scale"');
     expect(html).toContain('aria-label="Enable PMax · Best sellers · EU"');
     expect(html).toContain("hover or focus for scale history");
+    expect(html).toContain(
+      "xl:grid-cols-[1.75rem_minmax(0,auto)_1.75rem]",
+    );
+    expect(html).toContain('class="hidden size-7 xl:block" aria-hidden="true"');
     expect(html).not.toContain("binding policy");
     expect(html).not.toContain("Configure campaign controls");
   });

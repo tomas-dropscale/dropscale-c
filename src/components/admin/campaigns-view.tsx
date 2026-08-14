@@ -301,7 +301,8 @@ function BudgetControl({
   const editorPosition = anchor && editing ? floatingPosition(anchor, 280) : null;
 
   return (
-    <div className="flex min-w-0 items-center gap-1.5 xl:justify-center">
+    <div className="flex min-w-0 items-center gap-1.5 xl:grid xl:grid-cols-[1.75rem_minmax(0,auto)_1.75rem] xl:justify-center">
+      <span className="hidden size-7 xl:block" aria-hidden />
       <span className="whitespace-nowrap text-[13px] font-semibold tabular-nums text-[var(--text-primary)]">
         {campaign.dailyBudget === null ? "—" : money(campaign.dailyBudget, campaign.currency)}
         {campaign.dailyBudget !== null && (
