@@ -10,8 +10,8 @@ import {
   type StripeInvoiceRecipientExpectation,
 } from "@/lib/stripe/client";
 import {
-  CALCULATION_VERSION,
   isManualAgencyCalculationVersion,
+  isReviewedAgencyCalculationVersion,
 } from "@/lib/billing/weekly";
 import { requireBillingRecipientSnapshot } from "@/lib/billing/review-token";
 import { createServiceClient } from "@/lib/supabase/service";
@@ -268,7 +268,7 @@ export async function POST(request: NextRequest) {
           amount: Number(local.amount),
           requireMetadata: manualAgencyInvoice,
           requireManualCollection: manualAgencyInvoice,
-          ...(local.calculation_version === CALCULATION_VERSION
+          ...(isReviewedAgencyCalculationVersion(local.calculation_version)
             ? { recipient: stripeRecipientExpectation(local.billing_recipient) }
             : {}),
         });

@@ -58,7 +58,7 @@ const NAV_GROUPS: Group[] = [
     label: (d) => d.nav.groupGrowth,
     items: [
       {
-        href: "/admin/client-onboarding",
+        href: "/admin/clients",
         icon: UserPlus,
         label: (d) => d.nav.clients,
       },
@@ -114,14 +114,18 @@ export function Sidebar({
   const { d } = useI18n();
 
   // "/admin" only lights up on an exact match, otherwise every nested
-  // route would mark it active too. "/dashboard" never matches in here.
+  // route would mark it active too. Onboarding remains part of Clients.
   const isActive = (href: string) =>
-    href === "/admin" ? currentPath === href : currentPath.startsWith(href);
+    href === "/admin"
+      ? currentPath === href
+      : href === "/admin/clients"
+        ? currentPath.startsWith(href) || currentPath.startsWith("/admin/client-onboarding")
+        : currentPath.startsWith(href);
 
   // Counts live on the screen that clears them: approvals on Clients, unreviewed
   // submissions on Creatives.
   const count = (href: string) =>
-    href === "/admin/client-onboarding"
+    href === "/admin/clients"
       ? pendingClients
       : href === "/admin/creatives"
         ? newCreatives

@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
@@ -9,8 +11,33 @@ import {
   stripeInvoiceStatusDecision,
   type StripeLocalInvoiceStatus,
 } from "../../../../lib/stripe/client";
+import {
+  CALCULATION_VERSION,
+  isReviewedAgencyCalculationVersion,
+  V3_MANUAL_REFERRAL_CALCULATION_VERSION,
+} from "../../../../lib/billing/weekly";
+
+const WEBHOOK_ROUTE = readFileSync(
+  "src/app/api/stripe/webhook/route.ts",
+  "utf8",
+);
 
 describe("Stripe webhook invoice state", () => {
+  it("keeps both immutable V3 and V4 recipient snapshots bound during reconciliation", () => {
+    expect(
+      isReviewedAgencyCalculationVersion(
+        V3_MANUAL_REFERRAL_CALCULATION_VERSION,
+      ),
+    ).toBe(true);
+    expect(isReviewedAgencyCalculationVersion(CALCULATION_VERSION)).toBe(true);
+    expect(WEBHOOK_ROUTE).toContain(
+      "isReviewedAgencyCalculationVersion(local.calculation_version)",
+    );
+    expect(WEBHOOK_ROUTE).not.toContain(
+      "local.calculation_version === CALCULATION_VERSION",
+    );
+  });
+
   it("maps only Stripe's supported invoice states", () => {
     expect(localInvoiceStatus("draft")).toBe("draft");
     expect(localInvoiceStatus("open")).toBe("open");

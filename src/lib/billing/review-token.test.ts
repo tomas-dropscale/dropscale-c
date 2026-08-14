@@ -257,6 +257,39 @@ describe("billing review token", () => {
     expect(sameMathDifferentGrant).not.toBe(first);
   });
 
+  it("binds V4 review to the account term and pricing mode", async () => {
+    const common = {
+      clientId: "client-1",
+      week,
+      amount: 12,
+      lines: [
+        {
+          accountId: "store-a",
+          kind: "fee" as const,
+          store: "A",
+          rate: 12,
+          pricingMode: "manual" as const,
+          commissionTermId: "account-term-a",
+          listRate: 12,
+          referralDiscountRate: 0,
+          referralCount: 0,
+          baseAmount: 100,
+          label: "A manual account fee",
+          amount: 12,
+        },
+      ],
+      ledgerRows: [],
+      referralTermId: null,
+      recipient,
+    };
+    const reviewed = await billingReviewToken(common);
+    const changed = await billingReviewToken({
+      ...common,
+      lines: [{ ...common.lines[0], commissionTermId: "account-term-b" }],
+    });
+    expect(changed).not.toBe(reviewed);
+  });
+
   it("changes when the immutable closing-counter evidence changes", async () => {
     const common = {
       clientId: "client-1",

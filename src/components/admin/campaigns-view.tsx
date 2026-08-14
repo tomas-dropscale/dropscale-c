@@ -79,10 +79,14 @@ function safeDate(formatter: Intl.DateTimeFormat, value: string) {
   return Number.isNaN(timestamp) ? "—" : formatter.format(timestamp);
 }
 
-function campaignTypeLabel(value: string) {
-  if (value === "DEMAND_GEN") return "DGEN";
-  if (value === "PERFORMANCE_MAX") return "PMAX";
-  return value.replaceAll("_", " ");
+function campaignTypeLabel(
+  campaign: Pick<CampaignViewCampaign, "type" | "shoppingFeed">,
+) {
+  if (campaign.type === "DEMAND_GEN") return "DGEN";
+  if (campaign.type === "PERFORMANCE_MAX") {
+    return campaign.shoppingFeed ? "PMAX (SF)" : "PMAX";
+  }
+  return campaign.type.replaceAll("_", " ");
 }
 
 function responseError(status: number) {
@@ -310,7 +314,7 @@ function BudgetControl({
         type="button"
         variant="ghost"
         size="icon-sm"
-        className="size-10 shrink-0 aria-disabled:cursor-not-allowed aria-disabled:opacity-50 xl:size-8"
+        className="size-10 shrink-0 aria-disabled:cursor-not-allowed aria-disabled:opacity-50 xl:size-7"
         aria-label={
           canEdit
             ? `Edit daily budget for ${campaign.name}; hover or focus for scale history`
@@ -484,16 +488,11 @@ function CampaignRow({
         <p className="truncate text-[13px] font-medium text-[var(--text-primary)]">
           {campaign.name}
         </p>
-        {!campaign.actionable && (
-          <p className="mt-0.5 truncate text-[10.5px] text-[var(--text-muted)]">
-            Actions unavailable for this account
-          </p>
-        )}
       </div>
 
       <div className="min-w-0 xl:text-center">
         <span className="label-caps mb-1 block xl:hidden">Type</span>
-        <Badge variant="neutral">{campaignTypeLabel(campaign.type)}</Badge>
+        <Badge variant="neutral">{campaignTypeLabel(campaign)}</Badge>
       </div>
 
       <div className="min-w-0 xl:text-center">
@@ -518,7 +517,7 @@ function CampaignRow({
         />
       </div>
 
-      <CampaignMetric label="Google ROAS">
+      <CampaignMetric label="ROAS">
         {campaign.googleRoas === null ? "—" : multiplier(campaign.googleRoas)}
       </CampaignMetric>
 
@@ -575,11 +574,14 @@ function StoreGroup({
   onStatusChange: (campaign: ProjectedCampaign) => void;
 }) {
   const headingId = React.useId();
-  const spend = store.campaigns.reduce((sum, campaign) => sum + campaign.spend, 0);
+  const spend = store.rollupSpend;
   const budgets = store.campaigns.map((campaign) =>
     campaign.dailyBudget === null ? null : Number(campaign.dailyBudget),
   );
-  const dailyBudget = budgets.every((budget): budget is number => budget !== null)
+  const dailyBudget =
+    store.campaignState === "ready" &&
+    budgets.length > 0 &&
+    budgets.every((budget): budget is number => budget !== null)
     ? budgets.reduce((sum, budget) => sum + budget, 0)
     : null;
   const storeLabel = store.domain ? `https://${store.domain}` : store.name;
@@ -618,75 +620,81 @@ function StoreGroup({
         </Button>
       </header>
 
-      {store.campaigns.length > 0 ? (
-        <>
-          <div
-            className={cn(
-              "hidden gap-x-3 border-t border-[var(--border-subtle)] bg-[var(--bg-base)] px-5 py-2.5 xl:grid",
-              CAMPAIGN_GRID,
-            )}
-          >
-            <span className="label-caps pl-6">Campaign</span>
-            <span className="label-caps text-center">Type</span>
-            <span className="label-caps text-center">Status</span>
-            <span className="label-caps text-center">Spend</span>
-            <span className="label-caps text-center">Daily budget</span>
-            <span className="label-caps text-center">Google ROAS</span>
-            <span className="label-caps text-center">Last Scaled at</span>
-            <span className="label-caps text-center">Action</span>
-          </div>
-          <ul>
-            <li
-              className={cn(
-                "grid grid-cols-2 items-center gap-x-3 gap-y-3 border-t border-[var(--border-subtle)] bg-[var(--bg-base)] px-4 py-3 lg:px-5",
-                CAMPAIGN_GRID,
-              )}
-            >
-              <span className="col-span-2 text-[12px] font-semibold tracking-[0.08em] text-[var(--text-primary)] xl:col-span-1 xl:pl-6">
-                TOTAL
+      <div
+        className={cn(
+          "hidden gap-x-3 border-t border-[var(--border-subtle)] bg-[var(--bg-base)] px-5 py-2.5 xl:grid",
+          CAMPAIGN_GRID,
+        )}
+      >
+        <span className="label-caps pl-6">Campaign</span>
+        <span className="label-caps text-center">Type</span>
+        <span className="label-caps text-center">Status</span>
+        <span className="label-caps text-center">Spend</span>
+        <span className="label-caps text-center">Daily budget</span>
+        <span
+          className="label-caps text-center"
+          title="Google-attributed ROAS per campaign; Real ROAS on the store total"
+        >
+          ROAS
+        </span>
+        <span className="label-caps text-center">Last Scaled at</span>
+        <span className="label-caps text-center">Action</span>
+      </div>
+      <ul>
+        <li
+          className={cn(
+            "grid grid-cols-2 items-center gap-x-3 gap-y-3 border-t border-[var(--border-subtle)] bg-[var(--bg-base)] px-4 py-3 lg:px-5",
+            CAMPAIGN_GRID,
+          )}
+        >
+          <span className="col-span-2 text-[12px] font-semibold tracking-[0.08em] text-[var(--text-primary)] xl:col-span-1 xl:pl-6">
+            TOTAL
+          </span>
+          <CampaignMetric label="Type">—</CampaignMetric>
+          <CampaignMetric label="Status">—</CampaignMetric>
+          <CampaignMetric label="Spend">{money(spend, store.currency)}</CampaignMetric>
+          <CampaignMetric label="Daily budget">
+            {dailyBudget === null ? "—" : money(dailyBudget, store.currency)}
+            {dailyBudget !== null && (
+              <span className="ml-1 text-[11px] font-normal text-[var(--text-muted)]">
+                / day
               </span>
-              <CampaignMetric label="Type">—</CampaignMetric>
-              <CampaignMetric label="Status">—</CampaignMetric>
-              <CampaignMetric label="Spend">{money(spend, store.currency)}</CampaignMetric>
-              <CampaignMetric label="Daily budget">
-                {dailyBudget === null ? "—" : money(dailyBudget, store.currency)}
-                {dailyBudget !== null && (
-                  <span className="ml-1 text-[11px] font-normal text-[var(--text-muted)]">
-                    / day
-                  </span>
-                )}
-              </CampaignMetric>
-              <CampaignMetric label="Real ROAS">
-                {store.realRoas === null ? "—" : multiplier(store.realRoas)}
-                {store.realRoas !== null && (
-                  <span className="ml-1 text-[10px] font-normal text-[var(--text-muted)]">
-                    real
-                  </span>
-                )}
-              </CampaignMetric>
-              <CampaignMetric label="Last scaled at">—</CampaignMetric>
-              <span className="hidden xl:block" aria-hidden />
-            </li>
-            {store.campaigns.map((campaign) => {
-              const key = campaignKey(campaign);
-              return (
-                <CampaignRow
-                  key={key}
-                  campaign={campaign}
-                  busy={pending.has(key)}
-                  statusError={statusErrors[key]}
-                  onBudgetChange={onBudgetChange}
-                  onStatusChange={onStatusChange}
-                />
-              );
-            })}
-          </ul>
-        </>
-      ) : (
-        <p className="border-t border-[var(--border-subtle)] bg-[var(--bg-base)] px-5 py-5 text-[12.5px] text-[var(--text-muted)]">
-          No campaigns in this store.
-        </p>
-      )}
+            )}
+          </CampaignMetric>
+          <CampaignMetric label="Real ROAS">
+            {store.realRoas === null ? "—" : multiplier(store.realRoas)}
+          </CampaignMetric>
+          <CampaignMetric label="Last scaled at">—</CampaignMetric>
+          <span className="hidden xl:block" aria-hidden />
+        </li>
+
+        {store.campaignState !== "ready" && (
+          <li className="border-t border-[var(--border-subtle)] bg-[var(--bg-base)] px-5 py-4 text-[12.5px] text-[var(--text-muted)]">
+            {store.campaignState === "empty" &&
+              "No campaign rows were returned for this period."}
+            {store.campaignState === "partial" &&
+              "Some Google Ads sources could not be loaded; the rows below are partial."}
+            {store.campaignState === "failed" &&
+              "Campaign reporting failed for this store. Its verified rollup total is still shown above."}
+            {store.campaignState === "disconnected" &&
+              "Campaign reporting is unavailable until this Google Ads connection is restored."}
+          </li>
+        )}
+
+        {store.campaigns.map((campaign) => {
+          const key = campaignKey(campaign);
+          return (
+            <CampaignRow
+              key={key}
+              campaign={campaign}
+              busy={pending.has(key)}
+              statusError={statusErrors[key]}
+              onBudgetChange={onBudgetChange}
+              onStatusChange={onStatusChange}
+            />
+          );
+        })}
+      </ul>
     </section>
   );
 }

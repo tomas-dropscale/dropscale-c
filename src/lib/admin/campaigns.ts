@@ -44,6 +44,8 @@ export type AdminAccountCampaigns = {
    * retry their way out of it, the account has to be reconnected.
    */
   authRevoked: boolean;
+  /** Never collapse an upstream failure into an honest zero-campaign result. */
+  campaignState: "ready" | "empty" | "partial" | "failed" | "disconnected";
   spend: number;
   commission: number;
   /** Reporting-rollup revenue for the exact store group in the selected window. */
@@ -128,6 +130,9 @@ type AdminAccountInventory = {
   account: AdAccount;
   googleSources: CanonicalReportingSource[] | null;
   metricAccountIds: string[];
+  commissionRateByMetricAccount: Map<string, number>;
+  /** Campaign mutations remain marker-gated even when Windsor is used read-only before cutover. */
+  campaignControlsEnabled: boolean;
 };
 
 function projectedShopDomain(source: CanonicalReportingSource): string {
@@ -181,6 +186,10 @@ async function adminAccountInventory(
       account,
       googleSources: null,
       metricAccountIds: [account.id],
+      commissionRateByMetricAccount: new Map([
+        [account.id, Number(account.commission_rate)],
+      ]),
+      campaignControlsEnabled: false,
     }));
   if (v2ClientIds.length === 0) return legacy;
 
@@ -227,6 +236,13 @@ async function adminAccountInventory(
       },
       googleSources: grouped.filter((source) => source.googleAds !== null),
       metricAccountIds: grouped.map((source) => source.adAccountId),
+      commissionRateByMetricAccount: new Map(
+        grouped.map((source) => [
+          source.adAccountId,
+          Number(baseById.get(source.adAccountId)!.commission_rate),
+        ]),
+      ),
+      campaignControlsEnabled: true,
     });
   }
 
@@ -251,11 +267,17 @@ async function adminAccountInventory(
       },
       googleSources: [source],
       metricAccountIds: [source.adAccountId],
+      commissionRateByMetricAccount: new Map([
+        [source.adAccountId, Number(base.commission_rate)],
+      ]),
+      campaignControlsEnabled: true,
     });
   }
 
   if (
-    v2ClientIds.some((clientId) => !sources.some((source) => source.clientId === clientId)) ||
+    v2ClientIds.some(
+      (clientId) => !sources.some((source) => source.clientId === clientId),
+    ) ||
     usedSourceIds.size !== sources.length
   ) {
     throw new Error("Admin reporting inventory is unavailable.");
@@ -347,7 +369,11 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
   );
 
   const perAccount = await Promise.all(
-    inventory.map(async ({ account, googleSources }): Promise<AdminAccountCampaigns> => {
+    inventory.map(async ({
+      account,
+      googleSources,
+      campaignControlsEnabled,
+    }): Promise<AdminAccountCampaigns> => {
       const connected = googleSources === null
         ? googleConfigured && account.google_ads_connected && Boolean(account.google_ads_customer_id)
         : windsorConfigured && googleSources.length > 0;
@@ -355,10 +381,11 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
       let campaigns: AdminLiveCampaign[] = [];
       let failed = false;
       let authRevoked = false;
+      let campaignState: AdminAccountCampaigns["campaignState"] = "disconnected";
 
       if (connected) {
-        try {
-          if (googleSources === null) {
+        if (googleSources === null) {
+          try {
             const { data } = await supabase
               .from("ad_accounts")
               .select("google_ads_refresh_token")
@@ -377,25 +404,9 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
               reportingBindingId: null,
               googleAdsConnectionId: null,
             }));
-          } else {
-            campaigns = (await Promise.all(
-              googleSources.map(async (source) =>
-                (await fetchGoogleReportingCampaigns(source, range.from, range.to)).map(
-                  (campaign) => ({
-                    ...campaign,
-                    reportingBindingId: source.bindingId,
-                    googleAdsConnectionId: source.googleAds!.connectionId,
-                  }),
-                ),
-              ),
-            ))
-              .flat()
-              .sort((left, right) => right.spend - left.spend || left.id.localeCompare(right.id));
-          }
-        } catch (error) {
-          failed = true;
-
-          if (googleSources === null) {
+            campaignState = campaigns.length > 0 ? "ready" : "empty";
+          } catch (error) {
+            failed = true;
             // A revoked authorisation is permanent, so record it: the account
             // flips to disconnected and the client's own portal starts asking
             // them to reconnect. Without this the store just reads "query
@@ -404,7 +415,38 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
             if (!authRevoked) {
               console.error(`Admin campaigns failed for ${account.id}:`, error);
             }
-          } else {
+            campaignState = authRevoked ? "disconnected" : "failed";
+          }
+        } else {
+          const sourceResults = await Promise.allSettled(
+            googleSources.map(async (source) =>
+              (await fetchGoogleReportingCampaigns(source, range.from, range.to)).map(
+                (campaign) => ({
+                  ...campaign,
+                  reportingBindingId: campaignControlsEnabled ? source.bindingId : null,
+                  googleAdsConnectionId: source.googleAds!.connectionId,
+                }),
+              ),
+            ),
+          );
+          const succeeded: AdminLiveCampaign[][] = [];
+          for (const result of sourceResults) {
+            if (result.status === "fulfilled") succeeded.push(result.value);
+          }
+          const sourceFailed = succeeded.length !== sourceResults.length;
+          campaigns = succeeded
+            .flat()
+            .sort((left, right) => right.spend - left.spend || left.id.localeCompare(right.id));
+          failed = sourceFailed;
+          campaignState =
+            succeeded.length === 0
+              ? "failed"
+              : sourceFailed
+                ? "partial"
+                : campaigns.length > 0
+                  ? "ready"
+                  : "empty";
+          if (sourceFailed) {
             // Windsor errors may contain upstream metadata. The page needs the
             // state, not the payload, so keep the log deliberately generic.
             console.error("Admin V2 campaign reporting failed");
@@ -420,6 +462,7 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
         connected: connected && !authRevoked,
         failed,
         authRevoked,
+        campaignState,
         spend,
         commission: (spend * Number(account.commission_rate)) / 100,
         rollupRevenue: null,
@@ -437,6 +480,7 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
       googleConfigured && account.google_ads_connected && Boolean(account.google_ads_customer_id),
     failed: false,
     authRevoked: false,
+    campaignState: "disconnected",
     spend: 0,
     commission: 0,
     rollupRevenue: null,
@@ -468,12 +512,23 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
   );
   const metricRowsByAccount = groupByAccount(metricRows);
   const accountsWithRollups = perAccount.map((entry, index) => {
-    const rows = inventory[index].metricAccountIds.flatMap(
+    const inventoryEntry = inventory[index];
+    const rows = inventoryEntry.metricAccountIds.flatMap(
       (accountId) => metricRowsByAccount.get(accountId) ?? [],
     );
     const totals = sumMetrics(rows);
+    const commission = inventoryEntry.metricAccountIds.reduce((total, accountId) => {
+      const accountRate = inventoryEntry.commissionRateByMetricAccount.get(accountId);
+      if (typeof accountRate !== "number" || !Number.isFinite(accountRate)) {
+        throw new Error("Admin reporting inventory is unavailable.");
+      }
+      const accountTotals = sumMetrics(metricRowsByAccount.get(accountId) ?? []);
+      return total + (accountTotals.adSpend * accountRate) / 100;
+    }, 0);
     return {
       ...entry,
+      spend: totals.adSpend,
+      commission,
       rollupRevenue: totals.attributedRevenue,
       rollupSpend: totals.adSpend,
     };
@@ -481,8 +536,8 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
   const rollup = sumMetrics(metricRows);
   const revenue = rollup.attributedRevenue;
 
-  const spend = perAccount.reduce((sum, entry) => sum + entry.spend, 0);
-  const commission = perAccount.reduce((sum, entry) => sum + entry.commission, 0);
+  const spend = accountsWithRollups.reduce((sum, entry) => sum + entry.spend, 0);
+  const commission = accountsWithRollups.reduce((sum, entry) => sum + entry.commission, 0);
 
   // Costs are recorded per day for the whole shop, so only the Google share of
   // them is charged here — see lib/admin/google-attribution.ts. Our own fee is
@@ -507,7 +562,7 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
         (sum, entry) => sum + entry.campaigns.filter((c) => c.status === "active").length,
         0,
       ),
-      connectedAccounts: perAccount.filter((entry) => entry.connected).length,
+      connectedAccounts: accountsWithRollups.filter((entry) => entry.connected).length,
       revenue,
       profit,
       roas: googleRoas(revenue, rollup.adSpend),

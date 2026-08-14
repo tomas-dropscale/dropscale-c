@@ -30,12 +30,24 @@ export const AGENCY_FEE_RATE = 10;
 export const REFERRAL_STEP_RATE = 0.5;
 export const BILLING_CURRENCY = "EUR" as const;
 export const CALCULATION_VERSION =
+  "agency-fee-eur-v4-account-rates-manual-referrals-google-boundaries";
+export const V3_MANUAL_REFERRAL_CALCULATION_VERSION =
   "agency-fee-eur-v3-manual-referrals-google-boundaries";
 export const LEGACY_MANUAL_CALCULATION_VERSION =
   "agency-fee-eur-10-v2-google-baseline";
 
+export function isReviewedAgencyCalculationVersion(value: string): boolean {
+  return (
+    value === CALCULATION_VERSION ||
+    value === V3_MANUAL_REFERRAL_CALCULATION_VERSION
+  );
+}
+
 export function isManualAgencyCalculationVersion(value: string): boolean {
-  return value === CALCULATION_VERSION || value === LEGACY_MANUAL_CALCULATION_VERSION;
+  return (
+    isReviewedAgencyCalculationVersion(value) ||
+    value === LEGACY_MANUAL_CALCULATION_VERSION
+  );
 }
 const BILLING_TIME_ZONE = "Europe/Lisbon";
 
@@ -65,8 +77,13 @@ export function sumGoogleSpend(values: number[]): number {
   let totalMicros = 0;
   for (const value of values) {
     const micros = Math.round(Math.max(0, value) * 1_000_000);
-    if (!Number.isSafeInteger(micros) || !Number.isSafeInteger(totalMicros + micros)) {
-      throw new RangeError("Google spend exceeds the safe integer-micros range.");
+    if (
+      !Number.isSafeInteger(micros) ||
+      !Number.isSafeInteger(totalMicros + micros)
+    ) {
+      throw new RangeError(
+        "Google spend exceeds the safe integer-micros range.",
+      );
     }
     totalMicros += micros;
   }
@@ -131,7 +148,10 @@ export function closedWeekStarting(
   if (!/^\d{4}-\d{2}-\d{2}$/.test(periodStart)) return null;
   const [year, month, day] = periodStart.split("-").map(Number);
   const parsed = new Date(Date.UTC(year, month - 1, day));
-  if (parsed.toISOString().slice(0, 10) !== periodStart || parsed.getUTCDay() !== 1) {
+  if (
+    parsed.toISOString().slice(0, 10) !== periodStart ||
+    parsed.getUTCDay() !== 1
+  ) {
     return null;
   }
   const end = addDays(periodStart, 6);
@@ -207,6 +227,15 @@ export type StoreTotals = {
   periodEnd?: string;
   /** Count sealed into the effective manual-referral term for this week. */
   referralCount: number;
+  /** V4 per-store commercial authority. Omitted only by immutable V2/V3 callers. */
+  commercialTerms?: {
+    commissionTermId: string | null;
+    pricingMode: "manual" | "referral";
+    listRate: number;
+    referralCount: number;
+    referralDiscountRate: number;
+    feeRate: number;
+  };
   currency: string | null;
 };
 
@@ -236,8 +265,8 @@ export function referralFeeTerms(referralCount: number): {
 
 /** A sealed percentage of Google spend, rounded once per store to euro cents. */
 export function agencyFee(spend: number, rate = AGENCY_FEE_RATE): number {
-  if (!Number.isFinite(rate) || rate < 0 || rate > AGENCY_FEE_RATE) {
-    throw new RangeError(`Agency fee rate must be between 0 and ${AGENCY_FEE_RATE}.`);
+  if (!Number.isFinite(rate) || rate < 0 || rate > 100) {
+    throw new RangeError("Agency fee rate must be between 0 and 100.");
   }
   return round2((Math.max(0, spend) * rate) / 100);
 }
@@ -249,7 +278,8 @@ function exactRate(value: number): string {
 function capturedAt(value: string | undefined, fallback: string): string {
   if (!value) return fallback;
   const parsed = new Date(value);
-  if (!Number.isFinite(parsed.getTime())) throw new RangeError("Invalid billing boundary time.");
+  if (!Number.isFinite(parsed.getTime()))
+    throw new RangeError("Invalid billing boundary time.");
   return parsed.toISOString();
 }
 
@@ -260,11 +290,18 @@ function capturedAt(value: string | undefined, fallback: string): string {
  * snapshot without turning it into a payable line. Older portal code can
  * ignore that optional field and still render the fee normally.
  */
-export function storeLines(accountId: string, store: string, totals: StoreTotals): InvoiceLine[] {
+export function storeLines(
+  accountId: string,
+  store: string,
+  totals: StoreTotals,
+): InvoiceLine[] {
   if (totals.currency?.toUpperCase() !== BILLING_CURRENCY) {
     throw new RangeError("Agency invoice lines require EUR Google spend.");
   }
-  if (totals.openingBaselineApplied && (!totals.billingStart || !totals.periodEnd)) {
+  if (
+    totals.openingBaselineApplied &&
+    (!totals.billingStart || !totals.periodEnd)
+  ) {
     throw new RangeError("Opening-boundary evidence is incomplete.");
   }
   if (totals.endingCapApplied && (!totals.billingEnd || !totals.periodStart)) {
@@ -282,7 +319,10 @@ export function storeLines(accountId: string, store: string, totals: StoreTotals
     0,
     Math.min(sourceSpendExact, totals.baselineDeduction ?? 0),
   );
-  const remainingAfterOpening = Math.max(0, sourceSpendExact - baselineDeductionExact);
+  const remainingAfterOpening = Math.max(
+    0,
+    sourceSpendExact - baselineDeductionExact,
+  );
   const endDeductionExact = Math.max(
     0,
     Math.min(remainingAfterOpening, totals.endDeduction ?? 0),
@@ -293,7 +333,9 @@ export function storeLines(accountId: string, store: string, totals: StoreTotals
     sourceSpendExact - baselineDeductionExact - endDeductionExact,
   );
   if (Math.abs(expectedSpend - preciseSpend) > 0.0000005) {
-    throw new RangeError("Billable spend does not match its Google boundary deductions.");
+    throw new RangeError(
+      "Billable spend does not match its Google boundary deductions.",
+    );
   }
 
   // A raw Google day that is consumed entirely by the immutable opening or
@@ -303,16 +345,55 @@ export function storeLines(accountId: string, store: string, totals: StoreTotals
   // manual referral term reduces the agency rate to 0%.
   if (preciseSpend <= 0) return [];
 
-  const { referralCount, referralDiscountRate, feeRate } = referralFeeTerms(
-    totals.referralCount,
+  const legacyTerms = referralFeeTerms(totals.referralCount);
+  const commercial = totals.commercialTerms;
+  const { referralCount, referralDiscountRate, feeRate } = commercial ?? {
+    ...legacyTerms,
+    commissionTermId: null,
+    pricingMode: "referral" as const,
+    listRate: AGENCY_FEE_RATE,
+  };
+  const listRate = commercial?.listRate ?? AGENCY_FEE_RATE;
+  const validPrecision = [listRate, referralDiscountRate, feeRate].every(
+    (value) => {
+      const scaled = value * 100;
+      return (
+        Number.isFinite(value) &&
+        Math.abs(Math.round(scaled) - scaled) <=
+          Number.EPSILON * Math.max(1, Math.abs(scaled)) * 4
+      );
+    },
   );
+  const validFormula = commercial
+    ? commercial.pricingMode === "manual"
+      ? listRate !== AGENCY_FEE_RATE &&
+        referralCount === 0 &&
+        referralDiscountRate === 0 &&
+        feeRate === listRate &&
+        Boolean(commercial.commissionTermId)
+      : listRate === AGENCY_FEE_RATE &&
+        referralFeeTerms(referralCount).referralDiscountRate ===
+          referralDiscountRate &&
+        feeRate === listRate - referralDiscountRate
+    : true;
+  if (!validPrecision || !validFormula || listRate < 0 || listRate > 100) {
+    throw new RangeError("Invalid sealed store commission terms.");
+  }
   const fee = agencyFee(preciseSpend, feeRate);
 
-  const billingStartedAt = capturedAt(totals.billingStart?.capturedAt, "unknown time");
-  const billingEndedAt = capturedAt(totals.billingEnd?.capturedAt, "unknown time");
-  const referralEvidence =
-    `; manual referral term: approved referral count ${referralCount}` +
-    `; ${AGENCY_FEE_RATE}% - ${exactRate(referralDiscountRate)} percentage points = ${exactRate(feeRate)}%`;
+  const billingStartedAt = capturedAt(
+    totals.billingStart?.capturedAt,
+    "unknown time",
+  );
+  const billingEndedAt = capturedAt(
+    totals.billingEnd?.capturedAt,
+    "unknown time",
+  );
+  const commercialEvidence =
+    commercial?.pricingMode === "manual"
+      ? `; manual account list rate: ${exactRate(listRate)}%`
+      : `; manual referral term: approved referral count ${referralCount}` +
+        `; ${AGENCY_FEE_RATE}% - ${exactRate(referralDiscountRate)} percentage points = ${exactRate(feeRate)}%`;
   let boundaryEvidence = "";
   if (totals.openingBaselineApplied && totals.endingCapApplied) {
     boundaryEvidence =
@@ -350,7 +431,13 @@ export function storeLines(accountId: string, store: string, totals: StoreTotals
       kind: "fee",
       store,
       rate: feeRate,
-      listRate: AGENCY_FEE_RATE,
+      ...(commercial
+        ? {
+            pricingMode: commercial.pricingMode,
+            commissionTermId: commercial.commissionTermId,
+          }
+        : {}),
+      listRate,
       referralDiscountRate,
       referralCount,
       baseAmount: spend,
@@ -366,7 +453,9 @@ export function storeLines(accountId: string, store: string, totals: StoreTotals
             // evidence field; only the human label is normalised to millis.
             billingStartedAt: totals.billingStart.capturedAt,
             billingTimeZone: totals.billingStart.timeZone,
-            billingStartBaselineAmount: round2(totals.billingStart.baselineAmount),
+            billingStartBaselineAmount: round2(
+              totals.billingStart.baselineAmount,
+            ),
           }
         : {}),
       ...(totals.endingCapApplied && totals.billingEnd
@@ -382,14 +471,20 @@ export function storeLines(accountId: string, store: string, totals: StoreTotals
         : {}),
       label:
         `${store} - Google Ads agency fee (${exactRate(feeRate)}% of captured Google-reported billable spend: ` +
-        `EUR ${preciseSpend.toFixed(6)}${referralEvidence}${boundaryEvidence})`,
+        `EUR ${preciseSpend.toFixed(6)}${commercialEvidence}${boundaryEvidence})`,
       amount: fee,
     },
   ];
 }
 
 /** EUR is mandatory; a fallback would silently relabel foreign spend. */
-export function billingCurrency(currencies: Set<string>): typeof BILLING_CURRENCY | null {
-  const normalised = new Set([...currencies].map((currency) => currency.toUpperCase()));
-  return normalised.size === 1 && normalised.has(BILLING_CURRENCY) ? BILLING_CURRENCY : null;
+export function billingCurrency(
+  currencies: Set<string>,
+): typeof BILLING_CURRENCY | null {
+  const normalised = new Set(
+    [...currencies].map((currency) => currency.toUpperCase()),
+  );
+  return normalised.size === 1 && normalised.has(BILLING_CURRENCY)
+    ? BILLING_CURRENCY
+    : null;
 }

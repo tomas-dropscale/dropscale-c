@@ -218,7 +218,10 @@ describe("admin V2 campaign inventory", () => {
   it("projects one Shopify anchor, reads its pair and child, and counts metrics once", async () => {
     const accounts = [
       account("anchor", "client-1", { reporting_role: "shopify_anchor" }),
-      account("child", "client-1", { reporting_role: "google_spend" }),
+      account("child", "client-1", {
+        reporting_role: "google_spend",
+        commission_rate: 20,
+      }),
     ];
     mocks.createClient.mockResolvedValue(supabaseFor(accounts));
     const rolloutQuery = query([
@@ -238,10 +241,16 @@ describe("admin V2 campaign inventory", () => {
       { ad_account_id: "anchor" },
       { ad_account_id: "child" },
     ]);
-    mocks.sumMetrics.mockImplementation((rows: unknown[]) =>
-      rows.length > 0
-        ? { ...emptyRollup, attributedRevenue: 120, revenue: 120, adSpend: 40 }
-        : emptyRollup,
+    mocks.sumMetrics.mockImplementation(
+      (rows: Array<{ ad_account_id?: string }>) => {
+        if (rows.length === 0) return emptyRollup;
+        const adSpend = rows.reduce(
+          (sum, row) =>
+            sum + (row.ad_account_id === "anchor" ? 10 : row.ad_account_id === "child" ? 30 : 0),
+          0,
+        );
+        return { ...emptyRollup, attributedRevenue: 120, revenue: 120, adSpend };
+      },
     );
     mocks.googleRoas.mockImplementation((revenue: number | null, spend: number) =>
       revenue !== null && spend > 0 ? revenue / spend : 0,
@@ -286,7 +295,7 @@ describe("admin V2 campaign inventory", () => {
           expect.objectContaining({ id: "campaign-anchor", spend: 10 }),
         ],
         spend: 40,
-        commission: 4,
+        commission: 7,
         connected: true,
         failed: false,
       }),
@@ -299,6 +308,39 @@ describe("admin V2 campaign inventory", () => {
     );
     expect(mocks.fetchLiveCampaignsDetailed).not.toHaveBeenCalled();
     expect(mocks.decryptToken).not.toHaveBeenCalled();
+
+    mocks.fetchGoogleReportingCampaigns.mockReset();
+    mocks.fetchGoogleReportingCampaigns.mockImplementation(async (reportingSource) => {
+      if (reportingSource.adAccountId === "child") throw new Error("one source failed");
+      return [{
+        id: "campaign-anchor",
+        ad_account_id: "anchor",
+        name: "anchor",
+        status: "active",
+        spend: 10,
+        impressions: 100,
+        clicks: 10,
+        ctr: 0.1,
+        cpc: 1,
+        daily_budget: 20,
+        updated_at: "2026-08-14T00:00:00.000Z",
+        startDate: "2026-08-01",
+        conversions: 2,
+      }];
+    });
+
+    const partial = await fetchAdminCampaigns({
+      key: "custom",
+      from: "2026-08-01",
+      to: "2026-08-14",
+    });
+    expect(partial.clients[0].accounts[0]).toEqual(
+      expect.objectContaining({
+        campaignState: "partial",
+        failed: true,
+        campaigns: [expect.objectContaining({ id: "campaign-anchor" })],
+      }),
+    );
   });
 
   it("keeps a client with no rollout row on the legacy token reader", async () => {
@@ -311,6 +353,10 @@ describe("admin V2 campaign inventory", () => {
     mocks.createServiceClient.mockReturnValue({
       from: vi.fn(() => query([])),
     });
+    mocks.fetchDailyMetrics.mockResolvedValue([{ ad_account_id: "legacy" }]);
+    mocks.sumMetrics.mockImplementation((rows: unknown[]) =>
+      rows.length > 0 ? { ...emptyRollup, adSpend: 25 } : emptyRollup,
+    );
     mocks.decryptToken.mockResolvedValue("refresh-token");
     mocks.fetchLiveCampaignsDetailed.mockResolvedValue([
       {
@@ -340,7 +386,7 @@ describe("admin V2 campaign inventory", () => {
       expect.objectContaining({ spend: 25, commission: 2.5, connected: true }),
     );
     expect(overview.clients[0]).toEqual(
-      expect.objectContaining({ revenue: null, rollupSpend: 0, realRoas: 0 }),
+      expect.objectContaining({ revenue: null, rollupSpend: 25, realRoas: 0 }),
     );
     expect(mocks.fetchLiveCampaignsDetailed).toHaveBeenCalledWith(
       "1234567890",
@@ -382,6 +428,41 @@ describe("admin V2 campaign inventory", () => {
     expect(mocks.fetchLiveCampaignsDetailed).toHaveBeenCalledTimes(1);
     expect(mocks.resolveReportingSources).not.toHaveBeenCalled();
     expect(mocks.fetchGoogleReportingCampaigns).not.toHaveBeenCalled();
+  });
+
+  it("keeps verified rollup spend visible when campaign reporting fails", async () => {
+    const legacy = account("legacy", "client-1", {
+      status: "active",
+      google_ads_connected: true,
+      google_ads_customer_id: "1234567890",
+    });
+    mocks.createClient.mockResolvedValue(supabaseFor([legacy], "ciphertext"));
+    mocks.createServiceClient.mockReturnValue({ from: vi.fn(() => query([])) });
+    mocks.decryptToken.mockResolvedValue("refresh-token");
+    mocks.fetchLiveCampaignsDetailed.mockRejectedValue(new Error("provider query failed"));
+    mocks.fetchDailyMetrics.mockResolvedValue([{ ad_account_id: "legacy" }]);
+    mocks.sumMetrics.mockImplementation((rows: unknown[]) =>
+      rows.length > 0
+        ? { ...emptyRollup, attributedRevenue: 164.07, revenue: 164.07, adSpend: 72.56 }
+        : emptyRollup,
+    );
+
+    const overview = await fetchAdminCampaigns({
+      key: "d7",
+      from: "2026-08-08",
+      to: "2026-08-14",
+    });
+
+    expect(overview.clients[0].accounts[0]).toEqual(
+      expect.objectContaining({
+        campaignState: "failed",
+        campaigns: [],
+        failed: true,
+        spend: 72.56,
+        rollupSpend: 72.56,
+      }),
+    );
+    expect(overview.totals.spend).toBe(72.56);
   });
 
   it("does not fall back to legacy when rollout authority is unavailable", async () => {

@@ -4,6 +4,7 @@ vi.mock("server-only", () => ({}));
 vi.mock("../google-ads/client", () => ({ searchGoogleAdsAsAgency: vi.fn() }));
 
 import {
+  accountCommissionTermsForDate,
   billableGoogleMicros,
   billableGoogleSpendWindow,
   billingBoundaryMicros,
@@ -49,14 +50,113 @@ describe("manual referral rates", () => {
       feeRate: 8,
     };
 
-    expect(manualReferralRateForDate("2026-08-09", [base, revision, future])).toBe(8.5);
-    expect(manualReferralRateForDate("2026-08-10", [base, revision, future])).toBe(8);
+    expect(
+      manualReferralRateForDate("2026-08-09", [base, revision, future]),
+    ).toBe(8.5);
+    expect(
+      manualReferralRateForDate("2026-08-10", [base, revision, future]),
+    ).toBe(8);
   });
 
   it("fails closed on a term whose stored arithmetic is inconsistent", () => {
     expect(() =>
       manualReferralRateForDate("2026-08-03", [{ ...base, feeRate: 8.99 }]),
     ).toThrow("Invalid sealed manual referral term");
+  });
+});
+
+describe("account commission terms", () => {
+  const referral = {
+    effectiveFrom: "2026-08-03",
+    revision: 1,
+    referralCount: 2,
+    listRate: 10,
+    stepRate: 0.5,
+    discountRate: 1,
+    feeRate: 9,
+  };
+  const manual = {
+    id: "term-12",
+    effectiveFrom: "2026-08-10",
+    revision: 1,
+    listRate: 12,
+  };
+
+  it("keeps the audited 10% default, then treats a custom list rate as an override", () => {
+    expect(
+      accountCommissionTermsForDate("2026-08-09", [manual], [referral]),
+    ).toEqual({
+      commissionTermId: null,
+      pricingMode: "referral",
+      listRate: 10,
+      referralCount: 2,
+      referralDiscountRate: 1,
+      feeRate: 9,
+    });
+    expect(
+      accountCommissionTermsForDate("2026-08-10", [manual], [referral]),
+    ).toEqual({
+      commissionTermId: "term-12",
+      pricingMode: "manual",
+      listRate: 12,
+      referralCount: 0,
+      referralDiscountRate: 0,
+      feeRate: 12,
+    });
+  });
+
+  it("uses the latest Monday revision and reactivates referrals after a reset to 10%", () => {
+    const reset = { ...manual, id: "term-reset", revision: 2, listRate: 10 };
+    expect(
+      accountCommissionTermsForDate("2026-08-10", [manual, reset], [referral]),
+    ).toMatchObject({
+      commissionTermId: "term-reset",
+      pricingMode: "referral",
+      referralCount: 2,
+      feeRate: 9,
+    });
+  });
+
+  it("keeps the sealed count after the referral discount reaches its floor", () => {
+    expect(
+      accountCommissionTermsForDate(
+        "2026-08-10",
+        [],
+        [
+          {
+            ...referral,
+            referralCount: 25,
+            discountRate: 10,
+            feeRate: 0,
+          },
+        ],
+      ),
+    ).toMatchObject({
+      pricingMode: "referral",
+      referralCount: 25,
+      referralDiscountRate: 10,
+      feeRate: 0,
+    });
+  });
+
+  it("accepts an exact hundredth that is inexact in binary floating point", () => {
+    expect(
+      accountCommissionTermsForDate(
+        "2026-08-10",
+        [{ ...manual, id: "term-995", listRate: 9.95 }],
+        [referral],
+      ),
+    ).toMatchObject({ pricingMode: "manual", feeRate: 9.95 });
+  });
+
+  it("fails closed on malformed account terms", () => {
+    expect(() =>
+      accountCommissionTermsForDate(
+        "2026-08-10",
+        [{ ...manual, listRate: 12.345 }],
+        [],
+      ),
+    ).toThrow("Invalid sealed account commission term");
   });
 });
 
@@ -316,9 +416,15 @@ describe("immutable billing baseline", () => {
     expect(eurosToMicros("1.045001")).toBe(BigInt(1_045_001));
     expect(canonicalEuroMicros(1.045)).toBe("1.045000");
     expect(microsToEuroNumber("1045000")).toBe(1.045);
-    expect(billableGoogleMicros("90", "2026-07-20", "2026-07-21", "100")).toBe(BigInt(0));
-    expect(billableGoogleMicros("125", "2026-07-21", "2026-07-21", "100")).toBe(BigInt(25));
-    expect(billableGoogleMicros("125", "2026-07-22", "2026-07-21", "100")).toBe(BigInt(125));
+    expect(billableGoogleMicros("90", "2026-07-20", "2026-07-21", "100")).toBe(
+      BigInt(0),
+    );
+    expect(billableGoogleMicros("125", "2026-07-21", "2026-07-21", "100")).toBe(
+      BigInt(25),
+    );
+    expect(billableGoogleMicros("125", "2026-07-22", "2026-07-21", "100")).toBe(
+      BigInt(125),
+    );
   });
 });
 
@@ -331,11 +437,15 @@ describe("needsGoogleLedgerRewrite", () => {
   };
 
   it("re-confirms a row even when its arithmetic is unchanged", () => {
-    expect(needsGoogleLedgerRewrite({ ...next, status: "pending" }, next)).toBe(true);
+    expect(needsGoogleLedgerRewrite({ ...next, status: "pending" }, next)).toBe(
+      true,
+    );
   });
 
   it("leaves an already-confirmed exact row untouched", () => {
-    expect(needsGoogleLedgerRewrite({ ...next, status: "confirmed" }, next)).toBe(false);
+    expect(
+      needsGoogleLedgerRewrite({ ...next, status: "confirmed" }, next),
+    ).toBe(false);
   });
 
   it("detects a one-micro raw restatement or a first-day fee-base change", () => {
@@ -368,7 +478,13 @@ describe("matchesAuthoritativeGoogleSpend", () => {
     expect(
       matchesAuthoritativeGoogleSpend(
         google,
-        [{ occurred_on: "2026-07-20", gross_amount: "1.045001", currency: "EUR" }],
+        [
+          {
+            occurred_on: "2026-07-20",
+            gross_amount: "1.045001",
+            currency: "EUR",
+          },
+        ],
         "EUR",
       ),
     ).toBe(true);
@@ -389,21 +505,39 @@ describe("matchesAuthoritativeGoogleSpend", () => {
     expect(
       matchesAuthoritativeGoogleSpend(
         google,
-        [{ occurred_on: "2026-07-20", gross_amount: "1.045000", currency: "EUR" }],
+        [
+          {
+            occurred_on: "2026-07-20",
+            gross_amount: "1.045000",
+            currency: "EUR",
+          },
+        ],
         "EUR",
       ),
     ).toBe(false);
     expect(
       matchesAuthoritativeGoogleSpend(
         google,
-        [{ occurred_on: "2026-07-20", gross_amount: "1.045001", currency: "USD" }],
+        [
+          {
+            occurred_on: "2026-07-20",
+            gross_amount: "1.045001",
+            currency: "USD",
+          },
+        ],
         "EUR",
       ),
     ).toBe(false);
     expect(
       matchesAuthoritativeGoogleSpend(
         google,
-        [{ occurred_on: "2026-07-22", gross_amount: "1.045001", currency: "EUR" }],
+        [
+          {
+            occurred_on: "2026-07-22",
+            gross_amount: "1.045001",
+            currency: "EUR",
+          },
+        ],
         "EUR",
       ),
     ).toBe(false);

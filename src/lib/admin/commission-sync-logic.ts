@@ -18,11 +18,26 @@ export type ManualReferralRateTerm = {
   feeRate: number;
 };
 
-/** Resolve the append-only manual term in force on an exact Google day. */
-export function manualReferralRateForDate(
+export type AccountCommissionRateTerm = {
+  id: string;
+  effectiveFrom: string;
+  revision: number;
+  listRate: number;
+};
+
+export type ResolvedAccountCommissionTerms = {
+  commissionTermId: string | null;
+  pricingMode: "manual" | "referral";
+  listRate: number;
+  referralCount: number;
+  referralDiscountRate: number;
+  feeRate: number;
+};
+
+function manualReferralTermsForDate(
   date: string,
   terms: ManualReferralRateTerm[],
-): number {
+): ManualReferralRateTerm {
   const applicable = terms
     .filter((term) => term.effectiveFrom <= date)
     .sort((left, right) =>
@@ -30,7 +45,17 @@ export function manualReferralRateForDate(
         ? right.revision - left.revision
         : right.effectiveFrom.localeCompare(left.effectiveFrom),
     )[0];
-  if (!applicable) return 10;
+  if (!applicable) {
+    return {
+      effectiveFrom: date,
+      revision: 0,
+      referralCount: 0,
+      listRate: 10,
+      stepRate: 0.5,
+      discountRate: 0,
+      feeRate: 10,
+    };
+  }
 
   const expectedDiscount = Math.min(10, applicable.referralCount * 0.5);
   if (
@@ -43,7 +68,76 @@ export function manualReferralRateForDate(
   ) {
     throw new RangeError("Invalid sealed manual referral term.");
   }
-  return applicable.feeRate;
+  return applicable;
+}
+
+/** Resolve the append-only manual term in force on an exact Google day. */
+export function manualReferralRateForDate(
+  date: string,
+  terms: ManualReferralRateTerm[],
+): number {
+  return manualReferralTermsForDate(date, terms).feeRate;
+}
+
+function exactHundredth(value: number): boolean {
+  const scaled = value * 100;
+  return (
+    Number.isFinite(value) &&
+    Math.abs(Math.round(scaled) - scaled) <=
+      Number.EPSILON * Math.max(1, Math.abs(scaled)) * 4
+  );
+}
+
+/** Resolve one store's immutable Monday term; manual and referral never stack. */
+export function accountCommissionTermsForDate(
+  date: string,
+  accountTerms: AccountCommissionRateTerm[],
+  referralTerms: ManualReferralRateTerm[],
+): ResolvedAccountCommissionTerms {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    throw new RangeError("Invalid account commission date.");
+  }
+  const applicable = accountTerms
+    .filter((term) => term.effectiveFrom <= date)
+    .sort((left, right) =>
+      left.effectiveFrom === right.effectiveFrom
+        ? right.revision - left.revision
+        : right.effectiveFrom.localeCompare(left.effectiveFrom),
+    )[0];
+  const listRate = applicable?.listRate ?? 10;
+  if (
+    !exactHundredth(listRate) ||
+    listRate < 0 ||
+    listRate > 100 ||
+    (applicable &&
+      (!applicable.id ||
+        !Number.isSafeInteger(applicable.revision) ||
+        applicable.revision < 1 ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(applicable.effectiveFrom)))
+  ) {
+    throw new RangeError("Invalid sealed account commission term.");
+  }
+
+  if (listRate !== 10) {
+    return {
+      commissionTermId: applicable?.id ?? null,
+      pricingMode: "manual",
+      listRate,
+      referralCount: 0,
+      referralDiscountRate: 0,
+      feeRate: listRate,
+    };
+  }
+
+  const referral = manualReferralTermsForDate(date, referralTerms);
+  return {
+    commissionTermId: applicable?.id ?? null,
+    pricingMode: "referral",
+    listRate,
+    referralCount: referral.referralCount,
+    referralDiscountRate: referral.discountRate,
+    feeRate: referral.feeRate,
+  };
 }
 
 /** Stable exact-money helpers shared by sync, preview and issue paths. */
@@ -67,14 +161,17 @@ export function billableGoogleMicros(
   end?: { googleLocalDate: string; endCostMicros: bigint | string },
 ): bigint {
   if (date < startDate || (end && date > end.googleLocalDate)) return BigInt(0);
-  const raw = typeof rawMicros === "bigint" ? rawMicros : parseGoogleMicros(rawMicros);
+  const raw =
+    typeof rawMicros === "bigint" ? rawMicros : parseGoogleMicros(rawMicros);
   const capped =
     end && date === end.googleLocalDate
       ? raw < parseGoogleMicros(end.endCostMicros)
         ? raw
         : parseGoogleMicros(end.endCostMicros)
       : raw;
-  return date === startDate ? billableMicrosSinceBaseline(capped, baselineMicros) : capped;
+  return date === startDate
+    ? billableMicrosSinceBaseline(capped, baselineMicros)
+    : capped;
 }
 
 /** Apply opening and closing counters to already-aggregated raw ledger totals. */
@@ -110,9 +207,8 @@ export function billingBoundaryMicros({
   const endDeductionMicros = endingApplied
     ? endDayMicros - cappedEndDayMicros
     : BigInt(0);
-  const effectiveStartDayMicros = sameBoundaryDay && endingApplied
-    ? cappedEndDayMicros
-    : startDayMicros;
+  const effectiveStartDayMicros =
+    sameBoundaryDay && endingApplied ? cappedEndDayMicros : startDayMicros;
   const openingDeductionMicros = openingApplied
     ? effectiveStartDayMicros -
       billableMicrosSinceBaseline(effectiveStartDayMicros, baselineMicros)
@@ -148,7 +244,10 @@ export function completeGoogleMicrosWindow(
 
   const result: RawGoogleSpendDay[] = [];
   for (let date = from; date <= to; date = addIsoDays(date, 1)) {
-    result.push({ date, costMicros: (byDate.get(date) ?? BigInt(0)).toString() });
+    result.push({
+      date,
+      costMicros: (byDate.get(date) ?? BigInt(0)).toString(),
+    });
   }
   return result;
 }
@@ -186,24 +285,28 @@ export function billableGoogleSpendWindow(
   start: { googleLocalDate: string; baselineCostMicros: string },
   end?: { googleLocalDate: string; endCostMicros: string },
 ): BillableGoogleSpendDay[] {
-  const effectiveTo = end && end.googleLocalDate < to ? end.googleLocalDate : to;
+  const effectiveTo =
+    end && end.googleLocalDate < to ? end.googleLocalDate : to;
   if (start.googleLocalDate > effectiveTo) return [];
-  const effectiveFrom = start.googleLocalDate > from ? start.googleLocalDate : from;
-  return completeGoogleMicrosWindow(effectiveFrom, effectiveTo, reported).map((day) => {
-    const raw = parseGoogleMicros(day.costMicros);
-    const billable = billableGoogleMicros(
-      raw,
-      day.date,
-      start.googleLocalDate,
-      start.baselineCostMicros,
-      end,
-    );
-    return {
-      date: day.date,
-      rawCostMicros: raw.toString(),
-      billableCostMicros: billable.toString(),
-    };
-  });
+  const effectiveFrom =
+    start.googleLocalDate > from ? start.googleLocalDate : from;
+  return completeGoogleMicrosWindow(effectiveFrom, effectiveTo, reported).map(
+    (day) => {
+      const raw = parseGoogleMicros(day.costMicros);
+      const billable = billableGoogleMicros(
+        raw,
+        day.date,
+        start.googleLocalDate,
+        start.baselineCostMicros,
+        end,
+      );
+      return {
+        date: day.date,
+        rawCostMicros: raw.toString(),
+        billableCostMicros: billable.toString(),
+      };
+    },
+  );
 }
 
 type GoogleLedgerFinancialState = {
@@ -225,7 +328,11 @@ function sameDecimal(left: string | number, right: string | number): boolean {
 function sameRate(left: string | number, right: string | number): boolean {
   const leftNumber = Number(left);
   const rightNumber = Number(right);
-  return Number.isFinite(leftNumber) && Number.isFinite(rightNumber) && leftNumber === rightNumber;
+  return (
+    Number.isFinite(leftNumber) &&
+    Number.isFinite(rightNumber) &&
+    leftNumber === rightNumber
+  );
 }
 
 /** A successful Google read is authoritative for status and exact arithmetic. */
@@ -248,7 +355,11 @@ export function needsGoogleLedgerRewrite(
  */
 export function matchesAuthoritativeGoogleSpend(
   reported: BillableGoogleSpendDay[],
-  ledger: { occurred_on: string; gross_amount: string | number; currency: string }[],
+  ledger: {
+    occurred_on: string;
+    gross_amount: string | number;
+    currency: string;
+  }[],
   currency: string,
 ): boolean {
   const expected = new Map(

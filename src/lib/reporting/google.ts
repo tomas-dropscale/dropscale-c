@@ -120,6 +120,7 @@ export async function fetchGoogleReportingCampaigns(
       startDate: row.startDate,
       conversions: row.conversions,
       advertisingChannelType: row.advertisingChannelType,
+      shoppingFeed: row.shoppingFeed,
       biddingStrategyType: row.biddingStrategyType,
       conversionValue: row.conversionValue,
       googleRoas: row.spend > 0 ? row.conversionValue / row.spend : 0,

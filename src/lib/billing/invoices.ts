@@ -52,7 +52,11 @@ import {
   microsToDecimal,
   parseGoogleMicros,
 } from "@/lib/google-ads/billing-start";
-import { billingBoundaryMicros } from "@/lib/admin/commission-sync-logic";
+import {
+  accountCommissionTermsForDate,
+  billingBoundaryMicros,
+  type AccountCommissionRateTerm,
+} from "@/lib/admin/commission-sync-logic";
 import {
   addDays,
   AGENCY_FEE_RATE,
@@ -65,6 +69,7 @@ import {
   DAYS_UNTIL_DUE,
   isoDay,
   isManualAgencyCalculationVersion,
+  isReviewedAgencyCalculationVersion,
   mondayOf,
   referralFeeTerms,
   round2,
@@ -84,6 +89,7 @@ import { stripeInvoiceRecoveryMode } from "@/lib/billing/invoice-delivery";
 import {
   buildBillingPositions,
   type BillingPositionAccount,
+  type BillingPositionAccountTerm,
   type BillingPositionClient,
   type BillingPositionEnd,
   type BillingPositionInvoice,
@@ -141,6 +147,12 @@ export type BillingStorePreview = {
   accountId: string;
   storeName: string;
   accountCurrency: string;
+  pricingMode: "manual" | "referral";
+  commissionTermId: string | null;
+  listRate: number;
+  referralCount: number;
+  referralDiscountRate: number;
+  feeRate: number;
   /** Raw Google spend in the eligible part of the selected week. */
   grossSpend: number;
   /** Opening same-day counter excluded from the first partial week. */
@@ -187,7 +199,8 @@ export type BillingClientPreview = {
   referralCount: number;
   referralDiscountRate: number;
   feeRate: number;
-  listRate: typeof AGENCY_FEE_RATE;
+  listRate: number;
+  mixedRates: boolean;
   /** Exact email/legal identity bound into the admin confirmation. */
   recipient: BillingRecipientSnapshot;
   sourceDays: number;
@@ -452,6 +465,55 @@ async function fetchEffectiveReferralTerms(
   return latest;
 }
 
+async function fetchAccountCommissionTerms(
+  supabase: Supabase,
+  accountIds: string[],
+  through?: string,
+): Promise<Map<string, AccountCommissionRateTerm[]>> {
+  const byAccount = new Map<string, AccountCommissionRateTerm[]>();
+  if (accountIds.length === 0) return byAccount;
+  const pageSize = 1_000;
+  let afterId: string | null = null;
+  for (;;) {
+    let query = supabase
+      .from("ad_account_commission_terms")
+      .select("id, ad_account_id, effective_from, revision, list_rate")
+      .in("ad_account_id", accountIds)
+      .not("sealed_at", "is", null)
+      .order("id", { ascending: true })
+      .limit(pageSize);
+    if (through) query = query.lte("effective_from", through);
+    if (afterId) query = query.gt("id", afterId);
+    const { data, error } = await query;
+    if (error) {
+      throw new Error(
+        `Could not load account commission terms: ${error.message}`,
+      );
+    }
+    const page = (data ?? []) as unknown as Array<{
+      id: string;
+      ad_account_id: string;
+      effective_from: string;
+      revision: number;
+      list_rate: string | number;
+    }>;
+    for (const row of page) {
+      const current = byAccount.get(row.ad_account_id) ?? [];
+      current.push({
+        id: row.id,
+        effectiveFrom: row.effective_from,
+        revision: row.revision,
+        listRate: Number(row.list_rate),
+      });
+      byAccount.set(row.ad_account_id, current);
+    }
+    if (page.length < pageSize) break;
+    afterId = page.at(-1)?.id ?? null;
+    if (!afterId) break;
+  }
+  return byAccount;
+}
+
 async function calculateWeek(
   supabase: Supabase,
   week: { start: string; end: string },
@@ -525,6 +587,11 @@ async function calculateWeek(
       `Could not load billing accounts: ${accountsError.message}`,
     );
   const allAccounts = (accountRows ?? []) as unknown as BillingAccount[];
+  const commissionTermsByAccount = await fetchAccountCommissionTerms(
+    supabase,
+    allAccounts.map((account) => account.id),
+    week.start,
+  );
 
   let billingStarts: BillingStart[] = [];
   if (allAccounts.length > 0) {
@@ -676,12 +743,31 @@ async function calculateWeek(
     const referralTerm = resolvedReferralTerm(
       effectiveTermByClient.get(client.id),
     );
+    const referralRateTerms =
+      referralTerm.valid && referralTerm.termId
+        ? [
+            {
+              effectiveFrom: referralTerm.effectiveFrom!,
+              revision: referralTerm.revision,
+              referralCount: referralTerm.referralCount,
+              listRate: referralTerm.listRate,
+              stepRate: referralTerm.stepRate,
+              discountRate: referralTerm.discountRate,
+              feeRate: referralTerm.feeRate,
+            },
+          ]
+        : [];
     const clientAccounts = accountsByClient.get(client.id) ?? [];
     const stores: BillingStorePreview[] = [];
     const lines: InvoiceLine[] = [];
     const claimedRows: LedgerRow[] = [];
 
     for (const account of clientAccounts) {
+      const commercialTerms = accountCommissionTermsForDate(
+        week.start,
+        commissionTermsByAccount.get(account.id) ?? [],
+        referralRateTerms,
+      );
       const start = startByAccount.get(account.id) ?? null;
       const end = endByAccount.get(account.id) ?? null;
       const rows = (rowsByAccount.get(account.id) ?? []).filter(
@@ -774,14 +860,11 @@ async function calculateWeek(
           ),
         );
       }
-      if (
-        Number(account.list_commission_rate) !== AGENCY_FEE_RATE ||
-        account.revenue_share_enabled
-      ) {
+      if (account.revenue_share_enabled) {
         storeBlockers.push(
           blocker(
             "legacy_commercial_terms",
-            `${account.store_name} has a custom list-rate or revenue-share contract that is incompatible with manual referral billing.`,
+            `${account.store_name} has a legacy revenue-share contract that is incompatible with reviewed agency billing.`,
             "error",
             account.id,
           ),
@@ -880,7 +963,8 @@ async function calculateWeek(
       const endDeduction = round2(endDeductionExact);
       const billableSpend = round2(billableSpendExact);
       const storeInvoiceLines =
-        accountCurrency === BILLING_CURRENCY && referralTerm.valid
+        accountCurrency === BILLING_CURRENCY &&
+        (commercialTerms.pricingMode === "manual" || referralTerm.valid)
           ? storeLines(account.id, account.store_name, {
               spend: billableSpendExact,
               sourceSpend: sourceSpendExact,
@@ -891,6 +975,7 @@ async function calculateWeek(
               periodStart: week.start,
               periodEnd: week.end,
               referralCount: referralTerm.referralCount,
+              commercialTerms,
               ...(start
                 ? {
                     billingStart: {
@@ -927,6 +1012,12 @@ async function calculateWeek(
         accountId: account.id,
         storeName: account.store_name,
         accountCurrency,
+        pricingMode: commercialTerms.pricingMode,
+        commissionTermId: commercialTerms.commissionTermId,
+        listRate: commercialTerms.listRate,
+        referralCount: commercialTerms.referralCount,
+        referralDiscountRate: commercialTerms.referralDiscountRate,
+        feeRate: commercialTerms.feeRate,
         grossSpend,
         baselineDeduction,
         endDeduction,
@@ -969,7 +1060,8 @@ async function calculateWeek(
     const existingDraft = recoveryMode === "draft";
     const pendingStripeDelivery = Boolean(
       recoveryMode === "send_only" &&
-      existingInvoice?.calculation_version === CALCULATION_VERSION &&
+      existingInvoice &&
+      isReviewedAgencyCalculationVersion(existingInvoice.calculation_version) &&
       existingInvoice.currency.toUpperCase() === BILLING_CURRENCY,
     );
     const retryableInvoice = existingDraft || pendingStripeDelivery;
@@ -987,7 +1079,9 @@ async function calculateWeek(
     // not a later Google restatement. That makes the confirmation describe the
     // exact object createAndFinalizeInvoice() will resume in Stripe.
     if (existingInvoice) {
-      if (existingInvoice.calculation_version === CALCULATION_VERSION) {
+      if (
+        isReviewedAgencyCalculationVersion(existingInvoice.calculation_version)
+      ) {
         recipient = requireBillingRecipientSnapshot(
           existingInvoice.billing_recipient,
         );
@@ -1001,29 +1095,29 @@ async function calculateWeek(
         referralLine &&
         isManualAgencyCalculationVersion(existingInvoice.calculation_version)
       ) {
-        // v2 predates referral terms and is permanently the 10% list fee. It
-        // must not inherit a referral that happened to be in force when an
-        // admin later re-opened this historical week. v3, in contrast, seals
-        // the exact count/rate and term id into its immutable line snapshot.
-        const isV3 =
-          existingInvoice.calculation_version === CALCULATION_VERSION;
-        const count = isV3 ? Number(referralLine.referralCount ?? 0) : 0;
+        // V2 predates referral terms and is permanently the 10% list fee. It
+        // must not inherit a later referral. V3 and V4 both seal the applied
+        // referral values into immutable line snapshots.
+        const isReviewed = isReviewedAgencyCalculationVersion(
+          existingInvoice.calculation_version,
+        );
+        const count = isReviewed ? Number(referralLine.referralCount ?? 0) : 0;
         const terms = referralFeeTerms(count);
         displayReferralTerm = {
           ...referralTerm,
-          termId: isV3 ? existingInvoice.referral_discount_term_id : null,
-          effectiveFrom: isV3 ? referralTerm.effectiveFrom : null,
-          revision: isV3 ? referralTerm.revision : 0,
+          termId: isReviewed ? existingInvoice.referral_discount_term_id : null,
+          effectiveFrom: isReviewed ? referralTerm.effectiveFrom : null,
+          revision: isReviewed ? referralTerm.revision : 0,
           referralCount: count,
-          listRate: isV3
+          listRate: isReviewed
             ? Number(referralLine.listRate ?? AGENCY_FEE_RATE)
             : AGENCY_FEE_RATE,
-          discountRate: isV3
+          discountRate: isReviewed
             ? Number(
                 referralLine.referralDiscountRate ?? terms.referralDiscountRate,
               )
             : 0,
-          feeRate: isV3
+          feeRate: isReviewed
             ? Number(referralLine.rate ?? terms.feeRate)
             : AGENCY_FEE_RATE,
           valid: true,
@@ -1039,10 +1133,49 @@ async function calculateWeek(
           const current = line.accountId
             ? currentStoreByAccount.get(line.accountId)
             : undefined;
+          const reviewed = isReviewedAgencyCalculationVersion(
+            existingInvoice.calculation_version,
+          );
+          const pricingMode =
+            existingInvoice.calculation_version === CALCULATION_VERSION
+              ? (line.pricingMode ??
+                (Number(line.listRate ?? AGENCY_FEE_RATE) === AGENCY_FEE_RATE
+                  ? "referral"
+                  : "manual"))
+              : reviewed
+                ? "referral"
+                : "manual";
+          const listRate = reviewed
+            ? Number(line.listRate ?? AGENCY_FEE_RATE)
+            : AGENCY_FEE_RATE;
+          const referralCount =
+            pricingMode === "referral" ? Number(line.referralCount ?? 0) : 0;
+          const referralDiscountRate =
+            pricingMode === "referral"
+              ? Number(
+                  line.referralDiscountRate ??
+                    referralFeeTerms(referralCount).referralDiscountRate,
+                )
+              : 0;
+          const feeRate = Number(
+            line.rate ??
+              (pricingMode === "referral"
+                ? listRate - referralDiscountRate
+                : listRate),
+          );
           return {
             accountId,
             storeName: line.store ?? current?.storeName ?? line.label,
             accountCurrency: existingInvoice.currency,
+            pricingMode,
+            commissionTermId:
+              existingInvoice.calculation_version === CALCULATION_VERSION
+                ? (line.commissionTermId ?? null)
+                : null,
+            listRate,
+            referralCount,
+            referralDiscountRate,
+            feeRate,
             grossSpend: Number(line.sourceGrossAmount ?? line.baseAmount ?? 0),
             baselineDeduction: Number(line.baselineDeductionAmount ?? 0),
             endDeduction: Number(line.endDeductionAmount ?? 0),
@@ -1118,7 +1251,11 @@ async function calculateWeek(
         ),
       );
     }
-    if (!existingInvoice && !referralTerm.valid) {
+    if (
+      !existingInvoice &&
+      stores.some((store) => store.pricingMode === "referral") &&
+      !referralTerm.valid
+    ) {
       blockers.push(
         blocker(
           "referral_term_mismatch",
@@ -1170,19 +1307,48 @@ async function calculateWeek(
     }
     if (
       existingDraft &&
-      (existingInvoice?.calculation_version !== CALCULATION_VERSION ||
+      existingInvoice &&
+      (!isReviewedAgencyCalculationVersion(
+        existingInvoice.calculation_version,
+      ) ||
         existingInvoice.currency.toUpperCase() !== BILLING_CURRENCY)
     ) {
       blockers.push(
         blocker(
           "already_issued",
-          "This legacy draft cannot be retried by the v3 EUR referral flow.",
+          "This legacy draft cannot be retried by the reviewed EUR agency-fee flow.",
           "error",
         ),
       );
     }
 
     const uniqueDays = new Set(claimedRows.map((row) => row.occurred_on));
+    const commercialSignatures = new Set(
+      displayStores.map((store) =>
+        [
+          store.pricingMode,
+          store.listRate,
+          store.referralCount,
+          store.referralDiscountRate,
+          store.feeRate,
+        ].join(":"),
+      ),
+    );
+    const mixedRates = commercialSignatures.size > 1;
+    const summaryTerms = displayStores[0] ?? {
+      listRate: AGENCY_FEE_RATE,
+      referralCount: displayReferralTerm.referralCount,
+      referralDiscountRate: displayReferralTerm.discountRate,
+      feeRate: displayReferralTerm.feeRate,
+    };
+    const usesReferralPricing = displayStores.some(
+      (store) => store.pricingMode === "referral",
+    );
+    const appliedReferralTermId = existingInvoice
+      ? existingInvoice.referral_discount_term_id
+      : usesReferralPricing
+        ? displayReferralTerm.termId
+        : null;
     const preview: BillingClientPreview = {
       clientId: client.id,
       clientName: client.full_name,
@@ -1202,12 +1368,15 @@ async function calculateWeek(
       fee: amount,
       amount,
       currency: BILLING_CURRENCY,
-      referralTermId: displayReferralTerm.termId,
-      referralTermEffectiveFrom: displayReferralTerm.effectiveFrom,
-      referralCount: displayReferralTerm.referralCount,
-      referralDiscountRate: displayReferralTerm.discountRate,
-      feeRate: displayReferralTerm.feeRate,
-      listRate: AGENCY_FEE_RATE,
+      referralTermId: appliedReferralTermId,
+      referralTermEffectiveFrom: usesReferralPricing
+        ? displayReferralTerm.effectiveFrom
+        : null,
+      referralCount: summaryTerms.referralCount,
+      referralDiscountRate: summaryTerms.referralDiscountRate,
+      feeRate: summaryTerms.feeRate,
+      listRate: summaryTerms.listRate,
+      mixedRates,
       recipient,
       sourceDays: uniqueDays.size,
       lastLedgerUpdate: newestTimestamp(
@@ -1227,7 +1396,7 @@ async function calculateWeek(
       preview,
       lines: displayLines,
       ledgerRows: claimedRows,
-      referralTermId: displayReferralTerm.termId,
+      referralTermId: appliedReferralTermId,
       recipient,
     };
   });
@@ -1348,7 +1517,9 @@ async function fetchPositionLedgerRows(
     if (afterId) query = query.gt("id", afterId);
     const { data, error } = await query;
     if (error) {
-      throw new Error(`Could not load billing position ledger: ${error.message}`);
+      throw new Error(
+        `Could not load billing position ledger: ${error.message}`,
+      );
     }
     const page = (data ?? []).map((row) => ({
       id: row.id,
@@ -1392,7 +1563,9 @@ async function fetchPositionInvoices(
     if (afterId) query = query.gt("id", afterId);
     const { data, error } = await query;
     if (error) {
-      throw new Error(`Could not load billing position invoices: ${error.message}`);
+      throw new Error(
+        `Could not load billing position invoices: ${error.message}`,
+      );
     }
     const page = (data ?? []).map((row) => ({
       id: row.id,
@@ -1440,7 +1613,9 @@ async function fetchPositionMetrics(
       .order("ad_account_id", { ascending: true })
       .range(from, from + pageSize - 1);
     if (error) {
-      throw new Error(`Could not load current Google estimates: ${error.message}`);
+      throw new Error(
+        `Could not load current Google estimates: ${error.message}`,
+      );
     }
     const page = (data ?? []).map((row) => ({
       accountId: row.ad_account_id,
@@ -1476,7 +1651,9 @@ async function fetchPositionReferralTerms(
     if (afterId) query = query.gt("id", afterId);
     const { data, error } = await query;
     if (error) {
-      throw new Error(`Could not load billing position terms: ${error.message}`);
+      throw new Error(
+        `Could not load billing position terms: ${error.message}`,
+      );
     }
     const page = (data ?? []).map((row) => ({
       id: row.id,
@@ -1516,19 +1693,25 @@ async function fetchAdminBillingPositions(
 ): Promise<BillingPositions> {
   const currentStart = mondayOf(now);
   const currentEnd = addDays(currentStart, 6);
-  const [{ data: adminRows, error: adminsError }, { data: clientRows, error: clientsError }] =
-    await Promise.all([
-      supabase.from("profiles").select("id").eq("role", "admin"),
-      supabase
-        .from("portal_clients")
-        .select("id, full_name, email, approval_status")
-        .in("approval_status", ["approved", "rejected"]),
-    ]);
+  const [
+    { data: adminRows, error: adminsError },
+    { data: clientRows, error: clientsError },
+  ] = await Promise.all([
+    supabase.from("profiles").select("id").eq("role", "admin"),
+    supabase
+      .from("portal_clients")
+      .select("id, full_name, email, approval_status")
+      .in("approval_status", ["approved", "rejected"]),
+  ]);
   if (adminsError) {
-    throw new Error(`Could not load billing position owners: ${adminsError.message}`);
+    throw new Error(
+      `Could not load billing position owners: ${adminsError.message}`,
+    );
   }
   if (clientsError) {
-    throw new Error(`Could not load billing position clients: ${clientsError.message}`);
+    throw new Error(
+      `Could not load billing position clients: ${clientsError.message}`,
+    );
   }
   const adminIds = new Set((adminRows ?? []).map((row) => row.id));
   const clients: BillingPositionClient[] = (clientRows ?? [])
@@ -1548,7 +1731,9 @@ async function fetchAdminBillingPositions(
       .in("client_id", clientIds)
       .in("status", ["active", "suspended"]);
     if (error) {
-      throw new Error(`Could not load billing position accounts: ${error.message}`);
+      throw new Error(
+        `Could not load billing position accounts: ${error.message}`,
+      );
     }
     accounts = (data ?? []).map((account) => ({
       id: account.id,
@@ -1574,10 +1759,14 @@ async function fetchAdminBillingPositions(
         .in("ad_account_id", accountIds),
     ]);
     if (startsResult.error) {
-      throw new Error(`Could not load billing position starts: ${startsResult.error.message}`);
+      throw new Error(
+        `Could not load billing position starts: ${startsResult.error.message}`,
+      );
     }
     if (endsResult.error) {
-      throw new Error(`Could not load billing position ends: ${endsResult.error.message}`);
+      throw new Error(
+        `Could not load billing position ends: ${endsResult.error.message}`,
+      );
     }
     starts = (startsResult.data ?? []).map((start) => ({
       id: start.id,
@@ -1598,17 +1787,27 @@ async function fetchAdminBillingPositions(
     .eq("name", SPEND_SOURCE)
     .maybeSingle();
   if (sourceError) {
-    throw new Error(`Could not load billing position source: ${sourceError.message}`);
+    throw new Error(
+      `Could not load billing position source: ${sourceError.message}`,
+    );
   }
   if (!source) throw new Error(`Revenue source "${SPEND_SOURCE}" is missing.`);
 
-  const [ledgerRows, metricRows, invoices, referralTermsByClient] =
-    await Promise.all([
-      fetchPositionLedgerRows(supabase, source.id, accountIds),
-      fetchPositionMetrics(supabase, accountIds, currentStart, currentEnd),
-      fetchPositionInvoices(supabase, clientIds),
-      fetchPositionReferralTerms(supabase, clientIds),
-    ]);
+  const [
+    ledgerRows,
+    metricRows,
+    invoices,
+    referralTermsByClient,
+    commissionTermsByAccount,
+  ] = await Promise.all([
+    fetchPositionLedgerRows(supabase, source.id, accountIds),
+    fetchPositionMetrics(supabase, accountIds, currentStart, currentEnd),
+    fetchPositionInvoices(supabase, clientIds),
+    fetchPositionReferralTerms(supabase, clientIds),
+    fetchAccountCommissionTerms(supabase, accountIds) as Promise<
+      Map<string, BillingPositionAccountTerm[]>
+    >,
+  ]);
 
   return buildBillingPositions({
     now,
@@ -1620,6 +1819,7 @@ async function fetchAdminBillingPositions(
     metricRows,
     invoices,
     referralTermsByClient,
+    commissionTermsByAccount,
   });
 }
 
@@ -2147,7 +2347,7 @@ export async function issueClientWeek(input: {
       }
       if (
         Number(invoice.amount) !== preview.amount ||
-        invoice.calculation_version !== CALCULATION_VERSION ||
+        !isReviewedAgencyCalculationVersion(invoice.calculation_version) ||
         invoice.referral_discount_term_id !== calculated.referralTermId
       ) {
         throw new BillingIssueError(
@@ -2384,7 +2584,7 @@ export async function reconcileInvoices(
           amount: Number(row.amount),
           requireMetadata: manualAgencyInvoice,
           requireManualCollection: manualAgencyInvoice,
-          ...(row.calculation_version === CALCULATION_VERSION
+          ...(isReviewedAgencyCalculationVersion(row.calculation_version)
             ? { recipient: stripeRecipientExpectation(row.billing_recipient) }
             : {}),
         });

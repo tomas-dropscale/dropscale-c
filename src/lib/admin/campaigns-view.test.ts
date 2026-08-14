@@ -31,6 +31,8 @@ const clients: CampaignViewClient[] = [
         domain: "northwind-home.com",
         currency: "EUR",
         realRoas: 2.4,
+        rollupSpend: 100,
+        campaignState: "ready",
         campaigns: [
           {
             bindingId: "binding-1",
@@ -42,6 +44,7 @@ const clients: CampaignViewClient[] = [
             dailyBudget: "50.000000",
             currency: "EUR",
             type: "DGEN",
+            shoppingFeed: false,
             googleRoas: 2.4,
             actionable: true,
           },
@@ -64,6 +67,8 @@ const clients: CampaignViewClient[] = [
         domain: "atlas-objects.test",
         currency: "EUR",
         realRoas: null,
+        rollupSpend: 0,
+        campaignState: "empty",
         campaigns: [],
       },
     ],
@@ -215,6 +220,7 @@ describe("Campaigns view model", () => {
           connected: true,
           failed: false,
           authRevoked: false,
+          campaignState: "ready",
           spend: 100,
           commission: 10,
           rollupRevenue: 200,
@@ -231,6 +237,7 @@ describe("Campaigns view model", () => {
               spend: 100,
               daily_budget: 50,
               advertisingChannelType: "DEMAND_GEN",
+              shoppingFeed: true,
               googleRoas: 2.4,
             },
             {
@@ -244,6 +251,7 @@ describe("Campaigns view model", () => {
               spend: 0,
               daily_budget: 10,
               advertisingChannelType: "SEARCH",
+              shoppingFeed: false,
               googleRoas: 0,
             },
           ],
@@ -283,6 +291,7 @@ describe("Campaigns view model", () => {
         {
           bindingId,
           dailyBudget: "50",
+          shoppingFeed: true,
           actionable: true,
         },
         {

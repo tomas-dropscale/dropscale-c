@@ -161,9 +161,7 @@ export type Expense = {
 
 export type AdAccountStatus = "active" | "suspended" | "pending";
 export type AdAccountReportingRole =
-  | "legacy_hybrid"
-  | "shopify_anchor"
-  | "google_spend";
+  "legacy_hybrid" | "shopify_anchor" | "google_spend";
 export type RequestType = "google_ads" | "shopify";
 export type RequestStatus = "pending" | "approved" | "rejected";
 export type CampaignStatus = "active" | "paused" | "ended";
@@ -245,6 +243,10 @@ export type InvoiceLine = {
   store?: string;
   /** Percentage the line was computed at — blended over the week. Spend: null. */
   rate?: number | null;
+  /** V4 chooses exactly one source per store; manual and referral never stack. */
+  pricingMode?: "manual" | "referral";
+  /** Append-only account list-rate term used by this V4 fee line. */
+  commissionTermId?: string | null;
   /** Standard agency list fee before the sealed manual-referral term. */
   listRate?: number;
   /** Percentage points removed by the sealed manual-referral term. */
@@ -311,10 +313,7 @@ export type BillingIssueLease = {
 };
 
 export type BillingAutomationRunStatus =
-  | "running"
-  | "succeeded"
-  | "partial"
-  | "failed";
+  "running" | "succeeded" | "partial" | "failed";
 
 /** Durable aggregate receipt for one automatic billing invocation (0036). */
 export type BillingAutomationRun = {
@@ -337,18 +336,10 @@ export type BillingAutomationRun = {
 };
 
 export type BillingAutomationItemState =
-  | "pending"
-  | "processing"
-  | "blocked"
-  | "issued"
-  | "no_charge";
+  "pending" | "processing" | "blocked" | "issued" | "no_charge";
 
 export type BillingAutomationItemStage =
-  | "discovered"
-  | "preview"
-  | "google_evidence"
-  | "stripe_issue"
-  | "complete";
+  "discovered" | "preview" | "google_evidence" | "stripe_issue" | "complete";
 
 /** One fenced, retryable client/week work receipt (0036 + 0053). */
 export type BillingAutomationItem = {
@@ -488,6 +479,20 @@ export type ReferralDiscountTerm = {
   reviewed_by: string;
   created_at: string;
   sealed_at: string | null;
+};
+
+/** Append-only, Monday-effective per-store list-rate decision (0061). */
+export type AdAccountCommissionTerm = {
+  id: string;
+  ad_account_id: string;
+  effective_from: string;
+  revision: number;
+  supersedes_id: string | null;
+  decision_id: string;
+  list_rate: number | string;
+  reviewed_by: string;
+  created_at: string;
+  sealed_at: string;
 };
 
 /** One validated referred client sealed into a referral term. */
@@ -715,7 +720,8 @@ export type AuditShopifyConnectionEvent = {
   created_at: string;
 };
 
-export type AuditShopifyRunState = "queued" | "running" | "completed" | "failed";
+export type AuditShopifyRunState =
+  "queued" | "running" | "completed" | "failed";
 export type AuditShopifyRunRequestActor = "admin" | "system";
 
 /**
@@ -816,10 +822,7 @@ export type CampaignActionPolicyAction = Exclude<
   "campaign_launched"
 >;
 export type CampaignActionOperationStatus =
-  | "requested"
-  | "succeeded"
-  | "failed"
-  | "uncertain";
+  "requested" | "succeeded" | "failed" | "uncertain";
 
 /** Append-only, default-deny campaign write authority (migration 0059). */
 export type CampaignActionPolicy = {
@@ -1015,12 +1018,7 @@ export type ClientOnboardingMode = "new_client" | "add_assets" | "reconnect";
 export type ClientOnboardingAsset = "shopify" | "google_ads";
 export type ClientShopifyReconnectTargetSource = "legacy" | "onboarding";
 export type ClientOnboardingStatus =
-  | "pending"
-  | "collecting"
-  | "submitted"
-  | "reviewed"
-  | "active"
-  | "revoked";
+  "pending" | "collecting" | "submitted" | "reviewed" | "active" | "revoked";
 
 export type ClientOnboardingSession = {
   id: string;
@@ -1670,7 +1668,10 @@ export type Database = {
       };
       client_onboarding_secrets: {
         Row: Row<ClientOnboardingSecret>;
-        Insert: Insert<ClientOnboardingSecret, "windsor_access_token_ciphertext" | "updated_at">;
+        Insert: Insert<
+          ClientOnboardingSecret,
+          "windsor_access_token_ciphertext" | "updated_at"
+        >;
         Update: Partial<ClientOnboardingSecret>;
         Relationships: [
           {
@@ -1902,7 +1903,10 @@ export type Database = {
       };
       client_reporting_binding_events: {
         Row: Row<ClientReportingBindingEvent>;
-        Insert: Insert<ClientReportingBindingEvent, "id" | "details" | "created_at">;
+        Insert: Insert<
+          ClientReportingBindingEvent,
+          "id" | "details" | "created_at"
+        >;
         Update: Partial<ClientReportingBindingEvent>;
         Relationships: [
           {
@@ -1975,7 +1979,10 @@ export type Database = {
       };
       client_google_ads_reporting_identity_events: {
         Row: Row<ClientGoogleAdsReportingIdentityEvent>;
-        Insert: Insert<ClientGoogleAdsReportingIdentityEvent, "id" | "created_at">;
+        Insert: Insert<
+          ClientGoogleAdsReportingIdentityEvent,
+          "id" | "created_at"
+        >;
         Update: Partial<ClientGoogleAdsReportingIdentityEvent>;
         Relationships: [
           {
@@ -2194,10 +2201,7 @@ export type Database = {
       };
       manual_referral_billing_config: {
         Row: Row<ManualReferralBillingConfig>;
-        Insert: Insert<
-          ManualReferralBillingConfig,
-          "singleton" | "created_at"
-        >;
+        Insert: Insert<ManualReferralBillingConfig, "singleton" | "created_at">;
         Update: Partial<ManualReferralBillingConfig>;
         Relationships: [];
       };
@@ -2587,6 +2591,37 @@ export type Database = {
             columns: ["client_id"];
             isOneToOne: false;
             referencedRelation: "portal_clients";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      ad_account_commission_terms: {
+        Row: Row<AdAccountCommissionTerm>;
+        Insert: Insert<
+          AdAccountCommissionTerm,
+          "id" | "created_at" | "sealed_at"
+        >;
+        Update: Partial<AdAccountCommissionTerm>;
+        Relationships: [
+          {
+            foreignKeyName: "ad_account_commission_terms_ad_account_id_fkey";
+            columns: ["ad_account_id"];
+            isOneToOne: false;
+            referencedRelation: "ad_accounts";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "ad_account_commission_terms_supersedes_id_fkey";
+            columns: ["supersedes_id"];
+            isOneToOne: false;
+            referencedRelation: "ad_account_commission_terms";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "ad_account_commission_terms_reviewed_by_fkey";
+            columns: ["reviewed_by"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
             referencedColumns: ["id"];
           },
         ];
@@ -3342,7 +3377,11 @@ export type Database = {
         Returns: string;
       };
       review_client_onboarding_session: {
-        Args: { p_session_id: string; p_admin_id: string; p_activate?: boolean };
+        Args: {
+          p_session_id: string;
+          p_admin_id: string;
+          p_activate?: boolean;
+        };
         Returns: string;
       };
       revoke_client_onboarding_session: {
@@ -3666,6 +3705,26 @@ export type Database = {
           p_reviewed_by: string;
         };
         Returns: ReferralDiscountTerm[];
+      };
+      /** Authenticated-admin CAS scheduler for one Monday-effective store rate. */
+      schedule_ad_account_commission_rate: {
+        Args: {
+          p_account_id: string;
+          p_list_rate: number;
+          p_expected_term_id: string | null;
+          p_decision_id: string;
+        };
+        Returns: AdAccountCommissionTerm[];
+      };
+      /** Resolve a store's exact list-rate term for one Monday billing week. */
+      resolve_ad_account_commission_term: {
+        Args: { p_ad_account_id: string; p_period_start: string };
+        Returns: {
+          term_id: string | null;
+          effective_from: string | null;
+          revision: number;
+          list_rate: number | string;
+        }[];
       };
       /** Resolve the exact term in force for one client's Monday billing week. */
       resolve_manual_referral_term: {

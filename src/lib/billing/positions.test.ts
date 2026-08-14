@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("server-only", () => ({}));
+vi.mock("../google-ads/client", () => ({ searchGoogleAdsAsAgency: vi.fn() }));
 
 import {
   buildBillingPositions,
@@ -12,7 +15,9 @@ const client: BillingPositionClient = {
   email: "client@example.com",
 };
 
-function account(over: Partial<BillingPositionAccount> = {}): BillingPositionAccount {
+function account(
+  over: Partial<BillingPositionAccount> = {},
+): BillingPositionAccount {
   return {
     id: "account-1",
     clientId: client.id,
@@ -23,7 +28,9 @@ function account(over: Partial<BillingPositionAccount> = {}): BillingPositionAcc
   };
 }
 
-function position(over: Partial<Parameters<typeof buildBillingPositions>[0]> = {}) {
+function position(
+  over: Partial<Parameters<typeof buildBillingPositions>[0]> = {},
+) {
   return buildBillingPositions({
     now: new Date("2026-08-04T14:00:00.000Z"),
     clients: [client],
@@ -162,6 +169,52 @@ describe("billing positions", () => {
     });
   });
 
+  it("prices each closed/current account from its historical Monday term", () => {
+    const result = position({
+      starts: [
+        {
+          id: "start-1",
+          accountId: "account-1",
+          googleLocalDate: "2026-07-27",
+          baselineCostMicros: "0",
+        },
+      ],
+      ledgerRows: [
+        {
+          accountId: "account-1",
+          occurredOn: "2026-07-31",
+          grossAmount: "100.000000",
+          currency: "EUR",
+          updatedAt: "2026-08-03T15:00:00.000Z",
+        },
+      ],
+      metricRows: [
+        {
+          accountId: "account-1",
+          day: "2026-08-03",
+          adSpend: 100,
+          computedAt: "2026-08-04T13:30:00.000Z",
+        },
+      ],
+      commissionTermsByAccount: new Map([
+        [
+          "account-1",
+          [
+            {
+              id: "term-12",
+              effectiveFrom: "2026-08-03",
+              revision: 1,
+              listRate: 12,
+            },
+          ],
+        ],
+      ]),
+    });
+
+    expect(result.clients[0].closed.unissuedEstimate).toBe(10);
+    expect(result.clients[0].current.accruedFee).toBe(12);
+  });
+
   it("does not count a week twice once an active invoice exists", () => {
     const result = position({
       ledgerRows: [
@@ -181,7 +234,8 @@ describe("billing positions", () => {
           amount: 10,
           amountRemaining: 7.5,
           issuedAt: "2026-08-03T16:00:00.000Z",
-          calculationVersion: "agency-fee-eur-v3-manual-referrals-google-boundaries",
+          calculationVersion:
+            "agency-fee-eur-v3-manual-referrals-google-boundaries",
         },
       ],
     });
@@ -192,6 +246,42 @@ describe("billing positions", () => {
       issuedOutstanding: 7.5,
       supportedNotReceived: 7.5,
       maximumNotReceived: 7.5,
+    });
+  });
+
+  it("shows a reviewed local draft as exact unissued money", () => {
+    const result = position({
+      ledgerRows: [
+        {
+          accountId: "account-1",
+          occurredOn: "2026-07-31",
+          grossAmount: "100.000000",
+          currency: "EUR",
+          updatedAt: "2026-08-03T15:00:00.000Z",
+        },
+      ],
+      invoices: [
+        {
+          clientId: client.id,
+          periodStart: "2026-07-27",
+          status: "draft",
+          amount: 12,
+          amountRemaining: null,
+          issuedAt: null,
+          calculationVersion:
+            "agency-fee-eur-v4-account-rates-manual-referrals-google-boundaries",
+        },
+      ],
+    });
+
+    expect(result.clients[0].closed).toMatchObject({
+      unissuedEstimate: 12,
+      supportedUnissued: 12,
+      needsEntryReview: 0,
+      issuedOutstanding: 0,
+      supportedNotReceived: 12,
+      maximumNotReceived: 12,
+      periodCount: 1,
     });
   });
 

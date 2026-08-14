@@ -100,6 +100,8 @@ export type WindsorGoogleAdsCampaignRow = {
   name: string;
   status: "ENABLED" | "PAUSED" | "REMOVED";
   advertisingChannelType: string;
+  /** True only when Windsor reports Google's Merchant Center id. */
+  shoppingFeed: boolean;
   biddingStrategyType: string | null;
   startDate: string | null;
   dailyBudget: number | null;
@@ -862,7 +864,8 @@ export async function fetchGoogleAdsCampaignBreakdown(
   url.searchParams.set(
     "fields",
     "account_id,account_currency_code,account_time_zone,campaign_id,campaign," +
-      "campaign_status,advertising_channel_type,campaign_budget,bidding_strategy_type," +
+      "campaign_status,advertising_channel_type,campaign_shopping_setting_merchant_id," +
+      "campaign_budget,bidding_strategy_type," +
       "start_date,spend,impressions,clicks,conversions,conversion_value",
   );
   url.searchParams.set("date_from", from);
@@ -907,6 +910,20 @@ export async function fetchGoogleAdsCampaignBreakdown(
     const advertisingChannelType = typeof raw.advertising_channel_type === "string"
       ? raw.advertising_channel_type.trim().toUpperCase()
       : "";
+    let shoppingFeed = false;
+    if (raw.campaign_shopping_setting_merchant_id != null) {
+      const merchantId =
+        typeof raw.campaign_shopping_setting_merchant_id === "string"
+          ? raw.campaign_shopping_setting_merchant_id.trim()
+          : typeof raw.campaign_shopping_setting_merchant_id === "number" &&
+              Number.isSafeInteger(raw.campaign_shopping_setting_merchant_id)
+            ? String(raw.campaign_shopping_setting_merchant_id)
+            : null;
+      if (merchantId === null || (merchantId !== "" && !/^\d{1,30}$/.test(merchantId))) {
+        throw invalidCampaignResponse();
+      }
+      shoppingFeed = merchantId !== "" && !/^0+$/.test(merchantId);
+    }
     const biddingStrategyType = raw.bidding_strategy_type == null
       ? null
       : typeof raw.bidding_strategy_type === "string"
@@ -953,6 +970,7 @@ export async function fetchGoogleAdsCampaignBreakdown(
       name,
       status: status as WindsorGoogleAdsCampaignRow["status"],
       advertisingChannelType,
+      shoppingFeed,
       biddingStrategyType,
       startDate,
       dailyBudget,

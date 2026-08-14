@@ -1,10 +1,12 @@
 import type { ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   fetchAdminCampaigns: vi.fn(),
   listCampaignActionViewState: vi.fn(),
+  parseRange: vi.fn(),
+  presetSelection: vi.fn(),
 }));
 
 vi.mock("@/components/admin/campaigns-view", () => ({
@@ -15,13 +17,6 @@ vi.mock("@/components/admin/campaigns-toolbar", () => ({
   CampaignsToolbar: () => <div>New Campaign · Sync</div>,
 }));
 
-vi.mock("@/components/admin/client-dashboard-dialog", () => ({
-  ClientDashboardDialog: () => null,
-}));
-
-vi.mock("@/components/admin/commission-rate", () => ({ CommissionRate: () => null }));
-vi.mock("@/components/admin/store-name", () => ({ StoreName: () => null }));
-vi.mock("@/components/ui/avatar", () => ({ Avatar: () => null }));
 vi.mock("@/components/ui/badge", () => ({ Badge: () => null }));
 vi.mock("@/components/portal/range-picker", () => ({
   RangePicker: () => <div>Date range</div>,
@@ -83,16 +78,28 @@ vi.mock("@/lib/i18n/server", () => ({
 }));
 
 vi.mock("@/lib/portal/range", () => ({
-  parseRange: () => ({ key: "d7", from: "2026-08-08", to: "2026-08-14" }),
+  parseRange: mocks.parseRange,
+  presetSelection: mocks.presetSelection,
 }));
 
 import AdminCampaignsPage from "./page";
 
 describe("Campaigns page approved summary", () => {
-  it("renders the approved header, actions and six portfolio cards", async () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.presetSelection.mockReturnValue({
+      key: "d7",
+      from: "2026-08-08",
+      to: "2026-08-14",
+    });
+    mocks.parseRange.mockReturnValue({
+      key: "d30",
+      from: "2026-07-16",
+      to: "2026-08-14",
+    });
     mocks.fetchAdminCampaigns.mockResolvedValue({
       configured: true,
-      clients: [],
+      clients: [{ clientId: "external-client" }],
       internal: [],
       totals: {
         revenue: 8_400,
@@ -110,7 +117,9 @@ describe("Campaigns page approved summary", () => {
       actorNames: new Map(),
       historyTruncated: false,
     });
+  });
 
+  it("renders the approved header, actions and six portfolio cards", async () => {
     const page = await AdminCampaignsPage({ searchParams: Promise.resolve({}) });
     const html = renderToStaticMarkup(page);
 
@@ -130,5 +139,23 @@ describe("Campaigns page approved summary", () => {
     expect(html).toContain("Available reporting accounts");
     expect(html).not.toContain("Client profit");
     expect(html).not.toContain("Average ROAS");
+    expect(html).not.toContain("Client controls");
+    expect(html).not.toContain("Commercial terms");
+    expect(mocks.presetSelection).toHaveBeenCalledWith("d7");
+    expect(mocks.parseRange).not.toHaveBeenCalled();
+  });
+
+  it("keeps an explicit range instead of replacing it with the page default", async () => {
+    const params = { range: "d30" };
+
+    await AdminCampaignsPage({ searchParams: Promise.resolve(params) });
+
+    expect(mocks.parseRange).toHaveBeenCalledWith(params);
+    expect(mocks.presetSelection).not.toHaveBeenCalled();
+    expect(mocks.fetchAdminCampaigns).toHaveBeenCalledWith({
+      key: "d30",
+      from: "2026-07-16",
+      to: "2026-08-14",
+    });
   });
 });

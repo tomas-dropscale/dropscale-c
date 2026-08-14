@@ -637,6 +637,7 @@ describe("Windsor Google Ads server adapter", () => {
             campaign: "Demand Gen — Summer",
             campaign_status: "ENABLED",
             advertising_channel_type: "DEMAND_GEN",
+            campaign_shopping_setting_merchant_id: "123456789",
             campaign_budget: "35",
             bidding_strategy_type: "MAXIMIZE_CONVERSIONS",
             start_date: "2026-07-01",
@@ -667,6 +668,7 @@ describe("Windsor Google Ads server adapter", () => {
         name: "Demand Gen — Summer",
         status: "ENABLED",
         advertisingChannelType: "DEMAND_GEN",
+        shoppingFeed: true,
         biddingStrategyType: "MAXIMIZE_CONVERSIONS",
         startDate: "2026-07-01",
         dailyBudget: 35,
@@ -682,13 +684,16 @@ describe("Windsor Google Ads server adapter", () => {
     expect(upstream.searchParams.get("date_from")).toBe("2026-08-01");
     expect(upstream.searchParams.get("date_to")).toBe("2026-08-12");
     expect(upstream.searchParams.get("_max_rows")).toBe("1001");
-    expect(upstream.searchParams.get("fields")?.split(",")).not.toContain("date");
+    const fields = upstream.searchParams.get("fields")?.split(",") ?? [];
+    expect(fields).toContain("campaign_shopping_setting_merchant_id");
+    expect(fields).not.toContain("date");
   });
 
   it.each([
     ["another account", { account_id: "987-654-3210" }],
     ["unknown status", { campaign_status: "UNKNOWN" }],
     ["invalid channel", { advertising_channel_type: "" }],
+    ["invalid Merchant Center id", { campaign_shopping_setting_merchant_id: "merchant" }],
     ["negative spend", { spend: -1 }],
     ["invalid currency", { account_currency_code: "EURO" }],
     ["missing time zone", { account_time_zone: null }],
@@ -704,6 +709,7 @@ describe("Windsor Google Ads server adapter", () => {
             campaign: "Campaign",
             campaign_status: "PAUSED",
             advertising_channel_type: "PERFORMANCE_MAX",
+            campaign_shopping_setting_merchant_id: null,
             campaign_budget: 20,
             bidding_strategy_type: null,
             start_date: null,

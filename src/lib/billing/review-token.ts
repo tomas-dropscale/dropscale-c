@@ -104,6 +104,8 @@ function stableLines(lines: InvoiceLine[]) {
       kind: line.kind ?? null,
       store: line.store ?? null,
       rate: line.rate ?? null,
+      pricingMode: line.pricingMode ?? null,
+      commissionTermId: line.commissionTermId ?? null,
       listRate: line.listRate ?? null,
       referralDiscountRate: line.referralDiscountRate ?? null,
       referralCount: line.referralCount ?? null,

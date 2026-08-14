@@ -5,6 +5,8 @@ import {
   BILLING_EVIDENCE_READY_HOUR_UTC,
   BILLING_EVIDENCE_READY_MINUTE_UTC,
   BILLING_CURRENCY,
+  CALCULATION_VERSION,
+  V3_MANUAL_REFERRAL_CALCULATION_VERSION,
   agencyFee,
   billingEvidenceIsReady,
   billingEvidenceReadyAt,
@@ -12,6 +14,8 @@ import {
   closedWeekStarting,
   closedWeeks,
   mondayOf,
+  isManualAgencyCalculationVersion,
+  isReviewedAgencyCalculationVersion,
   referralFeeTerms,
   round2,
   storeLines,
@@ -27,7 +31,11 @@ describe("mondayOf", () => {
   it.each([
     ["a Monday is its own week start", "2026-07-20", "2026-07-20"],
     ["mid-week rolls back", "2026-07-23", "2026-07-20"],
-    ["Sunday belongs to the week that began six days earlier", "2026-07-26", "2026-07-20"],
+    [
+      "Sunday belongs to the week that began six days earlier",
+      "2026-07-26",
+      "2026-07-20",
+    ],
   ])("%s", (_label, day, expected) => {
     const [y, m, d] = day.split("-").map(Number);
     expect(mondayOf(new Date(y, m - 1, d))).toBe(expected);
@@ -102,10 +110,12 @@ describe("the sealed agency fee", () => {
     expect(round2(10.075)).toBe(10.08);
     expect(round2(1.049)).toBe(1.05);
     expect(round2(-10.075)).toBe(-10.08);
-    expect(storeLines("acc-1", "Velas", totals({ spend: 10.075 }))).toMatchObject([
-      { baseAmount: 10.08, amount: 1.01 },
-    ]);
-    expect(storeLines("acc-1", "Velas", totals({ spend: 1.049 }))).toMatchObject([
+    expect(
+      storeLines("acc-1", "Velas", totals({ spend: 10.075 })),
+    ).toMatchObject([{ baseAmount: 10.08, amount: 1.01 }]);
+    expect(
+      storeLines("acc-1", "Velas", totals({ spend: 1.049 })),
+    ).toMatchObject([
       {
         baseAmount: 1.05,
         amount: 0.1,
@@ -136,7 +146,74 @@ describe("the sealed agency fee", () => {
         amount: 400,
       },
     ]);
-    expect(lines.some((line) => line.kind === "spend" || line.kind === "rev_share")).toBe(false);
+    expect(
+      lines.some((line) => line.kind === "spend" || line.kind === "rev_share"),
+    ).toBe(false);
+  });
+
+  it("seals a custom account term without stacking a referral discount", () => {
+    expect(
+      storeLines(
+        "acc-1",
+        "Velas",
+        totals({
+          spend: 100,
+          referralCount: 3,
+          commercialTerms: {
+            commissionTermId: "term-12",
+            pricingMode: "manual",
+            listRate: 12,
+            referralCount: 0,
+            referralDiscountRate: 0,
+            feeRate: 12,
+          },
+        }),
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        pricingMode: "manual",
+        commissionTermId: "term-12",
+        rate: 12,
+        listRate: 12,
+        referralCount: 0,
+        amount: 12,
+        label:
+          "Velas - Google Ads agency fee (12% of captured Google-reported billable spend: EUR 100.000000; manual account list rate: 12%)",
+      }),
+    ]);
+  });
+
+  it("accepts an exact 9.95% manual rate despite binary representation", () => {
+    expect(
+      storeLines(
+        "acc-1",
+        "Velas",
+        totals({
+          spend: 100,
+          commercialTerms: {
+            commissionTermId: "term-995",
+            pricingMode: "manual",
+            listRate: 9.95,
+            referralCount: 0,
+            referralDiscountRate: 0,
+            feeRate: 9.95,
+          },
+        }),
+      )[0],
+    ).toMatchObject({ rate: 9.95, amount: 9.95 });
+  });
+
+  it("keeps V3 and V4 as separate reviewed immutable families", () => {
+    expect(CALCULATION_VERSION).toContain("v4-account-rates");
+    expect(isReviewedAgencyCalculationVersion(CALCULATION_VERSION)).toBe(true);
+    expect(
+      isReviewedAgencyCalculationVersion(
+        V3_MANUAL_REFERRAL_CALCULATION_VERSION,
+      ),
+    ).toBe(true);
+    expect(
+      isManualAgencyCalculationVersion(V3_MANUAL_REFERRAL_CALCULATION_VERSION),
+    ).toBe(true);
   });
 
   it("puts the raw spend, opening baseline and billable delta on the first invoice", () => {
@@ -231,9 +308,9 @@ describe("the sealed agency fee", () => {
 
     // A positive rate that rounds below one cent is also settled locally; it
     // must not become billable later after a Google restatement or rate change.
-    expect(storeLines("acc-1", "Velas", totals({ spend: 0.04 }))).toMatchObject([
-      { rate: 10, baseAmount: 0.04, amount: 0 },
-    ]);
+    expect(storeLines("acc-1", "Velas", totals({ spend: 0.04 }))).toMatchObject(
+      [{ rate: 10, baseAmount: 0.04, amount: 0 }],
+    );
   });
 
   it("puts the raw spend, closing counter and post-service deduction on the final line", () => {

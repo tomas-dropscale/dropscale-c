@@ -89,6 +89,8 @@ const clients: CampaignViewClient[] = [
         domain: "northwind-home.com",
         currency: "EUR",
         realRoas: 3,
+        rollupSpend: 2_800,
+        campaignState: "ready",
         campaigns: [
           {
             bindingId: "binding-1",
@@ -100,6 +102,7 @@ const clients: CampaignViewClient[] = [
             dailyBudget: "120",
             currency: "EUR",
             type: "DEMAND_GEN",
+            shoppingFeed: false,
             googleRoas: 2.5,
             actionable: true,
           },
@@ -113,6 +116,7 @@ const clients: CampaignViewClient[] = [
             dailyBudget: "80",
             currency: "EUR",
             type: "PERFORMANCE_MAX",
+            shoppingFeed: true,
             googleRoas: 1.25,
             actionable: true,
           },
@@ -153,8 +157,9 @@ describe("CampaignsView approved visual structure", () => {
     expect(html).toContain("TOTAL");
     expect(html).toContain("€2,800.00");
     expect(html).toContain("€200.00");
-    expect(html).toContain("Google ROAS");
-    expect(html).toContain("real");
+    expect(html).toContain("Google-attributed ROAS per campaign");
+    expect(html).not.toContain(">real<");
+    expect(html).toContain("PMAX (SF)");
     expect(html).toContain("Last Scaled at");
     expect(html).toContain(
       'href="/admin/analytics?client=client-1&amp;store=store-1"',
@@ -164,5 +169,52 @@ describe("CampaignsView approved visual structure", () => {
     expect(html).toContain("hover or focus for scale history");
     expect(html).not.toContain("binding policy");
     expect(html).not.toContain("Configure campaign controls");
+  });
+
+  it.each([
+    ["empty", "No campaign rows were returned for this period."],
+    ["failed", "Campaign reporting failed for this store."],
+    ["disconnected", "Campaign reporting is unavailable"],
+  ] as const)("keeps the approved table and TOTAL visible for %s stores", (state, message) => {
+    const emptyClients: CampaignViewClient[] = [{
+      ...clients[0],
+      stores: [{
+        ...clients[0].stores[0],
+        campaignState: state,
+        campaigns: [],
+      }],
+    }];
+    const html = renderToStaticMarkup(
+      <CampaignsView clients={emptyClients} history={[]} historyTruncated={false} />,
+    );
+
+    for (const heading of [
+      "Campaign",
+      "Type",
+      "Status",
+      "Spend",
+      "Daily budget",
+      "ROAS",
+      "Last Scaled at",
+      "Action",
+    ]) {
+      expect(html).toContain(heading);
+    }
+    expect(html).toContain("TOTAL");
+    expect(html).toContain("€2,800.00");
+    expect(html).toContain(message);
+  });
+
+  it("keeps successful source rows while warning that a store is partial", () => {
+    const partialClients: CampaignViewClient[] = [{
+      ...clients[0],
+      stores: [{ ...clients[0].stores[0], campaignState: "partial" }],
+    }];
+    const html = renderToStaticMarkup(
+      <CampaignsView clients={partialClients} history={history} historyTruncated={false} />,
+    );
+
+    expect(html).toContain("Some Google Ads sources could not be loaded");
+    expect(html).toContain("DGEN · Summer Living · Scale");
   });
 });

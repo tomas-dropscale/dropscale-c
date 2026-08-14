@@ -1,12 +1,8 @@
 import type { Metadata } from "next";
-import { ChevronRight, ShieldAlert, Truck, Unplug } from "lucide-react";
+import { ShieldAlert } from "lucide-react";
 
 import { CampaignsView } from "@/components/admin/campaigns-view";
 import { CampaignsToolbar } from "@/components/admin/campaigns-toolbar";
-import { ClientDashboardDialog } from "@/components/admin/client-dashboard-dialog";
-import { CommissionRate } from "@/components/admin/commission-rate";
-import { StoreName } from "@/components/admin/store-name";
-import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { PageContainer } from "@/components/ui/page-container";
 import { RangePicker } from "@/components/portal/range-picker";
@@ -20,7 +16,7 @@ import { multiplier } from "@/lib/format";
 import { money } from "@/lib/format-intl";
 import { intlLocale } from "@/lib/i18n";
 import { getServerDictionary } from "@/lib/i18n/server";
-import { parseRange } from "@/lib/portal/range";
+import { parseRange, presetSelection } from "@/lib/portal/range";
 
 export async function generateMetadata(): Promise<Metadata> {
   const { d } = await getServerDictionary();
@@ -31,9 +27,17 @@ export async function generateMetadata(): Promise<Metadata> {
 export default async function AdminCampaignsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ range?: string; from?: string; to?: string }>;
+  searchParams: Promise<{
+    range?: string | string[];
+    from?: string | string[];
+    to?: string | string[];
+  }>;
 }) {
-  const range = parseRange(await searchParams);
+  const params = await searchParams;
+  const range =
+    params.range === undefined && params.from === undefined && params.to === undefined
+      ? presetSelection("d7")
+      : parseRange(params);
   const overviewPromise = fetchAdminCampaigns(range);
   const dictionaryPromise = getServerDictionary();
   const overview = await overviewPromise;
@@ -131,126 +135,6 @@ export default async function AdminCampaignsPage({
         history={campaignView.history}
         historyTruncated={campaignView.historyTruncated}
       />
-
-      {overview.clients.length > 0 && (
-        <section className="panel mt-6 overflow-hidden" aria-labelledby="campaign-client-controls">
-          <header className="border-b border-[var(--border-subtle)] px-4 py-4 md:px-5">
-            <h2
-              id="campaign-client-controls"
-              className="text-[15px] font-semibold text-[var(--text-primary)]"
-            >
-              Client controls
-            </h2>
-            <p className="mt-1 text-[11.5px] text-[var(--text-muted)]">
-              Commercial terms, store names and full client reports.
-            </p>
-          </header>
-
-          {overview.clients.map((client) => {
-            const rates = [
-              ...new Set(client.accounts.map((entry) => Number(entry.account.commission_rate))),
-            ];
-            const revShare = client.accounts.some(
-              (entry) => entry.account.revenue_share_enabled,
-            );
-
-            return (
-              <details
-                key={client.clientId}
-                className="group/client-controls border-t border-[var(--border-subtle)] first:border-t-0"
-              >
-                <summary className="transition-smooth flex min-h-12 cursor-pointer list-none flex-wrap items-center gap-3 px-4 py-3.5 hover:bg-[var(--bg-panel-hover)] md:px-5 [&::-webkit-details-marker]:hidden">
-                  <ChevronRight
-                    className="size-4 shrink-0 text-[var(--text-muted)] transition-transform group-open/client-controls:rotate-90"
-                    aria-hidden
-                  />
-                  <Avatar name={client.clientName} seed={client.clientId} size="sm" />
-                  <span className="min-w-48 flex-1">
-                    <span className="block truncate text-[13.5px] font-semibold text-[var(--text-primary)]">
-                      {client.clientName}
-                    </span>
-                    <span className="mt-0.5 block truncate text-[11.5px] text-[var(--text-muted)]">
-                      {client.clientEmail}
-                    </span>
-                  </span>
-                  {client.inHst && (
-                    <Badge variant="gold" title="HST já paga comissão deste cliente">
-                      <Truck className="size-3" aria-hidden />
-                      HST
-                    </Badge>
-                  )}
-                  <Badge variant="neutral">
-                    {rates.length === 1 ? `${rates[0]}% ad spend` : "mixed ad spend %"}
-                  </Badge>
-                  {revShare && <Badge variant="success">+ rev share</Badge>}
-                  <span className="text-right">
-                    <span className="block text-[13px] font-semibold text-[var(--text-primary)]">
-                      {money(client.spend, intl)}
-                    </span>
-                    <span className="block text-[11px] text-[var(--accent-gold)]">
-                      {money(client.commission, intl)} commission
-                    </span>
-                  </span>
-                  <ClientDashboardDialog
-                    clientId={client.clientId}
-                    clientName={client.clientName}
-                    clientEmail={client.clientEmail}
-                    range={range}
-                  />
-                </summary>
-
-                {client.accounts.map((entry) => (
-                  <div
-                    key={entry.account.id}
-                    className="border-t border-[var(--border-subtle)] bg-[var(--bg-base)] px-4 py-3 md:px-5"
-                  >
-                    <div className="flex flex-wrap items-center gap-2.5">
-                      <span
-                        className="size-2 shrink-0 rounded-full"
-                        style={{ backgroundColor: entry.account.color_dot }}
-                        aria-hidden
-                      />
-                      <p className="min-w-48 flex-1 truncate text-[13px] font-medium text-[var(--text-primary)]">
-                        {entry.account.store_name}
-                      </p>
-                      {entry.authRevoked ? (
-                        <Badge variant="danger">
-                          <Unplug className="size-3" aria-hidden />
-                          Reconnect needed
-                        </Badge>
-                      ) : (
-                        !entry.connected && (
-                          <Badge variant="warning">
-                            <Unplug className="size-3" aria-hidden />
-                            Not connected
-                          </Badge>
-                        )
-                      )}
-                      {entry.failed && !entry.authRevoked && (
-                        <Badge variant="danger">Query failed</Badge>
-                      )}
-                      <span className="text-[12px] text-[var(--text-secondary)]">
-                        {money(entry.spend, intl, entry.account.currency)} spend
-                      </span>
-                      <span className="text-[12px] text-[var(--accent-gold)]">
-                        {money(entry.commission, intl, entry.account.currency)} commission
-                      </span>
-                    </div>
-                    <div className="mt-2 flex flex-wrap items-center gap-2 pl-4">
-                      <CommissionRate
-                        rate={Number(entry.account.commission_rate)}
-                        listRate={Number(entry.account.list_commission_rate)}
-                        revenueShareEnabled={entry.account.revenue_share_enabled}
-                      />
-                      <StoreName accountId={entry.account.id} name={entry.account.store_name} />
-                    </div>
-                  </div>
-                ))}
-              </details>
-            );
-          })}
-        </section>
-      )}
 
       {overview.internal.length > 0 && (
         <section className="mt-8 space-y-3 opacity-70">

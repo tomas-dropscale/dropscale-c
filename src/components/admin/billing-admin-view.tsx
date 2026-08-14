@@ -104,6 +104,37 @@ function rate(value: number, intl: string) {
   );
 }
 
+function storeRateLabel(
+  store: ClientPreview["stores"][number],
+  d: Dictionary,
+  intl: string,
+) {
+  return store.pricingMode === "referral"
+    ? fmt(d.adminBilling.manualReferralRate, {
+        count: store.referralCount,
+        list: rate(store.listRate, intl),
+        discount: rate(store.referralDiscountRate, intl),
+        rate: rate(store.feeRate, intl),
+      })
+    : fmt(d.adminBilling.agencyFeeRate, {
+        rate: rate(store.feeRate, intl),
+      });
+}
+
+function clientRateLabel(client: ClientPreview, d: Dictionary, intl: string) {
+  if (!client.mixedRates) {
+    const store = client.stores[0];
+    return store
+      ? storeRateLabel(store, d, intl)
+      : fmt(d.adminBilling.agencyFeeRate, {
+          rate: rate(client.feeRate, intl),
+        });
+  }
+  return [
+    ...new Set(client.stores.map((store) => storeRateLabel(store, d, intl))),
+  ].join(" · ");
+}
+
 function formatTimestamp(value: string | null, intl: string, fallback: string) {
   if (!value) return fallback;
   return new Date(value).toLocaleString(intl, {
@@ -131,7 +162,7 @@ function deliveryNeedsReconciliation(invoice: {
 }) {
   return Boolean(
     invoice.stripe_sent_at &&
-      (invoice.status === "draft" || invoice.issued_at === null),
+    (invoice.status === "draft" || invoice.issued_at === null),
   );
 }
 
@@ -360,9 +391,7 @@ export function BillingAdminView({
         cache: "no-store",
       });
       const body = (await response.json().catch(() => null)) as
-        | StripeReadiness
-        | { error?: string }
-        | null;
+        StripeReadiness | { error?: string } | null;
       if (!response.ok || !body || !("ready" in body)) {
         setStripeReadiness(null);
         setFeedback({
@@ -523,7 +552,9 @@ export function BillingAdminView({
                     ? d.adminBilling.stripeReady
                     : d.adminBilling.stripeNotReady}
                 </h2>
-                <Badge variant={stripeReadiness.liveMode ? "success" : "danger"}>
+                <Badge
+                  variant={stripeReadiness.liveMode ? "success" : "danger"}
+                >
                   {stripeReadiness.liveMode ? "LIVE" : "NOT LIVE"}
                 </Badge>
                 <Badge
@@ -598,10 +629,7 @@ export function BillingAdminView({
               dashboard.currency,
             )}
             detail={fmt(d.adminBilling.closedThrough, {
-              date: shortDate(
-                dashboard.positions.closedThrough,
-                intl,
-              ),
+              date: shortDate(dashboard.positions.closedThrough, intl),
             })}
             icon={CircleDollarSign}
           />
@@ -678,7 +706,9 @@ export function BillingAdminView({
 
                   <div className="grid min-w-0 flex-1 grid-cols-1 gap-3 sm:grid-cols-3">
                     <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3">
-                      <p className="label-caps">{d.adminBilling.closedBalance}</p>
+                      <p className="label-caps">
+                        {d.adminBilling.closedBalance}
+                      </p>
                       <p className="mt-1 text-[17px] font-semibold tabular-nums text-[var(--text-primary)]">
                         {moneyRange(
                           position.closed.supportedNotReceived,
@@ -704,7 +734,9 @@ export function BillingAdminView({
                       </p>
                     </div>
                     <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3">
-                      <p className="label-caps">{d.adminBilling.entryBoundary}</p>
+                      <p className="label-caps">
+                        {d.adminBilling.entryBoundary}
+                      </p>
                       <p
                         className={cn(
                           "mt-1 text-[17px] font-semibold tabular-nums",
@@ -728,7 +760,9 @@ export function BillingAdminView({
                       </p>
                     </div>
                     <div className="rounded-xl border border-[var(--warning-orange)]/25 bg-[var(--warning-orange)]/5 p-3">
-                      <p className="label-caps">{d.adminBilling.currentCycle}</p>
+                      <p className="label-caps">
+                        {d.adminBilling.currentCycle}
+                      </p>
                       <p className="mt-1 text-[17px] font-semibold tabular-nums text-[var(--warning-orange)]">
                         {money(
                           position.current.accruedFee,
@@ -840,9 +874,7 @@ export function BillingAdminView({
                 (blocker) => blocker.severity === "warning",
               );
               const invoice = client.existingInvoice;
-              const stripeHostedUrl = safeStripeUrl(
-                invoice?.stripe_hosted_url,
-              );
+              const stripeHostedUrl = safeStripeUrl(invoice?.stripe_hosted_url);
               const stripeInvoicePdf = safeStripeUrl(
                 invoice?.stripe_invoice_pdf,
               );
@@ -931,12 +963,7 @@ export function BillingAdminView({
                             {money(client.billableSpend, intl, client.currency)}
                           </p>
                           <p className="mt-1 text-[11px] text-[var(--text-muted)]">
-                            {fmt(d.adminBilling.manualReferralRate, {
-                              count: client.referralCount,
-                              list: rate(client.listRate, intl),
-                              discount: rate(client.referralDiscountRate, intl),
-                              rate: rate(client.feeRate, intl),
-                            })}
+                            {clientRateLabel(client, d, intl)}
                           </p>
                         </div>
                         <div className="rounded-xl border border-[var(--accent-gold)]/25 bg-[var(--accent-gold-dim)] p-3">
@@ -947,10 +974,7 @@ export function BillingAdminView({
                             {money(amountDue, intl, client.currency)}
                           </p>
                           <p className="mt-1 text-[11px] text-[var(--text-secondary)]">
-                            {fmt(d.adminBilling.agencyFeeRate, {
-                              rate: rate(client.feeRate, intl),
-                            })}{" "}
-                            · EUR
+                            {clientRateLabel(client, d, intl)} · EUR
                           </p>
                         </div>
                       </div>
@@ -1038,9 +1062,7 @@ export function BillingAdminView({
                               className="mt-0.5 size-3.5 shrink-0"
                               aria-hidden
                             />
-                            <span>
-                              {d.adminBilling.deliveryAssumedWarning}
-                            </span>
+                            <span>{d.adminBilling.deliveryAssumedWarning}</span>
                           </li>
                         )}
                         {invoice && deliveryNeedsReconciliation(invoice) && (
@@ -1231,6 +1253,9 @@ export function BillingAdminView({
                               </td>
                               <td className="px-4 py-3 text-right font-medium text-[var(--accent-gold-strong)] tabular-nums">
                                 {money(store.fee, intl, client.currency)}
+                                <p className="mt-0.5 text-[10px] font-normal text-[var(--text-muted)]">
+                                  {storeRateLabel(store, d, intl)}
+                                </p>
                               </td>
                               <td className="px-4 py-3 text-[var(--text-secondary)]">
                                 {fmt(d.adminBilling.sourceDays, {
@@ -1548,6 +1573,9 @@ export function BillingAdminView({
                         </div>
                         <p className="shrink-0 text-[13px] font-semibold text-[var(--accent-gold-strong)] tabular-nums">
                           {money(store.fee, intl, confirmClient.currency)}
+                          <span className="mt-0.5 block max-w-52 text-right text-[10px] font-normal text-[var(--text-muted)]">
+                            {storeRateLabel(store, d, intl)}
+                          </span>
                         </p>
                       </div>
                       <div className="mt-2 grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-1 text-[10.5px] text-[var(--text-muted)]">
@@ -1698,12 +1726,7 @@ export function BillingAdminView({
                 </p>
                 <div className="mt-3 flex items-center justify-between gap-4 border-t border-[var(--border-subtle)] pt-3">
                   <span className="text-[13px] font-medium text-[var(--text-primary)]">
-                    {fmt(d.adminBilling.manualReferralRate, {
-                      count: confirmClient.referralCount,
-                      list: rate(confirmClient.listRate, intl),
-                      discount: rate(confirmClient.referralDiscountRate, intl),
-                      rate: rate(confirmClient.feeRate, intl),
-                    })}
+                    {clientRateLabel(confirmClient, d, intl)}
                   </span>
                   <span className="text-[20px] font-semibold text-[var(--accent-gold-strong)] tabular-nums">
                     {money(confirmClient.amount, intl, confirmClient.currency)}

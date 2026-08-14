@@ -2,6 +2,12 @@ import type { CampaignActionViewState } from "@/lib/admin/campaign-actions";
 import type { AdminCampaignsOverview } from "@/lib/admin/campaigns";
 
 export type CampaignViewStatus = "active" | "paused" | "ended";
+export type CampaignViewLoadState =
+  | "ready"
+  | "empty"
+  | "partial"
+  | "failed"
+  | "disconnected";
 export type CampaignViewCampaign = {
   bindingId: string;
   adAccountId: string;
@@ -12,6 +18,7 @@ export type CampaignViewCampaign = {
   dailyBudget: string | null;
   currency: string;
   type: string;
+  shoppingFeed: boolean;
   googleRoas: number | null;
   actionable: boolean;
 };
@@ -22,6 +29,8 @@ export type CampaignViewStore = {
   domain: string;
   currency: string;
   realRoas: number | null;
+  rollupSpend: number;
+  campaignState: CampaignViewLoadState;
   campaigns: CampaignViewCampaign[];
 };
 
@@ -247,6 +256,8 @@ export function projectAdminCampaignsView(
       domain: storeDomain(entry.account.shopify_url),
       currency: entry.account.currency,
       realRoas: storeRealRoas(entry.rollupRevenue, entry.rollupSpend),
+      rollupSpend: entry.rollupSpend,
+      campaignState: entry.campaignState,
       campaigns: entry.campaigns.map((campaign): CampaignViewCampaign => {
         const bindingId = campaign.reportingBindingId ?? "";
 
@@ -260,6 +271,7 @@ export function projectAdminCampaignsView(
           dailyBudget: liveBudget(campaign.daily_budget),
           currency: entry.account.currency,
           type: campaign.advertisingChannelType,
+          shoppingFeed: campaign.shoppingFeed,
           googleRoas: Number.isFinite(campaign.googleRoas) ? campaign.googleRoas : null,
           actionable: bindingId.length > 0,
         };

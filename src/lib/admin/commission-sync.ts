@@ -17,10 +17,11 @@ import {
   REV_SHARE_NOTE_PREFIX,
 } from "@/lib/finance/config";
 import {
+  accountCommissionTermsForDate,
   billableGoogleSpendWindow,
-  manualReferralRateForDate,
   matchesAuthoritativeGoogleSpend,
   needsGoogleLedgerRewrite,
+  type AccountCommissionRateTerm,
   type ManualReferralRateTerm,
 } from "@/lib/admin/commission-sync-logic";
 import type { AdAccount } from "@/lib/supabase/types";
@@ -113,7 +114,11 @@ type BillingEndRow = {
  * that link exists, the note is the only place the finance pages can learn who
  * earned the money, and without it every synced euro reads as "Unattributed".
  */
-function noteFor(prefix: string, clientName: string | undefined, storeName: string): string {
+function noteFor(
+  prefix: string,
+  clientName: string | undefined,
+  storeName: string,
+): string {
   const detail = `${NOTE_DETAIL_SEPARATOR}${storeName}`;
 
   // With no name, deliberately DROP the attributing prefix rather than writing
@@ -131,8 +136,12 @@ function noteFor(prefix: string, clientName: string | undefined, storeName: stri
  * book agency revenue.
  */
 async function adminClientIds(supabase: Supa): Promise<Set<string>> {
-  const { data, error } = await supabase.from("profiles").select("id").eq("role", "admin");
-  if (error) throw new Error(`Could not identify admin accounts: ${error.message}`);
+  const { data, error } = await supabase
+    .from("profiles")
+    .select("id")
+    .eq("role", "admin");
+  if (error)
+    throw new Error(`Could not identify admin accounts: ${error.message}`);
   return new Set((data ?? []).map((row) => row.id));
 }
 
@@ -168,7 +177,8 @@ async function manualReferralTermsByClient(
       .limit(pageSize);
     if (afterId) query = query.gt("id", afterId);
     const { data, error } = await query;
-    if (error) throw new Error(`Could not load manual referral rates: ${error.message}`);
+    if (error)
+      throw new Error(`Could not load manual referral rates: ${error.message}`);
     const page = (data ?? []) as unknown as Row[];
     for (const row of page) {
       const current = byClient.get(row.client_id) ?? [];
@@ -188,6 +198,52 @@ async function manualReferralTermsByClient(
     if (!afterId) break;
   }
   return byClient;
+}
+
+async function accountCommissionTermsByAccount(
+  supabase: Supa,
+  accountIds: string[],
+): Promise<Map<string, AccountCommissionRateTerm[]>> {
+  type Row = {
+    id: string;
+    ad_account_id: string;
+    effective_from: string;
+    revision: number;
+    list_rate: string | number;
+  };
+  const byAccount = new Map<string, AccountCommissionRateTerm[]>();
+  const pageSize = 1_000;
+  let afterId: string | null = null;
+  for (;;) {
+    let query = supabase
+      .from("ad_account_commission_terms")
+      .select("id, ad_account_id, effective_from, revision, list_rate")
+      .in("ad_account_id", accountIds)
+      .not("sealed_at", "is", null)
+      .order("id", { ascending: true })
+      .limit(pageSize);
+    if (afterId) query = query.gt("id", afterId);
+    const { data, error } = await query;
+    if (error)
+      throw new Error(
+        `Could not load account commission terms: ${error.message}`,
+      );
+    const page = (data ?? []) as unknown as Row[];
+    for (const row of page) {
+      const current = byAccount.get(row.ad_account_id) ?? [];
+      current.push({
+        id: row.id,
+        effectiveFrom: row.effective_from,
+        revision: row.revision,
+        listRate: Number(row.list_rate),
+      });
+      byAccount.set(row.ad_account_id, current);
+    }
+    if (page.length < pageSize) break;
+    afterId = page.at(-1)?.id ?? null;
+    if (!afterId) break;
+  }
+  return byAccount;
 }
 
 let lastPurgeAt = 0;
@@ -234,7 +290,8 @@ let lastRunAt = 0;
 
 export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
   if (!hasAgencyServiceAccount()) {
-    if (opts?.force) throw new Error("Agency Google Ads is not configured on this server.");
+    if (opts?.force)
+      throw new Error("Agency Google Ads is not configured on this server.");
     return;
   }
   if (!opts?.force && Date.now() - lastRunAt < THROTTLE_MS) return;
@@ -253,7 +310,11 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
       .maybeSingle();
     if (newestError) throw newestError;
 
-    if (!opts?.force && newest && Date.now() - new Date(newest.updated_at).getTime() < THROTTLE_MS) {
+    if (
+      !opts?.force &&
+      newest &&
+      Date.now() - new Date(newest.updated_at).getTime() < THROTTLE_MS
+    ) {
       lastRunAt = Date.now();
       return;
     }
@@ -266,7 +327,9 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
     if (sourceError) throw sourceError;
     if (!source) {
       // Migration 0007 seeds it; without the seed there is nowhere to book to.
-      const error = new Error("Commission sync: revenue source missing — run migration 0007.");
+      const error = new Error(
+        "Commission sync: revenue source missing — run migration 0007.",
+      );
       if (opts?.force) throw error;
       console.error(error.message);
       return;
@@ -274,9 +337,7 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
 
     const { data: accountRows, error: accountRowsError } = await supabase
       .from("ad_accounts")
-      .select(
-        "id, client_id, store_name, google_ads_customer_id, currency",
-      )
+      .select("id, client_id, store_name, google_ads_customer_id, currency")
       // Pending rows are unapproved requests. Suspended rows remain eligible:
       // a client can still owe the final closed week from before suspension.
       .in("status", ["active", "suspended"])
@@ -287,11 +348,7 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
     // the rows as an error sentinel; the columns above match this Pick exactly.
     const accounts = (accountRows ?? []) as unknown as Pick<
       AdAccount,
-      | "id"
-      | "client_id"
-      | "store_name"
-      | "google_ads_customer_id"
-      | "currency"
+      "id" | "client_id" | "store_name" | "google_ads_customer_id" | "currency"
     >[];
     if (accounts.length === 0) {
       lastRunAt = Date.now();
@@ -301,7 +358,9 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
     // Admins' own ad accounts are internal — never agency revenue. Exclude
     // them from billing here; past rows are removed by purgeAdminAccountRevenue.
     const adminIds = await adminClientIds(supabase);
-    const billable = accounts.filter((account) => !adminIds.has(account.client_id));
+    const billable = accounts.filter(
+      (account) => !adminIds.has(account.client_id),
+    );
     if (billable.length === 0) {
       lastRunAt = Date.now();
       return;
@@ -316,7 +375,10 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
         "id, ad_account_id, google_ads_customer_id, google_local_date, google_time_zone, " +
           "currency, baseline_cost_micros, captured_at",
       )
-      .in("ad_account_id", billable.map((account) => account.id));
+      .in(
+        "ad_account_id",
+        billable.map((account) => account.id),
+      );
     if (billingStartsError) throw billingStartsError;
     const billingStartByAccount = new Map(
       ((billingStartRows ?? []) as unknown as BillingStartRow[]).map((row) => [
@@ -331,7 +393,10 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
         "id, ad_account_id, billing_start_id, google_ads_customer_id, google_local_date, " +
           "google_time_zone, currency, end_cost_micros, captured_at",
       )
-      .in("ad_account_id", billable.map((account) => account.id));
+      .in(
+        "ad_account_id",
+        billable.map((account) => account.id),
+      );
     if (billingEndsError) throw billingEndsError;
     const billingEndByAccount = new Map(
       ((billingEndRows ?? []) as unknown as BillingEndRow[]).map((row) => [
@@ -354,10 +419,19 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
     const crmByLogin = new Map(
       (portalClients ?? []).map((row) => [row.id, row.crm_client_id]),
     );
-    const nameByLogin = new Map((portalClients ?? []).map((row) => [row.id, row.full_name]));
-    const referralTermsByClient = await manualReferralTermsByClient(
-      supabase,
-      [...new Set(billable.map((account) => account.client_id))],
+    const nameByLogin = new Map(
+      (portalClients ?? []).map((row) => [row.id, row.full_name]),
+    );
+    const [referralTermsByClient, commissionTermsByAccount] = await Promise.all(
+      [
+        manualReferralTermsByClient(supabase, [
+          ...new Set(billable.map((account) => account.client_id)),
+        ]),
+        accountCommissionTermsByAccount(
+          supabase,
+          billable.map((account) => account.id),
+        ),
+      ],
     );
 
     const failures: string[] = [];
@@ -375,7 +449,9 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
         try {
           const start = billingStartByAccount.get(account.id);
           if (!start) {
-            throw new Error("Billing has not started: no immutable Google spend baseline exists.");
+            throw new Error(
+              "Billing has not started: no immutable Google spend baseline exists.",
+            );
           }
           // The activation migration stores the canonical ten digits. Do not
           // silently strip arbitrary characters here: a corrupted identity
@@ -385,15 +461,24 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
             !/^\d{10}$/.test(accountCustomerId) ||
             start.google_ads_customer_id !== accountCustomerId
           ) {
-            throw new Error("The billing baseline belongs to a different Google customer.");
+            throw new Error(
+              "The billing baseline belongs to a different Google customer.",
+            );
           }
-          if (account.currency.toUpperCase() !== "EUR" || start.currency.toUpperCase() !== "EUR") {
-            throw new Error("Agency billing supports EUR Google Ads accounts only.");
+          if (
+            account.currency.toUpperCase() !== "EUR" ||
+            start.currency.toUpperCase() !== "EUR"
+          ) {
+            throw new Error(
+              "Agency billing supports EUR Google Ads accounts only.",
+            );
           }
           // PostgREST may represent an int8 as either string or number. Reject
           // an unsafe numeric value instead of stringifying an already-rounded
           // baseline and silently moving the commercial boundary.
-          const baselineCostMicros = parseGoogleMicros(start.baseline_cost_micros);
+          const baselineCostMicros = parseGoogleMicros(
+            start.baseline_cost_micros,
+          );
           const end = billingEndByAccount.get(account.id);
           let endCostMicros: bigint | null = null;
           if (end) {
@@ -404,7 +489,9 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
               end.currency.toUpperCase() !== start.currency.toUpperCase() ||
               end.google_local_date < start.google_local_date
             ) {
-              throw new Error("The billing end does not match the immutable Google start.");
+              throw new Error(
+                "The billing end does not match the immutable Google start.",
+              );
             }
             endCostMicros = parseGoogleMicros(end.end_cost_micros);
           }
@@ -413,14 +500,19 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
           // not the Worker's UTC date. Exact admin periods keep their explicit
           // Monday/Sunday labels, but are not certifiable until local Monday.
           const runStartedAt = new Date();
-          const localToday = googleLocalDate(runStartedAt, start.google_time_zone);
+          const localToday = googleLocalDate(
+            runStartedAt,
+            start.google_time_zone,
+          );
           const to = opts?.period?.end ?? localToday;
-          const from = opts?.period?.start ?? addIsoDays(to, -(SPEND_WINDOW_DAYS - 1));
+          const from =
+            opts?.period?.start ?? addIsoDays(to, -(SPEND_WINDOW_DAYS - 1));
           // A closed account has no evidence in a wholly later window. Keeping
           // it out of the marker table also keeps hourly syncs from touching
           // Google forever after its final billable week has healed.
           if (end && end.google_local_date < from) return;
-          const queryTo = end && end.google_local_date < to ? end.google_local_date : to;
+          const queryTo =
+            end && end.google_local_date < to ? end.google_local_date : to;
           const syncRunId = crypto.randomUUID();
           marker = {
             runId: syncRunId,
@@ -455,29 +547,43 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
 
           if (
             opts?.period &&
-            !googlePeriodIsClosed(opts.period.end, runStartedAt, start.google_time_zone)
+            !googlePeriodIsClosed(
+              opts.period.end,
+              runStartedAt,
+              start.google_time_zone,
+            )
           ) {
             throw new Error(
               `The ${opts.period.end} Google-local day is not closed in ${start.google_time_zone}.`,
             );
           }
 
-          const metadata = await fetchGoogleBillingMetadataAsAgency(accountCustomerId);
+          const metadata =
+            await fetchGoogleBillingMetadataAsAgency(accountCustomerId);
           if (
             metadata.customerId !== start.google_ads_customer_id ||
             metadata.currency !== start.currency.toUpperCase() ||
             metadata.timeZone !== start.google_time_zone
           ) {
-            throw new Error("Live Google account metadata does not match the billing baseline.");
+            throw new Error(
+              "Live Google account metadata does not match the billing baseline.",
+            );
           }
           if (metadata.currency !== "EUR") {
-            throw new Error(`Google Ads account currency is ${metadata.currency}, not EUR.`);
+            throw new Error(
+              `Google Ads account currency is ${metadata.currency}, not EUR.`,
+            );
           }
 
-          const queryFrom = start.google_local_date > from ? start.google_local_date : from;
+          const queryFrom =
+            start.google_local_date > from ? start.google_local_date : from;
           const reportedDays =
             queryFrom <= queryTo
-              ? await fetchGoogleDailyCostMicrosAsAgency(accountCustomerId, queryFrom, queryTo)
+              ? await fetchGoogleDailyCostMicrosAsAgency(
+                  accountCustomerId,
+                  queryFrom,
+                  queryTo,
+                )
               : [];
           const days = billableGoogleSpendWindow(
             from,
@@ -507,10 +613,15 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
           if (days.length > 0) {
             const { data, error: existingRowsError } = await supabase
               .from("commissions")
-              .select("id, occurred_on, gross_amount, amount, rate, currency, status")
+              .select(
+                "id, occurred_on, gross_amount, amount, rate, currency, status",
+              )
               .eq("ad_account_id", account.id)
               .eq("source_id", source.id)
-              .in("occurred_on", days.map((day) => day.date));
+              .in(
+                "occurred_on",
+                days.map((day) => day.date),
+              );
             if (existingRowsError) throw existingRowsError;
             existingRows = (data ?? []) as unknown as typeof existingRows;
           }
@@ -523,10 +634,11 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
             const rawMicros = BigInt(day.rawCostMicros);
             const billableMicros = BigInt(day.billableCostMicros);
             const grossAmount = microsToDecimal(rawMicros);
-            const rate = manualReferralRateForDate(
+            const rate = accountCommissionTermsForDate(
               day.date,
+              commissionTermsByAccount.get(account.id) ?? [],
               referralTermsByClient.get(account.client_id) ?? [],
-            );
+            ).feeRate;
             const amount = percentageOfMicrosToDecimal(billableMicros, rate);
 
             // Do not manufacture empty financial rows. A zero is written only
@@ -538,18 +650,24 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
               // Unique index (ad_account_id, occurred_on) makes a concurrent
               // duplicate insert fail loudly instead of double-booking — that
               // error is safe to swallow.
-              const { error: insertError } = await supabase.from("commissions").insert({
-                source_id: source.id,
-                client_id: crmByLogin.get(account.client_id) ?? null,
-                ad_account_id: account.id,
-                occurred_on: day.date,
-                gross_amount: grossAmount,
-                rate,
-                amount,
-                currency: "EUR",
-                status: "confirmed",
-                notes: noteFor(GOOGLE_ADS_NOTE_PREFIX, nameByLogin.get(account.client_id), account.store_name),
-              });
+              const { error: insertError } = await supabase
+                .from("commissions")
+                .insert({
+                  source_id: source.id,
+                  client_id: crmByLogin.get(account.client_id) ?? null,
+                  ad_account_id: account.id,
+                  occurred_on: day.date,
+                  gross_amount: grossAmount,
+                  rate,
+                  amount,
+                  currency: "EUR",
+                  status: "confirmed",
+                  notes: noteFor(
+                    GOOGLE_ADS_NOTE_PREFIX,
+                    nameByLogin.get(account.client_id),
+                    account.store_name,
+                  ),
+                });
               // A concurrent writer can win the unique account/day race, but
               // this attempt did not verify the winning value. Fail closed and
               // let the explicit admin retry produce an authoritative marker.
@@ -597,7 +715,9 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
                 .maybeSingle();
               if (updateError) throw updateError;
               if (!updatedRow) {
-                throw new Error(`Google ledger row ${current.id} changed during refresh.`);
+                throw new Error(
+                  `Google ledger row ${current.id} changed during refresh.`,
+                );
               }
             }
           }
@@ -636,7 +756,9 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
               "EUR",
             )
           ) {
-            throw new Error("The ledger changed while Google spend was being refreshed.");
+            throw new Error(
+              "The ledger changed while Google spend was being refreshed.",
+            );
           }
           const ledgerSnapshot = snapshotRows.map((row) => ({
             id: row.id,
@@ -664,12 +786,13 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
           completeWindow = end
             ? completeWindow.eq("billing_end_id", end.id)
             : completeWindow.is("billing_end_id", null);
-          const { data: completedWindow, error: syncWindowError } = await completeWindow
-            .select("ad_account_id")
-            .maybeSingle();
+          const { data: completedWindow, error: syncWindowError } =
+            await completeWindow.select("ad_account_id").maybeSingle();
           if (syncWindowError) throw syncWindowError;
           if (!completedWindow) {
-            throw new Error("This refresh was superseded by a newer account or sync change.");
+            throw new Error(
+              "This refresh was superseded by a newer account or sync change.",
+            );
           }
         } catch (error) {
           if (marker) {
@@ -728,7 +851,9 @@ const REV_SHARE_WINDOW_DAYS = 90;
 let lastRevShareRunAt = 0;
 
 function isoDay(offsetDays: number): string {
-  return new Date(Date.now() + offsetDays * 86_400_000).toISOString().slice(0, 10);
+  return new Date(Date.now() + offsetDays * 86_400_000)
+    .toISOString()
+    .slice(0, 10);
 }
 
 /**
@@ -750,7 +875,9 @@ export async function syncRevenueShareLedger(opts?: SyncOpts): Promise<void> {
       .eq("name", REV_SHARE_SOURCE)
       .maybeSingle();
     if (!source) {
-      console.error("Rev-share sync: revenue source missing — run migration 0010.");
+      console.error(
+        "Rev-share sync: revenue source missing — run migration 0010.",
+      );
       return;
     }
 
@@ -770,7 +897,9 @@ export async function syncRevenueShareLedger(opts?: SyncOpts): Promise<void> {
     // Admins' own accounts don't book agency revenue — exclude here (past rows
     // are removed by purgeAdminAccountRevenue).
     const adminIds = await adminClientIds(supabase);
-    const billable = accounts.filter((account) => !adminIds.has(account.client_id));
+    const billable = accounts.filter(
+      (account) => !adminIds.has(account.client_id),
+    );
     if (billable.length === 0) {
       lastRevShareRunAt = Date.now();
       return;
@@ -780,9 +909,13 @@ export async function syncRevenueShareLedger(opts?: SyncOpts): Promise<void> {
       .from("portal_clients")
       .select("id, crm_client_id, full_name")
       .in("id", [...new Set(billable.map((account) => account.client_id))]);
-    const crmByLogin = new Map((portalClients ?? []).map((row) => [row.id, row.crm_client_id]));
+    const crmByLogin = new Map(
+      (portalClients ?? []).map((row) => [row.id, row.crm_client_id]),
+    );
     // Same reason as the ad-spend ledger: the note is where attribution lives.
-    const nameByLogin = new Map((portalClients ?? []).map((row) => [row.id, row.full_name]));
+    const nameByLogin = new Map(
+      (portalClients ?? []).map((row) => [row.id, row.full_name]),
+    );
 
     const from = isoDay(-REV_SHARE_WINDOW_DAYS);
     const accountIds = billable.map((account) => account.id);
@@ -807,10 +940,15 @@ export async function syncRevenueShareLedger(opts?: SyncOpts): Promise<void> {
       .in("ad_account_id", accountIds)
       .gte("occurred_on", from);
     const existing = new Map(
-      (existingRows ?? []).map((row) => [`${row.ad_account_id}|${row.occurred_on}`, row]),
+      (existingRows ?? []).map((row) => [
+        `${row.ad_account_id}|${row.occurred_on}`,
+        row,
+      ]),
     );
 
-    const accountById = new Map(billable.map((account) => [account.id, account]));
+    const accountById = new Map(
+      billable.map((account) => [account.id, account]),
+    );
 
     await Promise.all(
       metricRows.map(async (metric) => {
@@ -834,16 +972,28 @@ export async function syncRevenueShareLedger(opts?: SyncOpts): Promise<void> {
               amount,
               currency: account.currency,
               status: "confirmed",
-              notes: noteFor(REV_SHARE_NOTE_PREFIX, nameByLogin.get(account.client_id), account.store_name),
+              notes: noteFor(
+                REV_SHARE_NOTE_PREFIX,
+                nameByLogin.get(account.client_id),
+                account.store_name,
+              ),
             });
           } else if (Math.abs(Number(current.amount) - amount) > 0.01) {
             await supabase
               .from("commissions")
-              .update({ gross_amount: base, rate, amount, updated_at: new Date().toISOString() })
+              .update({
+                gross_amount: base,
+                rate,
+                amount,
+                updated_at: new Date().toISOString(),
+              })
               .eq("id", current.id);
           }
         } catch (error) {
-          console.error(`Rev-share book failed for ${account.id} ${metric.day}:`, error);
+          console.error(
+            `Rev-share book failed for ${account.id} ${metric.day}:`,
+            error,
+          );
         }
       }),
     );

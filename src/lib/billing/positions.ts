@@ -2,10 +2,15 @@ import {
   addDays,
   agencyFee,
   BILLING_CURRENCY,
+  isReviewedAgencyCalculationVersion,
   isoDay,
   mondayOf,
   round2,
 } from "./weekly";
+import {
+  accountCommissionTermsForDate,
+  type AccountCommissionRateTerm,
+} from "../admin/commission-sync-logic";
 
 export type BillingPositionReferralTerm = {
   effectiveFrom: string;
@@ -22,7 +27,8 @@ const MICROS = BigInt(1_000_000);
 
 function decimalToMicros(value: string | number): bigint {
   const match = /^(\d+)(?:\.(\d{1,6}))?$/.exec(String(value).trim());
-  if (!match) throw new RangeError("Billing money must have at most six decimals.");
+  if (!match)
+    throw new RangeError("Billing money must have at most six decimals.");
   return BigInt(match[1]) * MICROS + BigInt((match[2] ?? "").padEnd(6, "0"));
 }
 
@@ -43,39 +49,16 @@ function billableGoogleMicros(
 ): bigint {
   if (date < startDate || (end && date > end.googleLocalDate)) return ZERO;
   const endMicros = end ? integerMicros(end.endCostMicros) : ZERO;
-  const capped = end && date === end.googleLocalDate && rawMicros > endMicros
-    ? endMicros
-    : rawMicros;
+  const capped =
+    end && date === end.googleLocalDate && rawMicros > endMicros
+      ? endMicros
+      : rawMicros;
   if (date !== startDate) return capped;
   const baseline = integerMicros(baselineMicros);
   return capped > baseline ? capped - baseline : ZERO;
 }
 
-function manualReferralRateForDate(
-  date: string,
-  terms: BillingPositionReferralTerm[],
-): number {
-  const term = terms
-    .filter((candidate) => candidate.effectiveFrom <= date)
-    .sort((left, right) =>
-      left.effectiveFrom === right.effectiveFrom
-        ? right.revision - left.revision
-        : right.effectiveFrom.localeCompare(left.effectiveFrom),
-    )[0];
-  if (!term) return 10;
-  const expectedDiscount = Math.min(10, term.referralCount * 0.5);
-  if (
-    !Number.isSafeInteger(term.referralCount) ||
-    term.referralCount < 0 ||
-    term.listRate !== 10 ||
-    term.stepRate !== 0.5 ||
-    term.discountRate !== expectedDiscount ||
-    term.feeRate !== 10 - expectedDiscount
-  ) {
-    throw new RangeError("Invalid sealed manual referral term.");
-  }
-  return term.feeRate;
-}
+export type BillingPositionAccountTerm = AccountCommissionRateTerm;
 
 export type BillingPositionClient = {
   id: string;
@@ -190,6 +173,7 @@ type PositionInput = {
   metricRows: BillingPositionMetricRow[];
   invoices: BillingPositionInvoice[];
   referralTermsByClient?: Map<string, BillingPositionReferralTerm[]>;
+  commissionTermsByAccount?: Map<string, BillingPositionAccountTerm[]>;
 };
 
 type AccountWeek = {
@@ -243,10 +227,15 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
   const currentPeriod = currentWeek(input.now);
   const today = isoDay(input.now);
   const closedThrough = addDays(currentPeriod.start, -1);
-  const accountById = new Map(input.accounts.map((account) => [account.id, account]));
-  const startsByAccount = new Map(input.starts.map((start) => [start.accountId, start]));
+  const accountById = new Map(
+    input.accounts.map((account) => [account.id, account]),
+  );
+  const startsByAccount = new Map(
+    input.starts.map((start) => [start.accountId, start]),
+  );
   const endsByAccount = new Map(input.ends.map((end) => [end.accountId, end]));
   const termsByClient = input.referralTermsByClient ?? new Map();
+  const termsByAccount = input.commissionTermsByAccount ?? new Map();
 
   const activeInvoiceWeeks = new Set(
     input.invoices
@@ -267,7 +256,8 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
     if (row.occurredOn > closedThrough) continue;
 
     const start = startsByAccount.get(account.id);
-    const candidateStart = start?.googleLocalDate ?? isoDay(new Date(account.createdAt));
+    const candidateStart =
+      start?.googleLocalDate ?? isoDay(new Date(account.createdAt));
     const end = endsByAccount.get(account.id);
     if (
       row.occurredOn < candidateStart ||
@@ -352,7 +342,8 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
     const position = positions.get(account.clientId);
     if (!position) continue;
     const start = startsByAccount.get(account.id);
-    const candidateStart = start?.googleLocalDate ?? isoDay(new Date(account.createdAt));
+    const candidateStart =
+      start?.googleLocalDate ?? isoDay(new Date(account.createdAt));
     if (!start && candidateStart <= closedThrough) {
       position.closed.missingStartCount += 1;
     }
@@ -366,10 +357,11 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
     if (!position) continue;
     if (activeInvoiceWeeks.has(`${week.clientId}:${week.weekStart}`)) continue;
 
-    const rate = manualReferralRateForDate(
+    const rate = accountCommissionTermsForDate(
       week.weekStart,
+      termsByAccount.get(week.accountId) ?? [],
       termsByClient.get(week.clientId) ?? [],
-    );
+    ).feeRate;
     const fullFee = agencyFee(euroNumber(week.totalMicros), rate);
     const supportedFee = agencyFee(
       euroNumber(week.totalMicros - week.unresolvedEntryDayMicros),
@@ -395,7 +387,26 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
 
   for (const invoice of input.invoices) {
     const position = positions.get(invoice.clientId);
-    if (!position || invoice.status !== "open" || !invoice.issuedAt) continue;
+    if (!position) continue;
+
+    if (
+      invoice.status === "draft" &&
+      invoice.issuedAt === null &&
+      isReviewedAgencyCalculationVersion(invoice.calculationVersion)
+    ) {
+      const amount = Number(invoice.amount);
+      if (!Number.isFinite(amount) || amount < 0) continue;
+      position.closed.unissuedEstimate = round2(
+        position.closed.unissuedEstimate + amount,
+      );
+      position.closed.supportedUnissued = round2(
+        position.closed.supportedUnissued + amount,
+      );
+      position.closedPeriodStarts.add(invoice.periodStart);
+      continue;
+    }
+
+    if (invoice.status !== "open" || !invoice.issuedAt) continue;
     const remaining = Number(invoice.amountRemaining ?? invoice.amount);
     if (!Number.isFinite(remaining) || remaining < 0) continue;
     position.closed.issuedOutstanding = round2(
@@ -424,12 +435,10 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
       continue;
     }
     const start = startsByAccount.get(account.id);
-    const candidateStart = start?.googleLocalDate ?? isoDay(new Date(account.createdAt));
+    const candidateStart =
+      start?.googleLocalDate ?? isoDay(new Date(account.createdAt));
     const end = endsByAccount.get(account.id);
-    if (
-      row.day < candidateStart ||
-      (end && row.day > end.googleLocalDate)
-    ) {
+    if (row.day < candidateStart || (end && row.day > end.googleLocalDate)) {
       continue;
     }
     const rawMicros = decimalToMicros(row.adSpend);
@@ -457,9 +466,10 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
     if (!start && row.day === candidateStart) {
       aggregate.unresolvedEntryDayMicros += billableMicros;
     }
-    aggregate.through = !aggregate.through || row.day > aggregate.through
-      ? row.day
-      : aggregate.through;
+    aggregate.through =
+      !aggregate.through || row.day > aggregate.through
+        ? row.day
+        : aggregate.through;
     aggregate.updatedAt = newest(aggregate.updatedAt, row.computedAt);
     currentByAccount.set(account.id, aggregate);
   }
@@ -467,10 +477,11 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
   for (const aggregate of currentByAccount.values()) {
     const position = positions.get(aggregate.clientId);
     if (!position) continue;
-    const rate = manualReferralRateForDate(
+    const rate = accountCommissionTermsForDate(
       currentPeriod.start,
+      termsByAccount.get(aggregate.accountId) ?? [],
       termsByClient.get(aggregate.clientId) ?? [],
-    );
+    ).feeRate;
     const fullFee = agencyFee(euroNumber(aggregate.totalMicros), rate);
     const supportedFee = agencyFee(
       euroNumber(aggregate.totalMicros - aggregate.unresolvedEntryDayMicros),
@@ -479,15 +490,14 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
     position.current.grossSpend = round2(
       position.current.grossSpend + euroNumber(aggregate.totalMicros),
     );
-    position.current.accruedFee = round2(
-      position.current.accruedFee + fullFee,
-    );
+    position.current.accruedFee = round2(position.current.accruedFee + fullFee);
     position.current.needsEntryReview = round2(
       position.current.needsEntryReview + fullFee - supportedFee,
     );
     if (
       aggregate.through &&
-      (!position.current.through || aggregate.through > position.current.through)
+      (!position.current.through ||
+        aggregate.through > position.current.through)
     ) {
       position.current.through = aggregate.through;
     }
@@ -532,15 +542,11 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
       closedNeedsEntryReview: sum(
         (position) => position.closed.needsEntryReview,
       ),
-      issuedOutstanding: sum(
-        (position) => position.closed.issuedOutstanding,
-      ),
+      issuedOutstanding: sum((position) => position.closed.issuedOutstanding),
       supportedNotReceived: sum(
         (position) => position.closed.supportedNotReceived,
       ),
-      maximumNotReceived: sum(
-        (position) => position.closed.maximumNotReceived,
-      ),
+      maximumNotReceived: sum((position) => position.closed.maximumNotReceived),
       currentGrossSpend: sum((position) => position.current.grossSpend),
       currentAccruedFee: sum((position) => position.current.accruedFee),
       clientsNeedingEntryReview: clients.filter(

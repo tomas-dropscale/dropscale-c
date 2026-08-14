@@ -20,6 +20,23 @@ const STATUS: Record<string, CampaignStatus> = {
 const micros = (value: unknown) => Number(value ?? 0) / 1_000_000;
 const num = (value: unknown) => Number(value ?? 0);
 
+function hasShoppingFeed(campaign: Record<string, unknown>): boolean {
+  const value = campaign.shoppingSetting;
+  if (value == null) return false;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Google Ads returned invalid shopping metadata.");
+  }
+
+  const merchantId = (value as Record<string, unknown>).merchantId;
+  if (merchantId == null) return false;
+  const normalized = String(merchantId).trim();
+  if (/^0+$/.test(normalized)) return false;
+  if (!/^[1-9]\d{0,29}$/.test(normalized)) {
+    throw new Error("Google Ads returned invalid shopping metadata.");
+  }
+  return true;
+}
+
 /**
  * Just the names of an account's non-removed campaigns — for rev-share deal
  * discovery (the deal's collection + rate are encoded in the campaign name).
@@ -59,6 +76,8 @@ export type LiveCampaign = Campaign & {
   conversionValue: number;
   /** Provider channel enum, such as DEMAND_GEN or PERFORMANCE_MAX. */
   advertisingChannelType: string;
+  /** True only when Google reports a Merchant Center id for this campaign. */
+  shoppingFeed: boolean;
   /** Google conversion value divided by Google spend. */
   googleRoas: number;
 };
@@ -75,8 +94,9 @@ export async function fetchLiveCampaignsDetailed(
       campaign.id,
       campaign.name,
       campaign.status,
-      campaign.start_date,
+      campaign.start_date_time,
       campaign.advertising_channel_type,
+      campaign.shopping_setting.merchant_id,
       campaign_budget.amount_micros,
       metrics.cost_micros,
       metrics.impressions,
@@ -92,7 +112,7 @@ export async function fetchLiveCampaignsDetailed(
 
   const rows = await searchGoogleAds(customerId, refreshToken, query);
 
-  // The REST API serialises fields as camelCase (costMicros, startDate), even
+  // The REST API serialises fields as camelCase (costMicros, startDateTime), even
   // though the GAQL query above uses the proto snake_case names.
   return rows.map((row: GaqlRow): LiveCampaign => {
     const campaign = row.campaign ?? {};
@@ -120,10 +140,18 @@ export async function fetchLiveCampaignsDetailed(
       cpc: micros(metrics.averageCpc),
       daily_budget: budget.amountMicros != null ? micros(budget.amountMicros) : null,
       updated_at: new Date().toISOString(),
-      startDate: campaign.startDate ? String(campaign.startDate) : null,
+      // v23 replaced campaign.start_date with start_date_time. Google returns
+      // the latter in the customer's local time (YYYY-MM-DD HH:mm:ss); this
+      // view only needs the calendar day, so keep the exact ISO-day prefix.
+      startDate:
+        typeof campaign.startDateTime === "string" &&
+        /^\d{4}-\d{2}-\d{2}(?:[ T].*)?$/.test(campaign.startDateTime)
+          ? campaign.startDateTime.slice(0, 10)
+          : null,
       conversions: num(metrics.conversions),
       conversionValue,
       advertisingChannelType: String(campaign.advertisingChannelType ?? "UNKNOWN"),
+      shoppingFeed: hasShoppingFeed(campaign),
       googleRoas: spend > 0 ? conversionValue / spend : 0,
     };
   });
