@@ -380,6 +380,7 @@ describe("admin client overview V2 projection", () => {
     expect(overview?.stores).toEqual([
       expect.objectContaining({
         accountId: "anchor",
+        activityAccountIds: ["anchor", "child"],
         storeName: "Projected Store",
         connected: true,
         adSpend: 30,
@@ -388,6 +389,7 @@ describe("admin client overview V2 projection", () => {
         days: [{ day: "2026-08-14", adSpend: 30, revenue: 100 }],
       }),
     ]);
+    expect(overview?.activityAccountIds).toEqual(["anchor", "child", "standalone"]);
     expect(overview?.totals).toEqual(
       expect.objectContaining({ adSpend: 35, googleRevenue: 100, commission: 6.5 }),
     );

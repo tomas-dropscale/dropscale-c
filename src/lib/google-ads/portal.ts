@@ -49,10 +49,18 @@ export async function fetchCampaignNames(
  * the daily report reads from.
  */
 export type LiveCampaign = Campaign & {
+  /** Exact provider identity. Never derive this back out of the display id. */
+  providerCampaignId: string;
   /** ISO day the campaign started, per Google. Null when it does not report one. */
   startDate: string | null;
   /** Google-attributed conversions in the queried range. */
   conversions: number;
+  /** Google-attributed conversion value in the account currency. */
+  conversionValue: number;
+  /** Provider channel enum, such as DEMAND_GEN or PERFORMANCE_MAX. */
+  advertisingChannelType: string;
+  /** Google conversion value divided by Google spend. */
+  googleRoas: number;
 };
 
 /** Live campaigns for one customer, with everything Google will give us. */
@@ -68,13 +76,15 @@ export async function fetchLiveCampaignsDetailed(
       campaign.name,
       campaign.status,
       campaign.start_date,
+      campaign.advertising_channel_type,
       campaign_budget.amount_micros,
       metrics.cost_micros,
       metrics.impressions,
       metrics.clicks,
       metrics.ctr,
       metrics.average_cpc,
-      metrics.conversions
+      metrics.conversions,
+      metrics.conversions_value
     FROM campaign
     WHERE ${dateClause(range)}
     ORDER BY metrics.cost_micros DESC
@@ -88,15 +98,22 @@ export async function fetchLiveCampaignsDetailed(
     const campaign = row.campaign ?? {};
     const metrics = row.metrics ?? {};
     const budget = row.campaignBudget ?? {};
+    const spend = micros(metrics.costMicros);
+    const conversionValue = num(metrics.conversionsValue);
+    const providerCampaignId = String(campaign.id ?? "").trim();
+    if (!/^\d{1,30}$/.test(providerCampaignId)) {
+      throw new Error("Google Ads returned an invalid campaign identity.");
+    }
 
     return {
       // Not a DB uuid — the table is never written in the live path. Prefixed
       // so it can never collide with a real row id if the two ever mix.
-      id: `gads-${accountId}-${String(campaign.id ?? "")}`,
+      id: `gads-${accountId}-${providerCampaignId}`,
+      providerCampaignId,
       ad_account_id: accountId,
       name: String(campaign.name ?? "—"),
       status: STATUS[String(campaign.status ?? "")] ?? "paused",
-      spend: micros(metrics.costMicros),
+      spend,
       impressions: num(metrics.impressions),
       clicks: num(metrics.clicks),
       ctr: num(metrics.ctr),
@@ -105,6 +122,9 @@ export async function fetchLiveCampaignsDetailed(
       updated_at: new Date().toISOString(),
       startDate: campaign.startDate ? String(campaign.startDate) : null,
       conversions: num(metrics.conversions),
+      conversionValue,
+      advertisingChannelType: String(campaign.advertisingChannelType ?? "UNKNOWN"),
+      googleRoas: spend > 0 ? conversionValue / spend : 0,
     };
   });
 }

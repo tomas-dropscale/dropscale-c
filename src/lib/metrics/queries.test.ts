@@ -1,9 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 
-vi.mock("@/lib/supabase/server", () => ({ createClient: vi.fn() }));
+const mocks = vi.hoisted(() => ({ createClient: vi.fn() }));
+
+vi.mock("@/lib/supabase/server", () => ({ createClient: mocks.createClient }));
 vi.mock("@/lib/metrics/recompute", () => ({ RECOMPUTE_INTERVAL_MS: 15 * 60 * 1000 }));
 
 import {
+  fetchDailyMetrics,
   groupByAccount,
   rekeyDailyMetricRows,
   sumMetrics,
@@ -68,5 +71,25 @@ describe("rekeyDailyMetricRows", () => {
     );
 
     expect(projected[0].ad_account_id).toBe("unmapped");
+  });
+});
+
+describe("fetchDailyMetrics", () => {
+  it("fails closed instead of turning a database error into zero spend", async () => {
+    const chain: Record<string, ReturnType<typeof vi.fn>> = {};
+    for (const name of ["select", "in", "gte", "lte"]) {
+      chain[name] = vi.fn(() => chain);
+    }
+    chain.order = vi.fn().mockResolvedValue({
+      data: null,
+      error: { code: "42501" },
+    });
+    mocks.createClient.mockResolvedValue({
+      from: vi.fn(() => chain),
+    });
+
+    await expect(
+      fetchDailyMetrics(["account-1"], "2026-08-01", "2026-08-07"),
+    ).rejects.toThrow("Daily metrics are unavailable");
   });
 });

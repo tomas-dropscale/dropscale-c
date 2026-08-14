@@ -806,6 +806,74 @@ export type Campaign = {
   updated_at: string;
 };
 
+export type CampaignAction =
+  | "budget_changed"
+  | "campaign_paused"
+  | "campaign_enabled"
+  | "campaign_launched";
+export type CampaignActionPolicyAction = Exclude<
+  CampaignAction,
+  "campaign_launched"
+>;
+export type CampaignActionOperationStatus =
+  | "requested"
+  | "succeeded"
+  | "failed"
+  | "uncertain";
+
+/** Append-only, default-deny campaign write authority (migration 0059). */
+export type CampaignActionPolicy = {
+  id: string;
+  client_reporting_binding_id: string;
+  supersedes_policy_id: string | null;
+  revision: number;
+  executor: "agency_google";
+  allowed_actions: CampaignActionPolicyAction[];
+  /** Integer Google Ads DAILY budget micros; keep as a string for arithmetic. */
+  max_daily_budget_micros: number | string | null;
+  idempotency_key: string;
+  configured_by: string;
+  reason: string;
+  created_at: string;
+};
+
+/** One request-to-terminal Google Ads mutation lifecycle (migration 0059). */
+export type CampaignActionOperation = {
+  id: string;
+  idempotency_key: string;
+  execution_claim_id: string;
+  client_id: string;
+  client_reporting_binding_id: string;
+  client_google_ads_connection_id: string;
+  shopify_anchor_binding_id: string | null;
+  shopify_anchor_ad_account_id: string | null;
+  ad_account_id: string;
+  billing_start_id: string;
+  campaign_action_policy_id: string;
+  policy_revision: number;
+  executor: "agency_google";
+  google_ads_customer_id: string;
+  google_time_zone: string;
+  currency: string;
+  provider_campaign_id: string;
+  campaign_name: string;
+  action: CampaignAction;
+  status: CampaignActionOperationStatus;
+  previous_status: "active" | "paused" | null;
+  next_status: "active" | "paused" | null;
+  previous_daily_budget_micros: number | string | null;
+  next_daily_budget_micros: number | string | null;
+  requested_details: Json;
+  request_snapshot: Json;
+  request_hash: string;
+  requested_by: string;
+  requested_at: string;
+  observed_status: "active" | "paused" | "ended" | null;
+  observed_daily_budget_micros: number | string | null;
+  result_details: Json | null;
+  completed_at: string | null;
+};
+
 /** One pre-aggregated day for one store (migration 0008). */
 export type DailyMetric = {
   ad_account_id: string;
@@ -1153,6 +1221,25 @@ export type ClientGoogleAdsReportingIdentityEvent = {
   source_time_zone: string;
   verified_at: string;
   actor_id: string;
+  created_at: string;
+};
+
+export type ClientGoogleAdsReportingMetadataEvent = {
+  id: string;
+  connection_id: string;
+  client_id: string;
+  binding_id: string | null;
+  event_type: "metadata_enriched";
+  proof_scope: "windsor_reporting_metadata_only";
+  source_account_id: string;
+  prior_currency: string | null;
+  source_currency: string;
+  prior_time_zone: string | null;
+  source_time_zone: string;
+  verified_at: string;
+  actor_id: string;
+  reason: string;
+  idempotency_key: string;
   created_at: string;
 };
 
@@ -1907,6 +1994,44 @@ export type Database = {
           },
         ];
       };
+      client_google_ads_reporting_metadata_events: {
+        Row: Row<ClientGoogleAdsReportingMetadataEvent>;
+        Insert: Insert<
+          ClientGoogleAdsReportingMetadataEvent,
+          "id" | "event_type" | "proof_scope" | "created_at"
+        >;
+        Update: Partial<ClientGoogleAdsReportingMetadataEvent>;
+        Relationships: [
+          {
+            foreignKeyName: "client_google_ads_reporting_metadata_events_connection_id_fkey";
+            columns: ["connection_id"];
+            isOneToOne: false;
+            referencedRelation: "client_google_ads_connections";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "client_google_ads_reporting_metadata_events_client_id_fkey";
+            columns: ["client_id"];
+            isOneToOne: false;
+            referencedRelation: "portal_clients";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "client_google_ads_reporting_metadata_events_binding_id_fkey";
+            columns: ["binding_id"];
+            isOneToOne: false;
+            referencedRelation: "client_reporting_bindings";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "client_google_ads_reporting_metadata_events_actor_id_fkey";
+            columns: ["actor_id"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
       audit_shopify_connections: {
         Row: Row<AuditShopifyConnection>;
         Insert: Insert<
@@ -2514,6 +2639,135 @@ export type Database = {
           },
         ];
       };
+      campaign_action_policies: {
+        Row: Row<CampaignActionPolicy>;
+        Insert: Insert<
+          CampaignActionPolicy,
+          | "supersedes_policy_id"
+          | "executor"
+          | "allowed_actions"
+          | "max_daily_budget_micros"
+          | "created_at"
+        >;
+        Update: Partial<CampaignActionPolicy>;
+        Relationships: [
+          {
+            foreignKeyName: "campaign_action_policies_client_reporting_binding_id_fkey";
+            columns: ["client_reporting_binding_id"];
+            isOneToOne: false;
+            referencedRelation: "client_reporting_bindings";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "campaign_action_policies_supersedes_policy_id_fkey";
+            columns: ["supersedes_policy_id"];
+            isOneToOne: true;
+            referencedRelation: "campaign_action_policies";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "campaign_action_policies_configured_by_fkey";
+            columns: ["configured_by"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      campaign_action_operations: {
+        Row: Row<CampaignActionOperation>;
+        Insert: Insert<
+          CampaignActionOperation,
+          | "shopify_anchor_binding_id"
+          | "shopify_anchor_ad_account_id"
+          | "executor"
+          | "status"
+          | "previous_status"
+          | "next_status"
+          | "previous_daily_budget_micros"
+          | "next_daily_budget_micros"
+          | "requested_details"
+          | "requested_at"
+          | "observed_status"
+          | "observed_daily_budget_micros"
+          | "result_details"
+          | "completed_at"
+        >;
+        Update: Partial<CampaignActionOperation>;
+        Relationships: [
+          {
+            foreignKeyName: "campaign_action_operations_client_id_fkey";
+            columns: ["client_id"];
+            isOneToOne: false;
+            referencedRelation: "portal_clients";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "campaign_action_operations_client_reporting_binding_id_fkey";
+            columns: ["client_reporting_binding_id"];
+            isOneToOne: false;
+            referencedRelation: "client_reporting_bindings";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "campaign_action_operations_client_google_ads_connection_id_fkey";
+            columns: ["client_google_ads_connection_id"];
+            isOneToOne: false;
+            referencedRelation: "client_google_ads_connections";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "campaign_action_operations_shopify_anchor_binding_id_fkey";
+            columns: ["shopify_anchor_binding_id"];
+            isOneToOne: false;
+            referencedRelation: "client_reporting_bindings";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "campaign_action_operations_shopify_anchor_ad_account_id_fkey";
+            columns: ["shopify_anchor_ad_account_id"];
+            isOneToOne: false;
+            referencedRelation: "ad_accounts";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "campaign_action_operations_ad_account_id_fkey";
+            columns: ["ad_account_id"];
+            isOneToOne: false;
+            referencedRelation: "ad_accounts";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "campaign_action_operations_billing_start_id_fkey";
+            columns: ["billing_start_id"];
+            isOneToOne: false;
+            referencedRelation: "ad_account_billing_starts";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "campaign_action_operations_policy_reference_fkey";
+            columns: [
+              "campaign_action_policy_id",
+              "client_reporting_binding_id",
+              "policy_revision",
+            ];
+            isOneToOne: false;
+            referencedRelation: "campaign_action_policies";
+            referencedColumns: [
+              "id",
+              "client_reporting_binding_id",
+              "revision",
+            ];
+          },
+          {
+            foreignKeyName: "campaign_action_operations_requested_by_fkey";
+            columns: ["requested_by"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
       store_products: {
         Row: Row<StoreProduct>;
         Insert: Insert<
@@ -2726,6 +2980,55 @@ export type Database = {
     };
     Views: Record<never, never>;
     Functions: {
+      set_campaign_action_policy: {
+        Args: {
+          p_policy_id: string;
+          p_idempotency_key: string;
+          p_client_reporting_binding_id: string;
+          p_expected_policy_id: string | null;
+          p_allowed_actions: CampaignActionPolicyAction[];
+          p_max_daily_budget_micros: number | string | null;
+          p_admin_id: string;
+          p_reason: string;
+        };
+        Returns: CampaignActionPolicy;
+      };
+      start_campaign_action: {
+        Args: {
+          p_operation_id: string;
+          p_idempotency_key: string;
+          p_execution_claim_id: string;
+          p_client_id: string;
+          p_client_reporting_binding_id: string;
+          p_ad_account_id: string;
+          p_client_google_ads_connection_id: string;
+          p_google_ads_customer_id: string;
+          p_provider_campaign_id: string;
+          p_campaign_name: string;
+          p_action: Exclude<CampaignAction, "campaign_launched">;
+          p_currency: string;
+          p_actor_id: string;
+          p_previous_status?: "active" | "paused" | null;
+          p_next_status?: "active" | "paused" | null;
+          p_previous_daily_budget_micros?: number | string | null;
+          p_next_daily_budget_micros?: number | string | null;
+          p_details?: Json;
+        };
+        Returns: CampaignActionOperation;
+      };
+      complete_campaign_action: {
+        Args: {
+          p_operation_id: string;
+          p_idempotency_key: string;
+          p_execution_claim_id: string;
+          p_actor_id: string;
+          p_outcome: Exclude<CampaignActionOperationStatus, "requested">;
+          p_observed_status?: "active" | "paused" | "ended" | null;
+          p_observed_daily_budget_micros?: number | string | null;
+          p_details?: Json;
+        };
+        Returns: CampaignActionOperation;
+      };
       update_portal_client_identity: {
         Args: {
           p_client_id: string;
@@ -2857,6 +3160,18 @@ export type Database = {
           p_time_zone: string;
           p_admin_id: string;
           p_verified_at: string;
+        };
+        Returns: string;
+      };
+      enrich_client_google_ads_reporting_metadata: {
+        Args: {
+          p_connection_id: string;
+          p_currency: string;
+          p_time_zone: string;
+          p_admin_id: string;
+          p_verified_at: string;
+          p_reason: string;
+          p_idempotency_key: string;
         };
         Returns: string;
       };

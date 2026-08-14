@@ -1,5 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/service";
+import { requireClientOnboardingAdmin } from "@/lib/client-onboarding/sessions";
 import { decryptToken } from "@/lib/google-ads/crypto";
 import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
 import { fetchLiveCampaignsDetailed, type LiveCampaign } from "@/lib/google-ads/portal";
@@ -33,7 +34,7 @@ export type AdminAccountCampaigns = {
    * each collection has been running, and that is a Google field the campaigns
    * TABLE has no column for.
    */
-  campaigns: LiveCampaign[];
+  campaigns: AdminLiveCampaign[];
   connected: boolean;
   /** Live query attempted but failed — distinguishes "error" from "no spend". */
   failed: boolean;
@@ -45,6 +46,12 @@ export type AdminAccountCampaigns = {
   authRevoked: boolean;
   spend: number;
   commission: number;
+};
+
+export type AdminLiveCampaign = LiveCampaign & {
+  /** Only normalized V2 campaigns can be targeted by audited controls. */
+  reportingBindingId: string | null;
+  googleAdsConnectionId: string | null;
 };
 
 export type AdminClientCampaigns = {
@@ -279,6 +286,7 @@ function groupByOwner(
 }
 
 export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminCampaignsOverview> {
+  await requireClientOnboardingAdmin();
   const supabase = await createClient();
   const googleConfigured = hasGoogleAdsEnv();
   const windsorConfigured = hasWindsorEnv();
@@ -325,7 +333,7 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
         ? googleConfigured && account.google_ads_connected && Boolean(account.google_ads_customer_id)
         : windsorConfigured && googleSources.length > 0;
 
-      let campaigns: LiveCampaign[] = [];
+      let campaigns: AdminLiveCampaign[] = [];
       let failed = false;
       let authRevoked = false;
 
@@ -340,16 +348,26 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
             const cipher = data?.google_ads_refresh_token;
             if (!cipher) throw new Error("token row missing");
 
-            campaigns = await fetchLiveCampaignsDetailed(
+            campaigns = (await fetchLiveCampaignsDetailed(
               account.google_ads_customer_id!,
               await decryptToken(cipher),
               account.id,
               range,
-            );
+            )).map((campaign) => ({
+              ...campaign,
+              reportingBindingId: null,
+              googleAdsConnectionId: null,
+            }));
           } else {
             campaigns = (await Promise.all(
-              googleSources.map((source) =>
-                fetchGoogleReportingCampaigns(source, range.from, range.to),
+              googleSources.map(async (source) =>
+                (await fetchGoogleReportingCampaigns(source, range.from, range.to)).map(
+                  (campaign) => ({
+                    ...campaign,
+                    reportingBindingId: source.bindingId,
+                    googleAdsConnectionId: source.googleAds!.connectionId,
+                  }),
+                ),
               ),
             ))
               .flat()

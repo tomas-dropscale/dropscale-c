@@ -39,13 +39,17 @@ export async function fetchDailyMetrics(
   if (accountIds.length === 0) return [];
 
   const supabase = await createClient();
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("daily_metrics")
     .select("*")
     .in("ad_account_id", accountIds)
     .gte("day", from)
     .lte("day", to)
     .order("day", { ascending: true });
+
+  if (error) {
+    throw new Error("Daily metrics are unavailable.");
+  }
 
   return (data as DailyMetricRow[] | null) ?? [];
 }

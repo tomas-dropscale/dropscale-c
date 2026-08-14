@@ -45,6 +45,20 @@ export class GoogleAdsQueryError extends Error {
   }
 }
 
+/** A redacted write failure. Raw Google response bodies never leave this module. */
+export class GoogleAdsMutationError extends Error {
+  constructor(
+    readonly status: number | null,
+    readonly providerCode: string,
+    readonly requestId: string | null,
+    /** The request may have reached Google and must be reconciled, never retried blindly. */
+    readonly indeterminate: boolean,
+  ) {
+    super("Google Ads could not confirm the campaign mutation.");
+    this.name = "GoogleAdsMutationError";
+  }
+}
+
 // Cached per isolate, keyed by refresh token (one per client account). Access
 // tokens live ~1h; refreshing on every query would add a round-trip and burn
 // OAuth quota. A cold isolate just mints new ones.
@@ -67,6 +81,7 @@ async function accessToken(refreshToken: string): Promise<string> {
       client_secret: env.clientSecret,
       refresh_token: refreshToken,
     }),
+    signal: AbortSignal.timeout(20_000),
   });
 
   if (!res.ok) {
@@ -109,6 +124,15 @@ async function agencyToken(): Promise<{ token: string; loginCustomerId: string |
 /** One row of a GAQL result — a nested object keyed by resource name. */
 export type GaqlRow = Record<string, Record<string, unknown>>;
 
+export type GoogleAdsMutateService = "campaigns" | "campaignBudgets";
+
+export type GoogleAdsMutateResponse = {
+  /** Google request id, useful for a redacted provider receipt. */
+  requestId: string | null;
+  /** Mutable resources returned when responseContentType=MUTABLE_RESOURCE. */
+  results: Record<string, unknown>[];
+};
+
 /**
  * Runs a GAQL query and returns every row, following pagination. `:search`
  * returns plain JSON (unlike `:searchStream`, which streams and is awkward
@@ -138,6 +162,7 @@ async function gaqlSearch(
           "Content-Type": "application/json",
         },
         body: JSON.stringify(pageToken ? { query, pageToken } : { query }),
+        signal: AbortSignal.timeout(20_000),
       },
     );
 
@@ -211,6 +236,106 @@ export async function searchGoogleAdsAsAgency(
   const login =
     opts && "loginCustomerId" in opts ? (opts.loginCustomerId ?? null) : agency.loginCustomerId;
   return gaqlSearch(customerId, agency.token, query, login);
+}
+
+/**
+ * One purpose-built agency mutate call.
+ *
+ * The caller owns the resource-specific operation shape; this helper owns the
+ * service-account token, exact customer URL and Google headers. Only the two
+ * services used by the Campaigns controls are accepted so a future browser
+ * payload can never select an arbitrary Google Ads endpoint.
+ */
+export async function mutateGoogleAdsAsAgency(
+  customerId: string,
+  service: GoogleAdsMutateService,
+  operations: Record<string, unknown>[],
+  options: { validateOnly: boolean },
+): Promise<GoogleAdsMutateResponse> {
+  if (!/^[0-9\s-]+$/.test(customerId)) {
+    throw new Error("Invalid Google Ads mutate request.");
+  }
+  const cid = customerId.replace(/\D/g, "");
+  if (!/^\d{10}$/.test(cid) || operations.length !== 1) {
+    throw new Error("Invalid Google Ads mutate request.");
+  }
+
+  const { developerToken, apiVersion } = googleAdsApiBasics();
+  const agency = await agencyToken();
+  let res: Response;
+  try {
+    res = await fetch(
+      `https://googleads.googleapis.com/${apiVersion}/customers/${cid}/${service}:mutate`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${agency.token}`,
+          "developer-token": developerToken,
+          ...(agency.loginCustomerId
+            ? { "login-customer-id": agency.loginCustomerId }
+            : {}),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          operations,
+          partialFailure: false,
+          validateOnly: options.validateOnly,
+          responseContentType: "MUTABLE_RESOURCE",
+        }),
+        signal: AbortSignal.timeout(20_000),
+      },
+    );
+  } catch {
+    throw new GoogleAdsMutationError(
+      null,
+      "NETWORK_OR_TIMEOUT",
+      null,
+      !options.validateOnly,
+    );
+  }
+
+  if (!res.ok) {
+    const requestId = res.headers.get("request-id");
+    const detail = (await res.text()).slice(0, 32_768);
+    let providerCode = "HTTP_ERROR";
+    try {
+      const parsed = JSON.parse(detail) as { error?: { status?: unknown } };
+      const candidate = parsed.error?.status;
+      if (typeof candidate === "string" && /^[A-Z][A-Z0-9_]{1,79}$/.test(candidate)) {
+        providerCode = candidate;
+      }
+    } catch {
+      // The raw response remains deliberately discarded.
+    }
+    throw new GoogleAdsMutationError(
+      res.status,
+      providerCode,
+      requestId,
+      !options.validateOnly && (res.status === 408 || res.status === 429 || res.status >= 500),
+    );
+  }
+
+  let json: { results?: unknown };
+  try {
+    json = (await res.json()) as { results?: unknown };
+  } catch {
+    throw new GoogleAdsMutationError(
+      res.status,
+      "INVALID_RESPONSE",
+      res.headers.get("request-id"),
+      !options.validateOnly,
+    );
+  }
+  const results = Array.isArray(json.results)
+    ? json.results.filter(
+        (value): value is Record<string, unknown> =>
+          Boolean(value) && typeof value === "object" && !Array.isArray(value),
+      )
+    : [];
+  return {
+    requestId: res.headers.get("request-id"),
+    results,
+  };
 }
 
 export type AgencyAccount = {

@@ -214,6 +214,10 @@ async function reportingScope(
 /** One of the client's stores, focused on ad spend and what it earns us. */
 export type AdminStoreOverview = {
   accountId: string;
+  /** Exact anchor + Google child account IDs used to scope store activity. */
+  activityAccountIds: string[];
+  /** Freshness of this exact store group; null means no verified rollup rows. */
+  updatedAt: string | null;
   storeName: string;
   colorDot: string;
   currency: string;
@@ -265,6 +269,9 @@ export type AdminClientOverview = {
   clientId: string;
   clientName: string;
   clientEmail: string;
+  /** Every exact physical reporting account in the client scope, including
+   *  standalone Google spend that cannot be attributed to one store. */
+  activityAccountIds: string[];
   currency: string;
   /** True when the client's stores trade in more than one currency, so the
    *  client-level totals below are sums of unlike amounts. */
@@ -391,6 +398,8 @@ export async function fetchClientOverview(
 
       return {
         accountId: account.id,
+        activityAccountIds: [...metricIds],
+        updatedAt: freshness(accountRows).updatedAt,
         storeName: account.store_name,
         colorDot: account.color_dot,
         currency: account.currency,
@@ -487,6 +496,7 @@ export async function fetchClientOverview(
     clientId: client.id,
     clientName: client.full_name,
     clientEmail: client.email,
+    activityAccountIds: [...scope.allMetricIds],
     // Stores can differ in currency; the client-level strip uses the first
     // store's, which is what the client's own dashboard does too.
     // One currency across the client's stores, or the first as a fallback with

@@ -18,9 +18,24 @@ export const dynamic = "force-dynamic";
 
 type Context = { params: Promise<{ id: string }> };
 
+const METADATA_REASON = "Admin Google Ads test verified reporting metadata.";
+
+function sameOrigin(request: NextRequest) {
+  const origin = request.headers.get("origin");
+  if (!origin) return true;
+  try {
+    return new URL(origin).origin === request.nextUrl.origin;
+  } catch {
+    return false;
+  }
+}
+
 export async function PATCH(request: NextRequest, { params }: Context) {
   try {
     const admin = await requireClientOnboardingAdmin();
+    if (!sameOrigin(request)) {
+      throw new ClientOnboardingError("forbidden", "Forbidden.", 403);
+    }
     const { id } = await params;
     if (!isClientOnboardingId(id)) {
       return clientOnboardingResponse({ error: "Not found." }, 404);
@@ -39,7 +54,7 @@ export async function PATCH(request: NextRequest, { params }: Context) {
     }
     const { data: connection, error } = await service
       .from("client_google_ads_connections")
-      .select("id, windsor_account_id")
+      .select("id, windsor_account_id, currency, time_zone")
       .eq("id", id)
       .eq("status", "connected")
       .maybeSingle();
@@ -57,22 +72,37 @@ export async function PATCH(request: NextRequest, { params }: Context) {
     try {
       const health = await checkGoogleAdsAccountHealth(connection.windsor_account_id);
       if (health.ok && health.account.currency && health.account.timeZone) {
-        const { data: recordedIdentity, error: identityError } = await service.rpc(
-          "record_client_google_ads_reporting_identity",
-          {
-            p_connection_id: id,
-            p_currency: health.account.currency,
-            p_time_zone: health.account.timeZone,
-            p_admin_id: admin.id,
-            p_verified_at: health.checkedAt,
-          },
-        );
-        if (identityError || recordedIdentity !== id) {
+        const currentTimeZone = connection.time_zone?.trim() || null;
+        if (
+          (connection.currency !== null && connection.currency !== health.account.currency) ||
+          (currentTimeZone !== null && currentTimeZone !== health.account.timeZone)
+        ) {
           throw new ClientOnboardingError(
-            "database_error",
-            "The Google Ads reporting identity could not be recorded.",
-            500,
+            "invalid_state",
+            "The verified Google Ads identity differs from the reviewed source.",
+            409,
           );
+        }
+        if (connection.currency === null || currentTimeZone === null) {
+          const { data: recordedIdentity, error: identityError } = await service.rpc(
+            "enrich_client_google_ads_reporting_metadata",
+            {
+              p_connection_id: id,
+              p_currency: health.account.currency,
+              p_time_zone: health.account.timeZone,
+              p_admin_id: admin.id,
+              p_verified_at: health.checkedAt,
+              p_reason: METADATA_REASON,
+              p_idempotency_key: `google-meta:${id}:${health.checkedAt}`,
+            },
+          );
+          if (identityError || recordedIdentity !== id) {
+            throw new ClientOnboardingError(
+              "database_error",
+              "The Google Ads reporting identity could not be recorded.",
+              500,
+            );
+          }
         }
       }
       const { error: recordError } = await service.rpc("record_client_google_ads_health", {
@@ -91,6 +121,7 @@ export async function PATCH(request: NextRequest, { params }: Context) {
       }
       return clientOnboardingResponse({ ok: health.ok, health });
     } catch (healthError) {
+      if (healthError instanceof ClientOnboardingError) throw healthError;
       const code =
         healthError instanceof WindsorError ? healthError.code : "health_check_failed";
       await service.rpc("record_client_google_ads_health", {
@@ -116,6 +147,9 @@ export async function PATCH(request: NextRequest, { params }: Context) {
 export async function DELETE(_request: NextRequest, { params }: Context) {
   try {
     const admin = await requireClientOnboardingAdmin();
+    if (!sameOrigin(_request)) {
+      throw new ClientOnboardingError("forbidden", "Forbidden.", 403);
+    }
     const { id } = await params;
     if (!isClientOnboardingId(id)) {
       return clientOnboardingResponse({ error: "Not found." }, 404);

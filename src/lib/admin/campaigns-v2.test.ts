@@ -6,6 +6,7 @@ import type { AdAccount } from "@/lib/supabase/types";
 const mocks = vi.hoisted(() => ({
   createClient: vi.fn(),
   createServiceClient: vi.fn(),
+  requireAdmin: vi.fn(),
   hasGoogleAdsEnv: vi.fn(),
   hasWindsorEnv: vi.fn(),
   decryptToken: vi.fn(),
@@ -23,6 +24,9 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/lib/supabase/server", () => ({ createClient: mocks.createClient }));
 vi.mock("@/lib/supabase/service", () => ({
   createServiceClient: mocks.createServiceClient,
+}));
+vi.mock("@/lib/client-onboarding/sessions", () => ({
+  requireClientOnboardingAdmin: mocks.requireAdmin,
 }));
 vi.mock("@/lib/google-ads/env", () => ({ hasGoogleAdsEnv: mocks.hasGoogleAdsEnv }));
 vi.mock("@/lib/windsor/client", () => ({ hasWindsorEnv: mocks.hasWindsorEnv }));
@@ -178,6 +182,7 @@ const emptyRollup = {
 describe("admin V2 campaign inventory", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.requireAdmin.mockResolvedValue({ id: "admin-1" });
     mocks.hasGoogleAdsEnv.mockReturnValue(true);
     mocks.hasWindsorEnv.mockReturnValue(true);
     mocks.fetchHstClientKeys.mockResolvedValue({ crmIds: new Set(), names: new Set() });
@@ -186,6 +191,17 @@ describe("admin V2 campaign inventory", () => {
     mocks.googleProfit.mockReturnValue(0);
     mocks.googleRoas.mockReturnValue(0);
     mocks.markIfAuthRevoked.mockResolvedValue(false);
+  });
+
+  it("authenticates before constructing either database client", async () => {
+    mocks.requireAdmin.mockRejectedValueOnce(new Error("unauthorised"));
+
+    await expect(
+      fetchAdminCampaigns({ key: "today", from: "2026-08-14", to: "2026-08-14" }),
+    ).rejects.toThrow("unauthorised");
+
+    expect(mocks.createClient).not.toHaveBeenCalled();
+    expect(mocks.createServiceClient).not.toHaveBeenCalled();
   });
 
   it("projects one Shopify anchor, reads its pair and child, and counts metrics once", async () => {

@@ -30,10 +30,7 @@ type CampaignFetcher = (
 ) => Promise<WindsorGoogleAdsCampaignRow[]>;
 
 export type ReportingCampaign = LiveCampaign & {
-  advertisingChannelType: string;
   biddingStrategyType: string | null;
-  conversionValue: number;
-  googleRoas: number;
 };
 
 /**
@@ -109,6 +106,7 @@ export async function fetchGoogleReportingCampaigns(
 
     return {
       id: `windsor-${source.adAccountId}-${row.campaignId}`,
+      providerCampaignId: row.campaignId,
       ad_account_id: source.adAccountId,
       name: row.name,
       status: status[row.status],

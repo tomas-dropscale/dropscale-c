@@ -88,7 +88,12 @@ describe("admin client Google Ads disconnect", () => {
     mocks.isClientOnboardingId.mockReturnValue(true);
     mocks.requireClientOnboardingAdmin.mockResolvedValue({ id: ADMIN, role: "admin" });
     mocks.maybeSingle.mockResolvedValue({
-      data: { id: ID, windsor_account_id: "123-456-7890" },
+      data: {
+        id: ID,
+        windsor_account_id: "123-456-7890",
+        currency: null,
+        time_zone: null,
+      },
       error: null,
     });
     mocks.rpc.mockResolvedValue({ data: ID, error: null });
@@ -122,13 +127,15 @@ describe("admin client Google Ads disconnect", () => {
     expect(response.status).toBe(200);
     expect(mocks.rpc).toHaveBeenNthCalledWith(
       1,
-      "record_client_google_ads_reporting_identity",
+      "enrich_client_google_ads_reporting_metadata",
       {
         p_connection_id: ID,
         p_currency: "EUR",
         p_time_zone: "Europe/Lisbon",
         p_admin_id: ADMIN,
         p_verified_at: "2026-08-14T01:30:00.000Z",
+        p_reason: "Admin Google Ads test verified reporting metadata.",
+        p_idempotency_key: `google-meta:${ID}:2026-08-14T01:30:00.000Z`,
       },
     );
     expect(mocks.rpc).toHaveBeenNthCalledWith(2, "record_client_google_ads_health", {
@@ -138,6 +145,83 @@ describe("admin client Google Ads disconnect", () => {
       p_tested_at: "2026-08-14T01:30:00.000Z",
       p_error_code: null,
     });
+  });
+
+  it("does not rewrite complete exact metadata", async () => {
+    mocks.maybeSingle.mockResolvedValue({
+      data: {
+        id: ID,
+        windsor_account_id: "123-456-7890",
+        currency: "EUR",
+        time_zone: "Europe/Lisbon",
+      },
+      error: null,
+    });
+    mocks.checkGoogleAdsAccountHealth.mockResolvedValue({
+      ok: true,
+      code: "healthy",
+      account: {
+        datasource: "google_ads",
+        accountId: "123-456-7890",
+        customerId: "1234567890",
+        accountName: "Client Ads",
+        status: "active",
+        currency: "EUR",
+        timeZone: "Europe/Lisbon",
+      },
+      recentDataAvailable: true,
+      checkedAt: "2026-08-14T01:30:00.000Z",
+    });
+
+    const response = await PATCH(
+      new NextRequest(`http://localhost/api/admin/client-onboarding/google/${ID}`, {
+        method: "PATCH",
+        body: JSON.stringify({ action: "test" }),
+      }),
+      { params: Promise.resolve({ id: ID }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(mocks.rpc).toHaveBeenCalledTimes(1);
+    expect(mocks.rpc).toHaveBeenCalledWith("record_client_google_ads_health", expect.any(Object));
+  });
+
+  it("fails closed when verified metadata conflicts with a reviewed identity", async () => {
+    mocks.maybeSingle.mockResolvedValue({
+      data: {
+        id: ID,
+        windsor_account_id: "123-456-7890",
+        currency: "USD",
+        time_zone: "Europe/Lisbon",
+      },
+      error: null,
+    });
+    mocks.checkGoogleAdsAccountHealth.mockResolvedValue({
+      ok: true,
+      code: "healthy",
+      account: {
+        datasource: "google_ads",
+        accountId: "123-456-7890",
+        customerId: "1234567890",
+        accountName: "Client Ads",
+        status: "active",
+        currency: "EUR",
+        timeZone: "Europe/Lisbon",
+      },
+      recentDataAvailable: true,
+      checkedAt: "2026-08-14T01:30:00.000Z",
+    });
+
+    const response = await PATCH(
+      new NextRequest(`http://localhost/api/admin/client-onboarding/google/${ID}`, {
+        method: "PATCH",
+        body: JSON.stringify({ action: "test" }),
+      }),
+      { params: Promise.resolve({ id: ID }) },
+    );
+
+    expect(response.status).toBe(409);
+    expect(mocks.rpc).not.toHaveBeenCalled();
   });
 
   it("keeps a healthy account usable when Windsor has no identity metadata yet", async () => {
@@ -188,6 +272,21 @@ describe("admin client Google Ads disconnect", () => {
     );
     expect(response.status).toBe(403);
     expect(mocks.createServiceClient).not.toHaveBeenCalled();
+  });
+
+  it("rejects a cross-origin mutation before service-role access", async () => {
+    const response = await PATCH(
+      new NextRequest(`https://dropscale.app/api/admin/client-onboarding/google/${ID}`, {
+        method: "PATCH",
+        headers: { origin: "https://attacker.invalid" },
+        body: JSON.stringify({ action: "test" }),
+      }),
+      { params: Promise.resolve({ id: ID }) },
+    );
+
+    expect(response.status).toBe(403);
+    expect(mocks.createServiceClient).not.toHaveBeenCalled();
+    expect(mocks.checkGoogleAdsAccountHealth).not.toHaveBeenCalled();
   });
 
   it("disconnects only the Dropscale asset and states the Windsor boundary", async () => {

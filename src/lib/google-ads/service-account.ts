@@ -131,6 +131,7 @@ export async function serviceAccountAccessToken(
       grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
       assertion: `${unsigned}.${base64url(new Uint8Array(signature))}`,
     }),
+    signal: AbortSignal.timeout(20_000),
   });
   const body = (await response.json()) as TokenResponse;
   if (!body.access_token) {
