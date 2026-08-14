@@ -1,4 +1,5 @@
 import { createClient } from "@/lib/supabase/server";
+import { createServiceClient } from "@/lib/supabase/service";
 import { decryptToken } from "@/lib/google-ads/crypto";
 import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
 import { fetchLiveCampaignsDetailed, type LiveCampaign } from "@/lib/google-ads/portal";
@@ -9,6 +10,12 @@ import { fetchDailyMetrics, sumMetrics } from "@/lib/metrics/queries";
 import { ACCOUNT_COLUMNS } from "@/lib/portal/data";
 import type { AdAccount } from "@/lib/supabase/types";
 import type { RangeSelection } from "@/lib/portal/range";
+import { hasWindsorEnv } from "@/lib/windsor/client";
+import { fetchGoogleReportingCampaigns } from "@/lib/reporting/google";
+import {
+  resolveReportingSources,
+  type CanonicalReportingSource,
+} from "@/lib/reporting/sources";
 
 /**
  * The admin zone's cross-client campaigns view.
@@ -103,6 +110,147 @@ export type AdminCampaignsOverview = {
 
 type Owner = { name: string; email: string; crmClientId: string | null; inHst: boolean };
 
+type AdminAccountInventory = {
+  account: AdAccount;
+  googleSources: CanonicalReportingSource[] | null;
+  metricAccountIds: string[];
+};
+
+function projectedShopDomain(source: CanonicalReportingSource): string {
+  return source.shopify!.primaryDomain?.trim().toLowerCase() || source.shopify!.domain;
+}
+
+async function adminAccountInventory(
+  allAccounts: AdAccount[],
+  adminIds: Set<string>,
+): Promise<AdminAccountInventory[]> {
+  const accounts = allAccounts.filter((account) => !adminIds.has(account.client_id));
+  const clientIds = [...new Set(accounts.map((account) => account.client_id))];
+  if (clientIds.length === 0) return [];
+
+  const service = createServiceClient();
+  if (!service) throw new Error("Admin reporting inventory is unavailable.");
+  const { data, error } = await service
+    .from("client_rollout_states")
+    .select("client_id, operational_surface, reporting_cutover_at")
+    .in("client_id", clientIds);
+  if (error || !Array.isArray(data)) {
+    throw new Error("Admin reporting inventory is unavailable.");
+  }
+
+  const rollouts = new Map(data.map((row) => [row.client_id, row]));
+  const v2ClientIds = clientIds.filter((clientId) => {
+    const rollout = rollouts.get(clientId);
+    return (
+      rollout?.operational_surface === "v2_active" &&
+      rollout.reporting_cutover_at !== null
+    );
+  });
+  const unknown = data.some(
+    (row) =>
+      !clientIds.includes(row.client_id) ||
+      ![
+        "legacy_only",
+        "v2_onboarding",
+        "v2_ready_for_cutover",
+        "v2_active",
+        "rollback_legacy",
+      ].includes(row.operational_surface) ||
+      (row.reporting_cutover_at !== null &&
+        Number.isNaN(Date.parse(row.reporting_cutover_at))),
+  );
+  if (unknown) throw new Error("Admin reporting inventory is unavailable.");
+
+  const legacy = accounts
+    .filter((account) => !v2ClientIds.includes(account.client_id))
+    .map((account) => ({
+      account,
+      googleSources: null,
+      metricAccountIds: [account.id],
+    }));
+  if (v2ClientIds.length === 0) return legacy;
+
+  const sources = await resolveReportingSources({
+    service,
+    clientIds: v2ClientIds,
+    includeShopifyCredentials: false,
+  });
+  const baseById = new Map(accounts.map((account) => [account.id, account]));
+  if (
+    sources.some(
+      (source) =>
+        !v2ClientIds.includes(source.clientId) ||
+        baseById.get(source.adAccountId)?.client_id !== source.clientId,
+    )
+  ) {
+    throw new Error("Admin reporting inventory is unavailable.");
+  }
+
+  const v2: AdminAccountInventory[] = [];
+  const usedSourceIds = new Set<string>();
+  for (const anchor of sources.filter((source) => source.shopify !== null)) {
+    const base = baseById.get(anchor.adAccountId);
+    if (!base || !anchor.shopify || usedSourceIds.has(anchor.adAccountId)) {
+      throw new Error("Admin reporting inventory is unavailable.");
+    }
+    const grouped = sources.filter(
+      (source) => source.group.shopifyAnchorAdAccountId === anchor.adAccountId,
+    );
+    if (grouped.length === 0 || grouped.some((source) => usedSourceIds.has(source.adAccountId))) {
+      throw new Error("Admin reporting inventory is unavailable.");
+    }
+    grouped.forEach((source) => usedSourceIds.add(source.adAccountId));
+    v2.push({
+      account: {
+        ...base,
+        store_name: anchor.shopify.shopifyName,
+        shopify_url: projectedShopDomain(anchor),
+        currency: base.currency,
+        status: base.status === "suspended" ? "suspended" : "active",
+        shopify_connected: true,
+        google_ads_connected: grouped.some((source) => source.googleAds !== null),
+        google_ads_customer_id: anchor.googleAds?.customerId ?? null,
+      },
+      googleSources: grouped.filter((source) => source.googleAds !== null),
+      metricAccountIds: grouped.map((source) => source.adAccountId),
+    });
+  }
+
+  // Google-only bindings still carry agency spend. Keep them visible without
+  // pretending they are a Shopify store or attaching them to another anchor.
+  for (const source of sources.filter(
+    (candidate) =>
+      candidate.googleAds !== null && candidate.group.shopifyAnchorAdAccountId === null,
+  )) {
+    const base = baseById.get(source.adAccountId);
+    if (!base || !source.googleAds || usedSourceIds.has(source.adAccountId)) {
+      throw new Error("Admin reporting inventory is unavailable.");
+    }
+    usedSourceIds.add(source.adAccountId);
+    v2.push({
+      account: {
+        ...base,
+        store_name: source.googleAds.accountName,
+        currency: source.googleAds.currency ?? base.currency,
+        google_ads_connected: true,
+        google_ads_customer_id: source.googleAds.customerId,
+      },
+      googleSources: [source],
+      metricAccountIds: [source.adAccountId],
+    });
+  }
+
+  if (
+    v2ClientIds.some((clientId) => !sources.some((source) => source.clientId === clientId)) ||
+    usedSourceIds.size !== sources.length
+  ) {
+    throw new Error("Admin reporting inventory is unavailable.");
+  }
+  return [...legacy, ...v2].sort((left, right) =>
+    left.account.created_at.localeCompare(right.account.created_at),
+  );
+}
+
 /** Group accounts under their owner, biggest spender first. */
 function groupByOwner(
   entries: AdminAccountCampaigns[],
@@ -132,7 +280,9 @@ function groupByOwner(
 
 export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminCampaignsOverview> {
   const supabase = await createClient();
-  const configured = hasGoogleAdsEnv();
+  const googleConfigured = hasGoogleAdsEnv();
+  const windsorConfigured = hasWindsorEnv();
+  const configured = googleConfigured || windsorConfigured;
 
   const [accountsRes, clientsRes, adminsRes, hstKeys] = await Promise.all([
     supabase.from("ad_accounts").select(ACCOUNT_COLUMNS).order("created_at", { ascending: true }),
@@ -148,8 +298,8 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
   const adminIds = new Set((adminsRes.data ?? []).map((row) => row.id));
 
   const allAccounts = (accountsRes.data as AdAccount[] | null) ?? [];
-  const accounts = allAccounts.filter((account) => !adminIds.has(account.client_id));
   const internalAccounts = allAccounts.filter((account) => adminIds.has(account.client_id));
+  const inventory = await adminAccountInventory(allAccounts, adminIds);
   const owners = new Map<string, Owner>(
     (clientsRes.data ?? []).map((client) => [
       client.id,
@@ -170,9 +320,10 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
   );
 
   const perAccount = await Promise.all(
-    accounts.map(async (account): Promise<AdminAccountCampaigns> => {
-      const connected =
-        configured && account.google_ads_connected && Boolean(account.google_ads_customer_id);
+    inventory.map(async ({ account, googleSources }): Promise<AdminAccountCampaigns> => {
+      const connected = googleSources === null
+        ? googleConfigured && account.google_ads_connected && Boolean(account.google_ads_customer_id)
+        : windsorConfigured && googleSources.length > 0;
 
       let campaigns: LiveCampaign[] = [];
       let failed = false;
@@ -180,30 +331,46 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
 
       if (connected) {
         try {
-          const { data } = await supabase
-            .from("ad_accounts")
-            .select("google_ads_refresh_token")
-            .eq("id", account.id)
-            .maybeSingle();
-          const cipher = data?.google_ads_refresh_token;
-          if (!cipher) throw new Error("token row missing");
+          if (googleSources === null) {
+            const { data } = await supabase
+              .from("ad_accounts")
+              .select("google_ads_refresh_token")
+              .eq("id", account.id)
+              .maybeSingle();
+            const cipher = data?.google_ads_refresh_token;
+            if (!cipher) throw new Error("token row missing");
 
-          campaigns = await fetchLiveCampaignsDetailed(
-            account.google_ads_customer_id!,
-            await decryptToken(cipher),
-            account.id,
-            range,
-          );
+            campaigns = await fetchLiveCampaignsDetailed(
+              account.google_ads_customer_id!,
+              await decryptToken(cipher),
+              account.id,
+              range,
+            );
+          } else {
+            campaigns = (await Promise.all(
+              googleSources.map((source) =>
+                fetchGoogleReportingCampaigns(source, range.from, range.to),
+              ),
+            ))
+              .flat()
+              .sort((left, right) => right.spend - left.spend || left.id.localeCompare(right.id));
+          }
         } catch (error) {
           failed = true;
 
-          // A revoked authorisation is permanent, so record it: the account
-          // flips to disconnected and the client's own portal starts asking
-          // them to reconnect. Without this the store just reads "query
-          // failed" forever and only the server logs say why.
-          authRevoked = await markIfAuthRevoked(supabase, account.id, error);
-          if (!authRevoked) {
-            console.error(`Admin campaigns failed for ${account.id}:`, error);
+          if (googleSources === null) {
+            // A revoked authorisation is permanent, so record it: the account
+            // flips to disconnected and the client's own portal starts asking
+            // them to reconnect. Without this the store just reads "query
+            // failed" forever and only the server logs say why.
+            authRevoked = await markIfAuthRevoked(supabase, account.id, error);
+            if (!authRevoked) {
+              console.error(`Admin campaigns failed for ${account.id}:`, error);
+            }
+          } else {
+            // Windsor errors may contain upstream metadata. The page needs the
+            // state, not the payload, so keep the log deliberately generic.
+            console.error("Admin V2 campaign reporting failed");
           }
         }
       }
@@ -228,7 +395,7 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
     account,
     campaigns: [],
     connected:
-      configured && account.google_ads_connected && Boolean(account.google_ads_customer_id),
+      googleConfigured && account.google_ads_connected && Boolean(account.google_ads_customer_id),
     failed: false,
     authRevoked: false,
     spend: 0,
@@ -254,7 +421,7 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
    * ratio, and a number that moves when neither the revenue nor the spend did.
    */
   const metricRows = await fetchDailyMetrics(
-    accounts.map((account) => account.id),
+    inventory.flatMap((entry) => entry.metricAccountIds),
     range.from,
     range.to,
   );

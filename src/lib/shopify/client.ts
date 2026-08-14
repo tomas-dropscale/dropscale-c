@@ -154,6 +154,13 @@ export async function shopifyGraphql<T>(
   return body.data;
 }
 
+export type ShopifyGraphqlExecutor = <T>(
+  shopDomain: string,
+  accessToken: string,
+  query: string,
+  variables?: Record<string, unknown>,
+) => Promise<T>;
+
 export type ShopInfo = {
   name: string;
   currencyCode: string;
@@ -269,6 +276,7 @@ export async function fetchDailySales(
   accessToken: string,
   from: string,
   to: string,
+  graphql: ShopifyGraphqlExecutor = shopifyGraphql,
 ): Promise<{ currency: string | null; days: DailySales[]; orders: SyncedOrder[] }> {
   const byDay = new Map<
     string,
@@ -315,7 +323,7 @@ export async function fetchDailySales(
           };
         }[];
       };
-    } = await shopifyGraphql(
+    } = await graphql(
       shopDomain,
       accessToken,
       `query ($q: String!, $cursor: String) {
@@ -441,6 +449,7 @@ export async function fetchCollectionProductKeys(
   shopDomain: string,
   accessToken: string,
   handle: string,
+  graphql: ShopifyGraphqlExecutor = shopifyGraphql,
 ): Promise<Set<string>> {
   const keys = new Set<string>();
   let cursor: string | null = null;
@@ -455,7 +464,7 @@ export async function fetchCollectionProductKeys(
       } | null;
     };
     try {
-      data = await shopifyGraphql(
+      data = await graphql(
         shopDomain,
         accessToken,
         `query ($handle: String!, $cursor: String) {

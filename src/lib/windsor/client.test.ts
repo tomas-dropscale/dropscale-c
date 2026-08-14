@@ -8,6 +8,8 @@ import {
   createGoogleAdsAuthorization,
   decryptWindsorAccessToken,
   encryptWindsorAccessToken,
+  fetchGoogleAdsCampaignBreakdown,
+  fetchGoogleAdsDailyBreakdown,
   listLinkedGoogleAdsAccounts,
   normalizeGoogleAdsCustomerId,
   pollLinkedGoogleAdsAccounts,
@@ -385,6 +387,345 @@ describe("Windsor Google Ads server adapter", () => {
     });
     expect(requestedUrl(fetcher).pathname).toBe("/google_ads/actions");
     expect(fetcher.mock.calls[0]?.[1]).toMatchObject({ method: "GET" });
+  });
+
+  it("reads, validates and sorts daily metrics for one exact Google Ads account", async () => {
+    const fetcher = mockFetch(
+      jsonResponse({
+        data: [
+          {
+            date: "2026-08-12",
+            account_id: "1234567890",
+            account_currency_code: "EUR",
+            account_time_zone: "Europe/Lisbon",
+            spend: "12.34",
+            impressions: "1000",
+            clicks: 25,
+            conversions: "2.5",
+            conversion_value: "49.99",
+          },
+          {
+            date: "2026-08-10",
+            account_id: "123-456-7890",
+            account_currency_code: "EUR",
+            account_time_zone: "Europe/Lisbon",
+            spend: 0,
+            impressions: 0,
+            clicks: 0,
+            conversions: 0,
+            conversion_value: 0,
+          },
+        ],
+      }),
+    );
+
+    const rows = await fetchGoogleAdsDailyBreakdown(
+      "customers/1234567890",
+      "2026-08-10",
+      "2026-08-12",
+      { fetcher: fetcher as typeof fetch },
+    );
+
+    expect(rows).toEqual([
+      {
+        date: "2026-08-10",
+        accountId: "123-456-7890",
+        customerId: "1234567890",
+        currency: "EUR",
+        timeZone: "Europe/Lisbon",
+        spend: 0,
+        impressions: 0,
+        clicks: 0,
+        conversions: 0,
+        conversionValue: 0,
+      },
+      {
+        date: "2026-08-12",
+        accountId: "123-456-7890",
+        customerId: "1234567890",
+        currency: "EUR",
+        timeZone: "Europe/Lisbon",
+        spend: 12.34,
+        impressions: 1000,
+        clicks: 25,
+        conversions: 2.5,
+        conversionValue: 49.99,
+      },
+    ]);
+
+    const upstream = requestedUrl(fetcher);
+    expect(upstream.origin).toBe("https://connectors.windsor.ai");
+    expect(upstream.pathname).toBe("/google_ads");
+    expect(upstream.searchParams.get("fields")).toBe(
+      "date,account_id,account_currency_code,account_time_zone,spend," +
+        "impressions,clicks,conversions,conversion_value",
+    );
+    expect(upstream.searchParams.get("date_from")).toBe("2026-08-10");
+    expect(upstream.searchParams.get("date_to")).toBe("2026-08-12");
+    expect(upstream.searchParams.get("filter")).toBe(
+      JSON.stringify([["account_id", "eq", "123-456-7890"]]),
+    );
+    expect(upstream.searchParams.get("_max_rows")).toBe("4");
+    expect(upstream.searchParams.get("_renderer")).toBe("json");
+    expect(upstream.searchParams.has("date_preset")).toBe(false);
+  });
+
+  it.each([
+    ["invalid from", "2026-02-30", "2026-03-01"],
+    ["invalid to", "2026-03-01", "2026-03-1"],
+    ["reversed", "2026-03-02", "2026-03-01"],
+    ["more than 366 days", "2025-01-01", "2026-01-02"],
+  ])("rejects an %s reporting range before contacting Windsor", async (_label, from, to) => {
+    const fetcher = mockFetch(jsonResponse({ data: [] }));
+
+    await expect(
+      fetchGoogleAdsDailyBreakdown("123-456-7890", from, to, {
+        fetcher: fetcher as typeof fetch,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_request", status: 400 });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("rejects daily metrics returned for another Google Ads account", async () => {
+    const fetcher = mockFetch(
+      jsonResponse({
+        data: [
+          {
+            date: "2026-08-12",
+            account_id: "987-654-3210",
+            account_currency_code: "EUR",
+            account_time_zone: "Europe/Lisbon",
+            spend: 1,
+            impressions: 1,
+            clicks: 1,
+            conversions: 1,
+            conversion_value: 1,
+          },
+        ],
+      }),
+    );
+
+    await expect(
+      fetchGoogleAdsDailyBreakdown("123-456-7890", "2026-08-12", "2026-08-12", {
+        fetcher: fetcher as typeof fetch,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_response", status: 502 });
+  });
+
+  it.each([
+    ["invalid day", { date: "2026-02-30" }],
+    ["out-of-range day", { date: "2026-08-13" }],
+    ["negative spend", { spend: -0.01 }],
+    ["infinite impressions", { impressions: "Infinity" }],
+    ["NaN clicks", { clicks: Number.NaN }],
+    ["empty conversions", { conversions: "" }],
+    ["missing conversion value", { conversion_value: null }],
+    ["invalid currency", { account_currency_code: "EURO" }],
+    ["missing time zone", { account_time_zone: "" }],
+  ])("rejects a daily row with %s", async (_label, override) => {
+    const fetcher = mockFetch(
+      jsonResponse({
+        data: [
+          {
+            date: "2026-08-12",
+            account_id: "123-456-7890",
+            account_currency_code: "EUR",
+            account_time_zone: "Europe/Lisbon",
+            spend: 1,
+            impressions: 1,
+            clicks: 1,
+            conversions: 1,
+            conversion_value: 1,
+            ...override,
+          },
+        ],
+      }),
+    );
+
+    await expect(
+      fetchGoogleAdsDailyBreakdown("123-456-7890", "2026-08-12", "2026-08-12", {
+        fetcher: fetcher as typeof fetch,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_response", status: 502 });
+  });
+
+  it.each([
+    ["currency", { account_currency_code: "USD" }],
+    ["time zone", { account_time_zone: "America/New_York" }],
+  ])("rejects inconsistent daily-row %s", async (_label, override) => {
+    const base = {
+      account_id: "123-456-7890",
+      account_currency_code: "EUR",
+      account_time_zone: "Europe/Lisbon",
+      spend: 1,
+      impressions: 1,
+      clicks: 1,
+      conversions: 1,
+      conversion_value: 1,
+    };
+    const fetcher = mockFetch(
+      jsonResponse({
+        data: [
+          { ...base, date: "2026-08-11" },
+          { ...base, date: "2026-08-12", ...override },
+        ],
+      }),
+    );
+
+    await expect(
+      fetchGoogleAdsDailyBreakdown("123-456-7890", "2026-08-11", "2026-08-12", {
+        fetcher: fetcher as typeof fetch,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_response", status: 502 });
+  });
+
+  it("deduplicates identical days and rejects divergent duplicates", async () => {
+    const row = {
+      date: "2026-08-12",
+      account_id: "123-456-7890",
+      account_currency_code: "EUR",
+      account_time_zone: "Europe/Lisbon",
+      spend: 1,
+      impressions: 2,
+      clicks: 3,
+      conversions: 4,
+      conversion_value: 5,
+    };
+    const fetcher = mockFetch(
+      jsonResponse({ data: [row, { ...row }] }),
+      jsonResponse({ data: [row, { ...row, spend: 2 }] }),
+    );
+
+    await expect(
+      fetchGoogleAdsDailyBreakdown("123-456-7890", "2026-08-12", "2026-08-12", {
+        fetcher: fetcher as typeof fetch,
+      }),
+    ).resolves.toHaveLength(1);
+    await expect(
+      fetchGoogleAdsDailyBreakdown("123-456-7890", "2026-08-12", "2026-08-12", {
+        fetcher: fetcher as typeof fetch,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_response", status: 502 });
+  });
+
+  it("rejects oversized daily reporting responses before parsing them", async () => {
+    const fetcher = mockFetch(
+      new Response("[]", {
+        headers: {
+          "content-type": "application/json",
+          "content-length": "1000001",
+        },
+      }),
+    );
+
+    await expect(
+      fetchGoogleAdsDailyBreakdown("123-456-7890", "2026-08-12", "2026-08-12", {
+        fetcher: fetcher as typeof fetch,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_response", status: 502 });
+  });
+
+  it("reads one validated aggregate row per campaign for an exact account", async () => {
+    const fetcher = mockFetch(
+      jsonResponse({
+        data: [
+          {
+            account_id: "123-456-7890",
+            account_currency_code: "EUR",
+            account_time_zone: "Europe/Lisbon",
+            campaign_id: "42",
+            campaign: "Demand Gen — Summer",
+            campaign_status: "ENABLED",
+            advertising_channel_type: "DEMAND_GEN",
+            campaign_budget: "35",
+            bidding_strategy_type: "MAXIMIZE_CONVERSIONS",
+            start_date: "2026-07-01",
+            spend: "125.5",
+            impressions: "10000",
+            clicks: "250",
+            conversions: "12",
+            conversion_value: "490",
+          },
+        ],
+      }),
+    );
+
+    await expect(
+      fetchGoogleAdsCampaignBreakdown(
+        "1234567890",
+        "2026-08-01",
+        "2026-08-12",
+        { fetcher: fetcher as typeof fetch },
+      ),
+    ).resolves.toEqual([
+      {
+        accountId: "123-456-7890",
+        customerId: "1234567890",
+        currency: "EUR",
+        timeZone: "Europe/Lisbon",
+        campaignId: "42",
+        name: "Demand Gen — Summer",
+        status: "ENABLED",
+        advertisingChannelType: "DEMAND_GEN",
+        biddingStrategyType: "MAXIMIZE_CONVERSIONS",
+        startDate: "2026-07-01",
+        dailyBudget: 35,
+        spend: 125.5,
+        impressions: 10000,
+        clicks: 250,
+        conversions: 12,
+        conversionValue: 490,
+      },
+    ]);
+
+    const upstream = requestedUrl(fetcher);
+    expect(upstream.searchParams.get("date_from")).toBe("2026-08-01");
+    expect(upstream.searchParams.get("date_to")).toBe("2026-08-12");
+    expect(upstream.searchParams.get("_max_rows")).toBe("1001");
+    expect(upstream.searchParams.get("fields")?.split(",")).not.toContain("date");
+  });
+
+  it.each([
+    ["another account", { account_id: "987-654-3210" }],
+    ["unknown status", { campaign_status: "UNKNOWN" }],
+    ["invalid channel", { advertising_channel_type: "" }],
+    ["negative spend", { spend: -1 }],
+    ["invalid currency", { account_currency_code: "EURO" }],
+    ["missing time zone", { account_time_zone: null }],
+  ])("rejects a campaign row with %s", async (_label, override) => {
+    const fetcher = mockFetch(
+      jsonResponse({
+        data: [
+          {
+            account_id: "123-456-7890",
+            account_currency_code: "EUR",
+            account_time_zone: "Europe/Lisbon",
+            campaign_id: "42",
+            campaign: "Campaign",
+            campaign_status: "PAUSED",
+            advertising_channel_type: "PERFORMANCE_MAX",
+            campaign_budget: 20,
+            bidding_strategy_type: null,
+            start_date: null,
+            spend: 1,
+            impressions: 1,
+            clicks: 1,
+            conversions: 1,
+            conversion_value: 1,
+            ...override,
+          },
+        ],
+      }),
+    );
+
+    await expect(
+      fetchGoogleAdsCampaignBreakdown(
+        "123-456-7890",
+        "2026-08-12",
+        "2026-08-12",
+        { fetcher: fetcher as typeof fetch },
+      ),
+    ).rejects.toMatchObject({ code: "invalid_response", status: 502 });
   });
 
   it("performs an exact, read-only account health check without forced refresh", async () => {

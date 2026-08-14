@@ -1,11 +1,11 @@
 /**
  * recomputeDailyMetrics — fills/refreshes the daily_metrics read model.
  *
- * Follows the commission-ledger pattern exactly (lib/admin/commission-sync):
- * no cron, no service key. It runs server-side when someone opens a page that
- * reads metrics, rides THAT viewer's session (RLS lets clients write their
- * own accounts' rows, admins any), and self-throttles per account so most
- * page loads cost zero upstream calls.
+ * Legacy accounts still ride the viewer's session. Active V2 reporting
+ * bindings are deliberately service-only: their connection credentials never
+ * enter the legacy row and their pending ad_accounts surrogate is operational
+ * only through that audited binding. Both paths self-throttle per account so
+ * most page loads cost zero upstream calls.
  *
  * The 15-minute throttle is also the UI's freshness contract: pages show
  * "next update at ..." as newest computed_at + 15 min.
@@ -18,6 +18,7 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
+import { createServiceClient } from "@/lib/supabase/service";
 import { decryptToken } from "@/lib/google-ads/crypto";
 import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
 import { markIfAuthRevoked } from "@/lib/google-ads/revoked";
@@ -37,6 +38,19 @@ import { fxDailyRates, rateOn } from "@/lib/shopify/fx";
 import { orderCogs, paymentFee } from "@/lib/cogs/engine";
 import { loadCostContext, registerSoldProducts } from "@/lib/cogs/context";
 import { dealsFromCampaigns, orderRevShare, type AttributionDeal } from "@/lib/finance/rev-share";
+import type { DailyMetricRow } from "./queries";
+import {
+  mergeDailyMetricFamilies,
+  type ReportingFamilyResult,
+  type ShopifyDailyMetric,
+} from "../reporting/daily-metrics";
+import { fetchGoogleReportingDailyMetrics } from "../reporting/google";
+import { createShopifyReportingAdapter } from "../reporting/shopify";
+import {
+  resolveReportingSources,
+  resolveStagedReportingSource,
+  type CanonicalReportingSource,
+} from "../reporting/sources";
 import type { AdAccount, Database } from "@/lib/supabase/types";
 
 export const RECOMPUTE_INTERVAL_MS = 15 * 60 * 1000;
@@ -48,6 +62,32 @@ const WINDOW_DAYS = 7;
 const BACKFILL_LIMIT_DAYS = 90;
 
 type Supabase = SupabaseClient<Database>;
+
+type ReportingOptions = {
+  /** A service-role client for the service-only V2 binding graph. */
+  reportingClient?: Supabase;
+};
+
+type ResolvedReportingScope = {
+  accounts: AdAccount[];
+  sources: CanonicalReportingSource[];
+};
+
+type RuntimeReportingScope = ResolvedReportingScope & {
+  legacyAccounts: AdAccount[];
+};
+
+function assertCompleteReportingScope(scope: ResolvedReportingScope): void {
+  const sourceAccountIds = scope.sources.map((source) => source.adAccountId);
+  const uniqueSourceAccountIds = new Set(sourceAccountIds);
+  if (
+    sourceAccountIds.length !== scope.accounts.length ||
+    uniqueSourceAccountIds.size !== sourceAccountIds.length ||
+    scope.accounts.some((account) => !uniqueSourceAccountIds.has(account.id))
+  ) {
+    throw new Error("The requested V2 reporting scope is incomplete.");
+  }
+}
 
 /** The Google-sourced columns of daily_metrics, carried forward when Google
  *  can't be reached. Kept as its own type so the carry-forward below can't
@@ -76,6 +116,13 @@ function dayBefore(iso: string): string {
   return date.toISOString().slice(0, 10);
 }
 
+function addDays(iso: string, days: number): string {
+  const [year, month, day] = iso.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
 type SecretColumns = {
   google_ads_refresh_token: string | null;
   shopify_admin_token: string | null;
@@ -98,12 +145,529 @@ async function fetchSecrets(
   supabase: Supabase,
   accountIds: string[],
 ): Promise<Map<string, SecretColumns>> {
-  const { data } = await supabase
+  if (accountIds.length === 0) return new Map();
+  const ids = [...new Set(accountIds)];
+  const { data, error } = await supabase
     .from("ad_accounts")
     .select("id, google_ads_refresh_token, shopify_admin_token")
-    .in("id", accountIds);
-  return new Map(
-    ((data ?? []) as unknown as ({ id: string } & SecretColumns)[]).map((row) => [row.id, row]),
+    .in("id", ids);
+  if (error || !Array.isArray(data)) {
+    throw error ?? new Error("Reporting credentials could not be loaded.");
+  }
+  const secrets = new Map(
+    (data as unknown as ({ id: string } & SecretColumns)[]).map((row) => [row.id, row]),
+  );
+  if (secrets.size !== ids.length || ids.some((id) => !secrets.has(id))) {
+    throw new Error("A requested reporting credential row is missing.");
+  }
+  return secrets;
+}
+
+function reportingClient(explicit?: Supabase, fallback?: Supabase): Supabase {
+  const service = explicit ?? createServiceClient() ?? fallback;
+  if (!service) {
+    throw new Error("The V2 reporting service is not configured.");
+  }
+  return service;
+}
+
+async function resolveRequestedReportingSources(
+  service: Supabase,
+  accounts: AdAccount[],
+): Promise<ResolvedReportingScope> {
+  if (accounts.length === 0) return { accounts: [], sources: [] };
+  const clientIds = [...new Set(accounts.map((account) => account.client_id))];
+  const selected = await resolveReportingSources({
+    service,
+    adAccountIds: [...new Set(accounts.map((account) => account.id))],
+    clientIds,
+  });
+  const anchorBindingIds = [
+    ...new Set(
+      selected.flatMap((source) =>
+        source.shopify && source.group.shopifyAnchorBindingId === source.bindingId
+          ? [source.bindingId]
+          : [],
+      ),
+    ),
+  ];
+  if (anchorBindingIds.length === 0) return { accounts, sources: selected };
+
+  // A store projection contains its Shopify anchor, while Google accounts are
+  // metric children. Expand only children pointing at one of the exact anchor
+  // bindings selected above; client scope is repeated at the database boundary
+  // so a malformed cross-owner edge cannot widen this refresh.
+  const { data: children, error: childError } = await service
+    .from("client_reporting_bindings")
+    .select("ad_account_id")
+    .eq("status", "active")
+    .in("client_id", clientIds)
+    .in("shopify_anchor_binding_id", anchorBindingIds);
+  if (childError) throw childError;
+  const childIds = [
+    ...new Set((children ?? []).map((row) => row.ad_account_id)),
+  ].filter((id) => !selected.some((source) => source.adAccountId === id));
+  if (childIds.length === 0) return { accounts, sources: selected };
+
+  const { data: childAccounts, error: childAccountsError } = await service
+    .from("ad_accounts")
+    .select("*")
+    .in("id", childIds)
+    .in("client_id", clientIds);
+  if (childAccountsError) throw childAccountsError;
+  const expandedAccounts = (childAccounts as AdAccount[] | null) ?? [];
+  if (expandedAccounts.length !== childIds.length) {
+    throw new Error("A bound Google child account is missing from its store group.");
+  }
+
+  const expanded = await resolveReportingSources({
+    service,
+    adAccountIds: expandedAccounts.map((account) => account.id),
+    clientIds,
+  });
+  return { accounts: [...accounts, ...expandedAccounts], sources: [...selected, ...expanded] };
+}
+
+async function resolveRuntimeReportingScope(
+  service: Supabase,
+  accounts: AdAccount[],
+): Promise<RuntimeReportingScope> {
+  if (accounts.length === 0) {
+    return { accounts: [], sources: [], legacyAccounts: [] };
+  }
+  const clientIds = [...new Set(accounts.map((account) => account.client_id))];
+  const { data, error } = await service
+    .from("client_rollout_states")
+    .select("client_id, operational_surface, reporting_cutover_at")
+    .in("client_id", clientIds);
+  if (error || !Array.isArray(data)) {
+    throw error ?? new Error("Client reporting rollout state is unavailable.");
+  }
+  const rolloutByClient = new Map(data.map((row) => [row.client_id, row]));
+  if (
+    [...rolloutByClient.values()].some(
+      (rollout) =>
+        ![
+          "legacy_only",
+          "v2_onboarding",
+          "v2_ready_for_cutover",
+          "v2_active",
+          "rollback_legacy",
+        ].includes(rollout.operational_surface) ||
+        (rollout.reporting_cutover_at !== null &&
+          Number.isNaN(Date.parse(rollout.reporting_cutover_at))),
+    )
+  ) {
+    throw new Error("Client reporting rollout state is invalid.");
+  }
+
+  const v2Accounts = accounts.filter((account) => {
+    const rollout = rolloutByClient.get(account.client_id);
+    return (
+      rollout?.operational_surface === "v2_active" &&
+      rollout.reporting_cutover_at !== null
+    );
+  });
+  const v2AccountIds = new Set(v2Accounts.map((account) => account.id));
+  const legacyAccounts = accounts.filter((account) => !v2AccountIds.has(account.id));
+  const scope = await resolveRequestedReportingSources(service, v2Accounts);
+  // An active rollout may never silently fall through to legacy merely
+  // because a binding disappeared or became unreadable.
+  assertCompleteReportingScope(scope);
+  return { ...scope, legacyAccounts };
+}
+
+async function fetchExistingWindow(
+  service: Supabase,
+  adAccountId: string,
+  from: string,
+  to: string,
+): Promise<DailyMetricRow[]> {
+  const { data, error } = await service
+    .from("daily_metrics")
+    .select("*")
+    .eq("ad_account_id", adAccountId)
+    .gte("day", from)
+    .lte("day", to);
+  if (error) throw error;
+  return (data as DailyMetricRow[] | null) ?? [];
+}
+
+async function reportingFamily<T>(
+  label: "Google" | "Shopify",
+  adAccountId: string,
+  read: (() => Promise<T[]>) | null,
+): Promise<ReportingFamilyResult<T>> {
+  if (!read) return { state: "not_applicable" };
+  try {
+    return { state: "succeeded", rows: await read() };
+  } catch (error) {
+    // Adapter errors are deliberately reduced to their class here: upstream
+    // messages can contain request metadata and must never leak credentials.
+    const kind = error instanceof Error ? error.name : "unknown";
+    console.error(`${label} V2 reporting failed for ${adAccountId}: ${kind}`);
+    return { state: "failed" };
+  }
+}
+
+async function fetchShopifyReportingDailyMetrics(
+  service: Supabase,
+  account: AdAccount,
+  source: CanonicalReportingSource,
+  from: string,
+  to: string,
+): Promise<ShopifyDailyMetric[]> {
+  if (
+    !source.shopify ||
+    source.group.shopifyAnchorBindingId !== source.bindingId ||
+    source.group.shopifyAnchorAdAccountId !== source.adAccountId
+  ) {
+    throw new Error("A V2 Shopify source must be its store anchor.");
+  }
+  // Collection revenue-share is invoice input, not a Windsor reporting
+  // metric. Until its campaign-name source is normalized, preserving the
+  // stored family is safer than silently underbilling with invented zeros.
+  if (account.revenue_share_enabled) {
+    throw new Error("V2 revenue-share reporting is not available.");
+  }
+
+  const adapter = await createShopifyReportingAdapter(source);
+  const result = await adapter.fetchDailySales(from, to);
+  let sales = result.days;
+  const costByDay = new Map<string, { product: number; fees: number; shipping: number }>();
+
+  const needsFx = Boolean(result.currency && result.currency !== account.currency);
+  const rates =
+    needsFx && (sales.length > 0 || result.orders.length > 0)
+      ? await fxDailyRates(result.currency!, account.currency, from, to)
+      : null;
+  if (rates) {
+    sales = sales.map((day) => {
+      const rate = rateOn(rates, day.date);
+      return {
+        ...day,
+        revenue: day.revenue * rate,
+        refunds: day.refunds * rate,
+        attributedRevenue: day.attributedRevenue * rate,
+      };
+    });
+  }
+
+  if (result.orders.length > 0) {
+    await registerSoldProducts(
+      service,
+      account.id,
+      result.orders,
+      result.currency ?? account.currency,
+    );
+    const ctx = await loadCostContext(
+      service,
+      account.id,
+      Number(account.default_product_cost_pct),
+      account.currency,
+    );
+    for (const order of result.orders as SyncedOrder[]) {
+      const rate = rates ? rateOn(rates, order.date) : 1;
+      const lines = order.lines.map((line) => ({
+        productKey: line.productKey,
+        quantity: line.quantity,
+        unitPrice: line.unitPrice * rate,
+      }));
+      const entry = costByDay.get(order.date) ?? { product: 0, fees: 0, shipping: 0 };
+      entry.product += orderCogs(lines, order.date, ctx);
+      entry.fees += paymentFee(
+        order.total * rate,
+        Number(account.payment_fee_pct),
+        Number(account.payment_fee_fixed),
+      );
+      entry.shipping += Number(account.shipping_cost_per_order);
+      costByDay.set(order.date, entry);
+    }
+  }
+
+  return sales.map((day) => {
+    const costs = costByDay.get(day.date);
+    return {
+      day: day.date,
+      revenue: day.revenue,
+      orders_count: day.orders,
+      units_sold: day.units,
+      attributed_orders: day.attributedOrders,
+      attributed_revenue: day.attributedRevenue,
+      refunds_amount: day.refunds,
+      product_cost: costs?.product ?? 0,
+      payment_fees: costs?.fees ?? 0,
+      shipping_cost: costs?.shipping ?? 0,
+      revenue_share_base: 0,
+      revenue_share_amount: 0,
+    };
+  });
+}
+
+function assertReportingSourceSyncable(
+  account: AdAccount,
+  source: CanonicalReportingSource,
+): void {
+  if (source.adAccountId !== account.id || source.clientId !== account.client_id) {
+    throw new Error("A V2 reporting source does not match its requested account.");
+  }
+  const roleMatchesSource =
+    account.reporting_role === "legacy_hybrid" ||
+    (account.reporting_role === "shopify_anchor" && Boolean(source.shopify)) ||
+    (account.reporting_role === "google_spend" && !source.shopify && Boolean(source.googleAds));
+  if (!roleMatchesSource) {
+    throw new Error("A V2 reporting source does not match its account role.");
+  }
+  if (
+    source.shopify &&
+    (source.group.shopifyAnchorBindingId !== source.bindingId ||
+      source.group.shopifyAnchorAdAccountId !== source.adAccountId)
+  ) {
+    throw new Error("A Google child cannot read its Shopify anchor.");
+  }
+  if (
+    source.googleAds &&
+    (!source.googleAds.currency ||
+      source.googleAds.currency !== account.currency ||
+      !source.googleAds.timeZone?.trim())
+  ) {
+    throw new Error("A V2 Google Ads source has incomplete reporting metadata.");
+  }
+}
+
+function assertPartialLegacySourcePreservesFacts(
+  account: AdAccount,
+  source: CanonicalReportingSource,
+  existing: DailyMetricRow[],
+): void {
+  if (account.reporting_role !== "legacy_hybrid") return;
+
+  const hasGoogleFacts = existing.some(
+    (row) =>
+      Number(row.ad_spend) !== 0 ||
+      Number(row.impressions) !== 0 ||
+      Number(row.clicks) !== 0 ||
+      Number(row.conversions) !== 0 ||
+      Number(row.conversion_value) !== 0,
+  );
+  const hasShopifyFacts = existing.some(
+    (row) =>
+      Number(row.revenue) !== 0 ||
+      Number(row.orders_count) !== 0 ||
+      Number(row.units_sold) !== 0 ||
+      Number(row.attributed_orders) !== 0 ||
+      Number(row.attributed_revenue) !== 0 ||
+      Number(row.refunds_amount) !== 0 ||
+      Number(row.product_cost) !== 0 ||
+      Number(row.payment_fees) !== 0 ||
+      Number(row.shipping_cost) !== 0 ||
+      Number(row.revenue_share_base) !== 0 ||
+      Number(row.revenue_share_amount) !== 0,
+  );
+
+  if ((!source.googleAds && hasGoogleFacts) || (!source.shopify && hasShopifyFacts)) {
+    throw new Error(
+      "A partial V2 source would erase historical facts from its legacy reporting identity.",
+    );
+  }
+}
+
+async function syncReportingSourceWindow(
+  service: Supabase,
+  account: AdAccount,
+  source: CanonicalReportingSource,
+  from: string,
+  to: string,
+  lifecycle: "active" | "staged" = "active",
+): Promise<void> {
+  assertReportingSourceSyncable(account, source);
+
+  const existing = await fetchExistingWindow(service, account.id, from, to);
+  assertPartialLegacySourcePreservesFacts(account, source, existing);
+  const [google, shopify] = await Promise.all([
+    reportingFamily(
+      "Google",
+      account.id,
+      source.googleAds
+        ? () => fetchGoogleReportingDailyMetrics(source, from, to)
+        : null,
+    ),
+    reportingFamily(
+      "Shopify",
+      account.id,
+      source.shopify
+        ? () => fetchShopifyReportingDailyMetrics(service, account, source, from, to)
+        : null,
+    ),
+  ]);
+  if (
+    lifecycle === "staged" &&
+    ((source.googleAds && google.state !== "succeeded") ||
+      (source.shopify && shopify.state !== "succeeded"))
+  ) {
+    throw new Error("Every staged reporting family must succeed before its window is committed.");
+  }
+  const rows = mergeDailyMetricFamilies({
+    adAccountId: account.id,
+    from,
+    to,
+    existing,
+    google,
+    shopify,
+    computedAt: new Date().toISOString(),
+  });
+  if (lifecycle === "staged") {
+    const { data, error } = await service.rpc("commit_client_staged_reporting_metrics", {
+      p_binding_id: source.bindingId,
+      p_success_from: from,
+      p_success_to: to,
+      p_rows: rows,
+    });
+    if (error || data !== source.bindingId) {
+      throw error ?? new Error("A staged reporting window was not committed.");
+    }
+  } else {
+    const { error } = await service
+      .from("daily_metrics")
+      .upsert(rows, { onConflict: "ad_account_id,day" });
+    if (error) throw error;
+  }
+
+  // Receipts are the rollout gate's evidence, not a best-effort side effect.
+  // A rolling deploy where the RPC is absent therefore leaves the binding
+  // unready even if compatibility rows were already refreshed.
+  for (const [sourceType, family, currency] of [
+    ["google_ads", google, source.googleAds?.currency],
+    ["shopify", shopify, source.shopify?.currency],
+  ] as const) {
+    if (family.state !== "succeeded") continue;
+    if (!currency) {
+      throw new Error("A succeeded V2 reporting family has no source currency.");
+    }
+    const { data, error: receiptError } = await service.rpc(
+      lifecycle === "staged"
+        ? "record_client_staged_reporting_sync_success"
+        : "record_client_reporting_sync_success",
+      {
+        p_binding_id: source.bindingId,
+        p_source_type: sourceType,
+        p_success_from: from,
+        p_success_to: to,
+        p_source_currency: currency,
+        p_row_count: family.rows.length,
+      },
+    );
+    if (receiptError || data !== source.bindingId) {
+      throw receiptError ?? new Error("A V2 reporting receipt was not committed.");
+    }
+  }
+}
+
+/**
+ * Force-refresh one exact staged binding. The normal active refresh primitive
+ * has no staged option, and promotion remains impossible until this call has
+ * committed the full window plus every applicable native-currency receipt.
+ */
+export async function refreshStagedReportingSourceNow(
+  bindingId: string,
+  opts: {
+    client: Supabase;
+    from?: string;
+    to?: string;
+  },
+): Promise<void> {
+  const source = await resolveStagedReportingSource({
+    service: opts.client,
+    bindingId,
+  });
+  const { data, error } = await opts.client
+    .from("ad_accounts")
+    .select("*")
+    .in("id", [source.adAccountId])
+    .in("client_id", [source.clientId]);
+  if (error || !Array.isArray(data) || data.length !== 1) {
+    throw error ?? new Error("The staged reporting account does not exist.");
+  }
+  const account = data[0] as AdAccount;
+  assertReportingSourceSyncable(account, source);
+  const from = opts.from ?? isoDay(-BACKFILL_LIMIT_DAYS);
+  const to = opts.to ?? isoDay(-1);
+  if (from > to || addDays(from, 365) < to) {
+    throw new Error("A staged reporting sync window must be between 1 and 366 days.");
+  }
+
+  // An abandoned identity retains its immutable read-model rows. On explicit
+  // restage, overwrite every older day in bounded chunks before the final
+  // 90-day receipt; otherwise historical rows from the prior stage could
+  // reappear as soon as the binding is promoted.
+  const { data: oldestRows, error: oldestError } = await opts.client
+    .from("daily_metrics")
+    .select("day")
+    .eq("ad_account_id", account.id)
+    .order("day", { ascending: true })
+    .limit(1);
+  if (oldestError) throw oldestError;
+  const oldest = oldestRows?.[0]?.day;
+  let cursor = oldest && oldest < from ? oldest : from;
+  while (cursor < from) {
+    const chunkTo = [addDays(cursor, 365), dayBefore(from)].sort()[0];
+    await syncReportingSourceWindow(
+      opts.client,
+      account,
+      source,
+      cursor,
+      chunkTo,
+      "staged",
+    );
+    cursor = addDays(chunkTo, 1);
+  }
+  await syncReportingSourceWindow(opts.client, account, source, from, to, "staged");
+}
+
+/**
+ * Force-refresh exact active V2 bindings through a service-role client.
+ * This is the narrow primitive used by rollout verification and by portal
+ * routes once they have scoped account ids to the signed-in workspace.
+ */
+export async function refreshReportingSourcesNow(
+  accountIds: string[],
+  opts: {
+    client: Supabase;
+    from?: string;
+    to?: string;
+  },
+): Promise<void> {
+  const ids = [...new Set(accountIds)];
+  if (ids.length === 0) return;
+  const { data, error } = await opts.client.from("ad_accounts").select("*").in("id", ids);
+  if (error) throw error;
+  const accounts = (data as AdAccount[] | null) ?? [];
+  const foundIds = new Set(accounts.map((account) => account.id));
+  if (accounts.length !== ids.length || ids.some((id) => !foundIds.has(id))) {
+    throw new Error("A requested reporting account does not exist.");
+  }
+  const scope = await resolveRequestedReportingSources(opts.client, accounts);
+  assertCompleteReportingScope(scope);
+  const byId = new Map(scope.accounts.map((account) => [account.id, account]));
+  // The explicit pre-cutover primitive must cover the activation gate's full
+  // parity horizon; normal incremental refreshes remain seven days below.
+  const from = opts.from ?? isoDay(-BACKFILL_LIMIT_DAYS);
+  const to = opts.to ?? isoDay(0);
+
+  // Validate the complete graph before any adapter starts. This prevents a
+  // malformed second source from turning an exact refresh into partial work.
+  for (const source of scope.sources) {
+    const account = byId.get(source.adAccountId);
+    if (!account) throw new Error("A bound reporting account is missing.");
+    assertReportingSourceSyncable(account, source);
+  }
+
+  await Promise.all(
+    scope.sources.map((source) => {
+      const account = byId.get(source.adAccountId);
+      if (!account) throw new Error("A bound reporting account is missing.");
+      return syncReportingSourceWindow(opts.client, account, source, from, to);
+    }),
   );
 }
 
@@ -115,6 +679,19 @@ async function syncAccountWindow(
   from: string,
   to: string,
 ): Promise<void> {
+  if (
+    account.google_ads_connected &&
+    (!account.google_ads_customer_id || !secret?.google_ads_refresh_token)
+  ) {
+    throw new Error("A connected legacy Google Ads source has no credential.");
+  }
+  if (
+    account.shopify_connected &&
+    (!account.shopify_url || !secret?.shopify_admin_token)
+  ) {
+    throw new Error("A connected legacy Shopify source has no credential.");
+  }
+
   let google: DailyBreakdown[] = [];
   // Whether Google actually answered for this window. Decides, further down,
   // between "no spend that day" (a real zero) and "we have no idea" (carry the
@@ -356,7 +933,7 @@ async function syncAccountWindow(
  */
 export async function recomputeDailyMetrics(
   accounts: AdAccount[],
-  opts?: {
+  opts?: ReportingOptions & {
     /** Ignore both freshness checks — the nightly close wants today final. */
     force?: boolean;
     /**
@@ -369,25 +946,36 @@ export async function recomputeDailyMetrics(
   },
 ): Promise<void> {
   const now = Date.now();
-  const stale = accounts
-    .filter(syncable)
-    .filter(
-      (account) =>
-        opts?.force || now - (lastRunByAccount.get(account.id) ?? 0) >= RECOMPUTE_INTERVAL_MS,
-    );
-  if (stale.length === 0) return;
+  const candidates = accounts.filter(
+    (account) =>
+      opts?.force || now - (lastRunByAccount.get(account.id) ?? 0) >= RECOMPUTE_INTERVAL_MS,
+  );
+  if (candidates.length === 0) return;
 
   try {
     const supabase = opts?.client ?? (await createClient());
+    const service = reportingClient(opts?.reportingClient, supabase);
+    const scope = await resolveRuntimeReportingScope(service, candidates);
+    const sources = scope.sources;
+    const scopedAccounts = [...scope.accounts, ...scope.legacyAccounts];
+    const sourceByAccount = new Map(sources.map((source) => [source.adAccountId, source]));
+    // Only a receipt-gated reporting cutover lets binding authority win before
+    // status/legacy credentials are considered. Historical lifecycle-only
+    // `v2_active` clients remain legacy until the purpose-bound marker exists.
+    const stale = scopedAccounts.filter(
+      (account) => sourceByAccount.has(account.id) || syncable(account),
+    );
+    if (stale.length === 0) return;
 
     // Cross-isolate freshness: newest computed_at per account decides.
-    const { data: freshRows } = opts?.force
-      ? { data: [] }
-      : await supabase
+    const { data: freshRows, error: freshnessError } = opts?.force
+      ? { data: [], error: null }
+      : await service
           .from("daily_metrics")
           .select("ad_account_id, computed_at")
           .in("ad_account_id", stale.map((account) => account.id))
           .gte("computed_at", new Date(now - RECOMPUTE_INTERVAL_MS).toISOString());
+    if (freshnessError) throw freshnessError;
     const fresh = new Set((freshRows ?? []).map((row) => row.ad_account_id));
 
     const toRun = stale.filter((account) => !fresh.has(account.id));
@@ -396,14 +984,20 @@ export async function recomputeDailyMetrics(
     }
     if (toRun.length === 0) return;
 
-    const secrets = await fetchSecrets(supabase, toRun.map((account) => account.id));
+    const legacy = toRun.filter((account) => !sourceByAccount.has(account.id));
+    const secrets = await fetchSecrets(supabase, legacy.map((account) => account.id));
     const from = isoDay(-(WINDOW_DAYS - 1));
     const to = isoDay(0);
 
     await Promise.all(
       toRun.map(async (account) => {
         try {
-          await syncAccountWindow(supabase, account, secrets.get(account.id), from, to);
+          const source = sourceByAccount.get(account.id);
+          if (source) {
+            await syncReportingSourceWindow(service, account, source, from, to);
+          } else {
+            await syncAccountWindow(supabase, account, secrets.get(account.id), from, to);
+          }
           lastRunByAccount.set(account.id, Date.now());
         } catch (error) {
           console.error(`daily_metrics recompute failed for ${account.id}:`, error);
@@ -425,10 +1019,50 @@ export async function recomputeDailyMetrics(
  *
  * Throws on failure — the caller is an API route that wants to surface it.
  */
-export async function resyncAccountNow(accountId: string): Promise<void> {
-  const supabase = await createClient();
+export async function resyncAccountNow(
+  accountId: string,
+  opts?: ReportingOptions & { client?: Supabase },
+): Promise<void> {
+  const supabase = opts?.client ?? (await createClient());
+  const service = reportingClient(opts?.reportingClient, supabase);
 
-  // Server-side only — the full row (tokens included) never leaves this call.
+  // V2 bindings are service-only and may deliberately target a pending
+  // ad_accounts surrogate. Resolve that authority before reading any legacy
+  // token columns or applying the legacy pending-status gate.
+  const { data: reportingAccount, error: reportingAccountError } = await service
+    .from("ad_accounts")
+    .select("*")
+    .eq("id", accountId)
+    .maybeSingle();
+  if (reportingAccountError) throw reportingAccountError;
+  if (reportingAccount) {
+    const scope = await resolveRuntimeReportingScope(
+      service,
+      [reportingAccount],
+    );
+    if (scope.sources.length > 0) {
+      const byId = new Map(scope.accounts.map((account) => [account.id, account]));
+      await Promise.all(
+        scope.sources.map((source) => {
+          const account = byId.get(source.adAccountId);
+          if (!account) throw new Error("A bound reporting account is missing.");
+          return syncReportingSourceWindow(
+            service,
+            account,
+            source,
+            isoDay(-BACKFILL_LIMIT_DAYS),
+            isoDay(0),
+          );
+        }),
+      );
+      for (const account of scope.accounts) {
+        lastRunByAccount.set(account.id, Date.now());
+      }
+      return;
+    }
+  }
+
+  // Unbound accounts keep the original viewer-scoped legacy path.
   const { data: account } = await supabase
     .from("ad_accounts")
     .select("*")
@@ -458,7 +1092,7 @@ export async function resyncAccountNow(accountId: string): Promise<void> {
  */
 export async function refreshAccountsNow(
   accountIds: string[],
-  opts?: {
+  opts?: ReportingOptions & {
     /**
      * Supabase to work through. A page load passes nothing and rides the
      * viewer's session; a caller with no session at all — the keyed daily
@@ -473,27 +1107,65 @@ export async function refreshAccountsNow(
 ): Promise<void> {
   if (accountIds.length === 0) return;
   const supabase = opts?.client ?? (await createClient());
+  const service = reportingClient(opts?.reportingClient, supabase);
+  const ids = [...new Set(accountIds)];
 
-  const { data: rows } = await supabase.from("ad_accounts").select("*").in("id", accountIds);
-  const accounts = ((rows ?? []) as AdAccount[]).filter(syncable);
-  if (accounts.length === 0) return;
+  const { data: reportingRows, error: reportingRowsError } = await service
+    .from("ad_accounts")
+    .select("*")
+    .in("id", ids);
+  if (reportingRowsError) throw reportingRowsError;
+  const reportingAccounts = (reportingRows as AdAccount[] | null) ?? [];
+  const scope = await resolveRuntimeReportingScope(service, reportingAccounts);
+  const sources = scope.sources;
+  const scopedReportingAccounts = scope.accounts;
+  const sourceByAccount = new Map(sources.map((source) => [source.adAccountId, source]));
+
+  // Legacy rows stay viewer-scoped. A bound id is removed even if the V2
+  // upstream later fails, so failure can never trigger a second legacy fetch.
+  const { data: legacyRows, error: legacyRowsError } = await supabase
+    .from("ad_accounts")
+    .select("*")
+    .in("id", ids);
+  if (legacyRowsError) throw legacyRowsError;
+  const legacyAccounts = ((legacyRows ?? []) as AdAccount[]).filter(
+    (account) =>
+      scope.legacyAccounts.some((legacy) => legacy.id === account.id) &&
+      !sourceByAccount.has(account.id) &&
+      syncable(account),
+  );
+  if (sources.length === 0 && legacyAccounts.length === 0) return;
 
   const from = opts?.from ?? isoDay(-(WINDOW_DAYS - 1));
   const to = opts?.to ?? isoDay(0);
+  const reportingById = new Map(
+    scopedReportingAccounts.map((account) => [account.id, account]),
+  );
 
   await Promise.all(
-    accounts.map(async (account) => {
+    [
+      ...sources.map((source) => ({
+        account: reportingById.get(source.adAccountId),
+        source,
+      })),
+      ...legacyAccounts.map((account) => ({ account, source: null })),
+    ].map(async ({ account, source }) => {
+      if (!account) return;
       try {
-        await syncAccountWindow(
-          supabase,
-          account,
-          {
-            google_ads_refresh_token: account.google_ads_refresh_token,
-            shopify_admin_token: account.shopify_admin_token,
-          },
-          from,
-          to,
-        );
+        if (source) {
+          await syncReportingSourceWindow(service, account, source, from, to);
+        } else {
+          await syncAccountWindow(
+            supabase,
+            account,
+            {
+              google_ads_refresh_token: account.google_ads_refresh_token,
+              shopify_admin_token: account.shopify_admin_token,
+            },
+            from,
+            to,
+          );
+        }
         lastRunByAccount.set(account.id, Date.now());
       } catch (error) {
         console.error(`manual refresh failed for ${account.id}:`, error);
@@ -585,27 +1257,40 @@ async function healShopifyColumns(
  * older than BACKFILL_LIMIT_DAYS are served from whatever exists.
  */
 export async function ensureDailyCoverage(accounts: AdAccount[], from: string): Promise<void> {
-  const candidates = accounts.filter(syncable);
-  if (candidates.length === 0) return;
+  if (accounts.length === 0) return;
 
   const floor = isoDay(-BACKFILL_LIMIT_DAYS);
   const start = from < floor ? floor : from;
 
   try {
     const supabase = await createClient();
+    const service = reportingClient(undefined, supabase);
+    const scope = await resolveRuntimeReportingScope(service, accounts);
+    const sources = scope.sources;
+    const scopedAccounts = [...scope.accounts, ...scope.legacyAccounts];
+    const sourceByAccount = new Map(sources.map((source) => [source.adAccountId, source]));
+    const candidates = scopedAccounts.filter(
+      (account) => sourceByAccount.has(account.id) || syncable(account),
+    );
+    if (candidates.length === 0) return;
 
     // Days that exist but predate a column — a different problem from days that
     // are missing, so it runs whatever the range is, today-only included.
-    await healShopifyColumns(supabase, candidates, start);
+    await healShopifyColumns(
+      supabase,
+      candidates.filter((account) => !sourceByAccount.has(account.id)),
+      start,
+    );
 
     if (start >= isoDay(0)) return; // today is the recompute window's job
 
     // Earliest covered day per account, one query.
-    const { data: earliestRows } = await supabase
+    const { data: earliestRows, error: earliestError } = await service
       .from("daily_metrics")
       .select("ad_account_id, day")
       .in("ad_account_id", candidates.map((account) => account.id))
       .order("day", { ascending: true });
+    if (earliestError) throw earliestError;
     const earliest = new Map<string, string>();
     for (const row of earliestRows ?? []) {
       if (!earliest.has(row.ad_account_id)) earliest.set(row.ad_account_id, row.day);
@@ -622,12 +1307,28 @@ export async function ensureDailyCoverage(accounts: AdAccount[], from: string): 
       .filter((gap): gap is NonNullable<typeof gap> => gap !== null && gap.from <= gap.to);
     if (gaps.length === 0) return;
 
-    const secrets = await fetchSecrets(supabase, gaps.map((gap) => gap.account.id));
+    const secrets = await fetchSecrets(
+      supabase,
+      gaps
+        .filter((gap) => !sourceByAccount.has(gap.account.id))
+        .map((gap) => gap.account.id),
+    );
 
     await Promise.all(
       gaps.map(async ({ account, from: gapFrom, to: gapTo }) => {
         try {
-          await syncAccountWindow(supabase, account, secrets.get(account.id), gapFrom, gapTo);
+          const source = sourceByAccount.get(account.id);
+          if (source) {
+            await syncReportingSourceWindow(service, account, source, gapFrom, gapTo);
+          } else {
+            await syncAccountWindow(
+              supabase,
+              account,
+              secrets.get(account.id),
+              gapFrom,
+              gapTo,
+            );
+          }
         } catch (error) {
           console.error(`daily_metrics backfill failed for ${account.id}:`, error);
         }

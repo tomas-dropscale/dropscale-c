@@ -12,7 +12,13 @@ import { useI18n } from "@/lib/i18n/provider";
  * throttle: it re-pulls the recent window for the visible stores, then
  * re-renders. Between clicks the numbers still auto-refresh on navigation.
  */
-export function RefreshButton({ accountIds }: { accountIds: string[] }) {
+export function RefreshButton({
+  accountIds,
+  includeUnallocated = false,
+}: {
+  accountIds: string[];
+  includeUnallocated?: boolean;
+}) {
   const router = useRouter();
   const { d } = useI18n();
   const [busy, setBusy] = React.useState(false);
@@ -23,7 +29,7 @@ export function RefreshButton({ accountIds }: { accountIds: string[] }) {
       await fetch("/api/metrics/refresh", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ accountIds }),
+        body: JSON.stringify({ accountIds, includeUnallocated }),
       });
     } catch {
       // The next lazy sync heals it; nothing to surface for a refresh.

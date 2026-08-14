@@ -20,6 +20,7 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 const AUTHORIZATION_REQUEST_TIMEOUT_MS = 25_000;
 const MAX_JSON_CHARS = 1_000_000;
 const MAX_SECRET_CHARS = 4_096;
+const MAX_REPORTING_RANGE_DAYS = 366;
 
 export type WindsorErrorCode =
   | "server_not_configured"
@@ -70,6 +71,43 @@ export type WindsorGoogleAdsCapabilities = {
   canCreateCampaign: boolean;
   canPauseCampaign: boolean;
   canEnableCampaign: boolean;
+};
+
+/** One exact Google Ads account/day returned by Windsor's reporting API. */
+export type WindsorGoogleAdsDailyRow = {
+  /** ISO calendar day in the Google Ads account's reporting time zone. */
+  date: string;
+  /** Canonical Windsor/Google display form, e.g. 123-456-7890. */
+  accountId: string;
+  /** Digits-only Google Ads customer id. */
+  customerId: string;
+  currency: string;
+  timeZone: string;
+  spend: number;
+  impressions: number;
+  clicks: number;
+  conversions: number;
+  conversionValue: number;
+};
+
+/** One range-aggregated campaign returned for an exact Google Ads account. */
+export type WindsorGoogleAdsCampaignRow = {
+  accountId: string;
+  customerId: string;
+  currency: string;
+  timeZone: string;
+  campaignId: string;
+  name: string;
+  status: "ENABLED" | "PAUSED" | "REMOVED";
+  advertisingChannelType: string;
+  biddingStrategyType: string | null;
+  startDate: string | null;
+  dailyBudget: number | null;
+  spend: number;
+  impressions: number;
+  clicks: number;
+  conversions: number;
+  conversionValue: number;
 };
 
 export type WindsorGoogleAdsHealth =
@@ -277,6 +315,99 @@ function normalizeAccounts(value: unknown, keys: string[]): WindsorGoogleAdsAcco
 
   return [...accounts.values()].sort((left, right) =>
     left.accountId.localeCompare(right.accountId),
+  );
+}
+
+function isoDayTimestamp(value: string): number | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const timestamp = Date.parse(`${value}T00:00:00.000Z`);
+  if (!Number.isFinite(timestamp)) return null;
+  return new Date(timestamp).toISOString().slice(0, 10) === value
+    ? timestamp
+    : null;
+}
+
+function reportingRange(from: string, to: string): {
+  fromTimestamp: number;
+  toTimestamp: number;
+  days: number;
+} {
+  const fromTimestamp = isoDayTimestamp(from);
+  const toTimestamp = isoDayTimestamp(to);
+  if (fromTimestamp === null || toTimestamp === null || fromTimestamp > toTimestamp) {
+    throw new WindsorError(
+      "invalid_request",
+      "Windsor reporting dates are invalid.",
+      400,
+    );
+  }
+
+  const days = Math.floor((toTimestamp - fromTimestamp) / 86_400_000) + 1;
+  if (days > MAX_REPORTING_RANGE_DAYS) {
+    throw new WindsorError(
+      "invalid_request",
+      "Windsor reporting range is too large.",
+      400,
+    );
+  }
+  return { fromTimestamp, toTimestamp, days };
+}
+
+function invalidDailyResponse(): WindsorError {
+  return new WindsorError(
+    "invalid_response",
+    "Windsor returned invalid Google Ads daily metrics.",
+    502,
+  );
+}
+
+function invalidCampaignResponse(): WindsorError {
+  return new WindsorError(
+    "invalid_response",
+    "Windsor returned invalid Google Ads campaigns.",
+    502,
+  );
+}
+
+function dailyNumber(value: unknown): number {
+  if (
+    (typeof value !== "number" && typeof value !== "string") ||
+    (typeof value === "string" && value.trim() === "")
+  ) {
+    throw invalidDailyResponse();
+  }
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < 0) throw invalidDailyResponse();
+  return number === 0 ? 0 : number;
+}
+
+function dailyText(value: unknown, maxLength: number): string {
+  if (typeof value !== "string") throw invalidDailyResponse();
+  const text = value.trim();
+  if (
+    !text ||
+    text.length > maxLength ||
+    /[\u0000-\u001f\u007f]/.test(text)
+  ) {
+    throw invalidDailyResponse();
+  }
+  return text;
+}
+
+function sameDailyRow(
+  left: WindsorGoogleAdsDailyRow,
+  right: WindsorGoogleAdsDailyRow,
+): boolean {
+  return (
+    left.date === right.date &&
+    left.customerId === right.customerId &&
+    left.currency === right.currency &&
+    left.timeZone === right.timeZone &&
+    left.spend === right.spend &&
+    left.impressions === right.impressions &&
+    left.clicks === right.clicks &&
+    left.conversions === right.conversions &&
+    left.conversionValue === right.conversionValue
   );
 }
 
@@ -623,6 +754,221 @@ export async function probeGoogleAdsCapabilities(
     canPauseCampaign: actionIds.includes("pause_campaign"),
     canEnableCampaign: actionIds.includes("enable_campaign"),
   };
+}
+
+/**
+ * Reads daily metrics for one exact Google Ads account and inclusive date
+ * range. The caller remains responsible for comparing the returned currency
+ * and time zone with its own reporting identity.
+ */
+export async function fetchGoogleAdsDailyBreakdown(
+  accountId: string,
+  from: string,
+  to: string,
+  options: WindsorRequestOptions = {},
+): Promise<WindsorGoogleAdsDailyRow[]> {
+  const ids = normalizeGoogleAdsCustomerId(accountId);
+  const range = reportingRange(from, to);
+  const maxRows = range.days + 1;
+  const url = new URL(`/${WINDSOR_DATASOURCE}`, CONNECTORS_ORIGIN);
+  url.searchParams.set(
+    "fields",
+    "date,account_id,account_currency_code,account_time_zone,spend," +
+      "impressions,clicks,conversions,conversion_value",
+  );
+  url.searchParams.set("date_from", from);
+  url.searchParams.set("date_to", to);
+  url.searchParams.set("filter", JSON.stringify([["account_id", "eq", ids.accountId]]));
+  url.searchParams.set("_max_rows", String(maxRows));
+  url.searchParams.set("_renderer", "json");
+
+  const rawRows = arrayPayload(
+    await requestJson(url, options),
+    ["data", "results", "rows"],
+  );
+  if (rawRows.length > maxRows) throw invalidDailyResponse();
+
+  const byDay = new Map<string, WindsorGoogleAdsDailyRow>();
+  let currency: string | null = null;
+  let timeZone: string | null = null;
+
+  for (const value of rawRows) {
+    const raw = asRecord(value);
+    if (!raw || typeof raw.account_id !== "string") throw invalidDailyResponse();
+
+    let reportedIds: { accountId: string; customerId: string };
+    try {
+      reportedIds = normalizeGoogleAdsCustomerId(raw.account_id);
+    } catch {
+      throw invalidDailyResponse();
+    }
+    if (reportedIds.customerId !== ids.customerId) throw invalidDailyResponse();
+
+    const date = typeof raw.date === "string" ? raw.date.trim() : "";
+    const timestamp = isoDayTimestamp(date);
+    if (
+      timestamp === null ||
+      timestamp < range.fromTimestamp ||
+      timestamp > range.toTimestamp
+    ) {
+      throw invalidDailyResponse();
+    }
+
+    const rowCurrency = dailyText(raw.account_currency_code, 12).toUpperCase();
+    if (!/^[A-Z]{3}$/.test(rowCurrency)) throw invalidDailyResponse();
+    const rowTimeZone = dailyText(raw.account_time_zone, 100);
+    if (
+      (currency !== null && rowCurrency !== currency) ||
+      (timeZone !== null && rowTimeZone !== timeZone)
+    ) {
+      throw invalidDailyResponse();
+    }
+    currency = rowCurrency;
+    timeZone = rowTimeZone;
+
+    const row: WindsorGoogleAdsDailyRow = {
+      date,
+      ...reportedIds,
+      currency: rowCurrency,
+      timeZone: rowTimeZone,
+      spend: dailyNumber(raw.spend),
+      impressions: dailyNumber(raw.impressions),
+      clicks: dailyNumber(raw.clicks),
+      conversions: dailyNumber(raw.conversions),
+      conversionValue: dailyNumber(raw.conversion_value),
+    };
+    const previous = byDay.get(date);
+    if (previous && !sameDailyRow(previous, row)) throw invalidDailyResponse();
+    byDay.set(date, previous ?? row);
+  }
+
+  return [...byDay.values()].sort((left, right) => left.date.localeCompare(right.date));
+}
+
+/**
+ * Reads one aggregated row per campaign for an exact account and date range.
+ * Omitting the date dimension keeps this bounded even for year-long ranges.
+ */
+export async function fetchGoogleAdsCampaignBreakdown(
+  accountId: string,
+  from: string,
+  to: string,
+  options: WindsorRequestOptions = {},
+): Promise<WindsorGoogleAdsCampaignRow[]> {
+  const ids = normalizeGoogleAdsCustomerId(accountId);
+  reportingRange(from, to);
+  const maxRows = 1_001;
+  const url = new URL(`/${WINDSOR_DATASOURCE}`, CONNECTORS_ORIGIN);
+  url.searchParams.set(
+    "fields",
+    "account_id,account_currency_code,account_time_zone,campaign_id,campaign," +
+      "campaign_status,advertising_channel_type,campaign_budget,bidding_strategy_type," +
+      "start_date,spend,impressions,clicks,conversions,conversion_value",
+  );
+  url.searchParams.set("date_from", from);
+  url.searchParams.set("date_to", to);
+  url.searchParams.set("filter", JSON.stringify([["account_id", "eq", ids.accountId]]));
+  url.searchParams.set("_max_rows", String(maxRows));
+  url.searchParams.set("_renderer", "json");
+
+  const rawRows = arrayPayload(
+    await requestJson(url, options),
+    ["data", "results", "rows"],
+  );
+  // Asking for one sentinel row lets a silently truncated response fail closed.
+  if (rawRows.length >= maxRows) throw invalidCampaignResponse();
+
+  const campaigns = new Map<string, WindsorGoogleAdsCampaignRow>();
+  for (const value of rawRows) {
+    const raw = asRecord(value);
+    if (!raw || typeof raw.account_id !== "string") throw invalidCampaignResponse();
+
+    let reportedIds: { accountId: string; customerId: string };
+    try {
+      reportedIds = normalizeGoogleAdsCustomerId(raw.account_id);
+    } catch {
+      throw invalidCampaignResponse();
+    }
+    if (reportedIds.customerId !== ids.customerId) throw invalidCampaignResponse();
+
+    const currency = typeof raw.account_currency_code === "string"
+      ? raw.account_currency_code.trim().toUpperCase()
+      : "";
+    const timeZone = typeof raw.account_time_zone === "string"
+      ? raw.account_time_zone.trim()
+      : "";
+    const campaignId = typeof raw.campaign_id === "string"
+      ? raw.campaign_id.trim()
+      : "";
+    const name = typeof raw.campaign === "string" ? raw.campaign.trim() : "";
+    const status = typeof raw.campaign_status === "string"
+      ? raw.campaign_status.trim().toUpperCase()
+      : "";
+    const advertisingChannelType = typeof raw.advertising_channel_type === "string"
+      ? raw.advertising_channel_type.trim().toUpperCase()
+      : "";
+    const biddingStrategyType = raw.bidding_strategy_type == null
+      ? null
+      : typeof raw.bidding_strategy_type === "string"
+        ? raw.bidding_strategy_type.trim().toUpperCase()
+        : "";
+    const startDate = raw.start_date == null
+      ? null
+      : typeof raw.start_date === "string"
+        ? raw.start_date.trim()
+        : "";
+    const dailyBudget = raw.campaign_budget == null ? null : Number(raw.campaign_budget);
+
+    if (
+      !/^[A-Z]{3}$/.test(currency) ||
+      !timeZone ||
+      !/^\d{1,30}$/.test(campaignId) ||
+      !name ||
+      name.length > 500 ||
+      !["ENABLED", "PAUSED", "REMOVED"].includes(status) ||
+      !/^[A-Z][A-Z0-9_]{1,79}$/.test(advertisingChannelType) ||
+      (biddingStrategyType !== null && !/^[A-Z][A-Z0-9_]{1,119}$/.test(biddingStrategyType)) ||
+      (startDate !== null && isoDayTimestamp(startDate) === null) ||
+      (dailyBudget !== null && (!Number.isFinite(dailyBudget) || dailyBudget < 0))
+    ) {
+      throw invalidCampaignResponse();
+    }
+
+    const number = (candidate: unknown) => {
+      if (
+        (typeof candidate !== "number" && typeof candidate !== "string") ||
+        (typeof candidate === "string" && candidate.trim() === "")
+      ) {
+        throw invalidCampaignResponse();
+      }
+      const parsed = Number(candidate);
+      if (!Number.isFinite(parsed) || parsed < 0) throw invalidCampaignResponse();
+      return parsed === 0 ? 0 : parsed;
+    };
+    const row: WindsorGoogleAdsCampaignRow = {
+      ...reportedIds,
+      currency,
+      timeZone,
+      campaignId,
+      name,
+      status: status as WindsorGoogleAdsCampaignRow["status"],
+      advertisingChannelType,
+      biddingStrategyType,
+      startDate,
+      dailyBudget,
+      spend: number(raw.spend),
+      impressions: number(raw.impressions),
+      clicks: number(raw.clicks),
+      conversions: number(raw.conversions),
+      conversionValue: number(raw.conversion_value),
+    };
+    if (campaigns.has(campaignId)) throw invalidCampaignResponse();
+    campaigns.set(campaignId, row);
+  }
+
+  return [...campaigns.values()].sort(
+    (left, right) => right.spend - left.spend || left.campaignId.localeCompare(right.campaignId),
+  );
 }
 
 /**

@@ -17,6 +17,14 @@
 // Team / board
 // ---------------------------------------------------------------------------
 
+export type Json =
+  | string
+  | number
+  | boolean
+  | null
+  | { [key: string]: Json | undefined }
+  | Json[];
+
 export type Priority = "low" | "medium" | "high" | "urgent";
 export type Role = "admin" | "member";
 
@@ -152,6 +160,10 @@ export type Expense = {
 // ---------------------------------------------------------------------------
 
 export type AdAccountStatus = "active" | "suspended" | "pending";
+export type AdAccountReportingRole =
+  | "legacy_hybrid"
+  | "shopify_anchor"
+  | "google_spend";
 export type RequestType = "google_ads" | "shopify";
 export type RequestStatus = "pending" | "approved" | "rejected";
 export type CampaignStatus = "active" | "paused" | "ended";
@@ -599,6 +611,8 @@ export type AdAccount = {
   store_name: string;
   google_ads_customer_id: string | null;
   status: AdAccountStatus;
+  /** Metric-source family; historical rows default to legacy_hybrid (0055). */
+  reporting_role: AdAccountReportingRole;
   currency: string;
   breakeven_roas: number | null;
   lifetime_ads_budget_usd: number | null;
@@ -1039,6 +1053,9 @@ export type ClientRolloutState = {
     | "v2_active"
     | "rollback_legacy";
   onboarding_session_id: string | null;
+  reporting_cutover_at: string | null;
+  reporting_cutover_by: string | null;
+  reporting_cutover_reason: string | null;
   updated_by: string | null;
   updated_at: string;
 };
@@ -1063,6 +1080,77 @@ export type ClientOnboardingEvent = {
   actor_type: "admin" | "invite" | "client" | "system";
   actor_id: string | null;
   details: Record<string, unknown>;
+  created_at: string;
+};
+
+export type ClientReportingBindingStatus = "staged" | "active" | "revoked";
+export type ClientReportingBinding = {
+  id: string;
+  client_id: string;
+  ad_account_id: string;
+  shopify_connection_id: string | null;
+  google_ads_connection_id: string | null;
+  shopify_anchor_binding_id: string | null;
+  status: ClientReportingBindingStatus;
+  idempotency_key: string;
+  bound_reason: string;
+  bound_by: string;
+  bound_at: string;
+  revoked_by: string | null;
+  revoked_at: string | null;
+  revoke_reason: string | null;
+};
+
+export type ClientReportingBindingEvent = {
+  id: string;
+  binding_id: string;
+  event_type: "bound" | "staged" | "promoted" | "abandoned" | "revoked";
+  idempotency_key: string;
+  actor_id: string;
+  reason: string;
+  details: Record<string, unknown>;
+  created_at: string;
+};
+
+export type ClientReportingAnchorEvent = {
+  id: string;
+  binding_id: string;
+  prior_binding_id: string | null;
+  ad_account_id: string;
+  event_type:
+    | "provisioned"
+    | "adopted"
+    | "upgraded"
+    | "restaged"
+    | "source_added"
+    | "source_abandoned";
+  idempotency_key: string;
+  actor_id: string;
+  reason: string;
+  details: Record<string, unknown>;
+  created_at: string;
+};
+
+export type ClientReportingSyncSource = "shopify" | "google_ads";
+export type ClientReportingSyncState = {
+  binding_id: string;
+  source_type: ClientReportingSyncSource;
+  last_success_at: string;
+  last_success_from: string;
+  last_success_to: string;
+  source_currency: string;
+  row_count: number;
+};
+
+export type ClientGoogleAdsReportingIdentityEvent = {
+  id: string;
+  connection_id: string;
+  prior_currency: string | null;
+  source_currency: string;
+  prior_time_zone: string | null;
+  source_time_zone: string;
+  verified_at: string;
+  actor_id: string;
   created_at: string;
 };
 
@@ -1606,7 +1694,13 @@ export type Database = {
         Row: Row<ClientRolloutState>;
         Insert: Insert<
           ClientRolloutState,
-          "operational_surface" | "onboarding_session_id" | "updated_by" | "updated_at"
+          | "operational_surface"
+          | "onboarding_session_id"
+          | "reporting_cutover_at"
+          | "reporting_cutover_by"
+          | "reporting_cutover_reason"
+          | "updated_by"
+          | "updated_at"
         >;
         Update: Partial<ClientRolloutState>;
         Relationships: [
@@ -1624,6 +1718,13 @@ export type Database = {
             referencedRelation: "client_onboarding_sessions";
             referencedColumns: ["id"];
           },
+          {
+            foreignKeyName: "client_rollout_states_reporting_cutover_by_fkey";
+            columns: ["reporting_cutover_by"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
         ];
       };
       client_onboarding_events: {
@@ -1639,6 +1740,167 @@ export type Database = {
             columns: ["session_id"];
             isOneToOne: false;
             referencedRelation: "client_onboarding_sessions";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      client_reporting_bindings: {
+        Row: Row<ClientReportingBinding>;
+        Insert: Insert<
+          ClientReportingBinding,
+          | "id"
+          | "shopify_connection_id"
+          | "google_ads_connection_id"
+          | "shopify_anchor_binding_id"
+          | "status"
+          | "bound_at"
+          | "revoked_by"
+          | "revoked_at"
+          | "revoke_reason"
+        >;
+        Update: Partial<ClientReportingBinding>;
+        Relationships: [
+          {
+            foreignKeyName: "client_reporting_bindings_client_id_fkey";
+            columns: ["client_id"];
+            isOneToOne: false;
+            referencedRelation: "portal_clients";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "client_reporting_bindings_ad_account_id_fkey";
+            columns: ["ad_account_id"];
+            isOneToOne: false;
+            referencedRelation: "ad_accounts";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "client_reporting_bindings_shopify_connection_id_fkey";
+            columns: ["shopify_connection_id"];
+            isOneToOne: false;
+            referencedRelation: "client_shopify_connections";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "client_reporting_bindings_google_ads_connection_id_fkey";
+            columns: ["google_ads_connection_id"];
+            isOneToOne: false;
+            referencedRelation: "client_google_ads_connections";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "client_reporting_bindings_shopify_anchor_binding_id_fkey";
+            columns: ["shopify_anchor_binding_id"];
+            isOneToOne: false;
+            referencedRelation: "client_reporting_bindings";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "client_reporting_bindings_bound_by_fkey";
+            columns: ["bound_by"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "client_reporting_bindings_revoked_by_fkey";
+            columns: ["revoked_by"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      client_reporting_binding_events: {
+        Row: Row<ClientReportingBindingEvent>;
+        Insert: Insert<ClientReportingBindingEvent, "id" | "details" | "created_at">;
+        Update: Partial<ClientReportingBindingEvent>;
+        Relationships: [
+          {
+            foreignKeyName: "client_reporting_binding_events_binding_id_fkey";
+            columns: ["binding_id"];
+            isOneToOne: false;
+            referencedRelation: "client_reporting_bindings";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "client_reporting_binding_events_actor_id_fkey";
+            columns: ["actor_id"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      client_reporting_anchor_events: {
+        Row: Row<ClientReportingAnchorEvent>;
+        Insert: Insert<
+          ClientReportingAnchorEvent,
+          "id" | "prior_binding_id" | "details" | "created_at"
+        >;
+        Update: Partial<ClientReportingAnchorEvent>;
+        Relationships: [
+          {
+            foreignKeyName: "client_reporting_anchor_events_binding_id_fkey";
+            columns: ["binding_id"];
+            isOneToOne: false;
+            referencedRelation: "client_reporting_bindings";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "client_reporting_anchor_events_prior_binding_id_fkey";
+            columns: ["prior_binding_id"];
+            isOneToOne: false;
+            referencedRelation: "client_reporting_bindings";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "client_reporting_anchor_events_ad_account_id_fkey";
+            columns: ["ad_account_id"];
+            isOneToOne: false;
+            referencedRelation: "ad_accounts";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "client_reporting_anchor_events_actor_id_fkey";
+            columns: ["actor_id"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      client_reporting_sync_states: {
+        Row: Row<ClientReportingSyncState>;
+        Insert: Row<ClientReportingSyncState>;
+        Update: Partial<ClientReportingSyncState>;
+        Relationships: [
+          {
+            foreignKeyName: "client_reporting_sync_states_binding_id_fkey";
+            columns: ["binding_id"];
+            isOneToOne: false;
+            referencedRelation: "client_reporting_bindings";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      client_google_ads_reporting_identity_events: {
+        Row: Row<ClientGoogleAdsReportingIdentityEvent>;
+        Insert: Insert<ClientGoogleAdsReportingIdentityEvent, "id" | "created_at">;
+        Update: Partial<ClientGoogleAdsReportingIdentityEvent>;
+        Relationships: [
+          {
+            foreignKeyName: "client_google_ads_reporting_identity_events_connection_id_fkey";
+            columns: ["connection_id"];
+            isOneToOne: false;
+            referencedRelation: "client_google_ads_connections";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "client_google_ads_reporting_identity_events_actor_id_fkey";
+            columns: ["actor_id"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
             referencedColumns: ["id"];
           },
         ];
@@ -2167,6 +2429,7 @@ export type Database = {
           | "id"
           | "google_ads_customer_id"
           | "status"
+          | "reporting_role"
           | "currency"
           | "breakeven_roas"
           | "lifetime_ads_budget_usd"
@@ -2477,6 +2740,130 @@ export type Database = {
       };
       disconnect_legacy_shopify_connection: {
         Args: { p_account_id: string; p_admin_id: string };
+        Returns: string;
+      };
+      commit_client_reporting_binding: {
+        Args: {
+          p_ad_account_id: string;
+          p_shopify_connection_id: string | null;
+          p_google_ads_connection_id: string | null;
+          p_shopify_anchor_binding_id: string | null;
+          p_idempotency_key: string;
+          p_admin_id: string;
+          p_reason: string;
+        };
+        Returns: string;
+      };
+      revoke_client_reporting_binding: {
+        Args: {
+          p_binding_id: string;
+          p_admin_id: string;
+          p_idempotency_key: string;
+          p_reason: string;
+        };
+        Returns: string;
+      };
+      provision_client_reporting_anchor: {
+        Args: {
+          p_shopify_connection_id: string | null;
+          p_google_ads_connection_id: string | null;
+          p_shopify_anchor_binding_id: string | null;
+          p_existing_ad_account_id: string | null;
+          p_idempotency_key: string;
+          p_admin_id: string;
+          p_reason: string;
+        };
+        Returns: string;
+      };
+      stage_client_reporting_source: {
+        Args: {
+          p_client_id: string;
+          p_shopify_connection_id: string | null;
+          p_google_ads_connection_id: string | null;
+          p_shopify_anchor_binding_id: string | null;
+          p_existing_ad_account_id: string | null;
+          p_idempotency_key: string;
+          p_admin_id: string;
+          p_reason: string;
+        };
+        Returns: string;
+      };
+      commit_client_staged_reporting_metrics: {
+        Args: {
+          p_binding_id: string;
+          p_success_from: string;
+          p_success_to: string;
+          p_rows: Json;
+        };
+        Returns: string;
+      };
+      record_client_staged_reporting_sync_success: {
+        Args: {
+          p_binding_id: string;
+          p_source_type: ClientReportingSyncSource;
+          p_success_from: string;
+          p_success_to: string;
+          p_source_currency: string;
+          p_row_count: number;
+        };
+        Returns: string;
+      };
+      promote_client_reporting_source: {
+        Args: {
+          p_binding_id: string;
+          p_admin_id: string;
+          p_idempotency_key: string;
+          p_reason: string;
+        };
+        Returns: string;
+      };
+      abandon_client_reporting_source: {
+        Args: {
+          p_binding_id: string;
+          p_admin_id: string;
+          p_idempotency_key: string;
+          p_reason: string;
+        };
+        Returns: string;
+      };
+      upgrade_client_reporting_google_binding_to_pair: {
+        Args: {
+          p_binding_id: string;
+          p_shopify_connection_id: string;
+          p_reconnect_session_id: string;
+          p_idempotency_key: string;
+          p_admin_id: string;
+          p_reason: string;
+        };
+        Returns: string;
+      };
+      record_client_reporting_sync_success: {
+        Args: {
+          p_binding_id: string;
+          p_source_type: ClientReportingSyncSource;
+          p_success_from: string;
+          p_success_to: string;
+          p_source_currency: string;
+          p_row_count: number;
+        };
+        Returns: string;
+      };
+      record_client_google_ads_reporting_identity: {
+        Args: {
+          p_connection_id: string;
+          p_currency: string;
+          p_time_zone: string;
+          p_admin_id: string;
+          p_verified_at: string;
+        };
+        Returns: string;
+      };
+      activate_client_reporting_cutover: {
+        Args: {
+          p_client_id: string;
+          p_admin_id: string;
+          p_reason: string;
+        };
         Returns: string;
       };
       create_client_onboarding_invitation: {

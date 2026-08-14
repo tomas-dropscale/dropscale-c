@@ -27,11 +27,13 @@
  * account, so reopening the popup costs nothing; only a genuinely cold client
  * pays the round trip, which is the case that would otherwise be wrong.
  *
- * Like lib/admin/campaigns, this reads UNSCOPED and lets the admin RLS
- * policies decide. The route above it is what checks the caller is an admin.
+ * Like lib/admin/campaigns, the client/account read is UNSCOPED and lets admin
+ * RLS decide. Normalized binding authority is read separately with the
+ * service client only after the route above has checked the caller is admin.
  */
 
 import { createClient } from "@/lib/supabase/server";
+import { createServiceClient } from "@/lib/supabase/service";
 import { ACCOUNT_COLUMNS } from "@/lib/portal/data";
 import { currencyScope, displayCurrency } from "@/lib/portal/currency";
 import { ensureDailyCoverage, recomputeDailyMetrics } from "@/lib/metrics/recompute";
@@ -49,6 +51,165 @@ import {
 } from "@/lib/metrics/queries";
 import type { AdAccount } from "@/lib/supabase/types";
 import type { RangeSelection } from "@/lib/portal/range";
+import {
+  resolveReportingSources,
+  type CanonicalReportingSource,
+} from "@/lib/reporting/sources";
+
+type OverviewScope = {
+  stores: AdAccount[];
+  recomputeAccounts: AdAccount[];
+  metricIdsByStore: Map<string, string[]>;
+  allMetricIds: string[];
+  googleConnectedByStore: Map<string, boolean>;
+  service: NonNullable<ReturnType<typeof createServiceClient>>;
+};
+
+const ROLLOUT_SURFACES = new Set([
+  "legacy_only",
+  "v2_onboarding",
+  "v2_ready_for_cutover",
+  "v2_active",
+  "rollback_legacy",
+]);
+
+function projectedShopDomain(source: CanonicalReportingSource): string {
+  return source.shopify?.primaryDomain?.trim().toLowerCase() || source.shopify!.domain;
+}
+
+async function reportingScope(
+  clientId: string,
+  accounts: AdAccount[],
+): Promise<OverviewScope> {
+  const service = createServiceClient();
+  if (!service) throw new Error("The reporting service is unavailable.");
+
+  const { data: rollout, error } = await service
+    .from("client_rollout_states")
+    .select(
+      "operational_surface, reporting_cutover_at, reporting_cutover_by, reporting_cutover_reason",
+    )
+    .eq("client_id", clientId)
+    .maybeSingle();
+  if (error) throw new Error("The client reporting rollout is unavailable.");
+  const marker = rollout
+    ? [
+        rollout.reporting_cutover_at,
+        rollout.reporting_cutover_by,
+        rollout.reporting_cutover_reason,
+      ]
+    : [];
+  const markerComplete = marker.length > 0 && marker.every(Boolean);
+  if (
+    rollout &&
+    (!ROLLOUT_SURFACES.has(rollout.operational_surface) ||
+      (marker.some(Boolean) && !markerComplete))
+  ) {
+    throw new Error("The client reporting rollout is inconsistent.");
+  }
+
+  // `v2_active` existed before normalized reporting. Only the durable marker
+  // proves this client passed the exact binding/backfill cutover gate.
+  if (!rollout || rollout.operational_surface !== "v2_active" || !markerComplete) {
+    const ids = accounts.map((account) => account.id);
+    return {
+      stores: accounts,
+      recomputeAccounts: accounts,
+      metricIdsByStore: new Map(accounts.map((account) => [account.id, [account.id]])),
+      allMetricIds: [...new Set(ids)],
+      googleConnectedByStore: new Map(
+        accounts.map((account) => [account.id, account.google_ads_connected]),
+      ),
+      service,
+    };
+  }
+
+  const sources = await resolveReportingSources({
+    service,
+    clientIds: [clientId],
+    includeShopifyCredentials: false,
+  });
+  if (sources.length === 0 || sources.some((source) => source.clientId !== clientId)) {
+    throw new Error("The client reporting topology is incomplete.");
+  }
+
+  const accountById = new Map(accounts.map((account) => [account.id, account]));
+  if (
+    accountById.size !== accounts.length ||
+    sources.some((source) => !accountById.has(source.adAccountId))
+  ) {
+    throw new Error("The client reporting accounts are inconsistent.");
+  }
+
+  const anchors = sources.filter(
+    (source) =>
+      source.shopify !== null &&
+      source.group.shopifyAnchorBindingId === source.bindingId &&
+      source.group.shopifyAnchorAdAccountId === source.adAccountId,
+  );
+  if (anchors.length === 0) {
+    throw new Error("The client reporting topology has no Shopify anchor.");
+  }
+  const anchorByBindingId = new Map(anchors.map((source) => [source.bindingId, source]));
+  if (anchorByBindingId.size !== anchors.length) {
+    throw new Error("The client reporting topology repeats a Shopify anchor.");
+  }
+
+  const metricIdsByStore = new Map(
+    anchors.map((anchor) => [anchor.adAccountId, [anchor.adAccountId]]),
+  );
+  const googleConnectedByStore = new Map(
+    anchors.map((anchor) => [anchor.adAccountId, anchor.googleAds !== null]),
+  );
+  const claimedMetricIds = new Set(anchors.map((anchor) => anchor.adAccountId));
+
+  for (const source of sources) {
+    if (source.shopify || source.group.shopifyAnchorBindingId === null) continue;
+    const anchor = anchorByBindingId.get(source.group.shopifyAnchorBindingId);
+    if (
+      !anchor ||
+      source.group.shopifyAnchorAdAccountId !== anchor.adAccountId ||
+      claimedMetricIds.has(source.adAccountId)
+    ) {
+      throw new Error("The client reporting store group is inconsistent.");
+    }
+    claimedMetricIds.add(source.adAccountId);
+    metricIdsByStore.get(anchor.adAccountId)!.push(source.adAccountId);
+    if (source.googleAds) googleConnectedByStore.set(anchor.adAccountId, true);
+  }
+
+  const stores = anchors.map((anchor) => {
+    const base = accountById.get(anchor.adAccountId);
+    if (!base || !anchor.shopify) {
+      throw new Error("A Shopify anchor account is unavailable.");
+    }
+    return {
+      ...base,
+      store_name: anchor.shopify.shopifyName,
+      shopify_url: projectedShopDomain(anchor),
+      currency: base.currency,
+      shopify_connected: true,
+      google_ads_connected: googleConnectedByStore.get(anchor.adAccountId) ?? false,
+    } satisfies AdAccount;
+  });
+
+  const recomputeAccounts = sources.map((source) => {
+    const account = accountById.get(source.adAccountId);
+    if (!account) throw new Error("A bound reporting account is unavailable.");
+    return account;
+  });
+
+  return {
+    stores,
+    recomputeAccounts,
+    metricIdsByStore,
+    // Standalone Google bindings cannot be attributed to a store, but their
+    // spend is still agency spend and must remain in client totals/commission.
+    allMetricIds: recomputeAccounts.map((account) => account.id),
+    googleConnectedByStore,
+    service,
+  };
+}
 
 /** One of the client's stores, focused on ad spend and what it earns us. */
 export type AdminStoreOverview = {
@@ -173,38 +334,59 @@ export async function fetchClientOverview(
     supabase.from("ad_accounts").select(ACCOUNT_COLUMNS).eq("client_id", clientId),
   ]);
 
+  if (clientRes.error || accountsRes.error) {
+    throw new Error("The client reporting accounts could not be loaded.");
+  }
   const client = clientRes.data;
   if (!client) return null;
 
   const accounts = (accountsRes.data as AdAccount[] | null) ?? [];
-  const currencies = currencyScope(accounts);
+  const scope = await reportingScope(clientId, accounts);
+  const currencies = currencyScope(scope.recomputeAccounts);
 
   // Bring this client's rollup current before reading it — see the note at the
   // top. Never let a sync failure take the popup down: a partial view of a
   // client is far better than an error where their numbers should be.
   try {
-    await ensureDailyCoverage(accounts, range.from);
-    await recomputeDailyMetrics(accounts);
+    // A normalized store anchor is the safe public recompute scope: the
+    // runtime expands its exact Google children from binding authority.
+    await ensureDailyCoverage(scope.recomputeAccounts, range.from);
+    await recomputeDailyMetrics(scope.recomputeAccounts, {
+      client: scope.service,
+      reportingClient: scope.service,
+    });
   } catch (error) {
     console.error(`Client overview refresh failed for ${clientId}:`, error);
   }
 
   const rows = await fetchDailyMetrics(
-    accounts.map((account) => account.id),
+    scope.allMetricIds,
     range.from,
     range.to,
   );
+  const allowedMetricIds = new Set(scope.allMetricIds);
+  if (rows.some((row) => !allowedMetricIds.has(row.ad_account_id))) {
+    throw new Error("The client reporting metrics escaped their exact scope.");
+  }
 
   const byAccount = groupByAccount(rows);
   const rateById = new Map(
     accounts.map((account) => [account.id, Number(account.commission_rate)]),
   );
 
-  const stores: AdminStoreOverview[] = accounts
+  const stores: AdminStoreOverview[] = scope.stores
     .map((account) => {
-      const accountRows = byAccount.get(account.id) ?? [];
+      const metricIds = scope.metricIdsByStore.get(account.id);
+      if (!metricIds) throw new Error("A client reporting store group is missing.");
+      const accountRows = metricIds.flatMap((id) => byAccount.get(id) ?? []);
       const totals = sumMetrics(accountRows);
-      const rate = rateById.get(account.id) ?? 0;
+      const commission = metricIds.reduce((sum, id) => {
+        const physicalSpend = sumMetrics(byAccount.get(id) ?? []).adSpend;
+        return sum + (physicalSpend * (rateById.get(id) ?? 0)) / 100;
+      }, 0);
+      const rate = totals.adSpend > 0
+        ? (commission / totals.adSpend) * 100
+        : (rateById.get(account.id) ?? 0);
       const revenue = totals.attributedRevenue;
 
       return {
@@ -212,7 +394,7 @@ export async function fetchClientOverview(
         storeName: account.store_name,
         colorDot: account.color_dot,
         currency: account.currency,
-        connected: account.google_ads_connected,
+        connected: scope.googleConnectedByStore.get(account.id) ?? false,
         adSpend: totals.adSpend,
         impressions: totals.impressions,
         clicks: totals.clicks,
@@ -227,21 +409,24 @@ export async function fetchClientOverview(
         conversionValue: totals.conversionValue,
         costPerConversion: totals.costPerConversion,
         commissionRate: rate,
-        commission: (totals.adSpend * rate) / 100,
+        commission,
         revShareEnabled: account.revenue_share_enabled,
         revShare: accountRows.reduce(
           (sum, row) => sum + Number(row.revenue_share_amount),
           0,
         ),
-        days: [...accountRows]
-          .sort((a, b) => a.day.localeCompare(b.day))
-          .map((row) => ({
-            day: row.day,
-            adSpend: Number(row.ad_spend),
-            // Null attribution plots as 0 rather than breaking the line; the
-            // headline above the chart is what carries the "—" when unknown.
-            revenue: Number(row.attributed_revenue ?? 0),
-          })),
+        days: [...groupByDay(accountRows)]
+          .map(([day, dayRows]) => {
+            const dayTotals = sumMetrics(dayRows);
+            return {
+              day,
+              adSpend: dayTotals.adSpend,
+              // Null attribution plots as 0 rather than breaking the line; the
+              // headline above the chart is what carries the "—" when unknown.
+              revenue: dayTotals.attributedRevenue ?? 0,
+            };
+          })
+          .sort((a, b) => a.day.localeCompare(b.day)),
       };
     })
     // Biggest spender first: an agency reads this list looking for where the
@@ -249,7 +434,10 @@ export async function fetchClientOverview(
     .sort((a, b) => b.adSpend - a.adSpend);
 
   const totals = sumMetrics(rows);
-  const commission = stores.reduce((sum, store) => sum + store.commission, 0);
+  const commission = scope.allMetricIds.reduce((sum, id) => {
+    const physicalSpend = sumMetrics(byAccount.get(id) ?? []).adSpend;
+    return sum + (physicalSpend * (rateById.get(id) ?? 0)) / 100;
+  }, 0);
   const revShare = stores.reduce((sum, store) => sum + store.revShare, 0);
 
   const revenue = totals.attributedRevenue;

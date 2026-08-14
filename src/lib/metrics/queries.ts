@@ -257,6 +257,21 @@ export function groupByAccount(rows: DailyMetricRow[]): Map<string, DailyMetricR
   return byAccount;
 }
 
+/** Projects physical V2 metric rows back onto their public store anchors. */
+export function rekeyDailyMetricRows(
+  rows: readonly DailyMetricRow[],
+  metricIdsByAccount: ReadonlyMap<string, readonly string[]>,
+): DailyMetricRow[] {
+  const accountByMetricId = new Map<string, string>();
+  for (const [accountId, metricIds] of metricIdsByAccount) {
+    for (const metricId of metricIds) accountByMetricId.set(metricId, accountId);
+  }
+  return rows.map((row) => ({
+    ...row,
+    ad_account_id: accountByMetricId.get(row.ad_account_id) ?? row.ad_account_id,
+  }));
+}
+
 /** Rows grouped per day across accounts — the shape charts consume. */
 export function groupByDay(rows: DailyMetricRow[]): Map<string, DailyMetricRow[]> {
   const byDay = new Map<string, DailyMetricRow[]>();

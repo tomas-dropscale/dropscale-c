@@ -14,7 +14,7 @@ import {
   Wallet,
 } from "lucide-react";
 
-import { fetchAccounts } from "@/lib/portal/data";
+import { fetchAccounts, reportingMetricScope } from "@/lib/portal/data";
 import { createClient } from "@/lib/supabase/server";
 import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
 import { GettingStartedGuide } from "@/components/portal/getting-started-guide";
@@ -66,11 +66,6 @@ export default async function DashboardPage({
     legacyAssetActionsBlocked(),
   ]);
 
-  // Coverage first so the recompute's freshness check sees its rows and
-  // skips the overlap; both are per-account no-ops on a warm cache.
-  await ensureDailyCoverage(accounts, range.from);
-  await recomputeDailyMetrics(accounts);
-
   const selectedStore =
     typeof params.store === "string" && accounts.some((account) => account.id === params.store)
       ? params.store
@@ -79,9 +74,19 @@ export default async function DashboardPage({
     ? accounts.filter((account) => account.id === selectedStore)
     : accounts;
 
+  const metricsScope = await reportingMetricScope(visible, {
+    includeUnallocated: selectedStore === null,
+  });
+  const physicalAccounts = [...metricsScope.metricAccountsById.values()];
+  // Coverage first so recompute sees the rows it just filled and skips the
+  // overlap. The exact physical scope matters: all-store views also refresh
+  // standalone Google spend, while a store filter never pulls it in.
+  await ensureDailyCoverage(physicalAccounts, range.from);
+  await recomputeDailyMetrics(physicalAccounts);
+
   const [rows, referralRateSchedule] = await Promise.all([
     fetchDailyMetrics(
-      visible.map((account) => account.id),
+      metricsScope.metricAccountIds,
       range.from,
       range.to,
     ),
@@ -89,12 +94,23 @@ export default async function DashboardPage({
       ? fetchManualReferralRateSchedule(accounts[0].client_id)
       : Promise.resolve([]),
   ]);
+  const unallocatedIds = new Set(metricsScope.unallocatedGoogleAccountIds);
+  const unallocatedSpend = sumMetrics(
+    rows.filter((row) => unallocatedIds.has(row.ad_account_id)),
+  ).adSpend;
+  const unallocatedAccountCount = metricsScope.unallocatedGoogleAccountIds.length;
+  const unallocatedAccountsLabel = fmt(
+    unallocatedAccountCount === 1
+      ? d.portal.unallocatedGoogleAccount
+      : d.portal.unallocatedGoogleAccounts,
+    { count: unallocatedAccountCount },
+  );
 
   const totals = sumMetrics(rows);
   const { updatedAt } = freshness(rows);
   // Was `visible[0].currency`, which printed one symbol against a sum of two
   // currencies. The scope says whether that sum means anything.
-  const scope = currencyScope(visible);
+  const scope = currencyScope(physicalAccounts);
   const currency = displayCurrency(scope);
 
   // Setup state drives the first-run guide. It does NOT vanish after the first
@@ -148,10 +164,9 @@ export default async function DashboardPage({
   // accounts use the sealed history. Legacy/custom contracts keep their own
   // current cache, and every portal fee display is explicitly an estimate;
   // only Payments/admin billing applies exact start/end counters and rounding.
-  const accountById = new Map(visible.map((account) => [account.id, account]));
   const fee = rows.reduce(
     (sum, row) => {
-      const account = accountById.get(row.ad_account_id);
+      const account = metricsScope.metricAccountsById.get(row.ad_account_id);
       const standardManualContract =
         Number(account?.list_commission_rate) === 10 && !account?.revenue_share_enabled;
       const rate = standardManualContract
@@ -200,7 +215,12 @@ export default async function DashboardPage({
       }
       actions={
         <>
-          {accounts.length > 0 && <RefreshButton accountIds={visible.map((account) => account.id)} />}
+          {accounts.length > 0 && (
+            <RefreshButton
+              accountIds={visible.map((account) => account.id)}
+              includeUnallocated={selectedStore === null}
+            />
+          )}
           <StoreSelector accounts={accounts} current={selectedStore} />
           <RangePicker
             current={range}
@@ -288,6 +308,20 @@ export default async function DashboardPage({
           {/* Above the money, not below it: by the time someone has read a
               total in the wrong currency, the warning has come too late. */}
           <MixedCurrencyNotice scope={scope} />
+
+          {unallocatedAccountCount > 0 && (
+            <div className="flex items-start gap-3 rounded-[var(--radius-card)] border border-[var(--accent-gold)]/25 bg-[var(--accent-gold)]/8 px-4 py-3">
+              <Info className="mt-0.5 size-4 shrink-0 text-[var(--accent-gold)]" aria-hidden />
+              <p className="text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
+                <span className="font-semibold text-[var(--text-primary)]">
+                  {d.portal.unallocatedGoogleSpend}: {money(unallocatedSpend, currency)}
+                </span>{" "}
+                {fmt(d.portal.unallocatedGoogleDashboardWarning, {
+                  accounts: unallocatedAccountsLabel,
+                })}
+              </p>
+            </div>
+          )}
 
           {/* Hero — the client's money, RevFlow-style: rev/profit lead. */}
           <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">

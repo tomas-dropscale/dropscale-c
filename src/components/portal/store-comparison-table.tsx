@@ -10,22 +10,23 @@ import { useI18n } from "@/lib/i18n/provider";
 import { cn } from "@/lib/utils";
 
 export type StoreComparisonRow = {
-  accountId: string;
+  /** Null is the explicit client-level Google spend bucket, never a fake store. */
+  accountId: string | null;
   storeName: string;
   colorDot: string;
   currency: string;
   spend: number;
   share: number; // 0..1 of total spend
-  roas: number;
+  roas: number | null;
   /**
    * The STORE's conversions — real orders in the shop, from Shopify. Not
    * Google's attributed conversions: the shop sells through channels Google
    * never sees, so the attributed figure understates the store and this table
    * is meant to show the client what actually happened in each of theirs.
    */
-  conversions: number;
+  conversions: number | null;
   /** Ad spend per store order (spend ÷ the conversions above). */
-  cpa: number;
+  cpa: number | null;
   ctr: number;
   impressions: number;
   fee: number;
@@ -118,21 +119,32 @@ export function StoreComparisonTable({ rows }: { rows: StoreComparisonRow[] }) {
           <tbody>
             {sorted.map((row) => (
               <tr
-                key={row.accountId}
+                key={row.accountId ?? "unallocated-google-spend"}
                 className="transition-smooth border-b border-[var(--border-subtle)] last:border-b-0 hover:bg-[var(--bg-panel-hover)]"
               >
                 <td className="px-4 py-3">
-                  <Link
-                    href={`/dashboard/${row.accountId}`}
-                    className="flex items-center gap-2.5 font-medium text-[var(--text-primary)]"
-                  >
-                    <span
-                      className="size-2 shrink-0 rounded-full"
-                      style={{ backgroundColor: row.colorDot }}
-                      aria-hidden
-                    />
-                    {row.storeName}
-                  </Link>
+                  {row.accountId ? (
+                    <Link
+                      href={`/dashboard/${row.accountId}`}
+                      className="flex items-center gap-2.5 font-medium text-[var(--text-primary)]"
+                    >
+                      <span
+                        className="size-2 shrink-0 rounded-full"
+                        style={{ backgroundColor: row.colorDot }}
+                        aria-hidden
+                      />
+                      {row.storeName}
+                    </Link>
+                  ) : (
+                    <span className="flex items-center gap-2.5 font-medium text-[var(--text-primary)]">
+                      <span
+                        className="size-2 shrink-0 rounded-full"
+                        style={{ backgroundColor: row.colorDot }}
+                        aria-hidden
+                      />
+                      {row.storeName}
+                    </span>
+                  )}
                 </td>
                 <td className="px-4 py-3 text-right whitespace-nowrap text-[var(--text-primary)]">
                   {money(row.spend, row.currency)}
@@ -151,13 +163,13 @@ export function StoreComparisonTable({ rows }: { rows: StoreComparisonRow[] }) {
                   </div>
                 </td>
                 <td className="px-4 py-3 text-right text-[var(--text-primary)]">
-                  {multiplier(row.roas)}
+                  {row.roas == null ? "—" : multiplier(row.roas)}
                 </td>
                 <td className="px-4 py-3 text-right text-[var(--text-secondary)]">
-                  {row.conversions}
+                  {row.conversions ?? "—"}
                 </td>
                 <td className="px-4 py-3 text-right whitespace-nowrap text-[var(--text-secondary)]">
-                  {money(row.cpa, row.currency)}
+                  {row.cpa == null ? "—" : money(row.cpa, row.currency)}
                 </td>
                 <td className="px-4 py-3 text-right text-[var(--text-secondary)]">
                   {percent(row.ctr)}

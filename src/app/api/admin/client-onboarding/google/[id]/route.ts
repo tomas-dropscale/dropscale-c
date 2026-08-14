@@ -56,6 +56,25 @@ export async function PATCH(request: NextRequest, { params }: Context) {
     const testedAt = new Date().toISOString();
     try {
       const health = await checkGoogleAdsAccountHealth(connection.windsor_account_id);
+      if (health.ok && health.account.currency && health.account.timeZone) {
+        const { data: recordedIdentity, error: identityError } = await service.rpc(
+          "record_client_google_ads_reporting_identity",
+          {
+            p_connection_id: id,
+            p_currency: health.account.currency,
+            p_time_zone: health.account.timeZone,
+            p_admin_id: admin.id,
+            p_verified_at: health.checkedAt,
+          },
+        );
+        if (identityError || recordedIdentity !== id) {
+          throw new ClientOnboardingError(
+            "database_error",
+            "The Google Ads reporting identity could not be recorded.",
+            500,
+          );
+        }
+      }
       const { error: recordError } = await service.rpc("record_client_google_ads_health", {
         p_connection_id: id,
         p_admin_id: admin.id,

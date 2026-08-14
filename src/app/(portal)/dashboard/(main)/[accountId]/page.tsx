@@ -3,12 +3,13 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { FileBarChart, Hourglass } from "lucide-react";
 
-import { fetchAccount, fetchCampaigns } from "@/lib/portal/data";
+import { fetchAccount, fetchCampaigns, reportingMetricAccountIds } from "@/lib/portal/data";
 import { ensureDailyCoverage, recomputeDailyMetrics } from "@/lib/metrics/recompute";
 import {
   fetchDailyMetrics,
   freshness,
   metricSetFromRows,
+  rekeyDailyMetricRows,
   sumMetrics,
 } from "@/lib/metrics/queries";
 import { parseRange } from "@/lib/portal/range";
@@ -52,12 +53,17 @@ export default async function AccountPage({
   await ensureDailyCoverage([account], range.from);
   await recomputeDailyMetrics([account]);
 
-  const [rows, campaigns, referralRateSchedule, { d }] = await Promise.all([
-    fetchDailyMetrics([account.id], range.from, range.to),
+  const metricAccountIds = await reportingMetricAccountIds(account.id);
+  const [physicalRows, campaigns, referralRateSchedule, { d }] = await Promise.all([
+    fetchDailyMetrics(metricAccountIds, range.from, range.to),
     fetchCampaigns(account, range),
     fetchManualReferralRateSchedule(account.client_id),
     getServerDictionary(),
   ]);
+  const rows = rekeyDailyMetricRows(
+    physicalRows,
+    new Map([[account.id, metricAccountIds]]),
+  );
 
   const referralRateForDay = (day: string) =>
     Number(account.list_commission_rate) === 10 && !account.revenue_share_enabled

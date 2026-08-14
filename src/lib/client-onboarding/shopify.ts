@@ -374,7 +374,7 @@ export async function exchangeReportingClientCredentials({
   return payload.access_token;
 }
 
-async function reportingGraphql<T>({
+export async function reportingShopifyGraphql<T>({
   shopDomain,
   accessToken,
   query,
@@ -435,7 +435,7 @@ export async function verifyReportingShop({
   accessToken: string;
 }): Promise<VerifiedReportingShop> {
   const domain = normalizeReportingShopDomain(shopDomain);
-  const data = await reportingGraphql<VerifyResponse>({
+  const data = await reportingShopifyGraphql<VerifyResponse>({
     shopDomain: domain,
     accessToken,
     query: VERIFY_QUERY,
@@ -518,7 +518,7 @@ async function runProbe({
   isInvalid?: (data: unknown) => boolean;
 }): Promise<ReportingCapabilityResult> {
   try {
-    const data = await reportingGraphql<unknown>({
+    const data = await reportingShopifyGraphql<unknown>({
       shopDomain,
       accessToken,
       query,

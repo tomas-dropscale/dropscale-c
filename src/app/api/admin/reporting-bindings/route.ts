@@ -4,18 +4,18 @@ import {
   clientOnboardingErrorResponse,
   clientOnboardingResponse,
 } from "@/lib/client-onboarding/http";
-import { commitClientReportingBindingRequest } from "@/lib/client-onboarding/reporting-bindings";
+import { executeClientReportingCutoverRequest } from "@/lib/client-onboarding/reporting-cutover";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
   try {
-    const result = await commitClientReportingBindingRequest(request);
+    const result = await executeClientReportingCutoverRequest(request);
     return clientOnboardingResponse({ ok: true, ...result });
   } catch (error) {
     return clientOnboardingErrorResponse(
       error,
-      "The reporting binding could not be committed.",
+      "The reporting cutover action could not be completed.",
     );
   }
 }

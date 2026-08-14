@@ -5,9 +5,11 @@ import { ClientsManager } from "@/components/admin/clients-manager";
 import { ReportingBindingsQueue } from "@/components/admin/reporting-bindings-queue";
 import { PageContainer } from "@/components/ui/page-container";
 import { fetchAdminBillingDashboard } from "@/lib/billing/invoices";
-import { listClientReportingBindingQueue } from "@/lib/client-onboarding/reporting-bindings";
+import { listClientReportingCutoverQueue } from "@/lib/client-onboarding/reporting-cutover";
+import { requireClientOnboardingAdmin } from "@/lib/client-onboarding/sessions";
 import { getServerDictionary } from "@/lib/i18n/server";
 import { createClient } from "@/lib/supabase/server";
+import { createServiceClient } from "@/lib/supabase/service";
 import type {
   AccountRequest,
   AdAccount,
@@ -18,15 +20,35 @@ import type {
 export const metadata: Metadata = { title: "Billing" };
 
 async function loadFinancialOperations() {
+  // Bindings are service-only evidence. Re-authorise the interactive admin
+  // before constructing the service client, then select only lifecycle IDs.
+  await requireClientOnboardingAdmin();
   const supabase = await createClient();
-  const [clientsRes, profilesRes, accountsRes, billingStartsRes, billingEndsRes, requestsRes] =
-    await Promise.all([
+  const service = createServiceClient();
+  const reservedBindingsPromise = service
+    ? service
+        .from("client_reporting_bindings")
+        .select("ad_account_id, status")
+        .in("status", ["active", "staged"])
+    : Promise.resolve({
+        data: null,
+        error: new Error("Reporting binding service is unavailable."),
+      });
+  const [
+    clientsRes,
+    profilesRes,
+    accountsRes,
+    billingStartsRes,
+    billingEndsRes,
+    requestsRes,
+    reservedBindingsRes,
+  ] = await Promise.all([
       supabase.from("portal_clients").select("id, full_name"),
       supabase.from("profiles").select("id, role"),
       supabase
         .from("ad_accounts")
         .select(
-          "id, client_id, store_name, google_ads_customer_id, status, currency, breakeven_roas, lifetime_ads_budget_usd, shopify_url, shopify_connected, shopify_client_id, shopify_scopes, color_dot, created_at, google_ads_connected_email, google_ads_connected, commission_rate, list_commission_rate, shopify_token_last4, shopify_connected_at, default_product_cost_pct, payment_fee_pct, payment_fee_fixed, shipping_cost_per_order, revenue_share_enabled",
+          "id, client_id, store_name, google_ads_customer_id, status, reporting_role, currency, breakeven_roas, lifetime_ads_budget_usd, shopify_url, shopify_connected, shopify_client_id, shopify_scopes, color_dot, created_at, google_ads_connected_email, google_ads_connected, commission_rate, list_commission_rate, shopify_token_last4, shopify_connected_at, default_product_cost_pct, payment_fee_pct, payment_fee_fixed, shipping_cost_per_order, revenue_share_enabled",
         )
         .order("created_at", { ascending: true }),
       supabase
@@ -46,6 +68,7 @@ async function loadFinancialOperations() {
         )
         .eq("status", "pending")
         .order("created_at", { ascending: true }),
+      reservedBindingsPromise,
     ]);
 
   // Do not present a partial financial queue as complete. The account and
@@ -83,8 +106,14 @@ async function loadFinancialOperations() {
       end,
     ]),
   );
+  const reservedNormalizedAccountIds = new Set(
+    (reservedBindingsRes.data ?? []).map((binding) => binding.ad_account_id),
+  );
   const billingStartAuditFailed = Boolean(
-    accountsRes.error || profilesRes.error || billingStartsRes.error,
+    accountsRes.error ||
+      profilesRes.error ||
+      billingStartsRes.error ||
+      reservedBindingsRes.error,
   );
   const billingBoundaryAuditFailed = Boolean(
     accountsRes.error || profilesRes.error || billingStartsRes.error || billingEndsRes.error,
@@ -94,7 +123,16 @@ async function loadFinancialOperations() {
     pendingAccounts: billingStartAuditFailed
       ? []
       : allAccounts
-          .filter((account) => account.status === "pending")
+          .filter(
+            (account) =>
+              account.status === "pending" &&
+              !(
+                account.reporting_role === "shopify_anchor" &&
+                account.google_ads_customer_id === null
+              ) &&
+              (account.reporting_role === "legacy_hybrid" ||
+                reservedNormalizedAccountIds.has(account.id)),
+          )
           .map((account) => ({
             ...account,
             owner: nameById.get(account.client_id) ?? "Unknown client",
@@ -147,10 +185,10 @@ export default async function BillingPage({
   searchParams: Promise<{ week?: string }>;
 }) {
   const [{ week }, { d }] = await Promise.all([searchParams, getServerDictionary()]);
-  const [dashboard, operations, reportingBindings] = await Promise.all([
+  const [dashboard, operations, reportingCutover] = await Promise.all([
     fetchAdminBillingDashboard(week),
     loadFinancialOperations(),
-    listClientReportingBindingQueue(),
+    listClientReportingCutoverQueue(),
   ]);
 
   return (
@@ -171,7 +209,7 @@ export default async function BillingPage({
             </p>
           </div>
           <div className="mb-8">
-            <ReportingBindingsQueue queue={reportingBindings} />
+            <ReportingBindingsQueue queue={reportingCutover} />
           </div>
           <ClientsManager
             clients={[]}

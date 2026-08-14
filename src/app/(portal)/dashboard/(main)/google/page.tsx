@@ -1,11 +1,10 @@
 import { UpdatedAt } from "@/components/portal/updated-at";
 import type { Metadata } from "next";
-import { PackageOpen } from "lucide-react";
+import { Info, PackageOpen } from "lucide-react";
 
-import { fetchAccounts } from "@/lib/portal/data";
+import { fetchAccounts, reportingMetricScope } from "@/lib/portal/data";
 import { ensureDailyCoverage, recomputeDailyMetrics } from "@/lib/metrics/recompute";
 import {
-  combineMetricSets,
   fetchDailyMetrics,
   freshness,
   groupByAccount,
@@ -45,12 +44,14 @@ export default async function GoogleAllStoresPage({
   const range = parseRange(await searchParams);
   const [accounts, { d }] = await Promise.all([fetchAccounts(), getServerDictionary()]);
 
-  await ensureDailyCoverage(accounts, range.from);
-  await recomputeDailyMetrics(accounts);
+  const metricsScope = await reportingMetricScope(accounts, { includeUnallocated: true });
+  const physicalAccounts = [...metricsScope.metricAccountsById.values()];
+  await ensureDailyCoverage(physicalAccounts, range.from);
+  await recomputeDailyMetrics(physicalAccounts);
 
-  const [rows, referralRateSchedule] = await Promise.all([
+  const [physicalRows, referralRateSchedule] = await Promise.all([
     fetchDailyMetrics(
-      accounts.map((account) => account.id),
+      metricsScope.metricAccountIds,
       range.from,
       range.to,
     ),
@@ -58,25 +59,27 @@ export default async function GoogleAllStoresPage({
       ? fetchManualReferralRateSchedule(accounts[0].client_id)
       : Promise.resolve([]),
   ]);
-  const byAccount = groupByAccount(rows);
-  const { updatedAt } = freshness(rows);
+  const byPhysicalAccount = groupByAccount(physicalRows);
+  const { updatedAt } = freshness(physicalRows);
   const referralRateForDay = (day: string) =>
     manualReferralRateOnDay(day, referralRateSchedule);
+  const feeRate = (accountId: string, day: string) => {
+    const account = metricsScope.metricAccountsById.get(accountId);
+    return Number(account?.list_commission_rate) === 10 && !account?.revenue_share_enabled
+      ? referralRateForDay(day)
+      : Number(account?.commission_rate ?? 0);
+  };
   // Totals here span every store, so they are only a real figure when the
   // stores share a currency.
-  const scope = currencyScope(accounts);
+  const scope = currencyScope(physicalAccounts);
 
   const perAccount = accounts.map((account) => {
-    const accountRows = byAccount.get(account.id) ?? [];
-    const standardManualContract =
-      Number(account.list_commission_rate) === 10 && !account.revenue_share_enabled;
+    const accountRows = (metricsScope.metricIdsByStore.get(account.id) ?? []).flatMap(
+      (id) => byPhysicalAccount.get(id) ?? [],
+    );
     return {
       account,
-      metrics: metricSetFromRows(accountRows, (row) =>
-        standardManualContract
-          ? referralRateForDay(row.day)
-          : Number(account.commission_rate),
-      ),
+      metrics: metricSetFromRows(accountRows, (row) => feeRate(row.ad_account_id, row.day)),
       // Store-wide totals from Shopify, alongside the Google-attributed ones.
       // The per-store table below reports the STORE's conversions, not
       // Google's: the shop sells through channels Google never sees, so the
@@ -84,10 +87,12 @@ export default async function GoogleAllStoresPage({
       store: sumMetrics(accountRows),
     };
   });
-  const totals = combineMetricSets(perAccount.map((entry) => entry.metrics));
+  const totals = metricSetFromRows(physicalRows, (row) =>
+    feeRate(row.ad_account_id, row.day),
+  );
   // Across every store: Shopify revenue over ad spend. One number, used by the
   // grid and the picker's footer, so the page can't contradict itself.
-  const allStores = sumMetrics(rows);
+  const allStores = sumMetrics(physicalRows);
   const storeRoas = allStores.mer;
   const storeConversions = allStores.attributedOrders;
   const storeConversionValue = allStores.attributedRevenue;
@@ -95,16 +100,7 @@ export default async function GoogleAllStoresPage({
   // One percentage is only honest if the selected historical rows all used
   // the same Monday-effective manual term.
   const rates = new Set(
-    accounts.flatMap((account) => {
-      const accountRows = byAccount.get(account.id) ?? [];
-      const standardManualContract =
-        Number(account.list_commission_rate) === 10 && !account.revenue_share_enabled;
-      return accountRows.map((row) =>
-        standardManualContract
-          ? referralRateForDay(row.day)
-          : Number(account.commission_rate),
-      );
-    }),
+    physicalRows.map((row) => feeRate(row.ad_account_id, row.day)),
   );
   const uniformFeeRate = rates.size === 1 ? [...rates][0] : null;
 
@@ -128,6 +124,34 @@ export default async function GoogleAllStoresPage({
     impressions: metrics.impressions,
     fee: metrics.fee,
   }));
+  const unallocatedIds = new Set(metricsScope.unallocatedGoogleAccountIds);
+  const unallocatedRows = physicalRows.filter((row) => unallocatedIds.has(row.ad_account_id));
+  const unallocatedMetrics = metricSetFromRows(unallocatedRows, (row) =>
+    feeRate(row.ad_account_id, row.day),
+  );
+  if (metricsScope.unallocatedGoogleAccountIds.length > 0) {
+    comparisonRows.push({
+      accountId: null,
+      storeName: d.portal.unallocatedGoogleSpend,
+      colorDot: "#d8a85b",
+      currency: displayCurrency(
+        currencyScope(
+          metricsScope.unallocatedGoogleAccountIds.flatMap((id) => {
+            const account = metricsScope.metricAccountsById.get(id);
+            return account ? [account] : [];
+          }),
+        ),
+      ),
+      spend: unallocatedMetrics.spend,
+      share: totals.spend > 0 ? unallocatedMetrics.spend / totals.spend : 0,
+      roas: null,
+      conversions: null,
+      cpa: null,
+      ctr: unallocatedMetrics.ctr,
+      impressions: unallocatedMetrics.impressions,
+      fee: unallocatedMetrics.fee,
+    });
+  }
 
   return (
     <PageContainer
@@ -158,6 +182,22 @@ export default async function GoogleAllStoresPage({
       ) : (
         <div className="space-y-6">
           <MixedCurrencyNotice scope={scope} />
+          {metricsScope.unallocatedGoogleAccountIds.length > 0 && (
+            <div className="flex items-start gap-3 rounded-[var(--radius-card)] border border-[var(--accent-gold)]/25 bg-[var(--accent-gold)]/8 px-4 py-3">
+              <Info className="mt-0.5 size-4 shrink-0 text-[var(--accent-gold)]" aria-hidden />
+              <p className="text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
+                <span className="font-semibold text-[var(--text-primary)]">
+                  {fmt(
+                    metricsScope.unallocatedGoogleAccountIds.length === 1
+                      ? d.portal.unallocatedGoogleTableWarningOne
+                      : d.portal.unallocatedGoogleTableWarningMany,
+                    { count: metricsScope.unallocatedGoogleAccountIds.length },
+                  )}
+                </span>{" "}
+                {d.portal.unallocatedGoogleTableBody}
+              </p>
+            </div>
+          )}
           <MetricsGrid
             d={d}
             metrics={totals}

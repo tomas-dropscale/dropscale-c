@@ -331,6 +331,19 @@ export const en = {
     financeGroup: "Finance",
     noData: "No data for this period yet",
     noDataHelp: "Numbers appear once your Google Ads or Shopify connection syncs.",
+    unallocatedGoogleSpend: "Unallocated Google spend",
+    unallocatedGoogleAccount: "{count} Google Ads account",
+    unallocatedGoogleAccounts: "{count} Google Ads accounts",
+    unallocatedGoogleDashboardWarning:
+      "from {accounts} is included in these client totals and profit, but is not attributed to any individual store.",
+    unallocatedGoogleTableWarningOne:
+      "{count} Google Ads account is not mapped to a store.",
+    unallocatedGoogleTableWarningMany:
+      "{count} Google Ads accounts are not mapped to a store.",
+    unallocatedGoogleTableBody:
+      "Their spend, Google conversions and estimated fee are included in the client totals and in the separate row below. Store ROAS and Shopify conversions are intentionally left blank.",
+    unallocatedGooglePnlWarning:
+      "It is included in this all-store P&L and its agency fee, but never attributed to an individual store. Select a store to exclude it.",
     roasTotal: "Total ROAS",
     allStoresOption: "All stores",
     connections: "Shopify",
@@ -1575,6 +1588,19 @@ export const pt: Dictionary = {
     financeGroup: "Finanças",
     noData: "Ainda não há dados para este período",
     noDataHelp: "Os números aparecem assim que a ligação Google Ads ou Shopify sincronizar.",
+    unallocatedGoogleSpend: "Investimento Google não alocado",
+    unallocatedGoogleAccount: "{count} conta Google Ads",
+    unallocatedGoogleAccounts: "{count} contas Google Ads",
+    unallocatedGoogleDashboardWarning:
+      "de {accounts} está incluído nestes totais do cliente e no lucro, mas não é atribuído a nenhuma loja individual.",
+    unallocatedGoogleTableWarningOne:
+      "{count} conta Google Ads não está associada a uma loja.",
+    unallocatedGoogleTableWarningMany:
+      "{count} contas Google Ads não estão associadas a uma loja.",
+    unallocatedGoogleTableBody:
+      "O investimento, as conversões Google e a comissão estimada estão incluídos nos totais do cliente e na linha separada abaixo. O ROAS da loja e as conversões Shopify ficam intencionalmente em branco.",
+    unallocatedGooglePnlWarning:
+      "Está incluído neste P&L de todas as lojas, juntamente com a respetiva comissão da agência, mas nunca é atribuído a uma loja individual. Seleciona uma loja para o excluir.",
     roasTotal: "ROAS total",
     allStoresOption: "Todas as lojas",
     connections: "Shopify",
@@ -2803,6 +2829,19 @@ export const ptBR: Dictionary = {
     financeGroup: "Finanças",
     noData: "Ainda não há dados para este período",
     noDataHelp: "Os números aparecem assim que a conexão Google Ads ou Shopify sincronizar.",
+    unallocatedGoogleSpend: "Investimento Google não alocado",
+    unallocatedGoogleAccount: "{count} conta do Google Ads",
+    unallocatedGoogleAccounts: "{count} contas do Google Ads",
+    unallocatedGoogleDashboardWarning:
+      "de {accounts} está incluído nestes totais do cliente e no lucro, mas não é atribuído a nenhuma loja individual.",
+    unallocatedGoogleTableWarningOne:
+      "{count} conta do Google Ads não está associada a uma loja.",
+    unallocatedGoogleTableWarningMany:
+      "{count} contas do Google Ads não estão associadas a uma loja.",
+    unallocatedGoogleTableBody:
+      "O investimento, as conversões do Google e a comissão estimada estão incluídos nos totais do cliente e na linha separada abaixo. O ROAS da loja e as conversões do Shopify ficam intencionalmente em branco.",
+    unallocatedGooglePnlWarning:
+      "Está incluído neste P&L de todas as lojas, junto com a respectiva comissão da agência, mas nunca é atribuído a uma loja individual. Selecione uma loja para excluí-lo.",
     roasTotal: "ROAS total",
     allStoresOption: "Todas as lojas",
     connections: "Shopify",
@@ -4028,6 +4067,19 @@ export const es: Dictionary = {
     financeGroup: "Finanzas",
     noData: "Aún no hay datos para este período",
     noDataHelp: "Los números aparecen cuando la conexión de Google Ads o Shopify sincronice.",
+    unallocatedGoogleSpend: "Inversión de Google no asignada",
+    unallocatedGoogleAccount: "{count} cuenta de Google Ads",
+    unallocatedGoogleAccounts: "{count} cuentas de Google Ads",
+    unallocatedGoogleDashboardWarning:
+      "de {accounts} se incluye en estos totales del cliente y en el beneficio, pero no se atribuye a ninguna tienda individual.",
+    unallocatedGoogleTableWarningOne:
+      "{count} cuenta de Google Ads no está asociada a una tienda.",
+    unallocatedGoogleTableWarningMany:
+      "{count} cuentas de Google Ads no están asociadas a una tienda.",
+    unallocatedGoogleTableBody:
+      "La inversión, las conversiones de Google y la comisión estimada se incluyen en los totales del cliente y en la fila separada inferior. El ROAS de la tienda y las conversiones de Shopify se dejan en blanco intencionadamente.",
+    unallocatedGooglePnlWarning:
+      "Se incluye en este P&L de todas las tiendas junto con su comisión de agencia, pero nunca se atribuye a una tienda individual. Selecciona una tienda para excluirla.",
     roasTotal: "ROAS total",
     allStoresOption: "Todas las tiendas",
     connections: "Shopify",
@@ -5256,6 +5308,19 @@ export const fr: Dictionary = {
     financeGroup: "Finances",
     noData: "Pas encore de données pour cette période",
     noDataHelp: "Les chiffres apparaissent dès que la connexion Google Ads ou Shopify se synchronise.",
+    unallocatedGoogleSpend: "Dépenses Google non affectées",
+    unallocatedGoogleAccount: "{count} compte Google Ads",
+    unallocatedGoogleAccounts: "{count} comptes Google Ads",
+    unallocatedGoogleDashboardWarning:
+      "provenant de {accounts} est inclus dans les totaux et le bénéfice du client, mais n’est attribué à aucune boutique individuelle.",
+    unallocatedGoogleTableWarningOne:
+      "{count} compte Google Ads n’est associé à aucune boutique.",
+    unallocatedGoogleTableWarningMany:
+      "{count} comptes Google Ads ne sont associés à aucune boutique.",
+    unallocatedGoogleTableBody:
+      "Leurs dépenses, les conversions Google et les frais estimés sont inclus dans les totaux du client et dans la ligne séparée ci-dessous. Le ROAS de la boutique et les conversions Shopify restent volontairement vides.",
+    unallocatedGooglePnlWarning:
+      "Elles sont incluses dans ce P&L toutes boutiques avec les frais d’agence correspondants, mais ne sont jamais attribuées à une boutique individuelle. Sélectionnez une boutique pour les exclure.",
     roasTotal: "ROAS total",
     allStoresOption: "Toutes les boutiques",
     connections: "Shopify",

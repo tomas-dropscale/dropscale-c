@@ -1,16 +1,18 @@
 import type { Metadata } from "next";
+import { Info } from "lucide-react";
 
-import { fetchAccounts } from "@/lib/portal/data";
+import { fetchAccounts, reportingMetricScope } from "@/lib/portal/data";
 import { PnlSheetView } from "@/components/portal/pnl-sheet";
 import { StoreSelector } from "@/components/portal/store-selector";
 import { PageContainer } from "@/components/ui/page-container";
 import { ensureDailyCoverage, recomputeDailyMetrics } from "@/lib/metrics/recompute";
-import { fetchDailyMetrics } from "@/lib/metrics/queries";
+import { fetchDailyMetrics, sumMetrics } from "@/lib/metrics/queries";
 import { buildPnlSheet, monthDays } from "@/lib/portal/pnl";
 import { fetchManualReferralRateSchedule } from "@/lib/billing/referral-rate-schedule";
 import { manualReferralRateOnDay } from "@/lib/billing/referrals";
 import { currencyScope, displayCurrency } from "@/lib/portal/currency";
 import { MixedCurrencyNotice } from "@/components/portal/mixed-currency-notice";
+import { money } from "@/lib/format";
 import { intlLocale } from "@/lib/i18n";
 import { getServerDictionary } from "@/lib/i18n/server";
 
@@ -49,21 +51,24 @@ export default async function PnlPage({
   // of the whole business.
   const selected = accounts.find((account) => account.id === params.store) ?? null;
   const scope = selected ? [selected] : accounts;
-  // Only the stores this sheet actually covers — picking one store makes the
-  // figures single-currency again even when the account as a whole is mixed.
-  const currencies = currencyScope(scope);
-
   const days = monthDays(year, month);
   const from = days[0];
   const to = days[days.length - 1];
 
   // Older months need the backfill; the current one needs the rollup current.
-  await ensureDailyCoverage(scope, from);
-  await recomputeDailyMetrics(scope);
+  const metricsScope = await reportingMetricScope(scope, {
+    includeUnallocated: selected === null,
+  });
+  const physicalAccounts = [...metricsScope.metricAccountsById.values()];
+  await ensureDailyCoverage(physicalAccounts, from);
+  await recomputeDailyMetrics(physicalAccounts);
 
+  // Only the physical sources this sheet covers. An all-store sheet includes
+  // the explicit unallocated spend bucket; a store filter never does.
+  const currencies = currencyScope(physicalAccounts);
   const [rows, referralRateSchedule] = await Promise.all([
     fetchDailyMetrics(
-      scope.map((account) => account.id),
+      metricsScope.metricAccountIds,
       from,
       to,
     ),
@@ -71,12 +76,16 @@ export default async function PnlPage({
       ? fetchManualReferralRateSchedule(scope[0].client_id)
       : Promise.resolve([]),
   ]);
+  const unallocatedIds = new Set(metricsScope.unallocatedGoogleAccountIds);
+  const unallocatedSpend = sumMetrics(
+    rows.filter((row) => unallocatedIds.has(row.ad_account_id)),
+  ).adSpend;
 
   const sheet = buildPnlSheet(
     rows,
     days,
     (accountId, day) => {
-      const account = scope.find((candidate) => candidate.id === accountId);
+      const account = metricsScope.metricAccountsById.get(accountId);
       return Number(account?.list_commission_rate) === 10 && !account?.revenue_share_enabled
         ? manualReferralRateOnDay(day, referralRateSchedule)
         : Number(account?.commission_rate ?? 0);
@@ -106,6 +115,17 @@ export default async function PnlPage({
       }
     >
       <MixedCurrencyNotice scope={currencies} className="mb-4" />
+      {metricsScope.unallocatedGoogleAccountIds.length > 0 && (
+        <div className="mb-4 flex items-start gap-3 rounded-[var(--radius-card)] border border-[var(--accent-gold)]/25 bg-[var(--accent-gold)]/8 px-4 py-3">
+          <Info className="mt-0.5 size-4 shrink-0 text-[var(--accent-gold)]" aria-hidden />
+          <p className="text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
+            <span className="font-semibold text-[var(--text-primary)]">
+              {d.portal.unallocatedGoogleSpend}: {money(unallocatedSpend, displayCurrency(currencies))}.
+            </span>{" "}
+            {d.portal.unallocatedGooglePnlWarning}
+          </p>
+        </div>
+      )}
       <PnlSheetView
         d={d}
         intl={intl}
