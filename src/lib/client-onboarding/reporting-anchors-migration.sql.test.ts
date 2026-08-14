@@ -15,6 +15,10 @@ const STAGED_SOURCES_MIGRATION = readFileSync(
   "supabase/migrations/0056_staged_reporting_sources.sql",
   "utf8",
 );
+const ROLLBACK_MIGRATION = readFileSync(
+  "supabase/migrations/0057_reporting_cutover_rollback.sql",
+  "utf8",
+);
 
 const ADMIN = "55000000-0000-4000-8000-000000000001";
 const CLIENT = "55000000-0000-4000-8000-000000000002";
@@ -27,6 +31,7 @@ const GOOGLE_2 = "55000000-0000-4000-8000-000000000031";
 const SHELL = "55000000-0000-4000-8000-000000000040";
 const LEGACY_PAIR = "55000000-0000-4000-8000-000000000041";
 const SUBMISSION = "55000000-0000-4000-8000-000000000050";
+const LATER_SESSION = "55000000-0000-4000-8000-000000000060";
 
 const PRELUDE = `
 do $$ begin
@@ -404,6 +409,11 @@ beforeEach(async () => {
     await db.exec(STAGED_SOURCES_MIGRATION);
   } catch (error) {
     throw new Error("0056 migration failed", { cause: error });
+  }
+  try {
+    await db.exec(ROLLBACK_MIGRATION);
+  } catch (error) {
+    throw new Error("0057 migration failed", { cause: error });
   }
 
   await db.query(
@@ -1351,15 +1361,88 @@ describe("normalized reporting anchors migration", () => {
       ),
     ).rejects.toThrow(/Demote the V2 rollout before revoking/i);
 
+    // A later onboarding workflow may replace the rollout's convenience
+    // session pointer. Rollback still follows the immutable activation event.
     await db.query(
-      "update public.client_rollout_states set operational_surface = 'rollback_legacy' where client_id = $1",
-      [CLIENT],
+      `insert into public.client_onboarding_sessions(
+         id, mode, requested_assets, status, target_client_id,
+         claimed_user_id, created_by
+       ) values ($1, 'add_assets', array['shopify'], 'collecting', $2, $2, $3)`,
+      [LATER_SESSION, CLIENT, ADMIN],
     );
-    const rolledBack = await db.query<{ legacy_writes: boolean }>(
-      "select public.legacy_asset_writes_allowed($1) as legacy_writes",
-      [CLIENT],
+    await db.query(
+      `update public.client_rollout_states
+       set onboarding_session_id = $2, updated_at = clock_timestamp()
+       where client_id = $1`,
+      [CLIENT, LATER_SESSION],
     );
-    expect(rolledBack.rows[0]?.legacy_writes).toBe(true);
+
+    await expect(
+      db.query(
+        "update public.client_rollout_states set operational_surface = 'rollback_legacy' where client_id = $1",
+        [CLIENT],
+      ),
+    ).rejects.toThrow(/purpose-bound RPC/i);
+    await db.query(
+      "select public.rollback_client_reporting_cutover($1, $2, 'Emergency reporting rollback')",
+      [CLIENT, ADMIN],
+    );
+    await db.query(
+      "select public.rollback_client_reporting_cutover($1, $2, 'Emergency reporting rollback')",
+      [CLIENT, ADMIN],
+    );
+    await expect(
+      db.query(
+        "select public.rollback_client_reporting_cutover($1, $2, 'Conflicting rollback reason')",
+        [CLIENT, ADMIN],
+      ),
+    ).rejects.toThrow(/already recorded with different authority or reason/i);
+    const rolledBack = await db.query<{
+      surface: string;
+      cutover_at: string;
+      cutover_by: string;
+      marker_reason: string;
+      legacy_writes: boolean;
+      rollback_events: string;
+      rollback_reason: string;
+      fingerprint: string;
+    }>(`
+      select rollout.operational_surface as surface,
+        rollout.reporting_cutover_at::text as cutover_at,
+        rollout.reporting_cutover_by::text as cutover_by,
+        rollout.reporting_cutover_reason as marker_reason,
+        public.legacy_asset_writes_allowed(rollout.client_id) as legacy_writes,
+        (select count(*)::text from public.client_onboarding_events event
+          where event.session_id = $2 and event.event_type = 'reporting_rollback') as rollback_events,
+        (select event.details ->> 'reason' from public.client_onboarding_events event
+          where event.session_id = $2 and event.event_type = 'reporting_rollback') as rollback_reason,
+        md5(jsonb_build_object(
+          'commissions', (select coalesce(jsonb_agg(to_jsonb(row) order by row.id), '[]') from public.commissions row),
+          'starts', (select coalesce(jsonb_agg(to_jsonb(row) order by row.id), '[]') from public.ad_account_billing_starts row),
+          'ends', (select coalesce(jsonb_agg(to_jsonb(row) order by row.id), '[]') from public.ad_account_billing_ends row),
+          'invoices', (select coalesce(jsonb_agg(to_jsonb(row) order by row.id), '[]') from public.invoices row),
+          'invoiceRows', (select coalesce(jsonb_agg(to_jsonb(row) order by row.id), '[]') from public.invoice_commission_rows row)
+        )::text) as fingerprint
+      from public.client_rollout_states rollout
+      where rollout.client_id = $1
+    `, [CLIENT, SESSION]);
+    expect(rolledBack.rows[0]).toEqual({
+      surface: "rollback_legacy",
+      cutover_at: result.rows[0]!.cutover_at,
+      cutover_by: ADMIN,
+      marker_reason: "Reviewed receipt-gated cutover",
+      legacy_writes: true,
+      rollback_events: "1",
+      rollback_reason: "Emergency reporting rollback",
+      fingerprint: financeBefore.rows[0]!.fingerprint,
+    });
+    await expectSqlState(
+      db.query(
+        "delete from public.client_onboarding_events where session_id = $1 and event_type = 'reporting_rollback'",
+        [SESSION],
+      ),
+      "23514",
+    );
     await expect(
       db.query(
         "update public.client_rollout_states set operational_surface = 'v2_active' where client_id = $1",
@@ -1502,6 +1585,50 @@ describe("normalized reporting anchors migration", () => {
       receipt_currency: "JPY",
       metric_fingerprint: metricsBefore.rows[0]!.fingerprint,
     });
+
+    await db.query(
+      "select public.rollback_client_reporting_cutover($1, $2, 'Shopify adapter emergency stop')",
+      [CLIENT, ADMIN],
+    );
+    const rolledBack = await db.query<{
+      surface: string;
+      cutover_at: string;
+      role: string;
+      status: string;
+      shopify_connected: boolean;
+      binding_status: string;
+      billing_starts: string;
+      metric_fingerprint: string;
+    }>(`
+      select rollout.operational_surface as surface,
+             rollout.reporting_cutover_at::text as cutover_at,
+             account.reporting_role as role,
+             account.status,
+             account.shopify_connected,
+             binding.status as binding_status,
+             (select count(*)::text from public.ad_account_billing_starts) as billing_starts,
+             (
+               select md5(jsonb_agg(to_jsonb(metric) order by metric.day)::text)
+               from public.daily_metrics metric
+               where metric.ad_account_id = account.id
+                 and metric.day between current_date - 90 and current_date - 1
+             ) as metric_fingerprint
+      from public.client_rollout_states rollout
+      join public.client_reporting_bindings binding
+        on binding.client_id = rollout.client_id and binding.id = $2
+      join public.ad_accounts account on account.id = binding.ad_account_id
+      where rollout.client_id = $1
+    `, [CLIENT, binding.rows[0]!.id]);
+    expect(rolledBack.rows[0]).toEqual({
+      surface: "rollback_legacy",
+      cutover_at: result.rows[0]!.cutover_at,
+      role: "shopify_anchor",
+      status: "pending",
+      shopify_connected: false,
+      binding_status: "active",
+      billing_starts: "0",
+      metric_fingerprint: metricsBefore.rows[0]!.fingerprint,
+    });
   });
 
   it("keeps lifecycle RPCs service-only and audit/receipt tables read-only", async () => {
@@ -1510,6 +1637,8 @@ describe("normalized reporting anchors migration", () => {
       service_provision: boolean;
       authenticated_receipt: boolean;
       service_receipt: boolean;
+      authenticated_rollback: boolean;
+      service_rollback: boolean;
       service_event_insert: boolean;
       service_receipt_insert: boolean;
       authenticated_normalizer: boolean;
@@ -1525,6 +1654,10 @@ describe("normalized reporting anchors migration", () => {
           'public.record_client_reporting_sync_success(uuid,text,date,date,text,integer)', 'EXECUTE') as authenticated_receipt,
         has_function_privilege('service_role',
           'public.record_client_reporting_sync_success(uuid,text,date,date,text,integer)', 'EXECUTE') as service_receipt,
+        has_function_privilege('authenticated',
+          'public.rollback_client_reporting_cutover(uuid,uuid,text)', 'EXECUTE') as authenticated_rollback,
+        has_function_privilege('service_role',
+          'public.rollback_client_reporting_cutover(uuid,uuid,text)', 'EXECUTE') as service_rollback,
         has_table_privilege('service_role', 'public.client_reporting_anchor_events', 'INSERT') as service_event_insert,
         has_table_privilege('service_role', 'public.client_reporting_sync_states', 'INSERT') as service_receipt_insert,
         has_function_privilege('authenticated',
@@ -1542,6 +1675,8 @@ describe("normalized reporting anchors migration", () => {
       service_provision: true,
       authenticated_receipt: false,
       service_receipt: true,
+      authenticated_rollback: false,
+      service_rollback: true,
       service_event_insert: false,
       service_receipt_insert: false,
       authenticated_normalizer: true,
@@ -1562,6 +1697,15 @@ describe("normalized reporting anchors migration", () => {
     await db.query(
       "update public.client_shopify_connections set shopify_currency = 'JPY' where id = $1",
       [SHOPIFY_2],
+    );
+    await db.query(
+      `update public.ad_accounts
+       set shopify_connected = true,
+           shopify_admin_token = 'legacy-shopify-ciphertext',
+           google_ads_connected = true,
+           google_ads_refresh_token = 'legacy-google-ciphertext'
+       where id = $1`,
+      [LEGACY_PAIR],
     );
     const old = await db.query<{ id: string }>(
       `select public.commit_client_reporting_binding(
@@ -1761,6 +1905,52 @@ describe("normalized reporting anchors migration", () => {
       [LEGACY_PAIR],
     );
     expect(preserved.rows[0]?.revenue).toBe("30");
+
+    await db.query(
+      "select public.rollback_client_reporting_cutover($1, $2, 'Restore exact legacy pair authority')",
+      [CLIENT, ADMIN],
+    );
+    const legacyFallback = await db.query<{
+      surface: string;
+      role: string;
+      status: string;
+      shopify_connected: boolean;
+      shopify_secret: boolean;
+      google_connected: boolean;
+      google_secret: boolean;
+      binding_status: string;
+      billing_starts: string;
+      revenue: string;
+    }>(`
+      select rollout.operational_surface as surface,
+             account.reporting_role as role,
+             account.status,
+             account.shopify_connected,
+             account.shopify_admin_token is not null as shopify_secret,
+             account.google_ads_connected as google_connected,
+             account.google_ads_refresh_token is not null as google_secret,
+             binding.status as binding_status,
+             (select count(*)::text from public.ad_account_billing_starts start
+               where start.ad_account_id = account.id) as billing_starts,
+             (select metric.revenue::text from public.daily_metrics metric
+               where metric.ad_account_id = account.id and metric.day = current_date) as revenue
+      from public.client_rollout_states rollout
+      join public.client_reporting_bindings binding on binding.id = $2
+      join public.ad_accounts account on account.id = binding.ad_account_id
+      where rollout.client_id = $1
+    `, [CLIENT, upgraded.rows[0]!.id]);
+    expect(legacyFallback.rows[0]).toEqual({
+      surface: "rollback_legacy",
+      role: "legacy_hybrid",
+      status: "active",
+      shopify_connected: true,
+      shopify_secret: true,
+      google_connected: true,
+      google_secret: true,
+      binding_status: "active",
+      billing_starts: "1",
+      revenue: "30",
+    });
   });
 
   it("rolls back revoke and mapping when the pair commit fails after revocation", async () => {

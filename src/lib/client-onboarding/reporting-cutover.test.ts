@@ -57,6 +57,8 @@ vi.mock("@/lib/shopify/client", () => ({
 import { ClientOnboardingError } from "@/lib/client-onboarding/sessions";
 import {
   executeClientReportingCutoverRequest,
+  executePurposeBoundReportingCutoverRollback,
+  executePurposeBoundReportingCutoverStep,
   listClientReportingCutoverQueue,
   projectClientReportingCutover,
   type ClientReportingCutoverSnapshot,
@@ -399,6 +401,132 @@ describe("Phase 2 admin reporting cutover workflow", () => {
       p_admin_id: ADMIN,
       p_reason: "Admin-reviewed reporting anchor provisioning",
     });
+  });
+
+  it("executes only the exact purpose-bound client, admin, source set and queue phase", async () => {
+    const data = snapshot({
+      profiles: [
+        { id: CLIENT, role: "client" },
+        { id: ADMIN, role: "admin" },
+      ],
+    });
+    mocks.createServiceClient.mockReturnValue(serviceFor(data));
+    mocks.rpc.mockResolvedValue({ data: NEW_BINDING, error: null });
+
+    await expect(
+      executePurposeBoundReportingCutoverStep(
+        {
+          adminId: ADMIN,
+          clientId: CLIENT,
+          shopifyConnectionIds: [SHOPIFY],
+          googleAdsConnectionIds: [GOOGLE],
+        },
+        "provision",
+      ),
+    ).resolves.toEqual({ action: "provision" });
+    expect(mocks.rpc).toHaveBeenCalledWith("provision_client_reporting_anchor", {
+      p_shopify_connection_id: SHOPIFY,
+      p_google_ads_connection_id: GOOGLE,
+      p_shopify_anchor_binding_id: null,
+      p_existing_ad_account_id: null,
+      p_idempotency_key: expect.stringMatching(/^anchor:[0-9a-f]{64}$/),
+      p_admin_id: ADMIN,
+      p_reason: "Admin-reviewed reporting anchor provisioning",
+    });
+    expect(mocks.requireAdmin).not.toHaveBeenCalled();
+  });
+
+  it("rejects a purpose-bound source mismatch and inactive prerequisite without writes", async () => {
+    const data = snapshot({
+      profiles: [
+        { id: CLIENT, role: "client" },
+        { id: ADMIN, role: "admin" },
+      ],
+    });
+    mocks.createServiceClient.mockReturnValue(serviceFor(data));
+
+    await expect(
+      executePurposeBoundReportingCutoverStep(
+        {
+          adminId: ADMIN,
+          clientId: CLIENT,
+          shopifyConnectionIds: [SHOPIFY],
+          googleAdsConnectionIds: [],
+        },
+        "provision",
+      ),
+    ).rejects.toMatchObject({ code: "invalid_state", status: 409 });
+    await expect(
+      executePurposeBoundReportingCutoverStep(
+        {
+          adminId: ADMIN,
+          clientId: CLIENT,
+          shopifyConnectionIds: [SHOPIFY],
+          googleAdsConnectionIds: [GOOGLE],
+          prerequisiteClientId: ACCOUNT_2,
+        },
+        "provision",
+      ),
+    ).rejects.toMatchObject({ code: "invalid_state", status: 409 });
+    expect(mocks.refreshReportingSourcesNow).not.toHaveBeenCalled();
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+
+  it("rolls back only an exact active marker with the fixed emergency reason", async () => {
+    const data = boundSnapshot(true);
+    data.profiles.push({ id: ADMIN, role: "admin" });
+    data.rolloutStates[0] = {
+      ...data.rolloutStates[0],
+      operational_surface: "v2_active",
+      reporting_cutover_at: "2026-08-14T02:00:00.000Z",
+      reporting_cutover_by: ADMIN,
+      reporting_cutover_reason: "Initial reporting cutover",
+    };
+    const rollbackService = {
+      from: vi.fn((table: string) => {
+        if (table === "profiles") {
+          const query = {
+            select: vi.fn(),
+            in: vi.fn(async () => ({ data: data.profiles, error: null })),
+          };
+          query.select.mockReturnValue(query);
+          return query;
+        }
+        const query = {
+          select: vi.fn(),
+          eq: vi.fn(),
+          maybeSingle: vi.fn(async () => ({
+            data:
+              table === "portal_clients"
+                ? data.clients[0]
+                : data.rolloutStates[0],
+            error: null,
+          })),
+        };
+        query.select.mockReturnValue(query);
+        query.eq.mockReturnValue(query);
+        return query;
+      }),
+      rpc: mocks.rpc,
+    };
+    mocks.createServiceClient.mockReturnValue(rollbackService);
+    mocks.rpc.mockResolvedValue({ data: CLIENT, error: null });
+
+    await expect(
+      executePurposeBoundReportingCutoverRollback({ adminId: ADMIN, clientId: CLIENT }),
+    ).resolves.toEqual({ action: "rollback" });
+    expect(mocks.rpc).toHaveBeenCalledWith("rollback_client_reporting_cutover", {
+      p_client_id: CLIENT,
+      p_admin_id: ADMIN,
+      p_reason: "Emergency purpose-bound Phase 2 reporting rollback",
+    });
+
+    data.rolloutStates[0].operational_surface = "rollback_legacy";
+    mocks.rpc.mockClear();
+    await expect(
+      executePurposeBoundReportingCutoverRollback({ adminId: ADMIN, clientId: CLIENT }),
+    ).rejects.toMatchObject({ code: "invalid_state", status: 409 });
+    expect(mocks.rpc).not.toHaveBeenCalled();
   });
 
   it("commits explicit adoption only when that opaque alternative is selected", async () => {

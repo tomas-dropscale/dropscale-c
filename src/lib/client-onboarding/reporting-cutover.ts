@@ -232,6 +232,20 @@ type CutoverAction =
   | AbandonAction;
 type BuiltQueue = ClientReportingCutoverQueue & { actions: Map<string, CutoverAction> };
 
+export type PurposeBoundReportingCutoverContext = {
+  adminId: string;
+  clientId: string;
+  shopifyConnectionIds: readonly string[];
+  googleAdsConnectionIds: readonly string[];
+  prerequisiteClientId?: string;
+};
+
+export type PurposeBoundReportingCutoverKind =
+  | "provision"
+  | "upgrade"
+  | "sync"
+  | "activate";
+
 type SourceBundle = {
   clientId: string;
   shopify: ShopifyRow | null;
@@ -249,6 +263,7 @@ const STAGE_REASON = "Admin-reviewed post-cutover reporting source staging";
 const RESTAGE_REASON = "Admin-reviewed explicit abandoned reporting source reuse";
 const PROMOTE_REASON = "Admin-reviewed post-stage reporting source promotion";
 const ABANDON_REASON = "Admin-reviewed staged reporting source abandonment";
+const ROLLBACK_REASON = "Emergency purpose-bound Phase 2 reporting rollback";
 
 function canonicalGoogleCustomerId(value: string | null): string | null {
   if (!value || !/^[0-9\s-]+$/.test(value)) return null;
@@ -1314,6 +1329,347 @@ function databaseWriteError(error: { code?: string } | null | undefined): Client
   );
 }
 
+function invalidPurposeBoundState(): ClientOnboardingError {
+  return new ClientOnboardingError(
+    "invalid_state",
+    "The purpose-bound reporting cutover context is no longer exact.",
+    409,
+  );
+}
+
+function sameIds(actual: readonly string[], expected: readonly string[]): boolean {
+  const sortedActual = [...actual].sort();
+  const sortedExpected = [...expected].sort();
+  return (
+    sortedActual.length === sortedExpected.length &&
+    sortedActual.every((id, index) => id === sortedExpected[index])
+  );
+}
+
+function assertPurposeBoundContext(
+  snapshot: ClientReportingCutoverSnapshot,
+  context: PurposeBoundReportingCutoverContext,
+): void {
+  const allIds = [
+    context.adminId,
+    context.clientId,
+    ...context.shopifyConnectionIds,
+    ...context.googleAdsConnectionIds,
+    ...(context.prerequisiteClientId ? [context.prerequisiteClientId] : []),
+  ];
+  if (
+    allIds.some((id) => !UUID.test(id)) ||
+    new Set(context.shopifyConnectionIds).size !== context.shopifyConnectionIds.length ||
+    new Set(context.googleAdsConnectionIds).size !== context.googleAdsConnectionIds.length ||
+    context.shopifyConnectionIds.length === 0 ||
+    context.prerequisiteClientId === context.clientId ||
+    !snapshot.profiles.some(
+      (profile) => profile.id === context.adminId && profile.role === "admin",
+    ) ||
+    !snapshot.clients.some(
+      (client) =>
+        client.id === context.clientId &&
+        client.approval_status === "approved" &&
+        !snapshot.profiles.some(
+          (profile) => profile.id === client.id && profile.role === "admin",
+        ),
+    )
+  ) {
+    throw invalidPurposeBoundState();
+  }
+
+  const shopifyIds = snapshot.shopifyConnections
+    .filter(
+      (connection) =>
+        connection.client_id === context.clientId && connection.status === "connected",
+    )
+    .map((connection) => connection.id);
+  const googleIds = snapshot.googleConnections
+    .filter(
+      (connection) =>
+        connection.client_id === context.clientId && connection.status === "connected",
+    )
+    .map((connection) => connection.id);
+  if (
+    !sameIds(shopifyIds, context.shopifyConnectionIds) ||
+    !sameIds(googleIds, context.googleAdsConnectionIds)
+  ) {
+    throw invalidPurposeBoundState();
+  }
+}
+
+function assertPurposeBoundPrerequisite(
+  queue: BuiltQueue,
+  context: PurposeBoundReportingCutoverContext,
+): void {
+  if (!context.prerequisiteClientId) return;
+  const prerequisite = queue.clients.find(
+    (client) => client.id === context.prerequisiteClientId,
+  );
+  if (
+    prerequisite?.status !== "active" ||
+    !prerequisite.reportingCutoverAt
+  ) {
+    throw invalidPurposeBoundState();
+  }
+}
+
+function actionBelongsToClient(
+  action: CutoverAction,
+  clientId: string,
+  snapshot: ClientReportingCutoverSnapshot,
+): boolean {
+  if ("clientId" in action) return action.clientId === clientId;
+  const bindingId = action.bindingId;
+  return snapshot.bindings.some(
+    (binding) => binding.id === bindingId && binding.client_id === clientId,
+  );
+}
+
+function actionMatchesPurposeBoundSources(
+  action: CutoverAction,
+  context: PurposeBoundReportingCutoverContext,
+  snapshot: ClientReportingCutoverSnapshot,
+): boolean {
+  if (action.kind === "provision") {
+    return (
+      action.shopifyConnectionId === context.shopifyConnectionIds[0] &&
+      action.googleAdsConnectionId === (context.googleAdsConnectionIds[0] ?? null) &&
+      context.shopifyConnectionIds.length === 1 &&
+      context.googleAdsConnectionIds.length <= 1
+    );
+  }
+  if (action.kind === "upgrade") {
+    const binding = snapshot.bindings.find((row) => row.id === action.bindingId);
+    return (
+      context.shopifyConnectionIds.length === 1 &&
+      context.googleAdsConnectionIds.length === 1 &&
+      action.shopifyConnectionId === context.shopifyConnectionIds[0] &&
+      binding?.google_ads_connection_id === context.googleAdsConnectionIds[0]
+    );
+  }
+  return action.kind === "sync" || action.kind === "activate";
+}
+
+async function executeCutoverAction(
+  service: Service,
+  action: CutoverAction,
+  actionId: string,
+  adminId: string,
+): Promise<{ action: CutoverAction["kind"] }> {
+  if (action.kind === "sync") {
+    try {
+      await refreshReportingSourcesNow(action.adAccountIds, {
+        client: service,
+        from: isoDay(-90),
+        to: isoDay(-1),
+      });
+    } catch (error) {
+      throw databaseWriteError(error as { code?: string });
+    }
+    return { action: action.kind };
+  }
+
+  if (action.kind === "activate") {
+    const { data, error } = await service.rpc("activate_client_reporting_cutover", {
+      p_client_id: action.clientId,
+      p_admin_id: adminId,
+      p_reason: ACTIVATE_REASON,
+    });
+    if (error) throw databaseWriteError(error);
+    if (data !== action.clientId) throw databaseWriteError(null);
+    return { action: action.kind };
+  }
+
+  if (action.kind === "staged_sync") {
+    try {
+      await refreshStagedReportingSourceNow(action.bindingId, {
+        client: service,
+        from: isoDay(-90),
+        to: isoDay(-1),
+      });
+    } catch (error) {
+      throw databaseWriteError(error as { code?: string });
+    }
+    return { action: action.kind };
+  }
+
+  const idempotencyKey = `anchor:${actionId.slice(3)}`;
+  if (action.kind === "promote" || action.kind === "abandon") {
+    const rpcName =
+      action.kind === "promote"
+        ? "promote_client_reporting_source"
+        : "abandon_client_reporting_source";
+    const { data, error } = await service.rpc(rpcName, {
+      p_binding_id: action.bindingId,
+      p_admin_id: adminId,
+      p_idempotency_key: idempotencyKey,
+      p_reason: action.kind === "promote" ? PROMOTE_REASON : ABANDON_REASON,
+    });
+    if (error) throw databaseWriteError(error);
+    if (data !== action.bindingId) throw databaseWriteError(null);
+    return { action: action.kind };
+  }
+
+  if (action.kind === "upgrade") {
+    const { data, error } = await service.rpc(
+      "upgrade_client_reporting_google_binding_to_pair",
+      {
+        p_binding_id: action.bindingId,
+        p_shopify_connection_id: action.shopifyConnectionId,
+        p_reconnect_session_id: action.reconnectSessionId,
+        p_idempotency_key: idempotencyKey,
+        p_admin_id: adminId,
+        p_reason: UPGRADE_REASON,
+      },
+    );
+    if (error) throw databaseWriteError(error);
+    if (typeof data !== "string" || !UUID.test(data)) throw databaseWriteError(null);
+    return { action: action.kind };
+  }
+
+  if (action.postCutover) {
+    const { data, error } = await service.rpc("stage_client_reporting_source", {
+      p_client_id: action.clientId,
+      p_shopify_connection_id: action.shopifyConnectionId,
+      p_google_ads_connection_id: action.googleAdsConnectionId,
+      p_shopify_anchor_binding_id: action.shopifyAnchorBindingId,
+      p_existing_ad_account_id: action.existingAdAccountId,
+      p_idempotency_key: idempotencyKey,
+      p_admin_id: adminId,
+      p_reason:
+        action.kind === "restage"
+          ? RESTAGE_REASON
+          : action.kind === "adopt"
+            ? ADOPT_REASON
+            : STAGE_REASON,
+    });
+    if (error) throw databaseWriteError(error);
+    if (typeof data !== "string" || !UUID.test(data)) throw databaseWriteError(null);
+    return { action: action.kind };
+  }
+
+  const { data, error } = await service.rpc("provision_client_reporting_anchor", {
+    p_shopify_connection_id: action.shopifyConnectionId,
+    p_google_ads_connection_id: action.googleAdsConnectionId,
+    p_shopify_anchor_binding_id: action.shopifyAnchorBindingId,
+    p_existing_ad_account_id: action.existingAdAccountId,
+    p_idempotency_key: idempotencyKey,
+    p_admin_id: adminId,
+    p_reason: action.kind === "adopt" ? ADOPT_REASON : PROVISION_REASON,
+  });
+  if (error) throw databaseWriteError(error);
+  if (typeof data !== "string" || !UUID.test(data)) throw databaseWriteError(null);
+  return { action: action.kind };
+}
+
+/** Service-role preflight for a separately authenticated, fixed internal caller. */
+export async function validatePurposeBoundReportingCutoverContext(
+  context: PurposeBoundReportingCutoverContext,
+): Promise<void> {
+  const service = serviceOrThrow();
+  const snapshot = await loadSnapshot(service);
+  assertPurposeBoundContext(snapshot, context);
+  const queue = await buildClientReportingCutoverQueue(snapshot);
+  assertPurposeBoundPrerequisite(queue, context);
+}
+
+/** Executes one exact queue phase after the machine boundary authenticates. */
+export async function executePurposeBoundReportingCutoverStep(
+  context: PurposeBoundReportingCutoverContext,
+  expectedKind: PurposeBoundReportingCutoverKind,
+): Promise<{ action: PurposeBoundReportingCutoverKind }> {
+  const service = serviceOrThrow();
+  const snapshot = await loadSnapshot(service);
+  assertPurposeBoundContext(snapshot, context);
+  const queue = await buildClientReportingCutoverQueue(snapshot);
+  assertPurposeBoundPrerequisite(queue, context);
+
+  const expectedStatus: Record<
+    PurposeBoundReportingCutoverKind,
+    ReportingCutoverClient["status"]
+  > = {
+    provision: "bindings_required",
+    upgrade: "bindings_required",
+    sync: "ready_to_sync",
+    activate: "ready_to_activate",
+  };
+  if (
+    queue.clients.find((client) => client.id === context.clientId)?.status !==
+    expectedStatus[expectedKind]
+  ) {
+    throw invalidPurposeBoundState();
+  }
+
+  const matches = [...queue.actions.entries()].filter(
+    ([, action]) =>
+      action.kind === expectedKind &&
+      actionBelongsToClient(action, context.clientId, snapshot) &&
+      actionMatchesPurposeBoundSources(action, context, snapshot),
+  );
+  if (matches.length !== 1) throw invalidPurposeBoundState();
+  const [actionId, action] = matches[0];
+  const result = await executeCutoverAction(service, action, actionId, context.adminId);
+  if (result.action !== expectedKind) throw databaseWriteError(null);
+  return { action: expectedKind };
+}
+
+/** Emergency marker rollback; deliberately independent of source health. */
+export async function executePurposeBoundReportingCutoverRollback({
+  adminId,
+  clientId,
+}: Pick<PurposeBoundReportingCutoverContext, "adminId" | "clientId">): Promise<{
+  action: "rollback";
+}> {
+  if (!UUID.test(adminId) || !UUID.test(clientId) || adminId === clientId) {
+    throw invalidPurposeBoundState();
+  }
+  const service = serviceOrThrow();
+  const [profiles, client, rollout] = await Promise.all([
+    service.from("profiles").select("id, role").in("id", [adminId, clientId]),
+    service
+      .from("portal_clients")
+      .select("id, approval_status")
+      .eq("id", clientId)
+      .maybeSingle(),
+    service
+      .from("client_rollout_states")
+      .select("client_id, operational_surface, reporting_cutover_at")
+      .eq("client_id", clientId)
+      .maybeSingle(),
+  ]);
+  const readError = profiles.error ?? client.error ?? rollout.error;
+  if (readError) throw databaseWriteError(readError);
+  if (
+    !profiles.data?.some(
+      (profile) => profile.id === adminId && profile.role === "admin",
+    ) ||
+    profiles.data.some(
+      (profile) => profile.id === clientId && profile.role === "admin",
+    ) ||
+    client.data?.id !== clientId ||
+    client.data.approval_status !== "approved"
+  ) {
+    throw invalidPurposeBoundState();
+  }
+  if (
+    rollout.data?.client_id !== clientId ||
+    rollout.data.operational_surface !== "v2_active" ||
+    !rollout.data.reporting_cutover_at ||
+    !Number.isFinite(Date.parse(rollout.data.reporting_cutover_at))
+  ) {
+    throw invalidPurposeBoundState();
+  }
+  const { data, error } = await service.rpc("rollback_client_reporting_cutover", {
+    p_client_id: clientId,
+    p_admin_id: adminId,
+    p_reason: ROLLBACK_REASON,
+  });
+  if (error) throw databaseWriteError(error);
+  if (data !== clientId) throw databaseWriteError(null);
+  return { action: "rollback" };
+}
+
 export async function listClientReportingCutoverQueue(): Promise<ClientReportingCutoverQueue> {
   await requireClientOnboardingAdmin();
   const service = serviceOrThrow();
@@ -1353,109 +1709,5 @@ export async function executeClientReportingCutoverRequest(request: Request) {
       409,
     );
   }
-
-  if (action.kind === "sync") {
-    try {
-      await refreshReportingSourcesNow(action.adAccountIds, {
-        client: service,
-        from: isoDay(-90),
-        to: isoDay(-1),
-      });
-    } catch (error) {
-      throw databaseWriteError(error as { code?: string });
-    }
-    return { action: action.kind };
-  }
-
-  if (action.kind === "activate") {
-    const { data, error } = await service.rpc("activate_client_reporting_cutover", {
-      p_client_id: action.clientId,
-      p_admin_id: admin.id,
-      p_reason: ACTIVATE_REASON,
-    });
-    if (error) throw databaseWriteError(error);
-    if (data !== action.clientId) throw databaseWriteError(null);
-    return { action: action.kind };
-  }
-
-  if (action.kind === "staged_sync") {
-    try {
-      await refreshStagedReportingSourceNow(action.bindingId, {
-        client: service,
-        from: isoDay(-90),
-        to: isoDay(-1),
-      });
-    } catch (error) {
-      throw databaseWriteError(error as { code?: string });
-    }
-    return { action: action.kind };
-  }
-
-  const idempotencyKey = `anchor:${body.actionId.slice(3)}`;
-  if (action.kind === "promote" || action.kind === "abandon") {
-    const rpcName =
-      action.kind === "promote"
-        ? "promote_client_reporting_source"
-        : "abandon_client_reporting_source";
-    const { data, error } = await service.rpc(rpcName, {
-      p_binding_id: action.bindingId,
-      p_admin_id: admin.id,
-      p_idempotency_key: idempotencyKey,
-      p_reason: action.kind === "promote" ? PROMOTE_REASON : ABANDON_REASON,
-    });
-    if (error) throw databaseWriteError(error);
-    if (data !== action.bindingId) throw databaseWriteError(null);
-    return { action: action.kind };
-  }
-
-  if (action.kind === "upgrade") {
-    const { data, error } = await service.rpc(
-      "upgrade_client_reporting_google_binding_to_pair",
-      {
-        p_binding_id: action.bindingId,
-        p_shopify_connection_id: action.shopifyConnectionId,
-        p_reconnect_session_id: action.reconnectSessionId,
-        p_idempotency_key: idempotencyKey,
-        p_admin_id: admin.id,
-        p_reason: UPGRADE_REASON,
-      },
-    );
-    if (error) throw databaseWriteError(error);
-    if (typeof data !== "string" || !UUID.test(data)) throw databaseWriteError(null);
-    return { action: action.kind };
-  }
-
-  if (action.postCutover) {
-    const { data, error } = await service.rpc("stage_client_reporting_source", {
-      p_client_id: action.clientId,
-      p_shopify_connection_id: action.shopifyConnectionId,
-      p_google_ads_connection_id: action.googleAdsConnectionId,
-      p_shopify_anchor_binding_id: action.shopifyAnchorBindingId,
-      p_existing_ad_account_id: action.existingAdAccountId,
-      p_idempotency_key: idempotencyKey,
-      p_admin_id: admin.id,
-      p_reason:
-        action.kind === "restage"
-          ? RESTAGE_REASON
-          : action.kind === "adopt"
-            ? ADOPT_REASON
-            : STAGE_REASON,
-    });
-    if (error) throw databaseWriteError(error);
-    if (typeof data !== "string" || !UUID.test(data)) throw databaseWriteError(null);
-    return { action: action.kind };
-  }
-
-  const { data, error } = await service.rpc("provision_client_reporting_anchor", {
-    p_shopify_connection_id: action.shopifyConnectionId,
-    p_google_ads_connection_id: action.googleAdsConnectionId,
-    p_shopify_anchor_binding_id: action.shopifyAnchorBindingId,
-    p_existing_ad_account_id: action.existingAdAccountId,
-    p_idempotency_key: idempotencyKey,
-    p_admin_id: admin.id,
-    p_reason: action.kind === "adopt" ? ADOPT_REASON : PROVISION_REASON,
-  });
-  if (error) throw databaseWriteError(error);
-  if (typeof data !== "string" || !UUID.test(data)) throw databaseWriteError(null);
-  return { action: action.kind };
+  return executeCutoverAction(service, action, body.actionId, admin.id);
 }
