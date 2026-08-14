@@ -40,6 +40,7 @@ import { ensureDailyCoverage, recomputeDailyMetrics } from "@/lib/metrics/recomp
 import {
   googleProfit,
   googleRoas,
+  googleShare,
   type DayCosts,
 } from "@/lib/admin/google-attribution";
 import {
@@ -75,6 +76,24 @@ const ROLLOUT_SURFACES = new Set([
 
 function projectedShopDomain(source: CanonicalReportingSource): string {
   return source.shopify?.primaryDomain?.trim().toLowerCase() || source.shopify!.domain;
+}
+
+function normalizedStoreDomain(value: string | null): string {
+  return (value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/\/.*$/, "");
+}
+
+function estimatedGoogleCog(
+  googleRevenue: number | null,
+  grossRevenue: number,
+  productCost: number,
+): number | null {
+  return googleRevenue === null
+    ? null
+    : productCost * googleShare(googleRevenue, grossRevenue);
 }
 
 async function reportingScope(
@@ -219,6 +238,7 @@ export type AdminStoreOverview = {
   /** Freshness of this exact store group; null means no verified rollup rows. */
   updatedAt: string | null;
   storeName: string;
+  storeDomain: string;
   colorDot: string;
   currency: string;
   connected: boolean;
@@ -240,6 +260,10 @@ export type AdminStoreOverview = {
   costPerGoogleOrder: number;
   /** googleRevenue ÷ ad spend. The store's headline return. */
   roas: number;
+  /** Product cost apportioned to the non-Meta revenue slice. */
+  estimatedCog: number | null;
+  /** Trading profit on the same slice, before the agency fee. */
+  profit: number | null;
   /**
    * What Google's OWN conversion tracking claims, from the Ads API. Kept beside
    * the real figure because a 0.00x here over healthy revenue is the signature
@@ -258,9 +282,8 @@ export type AdminStoreOverview = {
   /**
    * This store's day-by-day spend and Google revenue, oldest first.
    *
-   * Only the share card reads it — the card needs a shape, and a single
-   * period total cannot show one. Revenue follows the same Google-only rule as
-   * every other figure here, so the curve and the headline agree.
+   * Spend-only days remain present so store charts do not silently hide Google
+   * delivery while Shopify attribution is still unavailable for that day.
    */
   days: { day: string; adSpend: number; revenue: number }[];
 };
@@ -292,6 +315,8 @@ export type AdminClientOverview = {
     conversions: number;
     /** googleRevenue ÷ ad spend. */
     roas: number;
+    /** Product cost apportioned to the non-Meta revenue slice. */
+    estimatedCog: number | null;
     /** Google's own attributed return — the tracking-health hint. */
     trackedRoas: number;
     /** Ad-spend commission across the client's stores, at each store's rate. */
@@ -395,12 +420,21 @@ export async function fetchClientOverview(
         ? (commission / totals.adSpend) * 100
         : (rateById.get(account.id) ?? 0);
       const revenue = totals.attributedRevenue;
+      const costs: DayCosts = {
+        revenue: totals.revenue,
+        refunds: totals.refunds,
+        productCost: totals.productCost,
+        paymentFees: totals.paymentFees,
+        shippingCost: totals.shippingCost,
+        adSpend: totals.adSpend,
+      };
 
       return {
         accountId: account.id,
         activityAccountIds: [...metricIds],
         updatedAt: freshness(accountRows).updatedAt,
         storeName: account.store_name,
+        storeDomain: normalizedStoreDomain(account.shopify_url),
         colorDot: account.color_dot,
         currency: account.currency,
         connected: scope.googleConnectedByStore.get(account.id) ?? false,
@@ -413,6 +447,8 @@ export async function fetchClientOverview(
         googleOrders: totals.attributedOrders,
         costPerGoogleOrder: totals.costPerAttributedOrder,
         roas: googleRoas(revenue, totals.adSpend),
+        estimatedCog: estimatedGoogleCog(revenue, totals.revenue, totals.productCost),
+        profit: googleProfit(revenue, costs),
         trackedRoas: totals.roas,
         conversions: totals.conversions,
         conversionValue: totals.conversionValue,
@@ -430,8 +466,6 @@ export async function fetchClientOverview(
             return {
               day,
               adSpend: dayTotals.adSpend,
-              // Null attribution plots as 0 rather than breaking the line; the
-              // headline above the chart is what carries the "—" when unknown.
               revenue: dayTotals.attributedRevenue ?? 0,
             };
           })
@@ -517,6 +551,7 @@ export async function fetchClientOverview(
       cpc: totals.cpc,
       conversions: totals.conversions,
       roas: googleRoas(revenue, totals.adSpend),
+      estimatedCog: estimatedGoogleCog(revenue, totals.revenue, totals.productCost),
       trackedRoas: totals.roas,
       commission,
       revShare,

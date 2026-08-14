@@ -2,15 +2,16 @@ import type { ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
+import type { AdminAnalyticsClient } from "@/lib/admin/analytics";
 import type { AdminClientOverview } from "@/lib/admin/client-overview";
 import type { CampaignActionHistory } from "@/lib/admin/campaigns-view";
 
-vi.mock("@/components/portal/range-picker", () => ({
-  RangePicker: () => <span>Range picker</span>,
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: vi.fn() }),
 }));
 
-vi.mock("@/components/portal/daily-performance-chart", () => ({
-  DailyPerformanceChart: () => <div>Client daily performance chart</div>,
+vi.mock("@/components/portal/range-picker", () => ({
+  RangePicker: () => <span>Range picker</span>,
 }));
 
 vi.mock("@/components/admin/performance-charts", () => ({
@@ -41,6 +42,22 @@ vi.mock("@/lib/utils", () => ({
 
 import { AnalyticsView } from "./analytics-view";
 
+const clients: AdminAnalyticsClient[] = [
+  {
+    id: "client-1",
+    name: "Northwind Commerce",
+    email: "team@northwind.example",
+    storeCount: 1,
+    stores: [
+      {
+        id: "store-gbp",
+        name: "Northwind UK",
+        domain: "northwind-uk.example",
+      },
+    ],
+  },
+];
+
 function overview(): AdminClientOverview {
   return {
     clientId: "client-1",
@@ -62,6 +79,7 @@ function overview(): AdminClientOverview {
       cpc: 3,
       conversions: 115,
       roas: 2.5,
+      estimatedCog: 1_500,
       trackedRoas: 2.2,
       commission: 900,
       revShare: 300,
@@ -75,6 +93,7 @@ function overview(): AdminClientOverview {
         activityAccountIds: ["store-gbp", "google-child"],
         updatedAt: "2026-08-07T18:00:00Z",
         storeName: "Northwind UK",
+        storeDomain: "northwind-uk.example",
         colorDot: "#6fae7a",
         currency: "GBP",
         connected: true,
@@ -87,6 +106,8 @@ function overview(): AdminClientOverview {
         googleOrders: 40,
         costPerGoogleOrder: 50,
         roas: 2.5,
+        estimatedCog: 1_000,
+        profit: 1_400,
         trackedRoas: 2.4,
         conversions: 37,
         conversionValue: 4_800,
@@ -130,6 +151,7 @@ describe("AnalyticsView", () => {
   it("renders store-scoped real metrics, daily spend and newest-first activity", () => {
     const html = renderToStaticMarkup(
       <AnalyticsView
+        clients={clients}
         overview={overview()}
         selectedStoreId="store-gbp"
         range={{ key: "custom", from: "2026-08-01", to: "2026-08-07" }}
@@ -143,20 +165,37 @@ describe("AnalyticsView", () => {
 
     expect(html).toContain("Northwind UK");
     expect(html).toContain("Store spend development chart");
-    expect(html).toContain("only verified Google spend by day");
+    expect(html).toContain("1. Client");
+    expect(html).toContain("2. Store");
+    expect(html).toContain('role="combobox"');
+    expect(html).toContain('aria-label="Search clients by name"');
+    expect(html).not.toContain(">View</button>");
+    expect(html).toContain("Estimated COG");
+    expect(html).toContain("Estimated profit");
+    expect(html).toContain("grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5");
     expect(html).toContain("Campaign and budget changes for Northwind UK.");
     expect(html).toContain("Budget updated");
     expect(html).toContain("1,000 most recent verified changes");
     expect(html.indexOf("Campaign newest")).toBeLessThan(html.indexOf("Campaign older"));
-    expect(html.indexOf("Return by Collection")).toBeLessThan(
-      html.indexOf("Store Activity Log"),
-    );
+    const orderedSections = [
+      "Funnel Development",
+      "Store behaviour across the selected period.",
+      "Store spend development chart",
+      "Campaign Performance",
+      "Return by Collection",
+      "Store Activity Log",
+    ].map((label) => html.indexOf(label));
+    expect(orderedSections.every((index) => index >= 0)).toBe(true);
+    expect(orderedSections).toEqual([...orderedSections].sort((a, b) => a - b));
+    expect(html).toContain("Per-campaign Shopify revenue");
+    expect(html).toContain("Collection attribution is not materialised");
     expect(html).not.toContain("Campaign launched");
   });
 
-  it("preserves client and range query keys and labels the aggregate activity scope", () => {
+  it("renders immediate scope controls and the approved all-stores table", () => {
     const html = renderToStaticMarkup(
       <AnalyticsView
+        clients={clients}
         overview={overview()}
         selectedStoreId={null}
         range={{ key: "d7", from: "2026-08-01", to: "2026-08-07" }}
@@ -165,15 +204,46 @@ describe("AnalyticsView", () => {
       />,
     );
 
-    expect(html).toContain('name="client" value="client-1"');
-    expect(html).toContain('name="store"');
-    expect(html).toContain('name="range" value="d7"');
-    expect(html).toContain('name="from" value="2026-08-01"');
-    expect(html).toContain('name="to" value="2026-08-07"');
-    expect(html).toContain("Client daily performance chart");
-    expect(html).toContain("across all stores in this client");
+    expect(html).toContain('aria-haspopup="dialog"');
+    expect(html).toContain('aria-label="Search clients by name"');
+    expect(html).toContain('aria-label="Select store"');
+    expect(html).not.toContain(">View</button>");
+    expect(html).toContain("All Stores");
+    expect(html).toContain("Store URL");
+    expect(html).toContain("northwind-uk.example");
+    expect(html).toContain("Synced");
     expect(html).toContain("Mixed currencies (EUR, GBP)");
-    expect(html).toContain("Collection attribution is not materialised");
+    expect(html.match(/title="Unavailable across mixed currencies/g)).toHaveLength(5);
+    expect(html).toContain("GBP 5000.00");
+    expect(html).toContain("GBP 2000.00");
+    expect(html).not.toContain("Store Activity Log");
+    expect(html).not.toContain("Campaign Performance");
+  });
+
+  it("shows a dash instead of 0.00x for a fresh spend-only scope", () => {
+    const spendOnly = overview();
+    spendOnly.mixedCurrency = false;
+    spendOnly.currencies = ["GBP"];
+    spendOnly.currency = "GBP";
+    spendOnly.totals.googleRevenue = null;
+    spendOnly.stores[0].googleRevenue = null;
+    spendOnly.stores[0].estimatedCog = null;
+    spendOnly.stores[0].profit = null;
+
+    const html = renderToStaticMarkup(
+      <AnalyticsView
+        clients={clients}
+        overview={spendOnly}
+        selectedStoreId="store-gbp"
+        range={{ key: "d7", from: "2026-08-01", to: "2026-08-07" }}
+        activity={[]}
+        activityTruncated={false}
+      />,
+    );
+
+    expect(html).toContain("Real ROAS");
+    expect(html).toContain("—");
+    expect(html).not.toContain("0.00x");
   });
 
   it("labels unavailable rollup data instead of presenting zero as verified", () => {
@@ -182,6 +252,7 @@ describe("AnalyticsView", () => {
     empty.stores[0].updatedAt = null;
     const html = renderToStaticMarkup(
       <AnalyticsView
+        clients={clients}
         overview={empty}
         selectedStoreId="store-gbp"
         range={{ key: "d7", from: "2026-08-01", to: "2026-08-07" }}

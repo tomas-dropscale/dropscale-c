@@ -115,11 +115,42 @@ describe("admin analytics client catalogue", () => {
       ],
       admins: [{ id: "internal", role: "admin" }],
       accounts: [
-        { id: "account-1", client_id: "zeta", shopify_url: "alpha.myshopify.com" },
-        { id: "account-2", client_id: "zeta", shopify_url: "beta.myshopify.com" },
-        { id: "google-child", client_id: "zeta", shopify_url: null },
-        { id: "account-admin", client_id: "internal", shopify_url: "admin.myshopify.com" },
-        { id: "account-pending", client_id: "pending", shopify_url: null },
+        {
+          id: "account-1",
+          client_id: "zeta",
+          store_name: "Alpha Store",
+          shopify_url: "alpha.myshopify.com",
+        },
+        {
+          id: "account-2",
+          client_id: "zeta",
+          store_name: "Beta Store",
+          shopify_url: "beta.myshopify.com",
+        },
+        {
+          id: "duplicate-domain",
+          client_id: "zeta",
+          store_name: "Duplicate Alpha",
+          shopify_url: "https://ALPHA.myshopify.com/products/example",
+        },
+        {
+          id: "google-child",
+          client_id: "zeta",
+          store_name: "Google child",
+          shopify_url: null,
+        },
+        {
+          id: "account-admin",
+          client_id: "internal",
+          store_name: "Admin",
+          shopify_url: "admin.myshopify.com",
+        },
+        {
+          id: "account-pending",
+          client_id: "pending",
+          store_name: "Pending",
+          shopify_url: null,
+        },
       ],
       rollouts: [
         { client_id: "alpha", ...completeMarker },
@@ -148,12 +179,25 @@ describe("admin analytics client catalogue", () => {
         name: "Alpha Studio",
         email: "alpha@example.com",
         storeCount: 0,
+        stores: [],
       },
       {
         id: "zeta",
         name: "Zeta Commerce",
         email: "zeta@example.com",
         storeCount: 2,
+        stores: [
+          {
+            id: "account-1",
+            name: "Alpha Store",
+            domain: "alpha.myshopify.com",
+          },
+          {
+            id: "account-2",
+            name: "Beta Store",
+            domain: "beta.myshopify.com",
+          },
+        ],
       },
     ]);
     expect(mocks.callOrder).toEqual(["auth", "service"]);

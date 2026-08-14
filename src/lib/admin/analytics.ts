@@ -16,6 +16,13 @@ export type AdminAnalyticsClient = {
   name: string;
   email: string;
   storeCount: number;
+  stores: AdminAnalyticsStore[];
+};
+
+export type AdminAnalyticsStore = {
+  id: string;
+  name: string;
+  domain: string;
 };
 
 function textOrder(left: string, right: string) {
@@ -37,7 +44,7 @@ export async function listAdminAnalyticsClients(): Promise<AdminAnalyticsClient[
         .select("id, full_name, email, approval_status")
         .eq("approval_status", "approved"),
       service.from("profiles").select("id, role").eq("role", "admin"),
-      service.from("ad_accounts").select("id, client_id, shopify_url"),
+      service.from("ad_accounts").select("id, client_id, store_name, shopify_url"),
       service
         .from("client_rollout_states")
         .select(
@@ -93,7 +100,7 @@ export async function listAdminAnalyticsClients(): Promise<AdminAnalyticsClient[
     }
   }
 
-  const storeDomainsByClient = new Map<string, Set<string>>();
+  const storesByClient = new Map<string, Map<string, AdminAnalyticsStore>>();
   const clientsWithAccounts = new Set<string>();
   for (const account of accounts) {
     clientsWithAccounts.add(account.client_id);
@@ -103,9 +110,15 @@ export async function listAdminAnalyticsClients(): Promise<AdminAnalyticsClient[
       .replace(/^https?:\/\//, "")
       .replace(/\/.*$/, "");
     if (!domain) continue;
-    const domains = storeDomainsByClient.get(account.client_id) ?? new Set<string>();
-    domains.add(domain);
-    storeDomainsByClient.set(account.client_id, domains);
+    const stores = storesByClient.get(account.client_id) ?? new Map<string, AdminAnalyticsStore>();
+    const candidate = {
+      id: account.id,
+      name: account.store_name,
+      domain,
+    };
+    const current = stores.get(domain);
+    if (!current || textOrder(candidate.id, current.id) < 0) stores.set(domain, candidate);
+    storesByClient.set(account.client_id, stores);
   }
 
   const adminIds = new Set(
@@ -119,12 +132,19 @@ export async function listAdminAnalyticsClients(): Promise<AdminAnalyticsClient[
         (clientsWithAccounts.has(client.id) ||
           completeReportingMarkers.has(client.id)),
     )
-    .map((client) => ({
-      id: client.id,
-      name: client.full_name,
-      email: client.email,
-      storeCount: storeDomainsByClient.get(client.id)?.size ?? 0,
-    }))
+    .map((client) => {
+      const stores = [...(storesByClient.get(client.id)?.values() ?? [])].sort(
+        (left, right) =>
+          textOrder(left.domain, right.domain) || textOrder(left.id, right.id),
+      );
+      return {
+        id: client.id,
+        name: client.full_name,
+        email: client.email,
+        storeCount: stores.length,
+        stores,
+      };
+    })
     .sort(
       (left, right) =>
         textOrder(left.name, right.name) ||

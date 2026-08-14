@@ -28,6 +28,10 @@ vi.mock("@/lib/portal/currency", () => ({
 vi.mock("@/lib/admin/google-attribution", () => ({
   googleRoas: (revenue: number | null, spend: number) =>
     revenue !== null && spend > 0 ? revenue / spend : 0,
+  googleShare: (revenue: number | null, grossRevenue: number) =>
+    revenue !== null && grossRevenue > 0
+      ? Math.min(1, Math.max(0, revenue / grossRevenue))
+      : 0,
   googleProfit: (
     revenue: number | null,
     costs: {
@@ -339,6 +343,7 @@ describe("admin client overview V2 projection", () => {
         attributed_revenue: 100,
       }),
       metric("child", {
+        day: "2026-08-13",
         ad_spend: 20,
         impressions: 200,
         clicks: 20,
@@ -385,13 +390,24 @@ describe("admin client overview V2 projection", () => {
         connected: true,
         adSpend: 30,
         googleRevenue: 100,
+        estimatedCog: 0,
+        profit: 70,
         commission: 5,
-        days: [{ day: "2026-08-14", adSpend: 30, revenue: 100 }],
+        storeDomain: "store.example",
+        days: [
+          { day: "2026-08-13", adSpend: 20, revenue: 0 },
+          { day: "2026-08-14", adSpend: 10, revenue: 100 },
+        ],
       }),
     ]);
     expect(overview?.activityAccountIds).toEqual(["anchor", "child", "standalone"]);
     expect(overview?.totals).toEqual(
-      expect.objectContaining({ adSpend: 35, googleRevenue: 100, commission: 6.5 }),
+      expect.objectContaining({
+        adSpend: 35,
+        googleRevenue: 100,
+        estimatedCog: 0,
+        commission: 6.5,
+      }),
     );
   });
 

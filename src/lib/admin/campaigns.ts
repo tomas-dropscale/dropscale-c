@@ -7,7 +7,7 @@ import { fetchLiveCampaignsDetailed, type LiveCampaign } from "@/lib/google-ads/
 import { markIfAuthRevoked } from "@/lib/google-ads/revoked";
 import { fetchHstClientKeys } from "@/lib/admin/hst";
 import { googleProfit, googleRoas } from "@/lib/admin/google-attribution";
-import { fetchDailyMetrics, sumMetrics } from "@/lib/metrics/queries";
+import { fetchDailyMetrics, groupByAccount, sumMetrics } from "@/lib/metrics/queries";
 import { ACCOUNT_COLUMNS } from "@/lib/portal/data";
 import type { AdAccount } from "@/lib/supabase/types";
 import type { RangeSelection } from "@/lib/portal/range";
@@ -46,6 +46,10 @@ export type AdminAccountCampaigns = {
   authRevoked: boolean;
   spend: number;
   commission: number;
+  /** Reporting-rollup revenue for the exact store group in the selected window. */
+  rollupRevenue: number | null;
+  /** Reporting-rollup spend paired with rollupRevenue. */
+  rollupSpend: number;
 };
 
 export type AdminLiveCampaign = LiveCampaign & {
@@ -70,6 +74,9 @@ export type AdminClientCampaigns = {
   accounts: AdminAccountCampaigns[];
   spend: number;
   commission: number;
+  revenue: number | null;
+  rollupSpend: number;
+  realRoas: number;
 };
 
 export type AdminCampaignsOverview = {
@@ -275,14 +282,26 @@ function groupByOwner(
       accounts: [],
       spend: 0,
       commission: 0,
+      revenue: null,
+      rollupSpend: 0,
+      realRoas: 0,
     };
     group.accounts.push(entry);
     group.spend += entry.spend;
     group.commission += entry.commission;
+    if (entry.rollupRevenue !== null) {
+      group.revenue = (group.revenue ?? 0) + entry.rollupRevenue;
+    }
+    group.rollupSpend += entry.rollupSpend;
     byClient.set(entry.account.client_id, group);
   }
 
-  return [...byClient.values()].sort((a, b) => b.spend - a.spend);
+  return [...byClient.values()]
+    .map((client) => ({
+      ...client,
+      realRoas: googleRoas(client.revenue, client.rollupSpend),
+    }))
+    .sort((a, b) => b.spend - a.spend);
 }
 
 export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminCampaignsOverview> {
@@ -403,6 +422,8 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
         authRevoked,
         spend,
         commission: (spend * Number(account.commission_rate)) / 100,
+        rollupRevenue: null,
+        rollupSpend: 0,
       };
     }),
   );
@@ -418,6 +439,8 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
     authRevoked: false,
     spend: 0,
     commission: 0,
+    rollupRevenue: null,
+    rollupSpend: 0,
   }));
 
   /**
@@ -443,6 +466,18 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
     range.from,
     range.to,
   );
+  const metricRowsByAccount = groupByAccount(metricRows);
+  const accountsWithRollups = perAccount.map((entry, index) => {
+    const rows = inventory[index].metricAccountIds.flatMap(
+      (accountId) => metricRowsByAccount.get(accountId) ?? [],
+    );
+    const totals = sumMetrics(rows);
+    return {
+      ...entry,
+      rollupRevenue: totals.attributedRevenue,
+      rollupSpend: totals.adSpend,
+    };
+  });
   const rollup = sumMetrics(metricRows);
   const revenue = rollup.attributedRevenue;
 
@@ -462,7 +497,7 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
   });
 
   return {
-    clients: groupByOwner(perAccount, owners),
+    clients: groupByOwner(accountsWithRollups, owners),
     internal: groupByOwner(internalEntries, owners),
     configured,
     totals: {

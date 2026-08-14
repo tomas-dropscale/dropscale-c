@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   analyticsBaseHref,
+  analyticsClientHref,
+  analyticsStoreHref,
   projectAnalyticsScope,
   sortAnalyticsActivity,
 } from "./analytics-view";
@@ -15,8 +17,8 @@ function overview(): AdminClientOverview {
     clientEmail: "team@northwind.example",
     activityAccountIds: ["account-1"],
     currency: "EUR",
-    mixedCurrency: true,
-    currencies: ["EUR", "GBP"],
+    mixedCurrency: false,
+    currencies: ["EUR"],
     range: { from: "2026-08-01", to: "2026-08-07" },
     totals: {
       googleRevenue: 15_000,
@@ -29,6 +31,7 @@ function overview(): AdminClientOverview {
       cpc: 3,
       conversions: 115,
       roas: 2.5,
+      estimatedCog: 1_500,
       trackedRoas: 2.2,
       commission: 900,
       revShare: 300,
@@ -42,6 +45,7 @@ function overview(): AdminClientOverview {
         activityAccountIds: ["store-eur", "google-child"],
         updatedAt: "2026-08-07T18:00:00Z",
         storeName: "Northwind Home",
+        storeDomain: "northwind-home.example",
         colorDot: "#d4a86a",
         currency: "EUR",
         connected: true,
@@ -54,6 +58,8 @@ function overview(): AdminClientOverview {
         googleOrders: 80,
         costPerGoogleOrder: 50,
         roas: 2.5,
+        estimatedCog: 500,
+        profit: 1_500,
         trackedRoas: 2.1,
         conversions: 78,
         conversionValue: 8_400,
@@ -69,6 +75,7 @@ function overview(): AdminClientOverview {
         activityAccountIds: ["store-gbp"],
         updatedAt: "2026-08-07T18:00:00Z",
         storeName: "Northwind UK",
+        storeDomain: "northwind-uk.example",
         colorDot: "#6fae7a",
         currency: "GBP",
         connected: true,
@@ -81,6 +88,8 @@ function overview(): AdminClientOverview {
         googleOrders: 40,
         costPerGoogleOrder: 50,
         roas: 2.5,
+        estimatedCog: 1_000,
+        profit: 1_400,
         trackedRoas: 2.4,
         conversions: 37,
         conversionValue: 4_800,
@@ -126,9 +135,9 @@ describe("projectAnalyticsScope", () => {
     expect(scope.metrics.map(({ key, value }) => [key, value])).toEqual([
       ["revenue", 15_000],
       ["spend", 6_000],
+      ["cog", 1_500],
       ["roas", 2.5],
       ["profit", 4_500],
-      ["agency", 1_200],
     ]);
   });
 
@@ -140,11 +149,10 @@ describe("projectAnalyticsScope", () => {
     expect(scope.metrics.map(({ key, value }) => [key, value])).toEqual([
       ["revenue", 5_000],
       ["spend", 2_000],
+      ["cog", 1_000],
       ["roas", 2.5],
-      ["orders", 40],
-      ["agency", 400],
+      ["profit", 1_400],
     ]);
-    expect(scope.metrics.some((metric) => metric.key === "profit")).toBe(false);
   });
 
   it("fails visibly back to all stores for an unknown store", () => {
@@ -168,6 +176,50 @@ describe("projectAnalyticsScope", () => {
       ),
     ).toBe(true);
   });
+
+  it("does not present Real ROAS when revenue is unknown or spend is zero", () => {
+    const unknownRevenue = overview();
+    unknownRevenue.totals.googleRevenue = null;
+    unknownRevenue.stores[0].googleRevenue = null;
+
+    expect(
+      projectAnalyticsScope(unknownRevenue, null).metrics.find(
+        (metric) => metric.key === "roas",
+      )?.value,
+    ).toBeNull();
+    expect(
+      projectAnalyticsScope(unknownRevenue, "store-eur").metrics.find(
+        (metric) => metric.key === "roas",
+      )?.value,
+    ).toBeNull();
+
+    const noSpend = overview();
+    noSpend.totals.adSpend = 0;
+    noSpend.stores[0].adSpend = 0;
+    expect(
+      projectAnalyticsScope(noSpend, null).metrics.find(
+        (metric) => metric.key === "roas",
+      )?.value,
+    ).toBeNull();
+    expect(
+      projectAnalyticsScope(noSpend, "store-eur").metrics.find(
+        (metric) => metric.key === "roas",
+      )?.value,
+    ).toBeNull();
+  });
+
+  it("withholds every aggregate KPI when store currencies are mixed", () => {
+    const mixed = overview();
+    mixed.mixedCurrency = true;
+    mixed.currencies = ["EUR", "GBP"];
+    const scope = projectAnalyticsScope(mixed, null);
+
+    expect(scope.metrics).toHaveLength(5);
+    expect(scope.metrics.every((metric) => metric.value === null)).toBe(true);
+    expect(
+      scope.metrics.every((metric) => metric.hint.includes("mixed currencies")),
+    ).toBe(true);
+  });
 });
 
 describe("sortAnalyticsActivity", () => {
@@ -188,7 +240,14 @@ describe("sortAnalyticsActivity", () => {
 });
 
 it("builds the base analytics URL with the complete reporting window", () => {
-  expect(
-    analyticsBaseHref({ key: "custom", from: "2026-08-01", to: "2026-08-07" }),
-  ).toBe("/admin/analytics?range=custom&from=2026-08-01&to=2026-08-07");
+  const range = { key: "custom", from: "2026-08-01", to: "2026-08-07" } as const;
+  expect(analyticsBaseHref(range)).toBe(
+    "/admin/analytics?range=custom&from=2026-08-01&to=2026-08-07",
+  );
+  expect(analyticsClientHref("client-1", range)).toBe(
+    "/admin/analytics?client=client-1&range=custom&from=2026-08-01&to=2026-08-07",
+  );
+  expect(analyticsStoreHref("client-1", "store-1", range)).toBe(
+    "/admin/analytics?client=client-1&store=store-1&range=custom&from=2026-08-01&to=2026-08-07",
+  );
 });

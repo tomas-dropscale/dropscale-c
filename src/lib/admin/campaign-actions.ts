@@ -66,19 +66,12 @@ type StatusRequest = {
 
 export type CampaignActionRequest = BudgetRequest | StatusRequest;
 
-type CampaignActionPolicyRequest = {
-  requestId: string;
-  bindingId: string;
-  expectedPolicyId: string | null;
-  allowedActions: CampaignActionPolicyAction[];
-  maxDailyBudget: string | null;
-};
-
-const POLICY_ACTIONS: readonly CampaignActionPolicyAction[] = [
+const INTERNAL_POLICY_ACTIONS: readonly CampaignActionPolicyAction[] = [
   "budget_changed",
   "campaign_enabled",
   "campaign_paused",
 ];
+const MAX_DAILY_BUDGET_MICROS = 1_000_000_000_000;
 
 function invalid(message: string): never {
   throw new ClientOnboardingError("invalid_request", message, 400);
@@ -146,52 +139,6 @@ function parseRequest(value: unknown): CampaignActionRequest {
   }
 
   return invalid("Send exactly one valid campaign action.");
-}
-
-function parsePolicyRequest(value: unknown): CampaignActionPolicyRequest {
-  if (
-    !isExactRecord(value, [
-      "requestId",
-      "bindingId",
-      "expectedPolicyId",
-      "allowedActions",
-      "maxDailyBudget",
-    ]) ||
-    typeof value.requestId !== "string" ||
-    !UUID.test(value.requestId) ||
-    typeof value.bindingId !== "string" ||
-    !UUID.test(value.bindingId) ||
-    !(
-      value.expectedPolicyId === null ||
-      (typeof value.expectedPolicyId === "string" && UUID.test(value.expectedPolicyId))
-    ) ||
-    !Array.isArray(value.allowedActions) ||
-    !value.allowedActions.every(
-      (action): action is CampaignActionPolicyAction =>
-        typeof action === "string" && POLICY_ACTIONS.includes(action as CampaignActionPolicyAction),
-    ) ||
-    new Set(value.allowedActions).size !== value.allowedActions.length ||
-    !(
-      value.maxDailyBudget === null ||
-      (typeof value.maxDailyBudget === "string" && DECIMAL.test(value.maxDailyBudget))
-    )
-  ) {
-    return invalid("Send exactly one valid campaign action policy.");
-  }
-
-  const allowedActions = [...value.allowedActions].sort() as CampaignActionPolicyAction[];
-  const includesBudget = allowedActions.includes("budget_changed");
-  if (includesBudget !== (value.maxDailyBudget !== null)) {
-    return invalid("A daily budget cap is required only when budget changes are enabled.");
-  }
-
-  return {
-    requestId: value.requestId,
-    bindingId: value.bindingId,
-    expectedPolicyId: value.expectedPolicyId,
-    allowedActions,
-    maxDailyBudget: value.maxDailyBudget,
-  };
 }
 
 export function campaignCurrencyUnitsToMicros(value: string): number {
@@ -310,6 +257,58 @@ function serviceOrThrow() {
     );
   }
   return service;
+}
+
+async function loadLatestCampaignPolicy(
+  service: CampaignActionService,
+  bindingId: string,
+): Promise<CampaignActionPolicy | null> {
+  const { data, error } = await service
+    .from("campaign_action_policies")
+    .select("*")
+    .eq("client_reporting_binding_id", bindingId)
+    .order("revision", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error || (data && data.client_reporting_binding_id !== bindingId)) {
+    throw databaseError(error?.code, "Campaign controls are unavailable.");
+  }
+  return data;
+}
+
+/**
+ * Keeps the 0059 ledger default-deny without exposing a separate control in
+ * the product. The first verified admin action creates one durable internal
+ * authority row; concurrent first actions accept the exact winning row.
+ */
+async function ensureInternalCampaignPolicy(
+  service: CampaignActionService,
+  bindingId: string,
+  adminId: string,
+): Promise<CampaignActionPolicy> {
+  const existing = await loadLatestCampaignPolicy(service, bindingId);
+  if (existing) return existing;
+
+  const { data, error } = await service.rpc("set_campaign_action_policy", {
+    p_policy_id: crypto.randomUUID(),
+    p_idempotency_key: `campaign-controls:${bindingId}`,
+    p_client_reporting_binding_id: bindingId,
+    p_expected_policy_id: null,
+    p_allowed_actions: [...INTERNAL_POLICY_ACTIONS],
+    p_max_daily_budget_micros: MAX_DAILY_BUDGET_MICROS,
+    p_admin_id: adminId,
+    p_reason: "Internal admin campaign controls.",
+  });
+  if (!error && data?.client_reporting_binding_id === bindingId) return data;
+
+  if (!["23505", "40001"].includes(error?.code ?? "")) {
+    throw databaseError(error?.code, "Campaign controls could not be initialized.");
+  }
+  const winner = await loadLatestCampaignPolicy(service, bindingId);
+  if (!winner) {
+    throw databaseError(error?.code, "Campaign controls could not be initialized.");
+  }
+  return winner;
 }
 
 function isStaleRequestedOperation(operation: CampaignActionOperation) {
@@ -476,23 +475,7 @@ export async function executeCampaignActionRequest(request: NextRequest) {
     return conflict("The campaign reporting source changed. Refresh before trying again.");
   }
 
-  const { data: policy, error: policyError } = await service
-    .from("campaign_action_policies")
-    .select("*")
-    .eq("client_reporting_binding_id", binding.id)
-    .order("revision", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  if (policyError) throw databaseError(policyError.code, "Campaign action policy is unavailable.");
   const action = requestedAction(body);
-  if (!policy || !policy.allowed_actions.includes(action)) {
-    throw new ClientOnboardingError(
-      "forbidden",
-      "This Google Ads binding has no policy for that campaign action.",
-      403,
-    );
-  }
-
   const state = await readGoogleCampaignControlState(
     source.googleAds.customerId,
     body.providerCampaignId,
@@ -514,25 +497,17 @@ export async function executeCampaignActionRequest(request: NextRequest) {
     nextBudgetMicros = campaignCurrencyUnitsToMicros(body.nextDailyBudget);
     if (
       previousBudgetMicros < 1_000_000 ||
-      previousBudgetMicros > 1_000_000_000_000 ||
+      previousBudgetMicros > MAX_DAILY_BUDGET_MICROS ||
       nextBudgetMicros < 1_000_000 ||
-      nextBudgetMicros > 1_000_000_000_000
+      nextBudgetMicros > MAX_DAILY_BUDGET_MICROS
     ) {
       return invalid("Daily budgets must be between 1 and 1,000,000 account-currency units.");
     }
-    const maxBudgetMicros = safeInteger(policy.max_daily_budget_micros);
     if (
       state.budgetMicros !== previousBudgetMicros ||
       nextBudgetMicros === previousBudgetMicros
     ) {
       return conflict("The campaign budget changed. Refresh before trying again.");
-    }
-    if (maxBudgetMicros === null || nextBudgetMicros > maxBudgetMicros) {
-      throw new ClientOnboardingError(
-        "forbidden",
-        "The requested daily budget exceeds this binding policy.",
-        403,
-      );
     }
   } else {
     previousStatus = body.expectedStatus;
@@ -540,6 +515,20 @@ export async function executeCampaignActionRequest(request: NextRequest) {
     if (state.status !== previousStatus) {
       return conflict("The campaign status changed. Refresh before trying again.");
     }
+  }
+
+  const policy = await ensureInternalCampaignPolicy(service, binding.id, admin.id);
+  const maxBudgetMicros = safeInteger(policy.max_daily_budget_micros);
+  if (
+    !policy.allowed_actions.includes(action) ||
+    (action === "budget_changed" &&
+      (maxBudgetMicros === null || nextBudgetMicros! > maxBudgetMicros))
+  ) {
+    throw new ClientOnboardingError(
+      "forbidden",
+      "Campaign controls are unavailable for this action.",
+      403,
+    );
   }
 
   const executionClaimId = crypto.randomUUID();
@@ -578,7 +567,7 @@ export async function executeCampaignActionRequest(request: NextRequest) {
           campaignId: body.providerCampaignId,
           expectedBudgetMicros: previousBudgetMicros!,
           nextBudgetMicros: nextBudgetMicros!,
-          maxBudgetMicros: safeInteger(policy.max_daily_budget_micros)!,
+          maxBudgetMicros: maxBudgetMicros!,
           expectedCurrency: source.googleAds.currency,
           expectedTimeZone: source.googleAds.timeZone,
         })
@@ -637,46 +626,7 @@ export async function executeCampaignActionRequest(request: NextRequest) {
   }
 }
 
-/** Authenticates before reading policy input or constructing service_role. */
-export async function configureCampaignActionPolicyRequest(request: NextRequest) {
-  const admin = await requireClientOnboardingAdmin();
-  if (!sameOrigin(request)) {
-    throw new ClientOnboardingError("forbidden", "Forbidden.", 403);
-  }
-  const body = parsePolicyRequest(await readSmallJson(request, 1_024));
-  const service = serviceOrThrow();
-  const maxBudgetMicros = body.maxDailyBudget === null
-    ? null
-    : campaignCurrencyUnitsToMicros(body.maxDailyBudget);
-  if (
-    maxBudgetMicros !== null &&
-    (maxBudgetMicros < 1_000_000 || maxBudgetMicros > 1_000_000_000_000)
-  ) {
-    return invalid("The daily budget cap must be between 1 and 1,000,000 account-currency units.");
-  }
-
-  const { data: policy, error } = await service.rpc("set_campaign_action_policy", {
-    p_policy_id: body.requestId,
-    p_idempotency_key: `campaign-policy:${body.requestId}`,
-    p_client_reporting_binding_id: body.bindingId,
-    p_expected_policy_id: body.expectedPolicyId,
-    p_allowed_actions: body.allowedActions,
-    p_max_daily_budget_micros: maxBudgetMicros,
-    p_admin_id: admin.id,
-    p_reason: "Admin configured campaign controls policy.",
-  });
-  if (error || !policy) {
-    throw databaseError(error?.code, "The campaign action policy could not be recorded.");
-  }
-
-  return {
-    revision: policy.revision,
-    enabled: policy.allowed_actions.length > 0,
-  };
-}
-
 export type CampaignActionViewState = {
-  policies: Map<string, CampaignActionPolicy>;
   history: CampaignActionOperation[];
   historyTruncated: boolean;
   actorNames: Map<string, string>;
@@ -831,29 +781,6 @@ async function loadScopedCampaignActivity(
   return { operations, truncated: true };
 }
 
-async function loadLatestCampaignPolicies(
-  service: CampaignActionService,
-  bindingIds: string[],
-): Promise<CampaignActionPolicy[]> {
-  return Promise.all(bindingIds.map(async (bindingId) => {
-    const { data, error } = await service
-      .from("campaign_action_policies")
-      .select("*")
-      .eq("client_reporting_binding_id", bindingId)
-      .order("revision", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (error || (data && data.client_reporting_binding_id !== bindingId)) {
-      throw new ClientOnboardingError(
-        "database_error",
-        "Campaign action policies are unavailable.",
-        500,
-      );
-    }
-    return data;
-  })).then((policies) => policies.filter((policy): policy is CampaignActionPolicy => policy !== null));
-}
-
 export function projectCampaignActionHistory(
   operations: CampaignActionOperation[],
   actorNames: Map<string, string>,
@@ -907,7 +834,7 @@ export async function listCampaignActionActivity(
   };
 }
 
-/** Reads only the latest policies and succeeded history after explicit admin auth. */
+/** Reads only succeeded budget history after explicit admin auth. */
 export async function listCampaignActionViewState(
   bindingIds: string[],
 ): Promise<CampaignActionViewState> {
@@ -915,24 +842,15 @@ export async function listCampaignActionViewState(
   const uniqueBindingIds = [...new Set(bindingIds.filter((id) => UUID.test(id)))];
   if (uniqueBindingIds.length === 0) {
     return {
-      policies: new Map(),
       history: [],
       historyTruncated: false,
       actorNames: new Map(),
     };
   }
   const service = serviceOrThrow();
-  const [latestPolicies, historyResult] = await Promise.all([
-    loadLatestCampaignPolicies(service, uniqueBindingIds),
-    loadBindingBudgetHistory(service, uniqueBindingIds),
-  ]);
-  const policies = new Map<string, CampaignActionPolicy>();
-  for (const policy of latestPolicies) {
-    policies.set(policy.client_reporting_binding_id, policy);
-  }
+  const historyResult = await loadBindingBudgetHistory(service, uniqueBindingIds);
   const actorNames = await loadCampaignActorNames(service, historyResult.operations);
   return {
-    policies,
     history: historyResult.operations,
     historyTruncated: historyResult.truncated,
     actorNames,

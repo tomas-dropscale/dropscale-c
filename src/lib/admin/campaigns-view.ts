@@ -2,14 +2,8 @@ import type { CampaignActionViewState } from "@/lib/admin/campaign-actions";
 import type { AdminCampaignsOverview } from "@/lib/admin/campaigns";
 
 export type CampaignViewStatus = "active" | "paused" | "ended";
-export type CampaignViewAllowedAction =
-  | "budget_changed"
-  | "campaign_paused"
-  | "campaign_enabled";
-
 export type CampaignViewCampaign = {
   bindingId: string;
-  policyId: string | null;
   adAccountId: string;
   providerCampaignId: string;
   name: string;
@@ -20,14 +14,14 @@ export type CampaignViewCampaign = {
   type: string;
   googleRoas: number | null;
   actionable: boolean;
-  allowedActions: CampaignViewAllowedAction[];
-  maxDailyBudget: string | null;
 };
 
 export type CampaignViewStore = {
   id: string;
   name: string;
   domain: string;
+  currency: string;
+  realRoas: number | null;
   campaigns: CampaignViewCampaign[];
 };
 
@@ -35,6 +29,10 @@ export type CampaignViewClient = {
   id: string;
   name: string;
   email: string;
+  currency: string;
+  revenue: number | null;
+  adSpend: number;
+  realRoas: number | null;
   stores: CampaignViewStore[];
 };
 
@@ -163,11 +161,20 @@ function decimalMicros(value: string): bigint | null {
   return BigInt(match[1]) * BigInt(1_000_000) + BigInt((match[2] ?? "").padEnd(6, "0"));
 }
 
-export function dailyBudgetWithinLimit(value: string, limit: string | null): boolean {
-  if (limit === null) return false;
+export const MIN_CAMPAIGN_DAILY_BUDGET = "1";
+export const MAX_CAMPAIGN_DAILY_BUDGET = "1000000";
+
+export function dailyBudgetWithinLimit(value: string): boolean {
   const amountMicros = decimalMicros(value);
-  const limitMicros = decimalMicros(limit);
-  return amountMicros !== null && limitMicros !== null && amountMicros <= limitMicros;
+  const minimumMicros = decimalMicros(MIN_CAMPAIGN_DAILY_BUDGET);
+  const limitMicros = decimalMicros(MAX_CAMPAIGN_DAILY_BUDGET);
+  return (
+    amountMicros !== null &&
+    minimumMicros !== null &&
+    limitMicros !== null &&
+    amountMicros >= minimumMicros &&
+    amountMicros <= limitMicros
+  );
 }
 
 function microsToCurrencyUnits(value: number | string | null): string | null {
@@ -194,7 +201,14 @@ function storeDomain(value: string | null): string {
     .replace(/\/.*$/, "");
 }
 
-const POLICY_ACTIONS: readonly CampaignViewAllowedAction[] = [
+export function storeRealRoas(revenue: number | null, adSpend: number): number | null {
+  if (revenue === null || !Number.isFinite(revenue) || !Number.isFinite(adSpend) || adSpend <= 0) {
+    return null;
+  }
+  return revenue / adSpend;
+}
+
+const CONTROLLED_ACTIONS: readonly CampaignActionHistory["action"][] = [
   "budget_changed",
   "campaign_paused",
   "campaign_enabled",
@@ -223,25 +237,21 @@ export function projectAdminCampaignsView(
     id: client.clientId,
     name: client.clientName,
     email: client.clientEmail,
+    currency: client.accounts[0]?.account.currency ?? "EUR",
+    revenue: client.revenue,
+    adSpend: client.rollupSpend,
+    realRoas: storeRealRoas(client.revenue, client.rollupSpend),
     stores: client.accounts.map((entry) => ({
       id: entry.account.id,
       name: entry.account.store_name,
       domain: storeDomain(entry.account.shopify_url),
+      currency: entry.account.currency,
+      realRoas: storeRealRoas(entry.rollupRevenue, entry.rollupSpend),
       campaigns: entry.campaigns.map((campaign): CampaignViewCampaign => {
         const bindingId = campaign.reportingBindingId ?? "";
-        const policy = bindingId ? state.policies.get(bindingId) : undefined;
-        const maxDailyBudget = microsToCurrencyUnits(policy?.max_daily_budget_micros ?? null);
-        const allowedActions = policy
-          ? policy.allowed_actions.filter(
-              (action): action is CampaignViewAllowedAction =>
-                POLICY_ACTIONS.includes(action) &&
-                (action !== "budget_changed" || maxDailyBudget !== null),
-            )
-          : [];
 
         return {
           bindingId,
-          policyId: policy?.id ?? null,
           adAccountId: campaign.ad_account_id,
           providerCampaignId: campaign.providerCampaignId,
           name: campaign.name,
@@ -251,9 +261,7 @@ export function projectAdminCampaignsView(
           currency: entry.account.currency,
           type: campaign.advertisingChannelType,
           googleRoas: Number.isFinite(campaign.googleRoas) ? campaign.googleRoas : null,
-          actionable: allowedActions.length > 0,
-          allowedActions,
-          maxDailyBudget,
+          actionable: bindingId.length > 0,
         };
       }),
     })),
@@ -263,7 +271,7 @@ export function projectAdminCampaignsView(
     if (
       operation.status !== "succeeded" ||
       !operation.completed_at ||
-      !POLICY_ACTIONS.includes(operation.action as CampaignViewAllowedAction)
+      !CONTROLLED_ACTIONS.includes(operation.action as CampaignActionHistory["action"])
     ) {
       return [];
     }

@@ -1,8 +1,11 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { ChevronRight, Search, Users } from "lucide-react";
+import { ChevronRight, Search, Store, Users } from "lucide-react";
 
-import { AnalyticsView } from "@/components/admin/analytics-view";
+import {
+  AnalyticsScopeSelector,
+  AnalyticsView,
+} from "@/components/admin/analytics-view";
 import { RangePicker } from "@/components/portal/range-picker";
 import { Badge } from "@/components/ui/badge";
 import { PageContainer } from "@/components/ui/page-container";
@@ -11,6 +14,10 @@ import {
   type AdminAnalyticsClient,
 } from "@/lib/admin/analytics";
 import { listCampaignActionActivity } from "@/lib/admin/campaign-actions";
+import {
+  analyticsClientHref,
+  analyticsStoreHref,
+} from "@/lib/admin/analytics-view";
 import { fetchClientOverview } from "@/lib/admin/client-overview";
 import { getServerDictionary } from "@/lib/i18n/server";
 import { parseRange, type RangeSelection } from "@/lib/portal/range";
@@ -31,16 +38,6 @@ type AnalyticsSearchParams = {
 
 function singleParam(value: string | string[] | undefined): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-function clientHref(clientId: string, range: RangeSelection): string {
-  const params = new URLSearchParams({
-    client: clientId,
-    range: range.key,
-    from: range.from,
-    to: range.to,
-  });
-  return `/admin/analytics?${params.toString()}`;
 }
 
 function ClientChooser({
@@ -64,10 +61,12 @@ function ClientChooser({
   return (
     <PageContainer
       title="Analytics"
-      description={`Choose a client to review its real store performance · ${range.from} → ${range.to}`}
+      description={`All-client overview · ${range.from} → ${range.to}`}
       actions={<RangePicker current={range} />}
     >
       <div className="space-y-4">
+        <AnalyticsScopeSelector clients={clients} range={range} />
+
         {error && (
           <p
             role="alert"
@@ -88,10 +87,10 @@ function ClientChooser({
                   id="analytics-clients-title"
                   className="text-sm font-semibold text-[var(--text-primary)]"
                 >
-                  Clients
+                  All clients
                 </h2>
                 <p className="mt-1 text-xs text-[var(--text-muted)]">
-                  No client is selected by default. Only approved clients with reporting evidence appear here.
+                  Choose a client or open one of its Shopify stores.
                 </p>
               </div>
             </div>
@@ -143,9 +142,12 @@ function ClientChooser({
               {visibleClients.map((client) => (
                 <li key={client.id}>
                   <Link
-                    href={clientHref(client.id, range)}
-                    className="transition-smooth flex min-h-16 items-center gap-3 px-4 py-3 hover:bg-[var(--bg-panel-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--accent-gold)]/40 sm:px-5"
+                    href={analyticsClientHref(client.id, range)}
+                    className="transition-smooth flex min-h-12 items-center gap-3 px-4 py-2.5 hover:bg-[var(--bg-panel-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--accent-gold)]/40 sm:px-5"
                   >
+                    <span className="flex size-8 shrink-0 items-center justify-center rounded-[8px] bg-[var(--accent-gold-dim)] text-[var(--accent-gold-strong)]">
+                      <Users className="size-3.5" aria-hidden />
+                    </span>
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-sm font-semibold text-[var(--text-primary)]">
                         {client.name}
@@ -159,6 +161,31 @@ function ClientChooser({
                     </Badge>
                     <ChevronRight className="size-4 shrink-0 text-[var(--text-muted)]" aria-hidden />
                   </Link>
+
+                  {client.stores.length > 0 && (
+                    <ul className="border-t border-[var(--border-subtle)] bg-[var(--bg-base)]">
+                      {client.stores.map((store) => (
+                        <li key={store.id}>
+                          <Link
+                            href={analyticsStoreHref(client.id, store.id, range)}
+                            aria-label={`Open ${store.domain} for ${client.name}`}
+                            className="transition-smooth flex min-h-11 items-center gap-3 border-t border-[var(--border-subtle)] px-4 py-2 first:border-t-0 hover:bg-[var(--bg-panel-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--accent-gold)]/40 sm:px-5 sm:pl-16"
+                          >
+                            <Store className="size-3.5 shrink-0 text-[var(--accent-gold)]" aria-hidden />
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate text-[12.5px] font-medium text-[var(--text-primary)]">
+                                {store.domain}
+                              </span>
+                              <span className="mt-0.5 block truncate text-[10.5px] text-[var(--text-muted)]">
+                                {store.name}
+                              </span>
+                            </span>
+                            <ChevronRight className="size-3.5 shrink-0 text-[var(--text-muted)]" aria-hidden />
+                          </Link>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                 </li>
               ))}
             </ul>
@@ -224,6 +251,7 @@ export default async function AnalyticsPage({
 
   return (
     <AnalyticsView
+      clients={clients}
       overview={overview}
       selectedStoreId={requestedStoreId}
       activity={activity.history}

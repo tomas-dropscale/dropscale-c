@@ -8,6 +8,7 @@ import {
   normalizeDailyBudgetInput,
   projectAdminCampaignsView,
   projectCampaignClients,
+  storeRealRoas,
   type CampaignActionHistory,
   type CampaignViewClient,
 } from "./campaigns-view";
@@ -19,15 +20,20 @@ const clients: CampaignViewClient[] = [
     id: "client-1",
     name: "Northwind Commerce",
     email: "performance@northwind.example",
+    currency: "EUR",
+    revenue: 240,
+    adSpend: 100,
+    realRoas: 2.4,
     stores: [
       {
         id: "store-1",
         name: "Northwind Home",
         domain: "northwind-home.com",
+        currency: "EUR",
+        realRoas: 2.4,
         campaigns: [
           {
             bindingId: "binding-1",
-            policyId: "policy-1",
             adAccountId: "account-1",
             providerCampaignId: "77",
             name: "DGEN · Summer",
@@ -38,8 +44,6 @@ const clients: CampaignViewClient[] = [
             type: "DGEN",
             googleRoas: 2.4,
             actionable: true,
-            allowedActions: ["budget_changed", "campaign_paused", "campaign_enabled"],
-            maxDailyBudget: "100",
           },
         ],
       },
@@ -49,11 +53,17 @@ const clients: CampaignViewClient[] = [
     id: "client-2",
     name: "Atlas Studio",
     email: "team@atlas.example",
+    currency: "EUR",
+    revenue: null,
+    adSpend: 0,
+    realRoas: null,
     stores: [
       {
         id: "store-2",
         name: "Atlas Objects",
         domain: "atlas-objects.test",
+        currency: "EUR",
+        realRoas: null,
         campaigns: [],
       },
     ],
@@ -158,12 +168,19 @@ describe("Campaigns view model", () => {
     expect(normalizeDailyBudgetInput("0")).toBeNull();
     expect(normalizeDailyBudgetInput("12.3456789")).toBeNull();
     expect(dailyBudgetDraft("49.999999")).toBe("49.999999");
-    expect(dailyBudgetWithinLimit("75.00", "75")).toBe(true);
-    expect(dailyBudgetWithinLimit("75.01", "75")).toBe(false);
-    expect(dailyBudgetWithinLimit("1.00", null)).toBe(false);
+    expect(dailyBudgetWithinLimit("0.999999")).toBe(false);
+    expect(dailyBudgetWithinLimit("1")).toBe(true);
+    expect(dailyBudgetWithinLimit("1000000")).toBe(true);
+    expect(dailyBudgetWithinLimit("1000000.000001")).toBe(false);
   });
 
-  it("projects live campaigns through the latest default-deny binding policy", () => {
+  it("only computes store Real ROAS from available Shopify rollup revenue and spend", () => {
+    expect(storeRealRoas(200, 80)).toBe(2.5);
+    expect(storeRealRoas(null, 80)).toBeNull();
+    expect(storeRealRoas(200, 0)).toBeNull();
+  });
+
+  it("makes exact reporting-bound campaigns actionable without product policy setup", () => {
     const bindingId = "00000000-0000-4000-8000-000000000001";
     const overview = {
       configured: true,
@@ -185,6 +202,9 @@ describe("Campaigns view model", () => {
         inHst: true,
         spend: 100,
         commission: 10,
+        revenue: 200,
+        rollupSpend: 80,
+        realRoas: 2.5,
         accounts: [{
           account: {
             id: "store-1",
@@ -197,6 +217,8 @@ describe("Campaigns view model", () => {
           authRevoked: false,
           spend: 100,
           commission: 10,
+          rollupRevenue: 200,
+          rollupSpend: 80,
           campaigns: [
             {
               id: "campaign-live",
@@ -229,13 +251,6 @@ describe("Campaigns view model", () => {
       }],
     } as unknown as AdminCampaignsOverview;
     const state = {
-      policies: new Map([[bindingId, {
-        id: "00000000-0000-4000-8000-000000000099",
-        client_reporting_binding_id: bindingId,
-        executor: "agency_google",
-        allowed_actions: ["budget_changed", "campaign_paused"],
-        max_daily_budget_micros: "75000000",
-      }]]),
       history: [{
         id: "operation-1",
         status: "succeeded",
@@ -254,22 +269,24 @@ describe("Campaigns view model", () => {
 
     expect(campaignActionBindingIds(overview)).toEqual([bindingId]);
     const projected = projectAdminCampaignsView(overview, state);
+    expect(projected.clients[0]).toMatchObject({
+      currency: "EUR",
+      revenue: 200,
+      adSpend: 80,
+      realRoas: 2.5,
+    });
     expect(projected.clients[0].stores[0]).toMatchObject({
       domain: "northwind-home.com",
+      currency: "EUR",
+      realRoas: 2.5,
       campaigns: [
         {
           bindingId,
-          policyId: expect.any(String),
           dailyBudget: "50",
-          allowedActions: ["budget_changed", "campaign_paused"],
-          maxDailyBudget: "75",
           actionable: true,
         },
         {
           bindingId: "",
-          policyId: null,
-          allowedActions: [],
-          maxDailyBudget: null,
           actionable: false,
         },
       ],
@@ -284,5 +301,11 @@ describe("Campaigns view model", () => {
         actorName: "Ana Costa",
       }),
     ]);
+
+    overview.clients[0].rollupSpend = 0;
+    expect(
+      projectAdminCampaignsView(overview as unknown as AdminCampaignsOverview, state).clients[0]
+        .realRoas,
+    ).toBeNull();
   });
 });

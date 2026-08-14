@@ -6,7 +6,7 @@ import type { CampaignActionHistory } from "@/lib/admin/campaigns-view";
 import type { RangeSelection } from "@/lib/portal/range";
 
 export type AnalyticsMetric = {
-  key: "revenue" | "spend" | "roas" | "profit" | "orders" | "agency";
+  key: "revenue" | "spend" | "cog" | "roas" | "profit";
   label: string;
   value: number | null;
   format: "money" | "multiplier" | "integer";
@@ -47,14 +47,13 @@ function clientMetrics(overview: AdminClientOverview): AnalyticsMetric[] {
   return [
     {
       key: "revenue",
-      label: "Google revenue",
+      label: "Revenue",
       value: totals.googleRevenue,
       format: "money",
       hint:
         totals.googleOrders === null
           ? "Awaiting attribution sync"
-          : `${totals.googleOrders} attributed orders`,
-      tone: "gold",
+          : `${totals.googleOrders} non-Meta attributed orders`,
     },
     {
       key: "spend",
@@ -64,33 +63,35 @@ function clientMetrics(overview: AdminClientOverview): AnalyticsMetric[] {
       hint: "Across all mapped Google accounts",
     },
     {
+      key: "cog",
+      label: "Estimated COG",
+      value: totals.estimatedCog,
+      format: "money",
+      hint: "Product cost apportioned to this revenue slice",
+    },
+    {
       key: "roas",
       label: "Real ROAS",
-      value: totals.roas,
+      value:
+        totals.googleRevenue !== null && totals.adSpend > 0
+          ? totals.roas
+          : null,
       format: "multiplier",
       hint: `${totals.trackedRoas.toFixed(2)}x tracked by Google`,
       tone: "gold",
     },
     {
       key: "profit",
-      label: "Client profit",
+      label: "Estimated profit",
       value: totals.profit,
       format: "money",
-      hint: "Before the agency fee",
+      hint: "After apportioned costs and ad spend · before agency fee",
       tone:
         totals.profit === null
           ? undefined
           : totals.profit < 0
             ? "negative"
             : "positive",
-    },
-    {
-      key: "agency",
-      label: "Agency billing",
-      value: totals.agencyRevenue,
-      format: "money",
-      hint: "Ad-spend fee and revenue share",
-      tone: "gold",
     },
   ];
 }
@@ -99,14 +100,13 @@ function storeMetrics(store: AdminStoreOverview): AnalyticsMetric[] {
   return [
     {
       key: "revenue",
-      label: "Google revenue",
+      label: "Revenue",
       value: store.googleRevenue,
       format: "money",
       hint:
         store.googleOrders === null
           ? "Awaiting attribution sync"
-          : `${store.googleOrders} attributed orders`,
-      tone: "gold",
+          : `${store.googleOrders} non-Meta attributed orders`,
     },
     {
       key: "spend",
@@ -116,30 +116,35 @@ function storeMetrics(store: AdminStoreOverview): AnalyticsMetric[] {
       hint: "Mapped Google accounts",
     },
     {
+      key: "cog",
+      label: "Estimated COG",
+      value: store.estimatedCog,
+      format: "money",
+      hint: "Product cost apportioned to this revenue slice",
+    },
+    {
       key: "roas",
       label: "Real ROAS",
-      value: store.roas,
+      value:
+        store.googleRevenue !== null && store.adSpend > 0
+          ? store.roas
+          : null,
       format: "multiplier",
       hint: `${store.trackedRoas.toFixed(2)}x tracked by Google`,
       tone: "gold",
     },
     {
-      key: "orders",
-      label: "Google orders",
-      value: store.googleOrders,
-      format: "integer",
-      hint: "Excludes Meta-referred orders",
-    },
-    {
-      key: "agency",
-      label: "Agency billing",
-      value: store.commission + store.revShare,
+      key: "profit",
+      label: "Estimated profit",
+      value: store.profit,
       format: "money",
-      hint:
-        store.revShare > 0
-          ? "Ad-spend fee and revenue share"
-          : `${store.commissionRate}% of ad spend`,
-      tone: "gold",
+      hint: "After apportioned costs and ad spend · before agency fee",
+      tone:
+        store.profit === null
+          ? undefined
+          : store.profit < 0
+            ? "negative"
+            : "positive",
     },
   ];
 }
@@ -167,6 +172,14 @@ export function projectAnalyticsScope(
   }
 
   const updatedAt = verifiedTimestamp(overview.updatedAt);
+  const metrics = overview.mixedCurrency
+    ? clientMetrics(overview).map((metric) => ({
+        ...metric,
+        value: null,
+        hint: `Unavailable across mixed currencies (${overview.currencies.join(", ")})`,
+        tone: undefined,
+      }))
+    : clientMetrics(overview);
   return {
     selectedStore: null,
     invalidStoreSelection: Boolean(selectedStoreId),
@@ -174,7 +187,7 @@ export function projectAnalyticsScope(
     currency: overview.currency,
     label: "All stores",
     description: `${overview.stores.length} ${overview.stores.length === 1 ? "store" : "stores"} in this client`,
-    metrics: verifiedMetrics(clientMetrics(overview), updatedAt),
+    metrics: verifiedMetrics(metrics, updatedAt),
   };
 }
 
@@ -199,6 +212,34 @@ export function sortAnalyticsActivity(
 /** URL for leaving a selected client while keeping the reporting window. */
 export function analyticsBaseHref(range: RangeSelection): string {
   const params = new URLSearchParams({
+    range: range.key,
+    from: range.from,
+    to: range.to,
+  });
+  return `/admin/analytics?${params.toString()}`;
+}
+
+export function analyticsClientHref(
+  clientId: string,
+  range: RangeSelection,
+): string {
+  const params = new URLSearchParams({
+    client: clientId,
+    range: range.key,
+    from: range.from,
+    to: range.to,
+  });
+  return `/admin/analytics?${params.toString()}`;
+}
+
+export function analyticsStoreHref(
+  clientId: string,
+  storeId: string,
+  range: RangeSelection,
+): string {
+  const params = new URLSearchParams({
+    client: clientId,
+    store: storeId,
     range: range.key,
     from: range.from,
     to: range.to,

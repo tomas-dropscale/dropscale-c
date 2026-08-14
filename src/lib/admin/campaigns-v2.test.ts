@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   googleProfit: vi.fn(),
   googleRoas: vi.fn(),
   fetchDailyMetrics: vi.fn(),
+  groupByAccount: vi.fn(),
   sumMetrics: vi.fn(),
   resolveReportingSources: vi.fn(),
   fetchGoogleReportingCampaigns: vi.fn(),
@@ -44,6 +45,7 @@ vi.mock("@/lib/admin/google-attribution", () => ({
 }));
 vi.mock("@/lib/metrics/queries", () => ({
   fetchDailyMetrics: mocks.fetchDailyMetrics,
+  groupByAccount: mocks.groupByAccount,
   sumMetrics: mocks.sumMetrics,
 }));
 vi.mock("@/lib/portal/data", () => ({ ACCOUNT_COLUMNS: "columns" }));
@@ -170,7 +172,7 @@ function supabaseFor(accounts: AdAccount[], token: string | null = null) {
 }
 
 const emptyRollup = {
-  attributedRevenue: 0,
+  attributedRevenue: null,
   revenue: 0,
   refunds: 0,
   productCost: 0,
@@ -187,6 +189,15 @@ describe("admin V2 campaign inventory", () => {
     mocks.hasWindsorEnv.mockReturnValue(true);
     mocks.fetchHstClientKeys.mockResolvedValue({ crmIds: new Set(), names: new Set() });
     mocks.fetchDailyMetrics.mockResolvedValue([]);
+    mocks.groupByAccount.mockImplementation((rows: Array<{ ad_account_id: string }>) => {
+      const grouped = new Map<string, Array<{ ad_account_id: string }>>();
+      for (const row of rows) {
+        const current = grouped.get(row.ad_account_id) ?? [];
+        current.push(row);
+        grouped.set(row.ad_account_id, current);
+      }
+      return grouped;
+    });
     mocks.sumMetrics.mockReturnValue(emptyRollup);
     mocks.googleProfit.mockReturnValue(0);
     mocks.googleRoas.mockReturnValue(0);
@@ -223,6 +234,18 @@ describe("admin V2 campaign inventory", () => {
     const pair = source("anchor", { anchor: true });
     const child = source("child", { child: true });
     mocks.resolveReportingSources.mockResolvedValue([pair, child]);
+    mocks.fetchDailyMetrics.mockResolvedValue([
+      { ad_account_id: "anchor" },
+      { ad_account_id: "child" },
+    ]);
+    mocks.sumMetrics.mockImplementation((rows: unknown[]) =>
+      rows.length > 0
+        ? { ...emptyRollup, attributedRevenue: 120, revenue: 120, adSpend: 40 }
+        : emptyRollup,
+    );
+    mocks.googleRoas.mockImplementation((revenue: number | null, spend: number) =>
+      revenue !== null && spend > 0 ? revenue / spend : 0,
+    );
     mocks.fetchGoogleReportingCampaigns.mockImplementation(async (reportingSource) => [
       {
         id: `campaign-${reportingSource.adAccountId}`,
@@ -248,6 +271,9 @@ describe("admin V2 campaign inventory", () => {
     });
 
     expect(overview.clients).toHaveLength(1);
+    expect(overview.clients[0]).toEqual(
+      expect.objectContaining({ revenue: 120, rollupSpend: 40, realRoas: 3 }),
+    );
     expect(overview.clients[0].accounts).toEqual([
       expect.objectContaining({
         account: expect.objectContaining({
@@ -312,6 +338,9 @@ describe("admin V2 campaign inventory", () => {
 
     expect(overview.clients[0].accounts[0]).toEqual(
       expect.objectContaining({ spend: 25, commission: 2.5, connected: true }),
+    );
+    expect(overview.clients[0]).toEqual(
+      expect.objectContaining({ revenue: null, rollupSpend: 0, realRoas: 0 }),
     );
     expect(mocks.fetchLiveCampaignsDetailed).toHaveBeenCalledWith(
       "1234567890",

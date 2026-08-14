@@ -58,15 +58,14 @@ vi.mock("@/lib/google-ads/client", () => ({
 import {
   campaignCurrencyUnitsToMicros,
   campaignMicrosToCurrencyUnits,
-  configureCampaignActionPolicyRequest,
   executeCampaignActionRequest,
   listCampaignActionActivity,
   projectCampaignActionHistory,
 } from "./campaign-actions";
 import type { CampaignActionOperation } from "@/lib/supabase/types";
 
-function policyRequest(body: unknown, origin = "https://dropscale.app") {
-  const request = new Request("https://dropscale.app/api/admin/campaign-action-policies", {
+function actionRequest(body: unknown, origin = "https://dropscale.app") {
+  const request = new Request("https://dropscale.app/api/admin/campaign-actions", {
     method: "POST",
     headers: { "content-type": "application/json", origin },
     body: JSON.stringify(body),
@@ -77,14 +76,6 @@ function policyRequest(body: unknown, origin = "https://dropscale.app") {
   return request as never;
 }
 
-const validBody = {
-  requestId: "11111111-1111-4111-8111-111111111111",
-  bindingId: "22222222-2222-4222-8222-222222222222",
-  expectedPolicyId: "77777777-7777-4777-8777-777777777777",
-  allowedActions: ["campaign_paused", "budget_changed", "campaign_enabled"],
-  maxDailyBudget: "1250.125",
-};
-
 const validActionBody = {
   requestId: "33333333-3333-4333-8333-333333333333",
   bindingId: "22222222-2222-4222-8222-222222222222",
@@ -93,7 +84,17 @@ const validActionBody = {
   expectedStatus: "active",
 };
 
-function setupStatusActionAuthority() {
+const internalPolicy = {
+  id: "77777777-7777-4777-8777-777777777777",
+  client_reporting_binding_id: validActionBody.bindingId,
+  allowed_actions: ["budget_changed", "campaign_enabled", "campaign_paused"],
+  max_daily_budget_micros: 1_000_000_000_000,
+  revision: 1,
+};
+
+function setupStatusActionAuthority(
+  policyResponses: Array<typeof internalPolicy | null> = [internalPolicy],
+) {
   const responses = [
     { data: null, error: null },
     { data: null, error: null },
@@ -107,16 +108,7 @@ function setupStatusActionAuthority() {
       },
       error: null,
     },
-    {
-      data: {
-        id: "77777777-7777-4777-8777-777777777777",
-        client_reporting_binding_id: validActionBody.bindingId,
-        allowed_actions: ["campaign_paused"],
-        max_daily_budget_micros: null,
-        revision: 1,
-      },
-      error: null,
-    },
+    ...policyResponses.map((policy) => ({ data: policy, error: null })),
   ];
   const builder: Record<string, ReturnType<typeof vi.fn>> = {};
   for (const name of ["select", "eq", "order", "limit"]) {
@@ -164,7 +156,7 @@ describe("campaign action request boundary", () => {
 
   it("authenticates before reading action input or constructing service_role", async () => {
     mocks.requireAdmin.mockRejectedValue(new Error("unauthorised"));
-    const request = policyRequest(validActionBody);
+    const request = actionRequest(validActionBody);
     const reader = vi.spyOn(request, "json");
 
     await expect(executeCampaignActionRequest(request)).rejects.toThrow("unauthorised");
@@ -174,7 +166,7 @@ describe("campaign action request boundary", () => {
 
   it("rejects cross-origin action input before reading it", async () => {
     mocks.requireAdmin.mockResolvedValue({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" });
-    const request = policyRequest(validActionBody, "https://evil.example");
+    const request = actionRequest(validActionBody, "https://evil.example");
     const reader = vi.spyOn(request, "json");
 
     await expect(executeCampaignActionRequest(request)).rejects.toMatchObject({ status: 403 });
@@ -213,7 +205,7 @@ describe("campaign action request boundary", () => {
     mocks.readGoogleCampaignControlState.mockRejectedValueOnce(new Error("provider unavailable"));
 
     await expect(
-      executeCampaignActionRequest(policyRequest(validActionBody)),
+      executeCampaignActionRequest(actionRequest(validActionBody)),
     ).rejects.toMatchObject({ status: 409 });
 
     expect(mocks.rpc).toHaveBeenCalledWith(
@@ -265,7 +257,7 @@ describe("campaign action request boundary", () => {
     mocks.rpc.mockResolvedValueOnce({ data: { status: "succeeded" }, error: null });
 
     await expect(
-      executeCampaignActionRequest(policyRequest(validActionBody)),
+      executeCampaignActionRequest(actionRequest(validActionBody)),
     ).resolves.toEqual({ status: "succeeded" });
 
     expect(mocks.rpc).toHaveBeenCalledWith(
@@ -294,7 +286,7 @@ describe("campaign action request boundary", () => {
       .mockResolvedValueOnce({ data: { status: "succeeded" }, error: null });
 
     await expect(
-      executeCampaignActionRequest(policyRequest(validActionBody)),
+      executeCampaignActionRequest(actionRequest(validActionBody)),
     ).resolves.toEqual({ status: "succeeded" });
 
     expect(mocks.rpc).toHaveBeenNthCalledWith(
@@ -326,6 +318,78 @@ describe("campaign action request boundary", () => {
     );
   });
 
+  it("creates the invisible internal controls on the first verified action", async () => {
+    setupStatusActionAuthority([null]);
+    mocks.rpc
+      .mockResolvedValueOnce({ data: internalPolicy, error: null })
+      .mockImplementationOnce((_: string, args: { p_execution_claim_id: string }) =>
+        Promise.resolve({
+          data: { status: "requested", execution_claim_id: args.p_execution_claim_id },
+          error: null,
+        }),
+      )
+      .mockResolvedValueOnce({ data: { status: "succeeded" }, error: null });
+
+    await expect(
+      executeCampaignActionRequest(actionRequest(validActionBody)),
+    ).resolves.toEqual({ status: "succeeded" });
+
+    expect(mocks.rpc).toHaveBeenNthCalledWith(1, "set_campaign_action_policy", {
+      p_policy_id: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      p_idempotency_key: `campaign-controls:${validActionBody.bindingId}`,
+      p_client_reporting_binding_id: validActionBody.bindingId,
+      p_expected_policy_id: null,
+      p_allowed_actions: ["budget_changed", "campaign_enabled", "campaign_paused"],
+      p_max_daily_budget_micros: 1_000_000_000_000,
+      p_admin_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      p_reason: "Internal admin campaign controls.",
+    });
+    expect(mocks.rpc).toHaveBeenNthCalledWith(
+      2,
+      "start_campaign_action",
+      expect.objectContaining({ p_action: "campaign_paused" }),
+    );
+    expect(mocks.updateGoogleCampaignStatus).toHaveBeenCalledTimes(1);
+    expect(mocks.rpc.mock.invocationCallOrder[1]).toBeLessThan(
+      mocks.updateGoogleCampaignStatus.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("accepts the exact winning controls row after a concurrent first action", async () => {
+    setupStatusActionAuthority([null, internalPolicy]);
+    mocks.rpc
+      .mockResolvedValueOnce({ data: null, error: { code: "40001" } })
+      .mockImplementationOnce((_: string, args: { p_execution_claim_id: string }) =>
+        Promise.resolve({
+          data: { status: "requested", execution_claim_id: args.p_execution_claim_id },
+          error: null,
+        }),
+      )
+      .mockResolvedValueOnce({ data: { status: "succeeded" }, error: null });
+
+    await expect(
+      executeCampaignActionRequest(actionRequest(validActionBody)),
+    ).resolves.toEqual({ status: "succeeded" });
+
+    expect(mocks.rpc).toHaveBeenCalledTimes(3);
+    expect(mocks.updateGoogleCampaignStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps an existing restrictive internal row fail-closed", async () => {
+    setupStatusActionAuthority([{
+      ...internalPolicy,
+      allowed_actions: ["budget_changed"],
+    }]);
+
+    await expect(
+      executeCampaignActionRequest(actionRequest(validActionBody)),
+    ).rejects.toMatchObject({ status: 403 });
+
+    expect(mocks.rpc).not.toHaveBeenCalled();
+    expect(mocks.updateGoogleCampaignStatus).not.toHaveBeenCalled();
+    expect(mocks.updateGoogleCampaignBudget).not.toHaveBeenCalled();
+  });
+
   it("retries an idempotent completion without repeating the Google mutation", async () => {
     setupStatusActionAuthority();
     mocks.rpc
@@ -339,7 +403,7 @@ describe("campaign action request boundary", () => {
       .mockResolvedValueOnce({ data: { status: "succeeded" }, error: null });
 
     await expect(
-      executeCampaignActionRequest(policyRequest(validActionBody)),
+      executeCampaignActionRequest(actionRequest(validActionBody)),
     ).resolves.toEqual({ status: "succeeded" });
 
     expect(mocks.updateGoogleCampaignStatus).toHaveBeenCalledTimes(1);
@@ -357,75 +421,12 @@ describe("campaign action request boundary", () => {
     });
 
     await expect(
-      executeCampaignActionRequest(policyRequest(validActionBody)),
+      executeCampaignActionRequest(actionRequest(validActionBody)),
     ).rejects.toMatchObject({ status: 409 });
 
     expect(mocks.rpc).toHaveBeenCalledTimes(1);
     expect(mocks.updateGoogleCampaignStatus).not.toHaveBeenCalled();
     expect(mocks.updateGoogleCampaignBudget).not.toHaveBeenCalled();
-  });
-});
-
-describe("campaign action policy request", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    mocks.requireAdmin.mockResolvedValue({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" });
-    mocks.createServiceClient.mockReturnValue({ rpc: mocks.rpc });
-    mocks.rpc.mockResolvedValue({
-      data: { revision: 3, allowed_actions: ["budget_changed"] },
-      error: null,
-    });
-  });
-
-  it("authenticates before reading the body or constructing service_role", async () => {
-    mocks.requireAdmin.mockRejectedValue(new Error("unauthorised"));
-    const request = policyRequest(validBody);
-    const reader = vi.spyOn(request, "json");
-
-    await expect(configureCampaignActionPolicyRequest(request)).rejects.toThrow("unauthorised");
-    expect(reader).not.toHaveBeenCalled();
-    expect(mocks.createServiceClient).not.toHaveBeenCalled();
-  });
-
-  it("rejects cross-origin input before constructing service_role", async () => {
-    await expect(
-      configureCampaignActionPolicyRequest(policyRequest(validBody, "https://evil.example")),
-    ).rejects.toMatchObject({ status: 403 });
-    expect(mocks.createServiceClient).not.toHaveBeenCalled();
-  });
-
-  it("normalizes actions and converts the exact account-currency cap to micros", async () => {
-    await expect(configureCampaignActionPolicyRequest(policyRequest(validBody))).resolves.toEqual({
-      revision: 3,
-      enabled: true,
-    });
-    expect(mocks.rpc).toHaveBeenCalledWith("set_campaign_action_policy", {
-      p_policy_id: validBody.requestId,
-      p_idempotency_key: `campaign-policy:${validBody.requestId}`,
-      p_client_reporting_binding_id: validBody.bindingId,
-      p_expected_policy_id: validBody.expectedPolicyId,
-      p_allowed_actions: ["budget_changed", "campaign_enabled", "campaign_paused"],
-      p_max_daily_budget_micros: 1_250_125_000,
-      p_admin_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-      p_reason: "Admin configured campaign controls policy.",
-    });
-  });
-
-  it("requires a cap exactly when budget mutations are allowed", async () => {
-    await expect(
-      configureCampaignActionPolicyRequest(
-        policyRequest({ ...validBody, maxDailyBudget: null }),
-      ),
-    ).rejects.toMatchObject({ status: 400 });
-    expect(mocks.createServiceClient).not.toHaveBeenCalled();
-  });
-
-  it("surfaces a stale policy comparison as a refreshable conflict", async () => {
-    mocks.rpc.mockResolvedValueOnce({ data: null, error: { code: "40001" } });
-
-    await expect(
-      configureCampaignActionPolicyRequest(policyRequest(validBody)),
-    ).rejects.toMatchObject({ status: 409 });
   });
 });
 

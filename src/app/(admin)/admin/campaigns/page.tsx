@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { ChevronRight, ShieldAlert, Truck, Unplug } from "lucide-react";
 
 import { CampaignsView } from "@/components/admin/campaigns-view";
+import { CampaignsToolbar } from "@/components/admin/campaigns-toolbar";
 import { ClientDashboardDialog } from "@/components/admin/client-dashboard-dialog";
 import { CommissionRate } from "@/components/admin/commission-rate";
 import { StoreName } from "@/components/admin/store-name";
@@ -46,10 +47,15 @@ export default async function AdminCampaignsPage({
   return (
     <PageContainer
       title={d.placeholder.campaigns.title}
-      description={`All client campaigns and agency commissions · ${range.from} → ${range.to}`}
-      actions={<RangePicker current={range} />}
+      description={`Portfolio performance and active campaign controls · ${range.from} → ${range.to}`}
+      actions={
+        <>
+          <CampaignsToolbar />
+          <RangePicker current={range} />
+        </>
+      }
     >
-      <div className="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-3">
+      <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
         {[
           {
             label: "Revenue",
@@ -57,62 +63,65 @@ export default async function AdminCampaignsPage({
               overview.totals.revenue === null
                 ? "—"
                 : money(overview.totals.revenue, intl),
-            hint: "all stores · excludes Meta referrals",
-            negative: false,
+            hint: "Non-Meta Shopify revenue in the reporting rollup",
           },
           {
-            label: "Client profit",
+            label: "Real ROAS",
             value:
-              overview.totals.profit === null ? "—" : money(overview.totals.profit, intl),
-            hint: "after COGS, shipping and ad spend · before our fee",
-            negative: overview.totals.profit !== null && overview.totals.profit < 0,
-          },
-          {
-            label: "Average ROAS",
-            value: multiplier(overview.totals.roas),
-            hint: `${money(overview.totals.revenue ?? 0, intl)} ÷ ${money(overview.totals.rollupSpend, intl)}`,
-            negative: false,
+              overview.totals.revenue === null ? "—" : multiplier(overview.totals.roas),
+            hint: "Non-Meta Shopify revenue ÷ rollup ad spend",
           },
         ].map((item) => (
           <div
             key={item.label}
-            className={
-              item.negative
-                ? "panel border-[var(--danger-red)]/40 p-4"
-                : "panel border-[var(--accent-gold)]/30 bg-[var(--accent-gold-dim)] p-4"
-            }
+            className="panel min-w-0 border-[var(--accent-gold)]/30 bg-[var(--accent-gold-dim)] p-4"
           >
             <p className="label-caps">{item.label}</p>
-            <p
-              className={
-                item.negative
-                  ? "metric-value mt-1 !text-[24px] !text-[var(--danger-red)]"
-                  : "metric-value mt-1 !text-[24px] !text-[var(--accent-gold-strong)]"
-              }
-            >
+            <p className="metric-value mt-1 truncate !text-[24px] !text-[var(--accent-gold-strong)]">
               {item.value}
             </p>
-            <p className="mt-0.5 truncate text-[11px] text-[var(--text-muted)]">{item.hint}</p>
+            <p className="mt-0.5 text-[11px] leading-relaxed text-[var(--text-muted)]">
+              {item.hint}
+            </p>
           </div>
         ))}
       </div>
 
-      <div className="mb-6 grid grid-cols-2 gap-4 lg:grid-cols-4">
+      <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
         {[
-          { label: "Ad spend", value: money(overview.totals.spend, intl) },
-          { label: "Agency commission", value: money(overview.totals.commission, intl) },
-          { label: "Active campaigns", value: String(overview.totals.activeCampaigns) },
-          { label: "Connected accounts", value: String(overview.totals.connectedAccounts) },
+          {
+            label: "Ad spend",
+            value: money(overview.totals.spend, intl),
+            hint: "Across mapped ad accounts",
+          },
+          {
+            label: "Agency commission",
+            value: money(overview.totals.commission, intl),
+            hint: "Based on each store rate",
+          },
+          {
+            label: "Active campaigns",
+            value: String(overview.totals.activeCampaigns),
+            hint: "Enabled in Google Ads",
+          },
+          {
+            label: "Connected accounts",
+            value: String(overview.totals.connectedAccounts),
+            hint: "Available reporting accounts",
+          },
         ].map((item) => (
-          <div key={item.label} className="panel p-4">
+          <div key={item.label} className="panel min-w-0 p-4">
             <p className="label-caps">{item.label}</p>
-            <p className="metric-value mt-1 !text-[24px]">{item.value}</p>
+            <p className="metric-value mt-1 truncate !text-[24px]">{item.value}</p>
+            <p className="mt-0.5 text-[11px] leading-relaxed text-[var(--text-muted)]">
+              {item.hint}
+            </p>
           </div>
         ))}
       </div>
 
       {!overview.configured && (
-        <div className="panel mb-6 px-5 py-4 text-[13px] text-[var(--text-secondary)]">
+        <div className="panel mb-4 px-5 py-4 text-[13px] text-[var(--text-secondary)]">
           Google Ads isn&apos;t configured, so no live campaigns can be shown yet.
         </div>
       )}

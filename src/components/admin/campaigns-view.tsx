@@ -2,41 +2,32 @@
 
 import * as React from "react";
 import { createPortal } from "react-dom";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
+  BarChart3,
   ChevronRight,
   Loader2,
   Pause,
   Pencil,
   Play,
   Search,
-  ShieldCheck,
   Store,
   X,
 } from "lucide-react";
 
-import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import {
+  MAX_CAMPAIGN_DAILY_BUDGET,
+  MIN_CAMPAIGN_DAILY_BUDGET,
   dailyBudgetDraft,
   dailyBudgetWithinLimit,
   filterCampaignClients,
   normalizeDailyBudgetInput,
   projectCampaignClients,
   type CampaignActionHistory,
-  type CampaignViewAllowedAction,
   type CampaignViewCampaign,
   type CampaignViewClient,
   type ProjectedCampaign,
@@ -79,20 +70,6 @@ type StatusActionBody = {
   action: "pause" | "enable";
   expectedStatus: "active" | "paused";
 };
-
-type PolicyActionBody = {
-  requestId: string;
-  bindingId: string;
-  expectedPolicyId: string | null;
-  allowedActions: CampaignViewAllowedAction[];
-  maxDailyBudget: string | null;
-};
-
-const POLICY_CHOICES: Array<{ action: CampaignViewAllowedAction; label: string }> = [
-  { action: "budget_changed", label: "Change daily budget" },
-  { action: "campaign_paused", label: "Pause campaigns" },
-  { action: "campaign_enabled", label: "Enable campaigns" },
-];
 
 const campaignKey = (campaign: CampaignViewCampaign) =>
   `${campaign.adAccountId}:${campaign.providerCampaignId}`;
@@ -185,10 +162,8 @@ function BudgetControl({
   const [error, setError] = React.useState("");
   const canEdit =
     campaign.actionable &&
-    campaign.allowedActions.includes("budget_changed") &&
     campaign.status !== "ended" &&
-    campaign.dailyBudget !== null &&
-    campaign.maxDailyBudget !== null;
+    campaign.dailyBudget !== null;
 
   function updateAnchor() {
     if (trigger.current) setAnchor(trigger.current.getBoundingClientRect());
@@ -257,9 +232,9 @@ function BudgetControl({
       setError("Choose a different daily budget.");
       return;
     }
-    if (!dailyBudgetWithinLimit(nextDailyBudget, campaign.maxDailyBudget)) {
+    if (!dailyBudgetWithinLimit(nextDailyBudget)) {
       setError(
-        `This binding allows up to ${money(campaign.maxDailyBudget ?? 0, campaign.currency)} per day.`,
+        `Daily budgets must be between ${money(MIN_CAMPAIGN_DAILY_BUDGET, campaign.currency)} and ${money(MAX_CAMPAIGN_DAILY_BUDGET, campaign.currency)} per day.`,
       );
       return;
     }
@@ -441,11 +416,6 @@ function BudgetControl({
             <label className="label-caps mt-3 block" htmlFor={inputId}>
               Budget per day
             </label>
-            {campaign.maxDailyBudget && (
-              <p className="mt-1 text-[10.5px] text-[var(--text-muted)]">
-                Policy cap: {money(campaign.maxDailyBudget, campaign.currency)}
-              </p>
-            )}
             <div className="relative mt-1.5">
               <Input
                 id={inputId}
@@ -487,204 +457,21 @@ function BudgetControl({
   );
 }
 
-function PolicyControl({
-  campaign,
-  busy,
-  onChange,
-}: {
-  campaign: ProjectedCampaign;
-  busy: boolean;
-  onChange: (
-    allowedActions: CampaignViewAllowedAction[],
-    maxDailyBudget: string | null,
-  ) => Promise<ActionResult>;
-}) {
-  const [open, setOpen] = React.useState(false);
-  const [allowed, setAllowed] = React.useState(
-    () => new Set<CampaignViewAllowedAction>(campaign.allowedActions),
-  );
-  const [maxBudget, setMaxBudget] = React.useState(() => dailyBudgetDraft(campaign.maxDailyBudget));
-  const [error, setError] = React.useState("");
-  const budgetEnabled = allowed.has("budget_changed");
-  const errorId = React.useId();
-
-  if (!campaign.bindingId) return null;
-
-  function reset() {
-    setAllowed(new Set(campaign.allowedActions));
-    setMaxBudget(dailyBudgetDraft(campaign.maxDailyBudget));
-    setError("");
-  }
-
-  function setDialogOpen(next: boolean) {
-    if (busy) return;
-    if (next) reset();
-    setOpen(next);
-  }
-
-  function toggle(action: CampaignViewAllowedAction, checked: boolean) {
-    setAllowed((current) => {
-      const next = new Set(current);
-      if (checked) next.add(action);
-      else next.delete(action);
-      return next;
-    });
-    setError("");
-  }
-
-  async function submit(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (busy) return;
-    const maxDailyBudget = budgetEnabled ? normalizeDailyBudgetInput(maxBudget) : null;
-    if (budgetEnabled && !maxDailyBudget) {
-      setError("Set a daily budget cap above 0 with no more than 6 decimal places.");
-      return;
-    }
-    const allowedActions = POLICY_CHOICES
-      .map(({ action }) => action)
-      .filter((action) => allowed.has(action));
-    const sameActions = [...allowedActions].sort().join(":") ===
-      [...campaign.allowedActions].sort().join(":");
-    const sameBudget = maxDailyBudget ===
-      (budgetEnabled ? dailyBudgetDraft(campaign.maxDailyBudget) : null);
-    if (sameActions && sameBudget) {
-      setError("Choose at least one policy change.");
-      return;
-    }
-    const result = await onChange(allowedActions, maxDailyBudget);
-    if (!result.ok) {
-      setError(result.error);
-      return;
-    }
-    setOpen(false);
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={setDialogOpen}>
-      <DialogTrigger asChild>
-        <Button
-          type="button"
-          variant="secondary"
-          size="icon"
-          className="size-10 xl:size-8"
-          disabled={busy}
-          aria-label={`Configure campaign controls for ${campaign.name}`}
-          title="Configure binding policy"
-        >
-          {busy ? <Loader2 className="animate-spin" aria-hidden /> : <ShieldCheck aria-hidden />}
-        </Button>
-      </DialogTrigger>
-
-      <DialogContent className="max-w-md">
-        <form onSubmit={submit}>
-          <DialogHeader>
-            <DialogTitle>Campaign controls</DialogTitle>
-            <DialogDescription>
-              This policy applies to every campaign on the same Google Ads binding.
-            </DialogDescription>
-          </DialogHeader>
-
-          <fieldset className="mt-5 space-y-1" disabled={busy}>
-            <legend className="label-caps mb-2">Allowed actions</legend>
-            {POLICY_CHOICES.map(({ action, label }) => {
-              const id = `${errorId}-${action}`;
-              return (
-                <label
-                  key={action}
-                  htmlFor={id}
-                  className="flex min-h-10 cursor-pointer items-center gap-3 rounded-[var(--radius-control)] px-2 text-[13px] text-[var(--text-primary)] hover:bg-[var(--bg-panel-hover)]"
-                >
-                  <Checkbox
-                    id={id}
-                    checked={allowed.has(action)}
-                    onCheckedChange={(checked) => toggle(action, checked === true)}
-                  />
-                  {label}
-                </label>
-              );
-            })}
-          </fieldset>
-
-          {budgetEnabled && (
-            <div className="mt-4">
-              <label className="label-caps block" htmlFor={`${errorId}-max-budget`}>
-                Maximum daily budget
-              </label>
-              <div className="relative mt-1.5">
-                <Input
-                  id={`${errorId}-max-budget`}
-                  type="text"
-                  inputMode="decimal"
-                  maxLength={15}
-                  value={maxBudget}
-                  disabled={busy}
-                  aria-invalid={Boolean(error)}
-                  aria-describedby={error ? errorId : undefined}
-                  className="h-10 pr-14 tabular-nums"
-                  onChange={(event) => {
-                    setMaxBudget(event.target.value);
-                    setError("");
-                  }}
-                />
-                <span className="pointer-events-none absolute top-1/2 right-3 -translate-y-1/2 text-[11px] font-medium text-[var(--text-muted)]">
-                  {campaign.currency}
-                </span>
-              </div>
-            </div>
-          )}
-
-          {error && (
-            <p id={errorId} role="alert" className="mt-2 text-[11px] text-[var(--danger-red)]">
-              {error}
-            </p>
-          )}
-
-          <DialogFooter className="mt-5">
-            <Button
-              type="button"
-              variant="ghost"
-              disabled={busy}
-              onClick={() => setDialogOpen(false)}
-            >
-              Cancel
-            </Button>
-            <Button type="submit" variant="primary" loading={busy}>
-              Save policy
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
 function CampaignRow({
   campaign,
   busy,
-  policyBusy,
   statusError,
   onBudgetChange,
-  onPolicyChange,
   onStatusChange,
 }: {
   campaign: ProjectedCampaign;
   busy: boolean;
-  policyBusy: boolean;
   statusError: string | undefined;
   onBudgetChange: (campaign: ProjectedCampaign, nextDailyBudget: string) => Promise<ActionResult>;
-  onPolicyChange: (
-    campaign: ProjectedCampaign,
-    allowedActions: CampaignViewAllowedAction[],
-    maxDailyBudget: string | null,
-  ) => Promise<ActionResult>;
   onStatusChange: (campaign: ProjectedCampaign) => void;
 }) {
   const nextAction = campaign.status === "active" ? "Pause" : "Enable";
-  const requiredAction = campaign.status === "active" ? "campaign_paused" : "campaign_enabled";
-  const canChangeStatus =
-    campaign.actionable &&
-    campaign.status !== "ended" &&
-    campaign.allowedActions.includes(requiredAction);
+  const canChangeStatus = campaign.actionable && campaign.status !== "ended";
 
   return (
     <li
@@ -699,9 +486,7 @@ function CampaignRow({
         </p>
         {!campaign.actionable && (
           <p className="mt-0.5 truncate text-[10.5px] text-[var(--text-muted)]">
-            {campaign.bindingId
-              ? "Campaign actions disabled by binding policy"
-              : "Actions unavailable for this account"}
+            Actions unavailable for this account
           </p>
         )}
       </div>
@@ -728,7 +513,7 @@ function CampaignRow({
         <span className="label-caps mb-1 block xl:hidden">Daily budget</span>
         <BudgetControl
           campaign={campaign}
-          busy={busy || policyBusy}
+          busy={busy}
           onChange={(nextDailyBudget) => onBudgetChange(campaign, nextDailyBudget)}
         />
       </div>
@@ -741,13 +526,13 @@ function CampaignRow({
         {campaign.lastScaledAt ? safeDate(SCALE_DATE, campaign.lastScaledAt) : "—"}
       </CampaignMetric>
 
-      <div className="flex justify-self-end gap-1 xl:justify-self-center">
+      <div className="flex justify-self-end xl:justify-self-center">
         <Button
           type="button"
           variant="secondary"
           size="icon"
           className="size-10 xl:size-8"
-          disabled={!canChangeStatus || busy || policyBusy}
+          disabled={!canChangeStatus || busy}
           aria-label={`${nextAction} ${campaign.name}`}
           title={canChangeStatus ? `${nextAction} ${campaign.name}` : "Campaign action unavailable"}
           onClick={() => onStatusChange(campaign)}
@@ -760,13 +545,6 @@ function CampaignRow({
             <Play aria-hidden />
           )}
         </Button>
-        <PolicyControl
-          campaign={campaign}
-          busy={busy || policyBusy}
-          onChange={(allowedActions, maxDailyBudget) =>
-            onPolicyChange(campaign, allowedActions, maxDailyBudget)
-          }
-        />
       </div>
 
       {statusError && (
@@ -782,38 +560,62 @@ function CampaignRow({
 }
 
 function StoreGroup({
+  clientId,
   store,
   pending,
-  pendingPolicies,
   statusErrors,
   onBudgetChange,
-  onPolicyChange,
   onStatusChange,
 }: {
+  clientId: string;
   store: ProjectedCampaignClient["stores"][number];
   pending: Set<string>;
-  pendingPolicies: Set<string>;
   statusErrors: Record<string, string>;
   onBudgetChange: (campaign: ProjectedCampaign, nextDailyBudget: string) => Promise<ActionResult>;
-  onPolicyChange: (
-    campaign: ProjectedCampaign,
-    allowedActions: CampaignViewAllowedAction[],
-    maxDailyBudget: string | null,
-  ) => Promise<ActionResult>;
   onStatusChange: (campaign: ProjectedCampaign) => void;
 }) {
   const headingId = React.useId();
+  const spend = store.campaigns.reduce((sum, campaign) => sum + campaign.spend, 0);
+  const budgets = store.campaigns.map((campaign) =>
+    campaign.dailyBudget === null ? null : Number(campaign.dailyBudget),
+  );
+  const dailyBudget = budgets.every((budget): budget is number => budget !== null)
+    ? budgets.reduce((sum, budget) => sum + budget, 0)
+    : null;
+  const storeLabel = store.domain ? `https://${store.domain}` : store.name;
 
   return (
     <section aria-labelledby={headingId} className="border-t border-[var(--border-strong)] first:border-t-0">
-      <header className="flex items-center gap-3 bg-[var(--bg-base)] px-4 py-4 lg:px-5">
-        <Store className="size-4 shrink-0 text-[var(--accent-gold)]" aria-hidden />
-        <div className="min-w-0">
-          <h3 id={headingId} className="truncate text-[13px] font-semibold text-[var(--text-primary)]">
-            https://{store.domain}
+      <header
+        className={cn(
+          "grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 bg-[var(--bg-base)] px-4 py-4 lg:px-5",
+          CAMPAIGN_GRID,
+        )}
+      >
+        <div className="flex min-w-0 items-center gap-2.5 xl:col-span-7 xl:pl-6">
+          <Store className="size-4 shrink-0 text-[var(--accent-gold)]" aria-hidden />
+          <h3
+            id={headingId}
+            className="min-w-0 flex-1 truncate text-[13px] font-semibold text-[var(--text-primary)]"
+          >
+            {storeLabel}
           </h3>
-          <p className="mt-0.5 truncate text-[10.5px] text-[var(--text-muted)]">{store.name}</p>
         </div>
+
+        <Button
+          asChild
+          variant="secondary"
+          size="icon"
+          className="size-10 shrink-0 justify-self-center xl:size-8"
+        >
+          <Link
+            href={`/admin/analytics?client=${encodeURIComponent(clientId)}&store=${encodeURIComponent(store.id)}`}
+            aria-label={`Open store analytics for ${store.name}`}
+            title={`Open store analytics for ${store.name}`}
+          >
+            <BarChart3 aria-hidden />
+          </Link>
+        </Button>
       </header>
 
       {store.campaigns.length > 0 ? (
@@ -834,6 +636,37 @@ function StoreGroup({
             <span className="label-caps text-center">Action</span>
           </div>
           <ul>
+            <li
+              className={cn(
+                "grid grid-cols-2 items-center gap-x-3 gap-y-3 border-t border-[var(--border-subtle)] bg-[var(--bg-base)] px-4 py-3 lg:px-5",
+                CAMPAIGN_GRID,
+              )}
+            >
+              <span className="col-span-2 text-[12px] font-semibold tracking-[0.08em] text-[var(--text-primary)] xl:col-span-1 xl:pl-6">
+                TOTAL
+              </span>
+              <CampaignMetric label="Type">—</CampaignMetric>
+              <CampaignMetric label="Status">—</CampaignMetric>
+              <CampaignMetric label="Spend">{money(spend, store.currency)}</CampaignMetric>
+              <CampaignMetric label="Daily budget">
+                {dailyBudget === null ? "—" : money(dailyBudget, store.currency)}
+                {dailyBudget !== null && (
+                  <span className="ml-1 text-[11px] font-normal text-[var(--text-muted)]">
+                    / day
+                  </span>
+                )}
+              </CampaignMetric>
+              <CampaignMetric label="Real ROAS">
+                {store.realRoas === null ? "—" : multiplier(store.realRoas)}
+                {store.realRoas !== null && (
+                  <span className="ml-1 text-[10px] font-normal text-[var(--text-muted)]">
+                    real
+                  </span>
+                )}
+              </CampaignMetric>
+              <CampaignMetric label="Last scaled at">—</CampaignMetric>
+              <span className="hidden xl:block" aria-hidden />
+            </li>
             {store.campaigns.map((campaign) => {
               const key = campaignKey(campaign);
               return (
@@ -841,10 +674,8 @@ function StoreGroup({
                   key={key}
                   campaign={campaign}
                   busy={pending.has(key)}
-                  policyBusy={pendingPolicies.has(campaign.bindingId)}
                   statusError={statusErrors[key]}
                   onBudgetChange={onBudgetChange}
-                  onPolicyChange={onPolicyChange}
                   onStatusChange={onStatusChange}
                 />
               );
@@ -860,44 +691,24 @@ function StoreGroup({
   );
 }
 
-function clientSpend(client: ProjectedCampaignClient) {
-  const campaigns = client.stores.flatMap((store) => store.campaigns);
-  if (campaigns.length === 0) return "—";
-  const currencies = new Set(campaigns.map((campaign) => campaign.currency));
-  if (currencies.size !== 1) return "Mixed currencies";
-  return money(
-    campaigns.reduce((sum, campaign) => sum + campaign.spend, 0),
-    campaigns[0].currency,
-  );
-}
-
 function ClientSection({
   client,
   open,
   pending,
-  pendingPolicies,
   statusErrors,
   onToggle,
   onBudgetChange,
-  onPolicyChange,
   onStatusChange,
 }: {
   client: ProjectedCampaignClient;
   open: boolean;
   pending: Set<string>;
-  pendingPolicies: Set<string>;
   statusErrors: Record<string, string>;
   onToggle: () => void;
   onBudgetChange: (campaign: ProjectedCampaign, nextDailyBudget: string) => Promise<ActionResult>;
-  onPolicyChange: (
-    campaign: ProjectedCampaign,
-    allowedActions: CampaignViewAllowedAction[],
-    maxDailyBudget: string | null,
-  ) => Promise<ActionResult>;
   onStatusChange: (campaign: ProjectedCampaign) => void;
 }) {
   const regionId = React.useId();
-  const campaignCount = client.stores.reduce((sum, store) => sum + store.campaigns.length, 0);
 
   return (
     <div className="border-t border-[var(--border-subtle)] first:border-t-0">
@@ -916,20 +727,31 @@ function ClientSection({
             )}
             aria-hidden
           />
-          <Avatar name={client.name} seed={client.id} size="md" />
-          <span className="min-w-0">
+          <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-[var(--accent-gold-dim)] text-[11px] font-semibold text-[var(--accent-gold-strong)]">
+            {client.name
+              .split(/\s+/)
+              .slice(0, 2)
+              .map((part) => part[0])
+              .join("")
+              .toUpperCase()}
+          </span>
+          <span className="min-w-0 flex-1">
             <span className="block truncate text-[13.5px] font-semibold text-[var(--text-primary)]">
               {client.name}
             </span>
             <span className="mt-0.5 block truncate text-[11.5px] text-[var(--text-muted)]">
-              {client.email}
+              {client.stores.length} {client.stores.length === 1 ? "store" : "stores"} · {client.email}
             </span>
           </span>
         </span>
 
-        <ClientMetric label="Stores">{client.stores.length}</ClientMetric>
-        <ClientMetric label="Campaigns">{campaignCount}</ClientMetric>
-        <ClientMetric label="Ad spend">{clientSpend(client)}</ClientMetric>
+        <ClientMetric label="Revenue">
+          {client.revenue === null ? "—" : money(client.revenue, client.currency)}
+        </ClientMetric>
+        <ClientMetric label="Ad spend">{money(client.adSpend, client.currency)}</ClientMetric>
+        <ClientMetric label="Real ROAS">
+          {client.realRoas === null ? "—" : multiplier(client.realRoas)}
+        </ClientMetric>
       </button>
 
       {open && (
@@ -942,12 +764,11 @@ function ClientSection({
           {client.stores.map((store) => (
             <StoreGroup
               key={store.id}
+              clientId={client.id}
               store={store}
               pending={pending}
-              pendingPolicies={pendingPolicies}
               statusErrors={statusErrors}
               onBudgetChange={onBudgetChange}
-              onPolicyChange={onPolicyChange}
               onStatusChange={onStatusChange}
             />
           ))}
@@ -968,12 +789,12 @@ export function CampaignsView({
 }) {
   const router = useRouter();
   const inFlight = React.useRef(new Set<string>());
-  const policiesInFlight = React.useRef(new Set<string>());
   const requestIds = React.useRef(new Map<string, string>());
   const [query, setQuery] = React.useState("");
-  const [openClients, setOpenClients] = React.useState(() => new Set<string>());
+  const [openClients, setOpenClients] = React.useState(
+    () => new Set(clients.slice(0, 1).map((client) => client.id)),
+  );
   const [pending, setPending] = React.useState(() => new Set<string>());
-  const [pendingPolicies, setPendingPolicies] = React.useState(() => new Set<string>());
   const [statusErrors, setStatusErrors] = React.useState<Record<string, string>>({});
   const projected = React.useMemo(() => projectCampaignClients(clients, history), [clients, history]);
   const visibleClients = React.useMemo(
@@ -997,17 +818,6 @@ export function CampaignsView({
       const next = new Set(current);
       if (value) next.add(key);
       else next.delete(key);
-      return next;
-    });
-  }
-
-  function setPolicyPending(bindingId: string, value: boolean) {
-    if (value) policiesInFlight.current.add(bindingId);
-    else policiesInFlight.current.delete(bindingId);
-    setPendingPolicies((current) => {
-      const next = new Set(current);
-      if (value) next.add(bindingId);
-      else next.delete(bindingId);
       return next;
     });
   }
@@ -1064,54 +874,6 @@ export function CampaignsView({
       expectedDailyBudget: campaign.dailyBudget!,
       nextDailyBudget,
     }));
-  }
-
-  async function changePolicy(
-    campaign: ProjectedCampaign,
-    allowedActions: CampaignViewAllowedAction[],
-    maxDailyBudget: string | null,
-  ): Promise<ActionResult> {
-    const bindingId = campaign.bindingId;
-    if (!bindingId) return { ok: false, error: "This campaign has no controllable binding." };
-    if (policiesInFlight.current.has(bindingId)) {
-      return { ok: false, error: "This binding policy update is pending." };
-    }
-    const fingerprint = [
-      bindingId,
-      campaign.policyId ?? "none",
-      ...[...allowedActions].sort(),
-      maxDailyBudget ?? "disabled",
-    ].join(":");
-    const requestId = requestIds.current.get(fingerprint) ?? crypto.randomUUID();
-    requestIds.current.set(fingerprint, requestId);
-    setPolicyPending(bindingId, true);
-    const body: PolicyActionBody = {
-      requestId,
-      bindingId,
-      expectedPolicyId: campaign.policyId,
-      allowedActions,
-      maxDailyBudget,
-    };
-
-    try {
-      const response = await fetch("/api/admin/campaign-action-policies", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (!response.ok) return { ok: false, error: responseError(response.status) };
-
-      requestIds.current.delete(fingerprint);
-      router.refresh();
-      return { ok: true };
-    } catch {
-      return {
-        ok: false,
-        error: "The connection ended before the result was known. Refresh before trying again.",
-      };
-    } finally {
-      setPolicyPending(bindingId, false);
-    }
   }
 
   async function changeStatus(campaign: ProjectedCampaign) {
@@ -1190,9 +952,9 @@ export function CampaignsView({
 
       <div className="hidden grid-cols-[minmax(260px,1.6fr)_repeat(3,minmax(100px,.65fr))] gap-4 border-b border-[var(--border-subtle)] px-5 py-2.5 md:grid">
         <span className="label-caps">Client</span>
-        <span className="label-caps">Stores</span>
-        <span className="label-caps">Campaigns</span>
+        <span className="label-caps">Revenue</span>
         <span className="label-caps">Ad spend</span>
+        <span className="label-caps">Real ROAS</span>
       </div>
 
       {visibleClients.length > 0 ? (
@@ -1202,11 +964,9 @@ export function CampaignsView({
             client={client}
             open={openClients.has(client.id)}
             pending={pending}
-            pendingPolicies={pendingPolicies}
             statusErrors={statusErrors}
             onToggle={() => toggleClient(client.id)}
             onBudgetChange={changeBudget}
-            onPolicyChange={changePolicy}
             onStatusChange={changeStatus}
           />
         ))
