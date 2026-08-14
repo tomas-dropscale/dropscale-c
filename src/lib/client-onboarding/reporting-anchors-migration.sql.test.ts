@@ -19,6 +19,10 @@ const ROLLBACK_MIGRATION = readFileSync(
   "supabase/migrations/0057_reporting_cutover_rollback.sql",
   "utf8",
 );
+const REACTIVATION_MIGRATION = readFileSync(
+  "supabase/migrations/0058_incident_reporting_reactivation.sql",
+  "utf8",
+);
 
 const ADMIN = "55000000-0000-4000-8000-000000000001";
 const CLIENT = "55000000-0000-4000-8000-000000000002";
@@ -32,6 +36,10 @@ const SHELL = "55000000-0000-4000-8000-000000000040";
 const LEGACY_PAIR = "55000000-0000-4000-8000-000000000041";
 const SUBMISSION = "55000000-0000-4000-8000-000000000050";
 const LATER_SESSION = "55000000-0000-4000-8000-000000000060";
+const INCIDENT_ROLLBACK_REASON =
+  "Emergency purpose-bound Phase 2 reporting rollback";
+const INCIDENT_REACTIVATION_REASON =
+  "Repair accidental Phase 2 rollback after secret propagation check";
 
 const PRELUDE = `
 do $$ begin
@@ -328,7 +336,9 @@ async function cutOverWithShopifyAnchor() {
     "update public.client_shopify_connections set status = 'revoked' where id = $1",
     [SHOPIFY_2],
   );
-  await db.exec("update public.client_google_ads_connections set status = 'revoked'");
+  await db.exec(
+    "update public.client_google_ads_connections set status = 'revoked'",
+  );
   await db.query(
     "update public.client_onboarding_sessions set requested_assets = array['shopify'] where id = $1",
     [SESSION],
@@ -414,6 +424,11 @@ beforeEach(async () => {
     await db.exec(ROLLBACK_MIGRATION);
   } catch (error) {
     throw new Error("0057 migration failed", { cause: error });
+  }
+  try {
+    await db.exec(REACTIVATION_MIGRATION);
+  } catch (error) {
+    throw new Error("0058 migration failed", { cause: error });
   }
 
   await db.query(
@@ -554,14 +569,17 @@ describe("normalized reporting anchors migration", () => {
       shopify_connected: boolean;
       secret: string | null;
       events: string;
-    }>(`
+    }>(
+      `
       select account.status, account.reporting_role as role, account.currency,
              account.shopify_connected, account.shopify_admin_token as secret,
              (select count(*)::text from public.client_reporting_anchor_events) as events
       from public.client_reporting_bindings binding
       join public.ad_accounts account on account.id = binding.ad_account_id
       where binding.id = $1
-    `, [first.rows[0]!.id]);
+    `,
+      [first.rows[0]!.id],
+    );
     expect(result.rows[0]).toEqual({
       status: "pending",
       role: "shopify_anchor",
@@ -576,7 +594,10 @@ describe("normalized reporting anchors migration", () => {
       [first.rows[0]!.id],
     );
     await expect(
-      db.query("update public.ad_accounts set status = 'active' where id = $1", [account.rows[0]!.id]),
+      db.query(
+        "update public.ad_accounts set status = 'active' where id = $1",
+        [account.rows[0]!.id],
+      ),
     ).rejects.toThrow(/Shopify-only fact anchor remains pending/i);
   });
 
@@ -633,8 +654,12 @@ describe("normalized reporting anchors migration", () => {
        order by account.reporting_role`,
       [shopifyBinding.rows[0]!.id, googleBinding.rows[0]!.id],
     );
-    const googleAccount = accounts.rows.find((row) => row.reporting_role === "google_spend")!;
-    const shopifyAccount = accounts.rows.find((row) => row.reporting_role === "shopify_anchor")!;
+    const googleAccount = accounts.rows.find(
+      (row) => row.reporting_role === "google_spend",
+    )!;
+    const shopifyAccount = accounts.rows.find(
+      (row) => row.reporting_role === "shopify_anchor",
+    )!;
     await db.query(
       `insert into public.daily_metrics(ad_account_id, day, ad_spend)
        values ($1, current_date, 4)`,
@@ -705,7 +730,10 @@ describe("normalized reporting anchors migration", () => {
       await actAs("service_role");
     }
 
-    await db.query("select set_config('dropscale.reporting_cutover_marker', $1, false)", [CLIENT]);
+    await db.query(
+      "select set_config('dropscale.reporting_cutover_marker', $1, false)",
+      [CLIENT],
+    );
     await db.query(
       `update public.client_rollout_states
        set operational_surface = 'v2_active', reporting_cutover_at = clock_timestamp(),
@@ -714,7 +742,9 @@ describe("normalized reporting anchors migration", () => {
        where client_id = $1`,
       [CLIENT, ADMIN],
     );
-    await db.query("select set_config('dropscale.reporting_cutover_marker', '', false)");
+    await db.query(
+      "select set_config('dropscale.reporting_cutover_marker', '', false)",
+    );
 
     await actAs("authenticated", ADMIN);
     await db.exec("set role authenticated");
@@ -796,7 +826,10 @@ describe("normalized reporting anchors migration", () => {
       }),
       "23514",
     );
-    await db.query("update public.ad_accounts set currency = 'USD' where id = $1", [SHELL]);
+    await db.query(
+      "update public.ad_accounts set currency = 'USD' where id = $1",
+      [SHELL],
+    );
     const binding = await provision({
       google: GOOGLE,
       existing: SHELL,
@@ -811,7 +844,8 @@ describe("normalized reporting anchors migration", () => {
       prior_domain: string | null;
       prior_currency: string;
       committed_currency: string;
-    }>(`
+    }>(
+      `
       select account.id as account_id, account.reporting_role as role,
              account.shopify_url, account.google_ads_customer_id as google_id,
              account.currency, event.details ->> 'priorShopifyDomain' as prior_domain,
@@ -821,7 +855,9 @@ describe("normalized reporting anchors migration", () => {
       join public.ad_accounts account on account.id = binding.ad_account_id
       join public.client_reporting_anchor_events event on event.binding_id = binding.id
       where binding.id = $1
-    `, [binding.rows[0]!.id]);
+    `,
+      [binding.rows[0]!.id],
+    );
     expect(result.rows[0]).toEqual({
       account_id: SHELL,
       role: "shopify_anchor",
@@ -872,7 +908,10 @@ describe("normalized reporting anchors migration", () => {
       [account.rows[0]!.id],
     );
     await expect(
-      db.query("update public.ad_accounts set status = 'active' where id = $1", [account.rows[0]!.id]),
+      db.query(
+        "update public.ad_accounts set status = 'active' where id = $1",
+        [account.rows[0]!.id],
+      ),
     ).rejects.toThrow(/requires a committed billing start/i);
 
     await db.query(
@@ -881,24 +920,35 @@ describe("normalized reporting anchors migration", () => {
        ) values ($1, '1111111111', 'USD')`,
       [account.rows[0]!.id],
     );
-    await db.query("update public.ad_accounts set status = 'active' where id = $1", [account.rows[0]!.id]);
+    await db.query(
+      "update public.ad_accounts set status = 'active' where id = $1",
+      [account.rows[0]!.id],
+    );
     const status = await db.query<{ status: string }>(
       "select status from public.ad_accounts where id = $1",
       [account.rows[0]!.id],
     );
     expect(status.rows[0]?.status).toBe("active");
     await expectSqlState(
-      db.query("update public.client_shopify_connections set shopify_currency = 'EUR' where id = $1", [SHOPIFY]),
+      db.query(
+        "update public.client_shopify_connections set shopify_currency = 'EUR' where id = $1",
+        [SHOPIFY],
+      ),
       "23514",
     );
     await expectSqlState(
-      db.query("update public.client_google_ads_connections set currency = 'EUR' where id = $1", [GOOGLE]),
+      db.query(
+        "update public.client_google_ads_connections set currency = 'EUR' where id = $1",
+        [GOOGLE],
+      ),
       "23514",
     );
   });
 
   it("provisions one Shopify anchor with multiple Google spend children without duplicate facts", async () => {
-    await db.query("delete from public.ad_accounts where id = $1", [LEGACY_PAIR]);
+    await db.query("delete from public.ad_accounts where id = $1", [
+      LEGACY_PAIR,
+    ]);
     await db.query(
       "update public.client_google_ads_connections set currency = 'EUR' where id in ($1, $2)",
       [GOOGLE, GOOGLE_2],
@@ -974,7 +1024,10 @@ describe("normalized reporting anchors migration", () => {
       "23514",
     );
 
-    await db.query("update public.ad_accounts set currency = 'USD' where id = $1", [SHELL]);
+    await db.query(
+      "update public.ad_accounts set currency = 'USD' where id = $1",
+      [SHELL],
+    );
     const blockers = [
       {
         insert: `insert into public.daily_metrics(ad_account_id, day) values ($1, current_date)`,
@@ -1080,12 +1133,15 @@ describe("normalized reporting anchors migration", () => {
       currency: string;
       time_zone: string;
       events: string;
-    }>(`
+    }>(
+      `
       select connection.windsor_account_id as account_id, connection.currency,
              connection.time_zone,
              (select count(*)::text from public.client_google_ads_reporting_identity_events) as events
       from public.client_google_ads_connections connection where id = $1
-    `, [GOOGLE_2]);
+    `,
+      [GOOGLE_2],
+    );
     expect(result.rows[0]).toEqual({
       account_id: "777-777-7777",
       currency: "USD",
@@ -1102,7 +1158,9 @@ describe("normalized reporting anchors migration", () => {
       "22023",
     );
     await expectSqlState(
-      db.query("delete from public.client_google_ads_reporting_identity_events"),
+      db.query(
+        "delete from public.client_google_ads_reporting_identity_events",
+      ),
       "23514",
     );
   });
@@ -1128,8 +1186,14 @@ describe("normalized reporting anchors migration", () => {
     expect(definition).toContain("share row exclusive");
 
     // Keep this case to one connected pair so complete source coverage is exact.
-    await db.query("update public.client_shopify_connections set status = 'revoked' where id = $1", [SHOPIFY_2]);
-    await db.query("update public.client_google_ads_connections set status = 'revoked' where id = $1", [GOOGLE_2]);
+    await db.query(
+      "update public.client_shopify_connections set status = 'revoked' where id = $1",
+      [SHOPIFY_2],
+    );
+    await db.query(
+      "update public.client_google_ads_connections set status = 'revoked' where id = $1",
+      [GOOGLE_2],
+    );
     await db.query(
       "update public.client_shopify_connections set shopify_currency = 'JPY' where id = $1",
       [SHOPIFY],
@@ -1139,8 +1203,15 @@ describe("normalized reporting anchors migration", () => {
        values ($1, $2, $3)`,
       [SESSION, SHOPIFY, GOOGLE],
     );
-    const binding = await provision({ google: GOOGLE, key: "anchor:cutover:pair" });
-    const accountBefore = await db.query<{ id: string; status: string; currency: string }>(
+    const binding = await provision({
+      google: GOOGLE,
+      key: "anchor:cutover:pair",
+    });
+    const accountBefore = await db.query<{
+      id: string;
+      status: string;
+      currency: string;
+    }>(
       `select account.id, account.status, account.currency
        from public.client_reporting_bindings binding
        join public.ad_accounts account on account.id = binding.ad_account_id
@@ -1158,12 +1229,15 @@ describe("normalized reporting anchors migration", () => {
       surface: string;
       cutover_at: string | null;
       legacy_writes: boolean;
-    }>(`
+    }>(
+      `
       select operational_surface as surface,
              reporting_cutover_at as cutover_at,
              public.legacy_asset_writes_allowed(client_id) as legacy_writes
       from public.client_rollout_states where client_id = $1
-    `, [CLIENT]);
+    `,
+      [CLIENT],
+    );
     expect(preexisting.rows[0]).toEqual({
       surface: "v2_active",
       cutover_at: null,
@@ -1182,7 +1256,10 @@ describe("normalized reporting anchors migration", () => {
     );
     expect(missingReceiptMarker.rows[0]?.cutover_at).toBeNull();
 
-    for (const [source, currency] of [["shopify", "JPY"], ["google_ads", "USD"]]) {
+    for (const [source, currency] of [
+      ["shopify", "JPY"],
+      ["google_ads", "USD"],
+    ]) {
       await db.query(
         `select public.record_client_reporting_sync_success(
            $1, $2, current_date - 7, current_date, $3, 2
@@ -1198,7 +1275,10 @@ describe("normalized reporting anchors migration", () => {
     ).rejects.toThrow(/fresh post-binding sync receipt/i);
 
     await materializeBindingWindow(binding.rows[0]!.id);
-    for (const [source, currency] of [["shopify", "JPY"], ["google_ads", "USD"]]) {
+    for (const [source, currency] of [
+      ["shopify", "JPY"],
+      ["google_ads", "USD"],
+    ]) {
       await db.query(
         `select public.record_client_reporting_sync_success(
            $1, $2, current_date - 90, current_date - 1, $3, 90
@@ -1299,7 +1379,8 @@ describe("normalized reporting anchors migration", () => {
       fingerprint: string;
       cutover_events: string;
       cutover_reason: string;
-    }>(`
+    }>(
+      `
       select rollout.operational_surface as surface,
         rollout.reporting_cutover_at::text as cutover_at,
         rollout.reporting_cutover_by::text as cutover_by,
@@ -1323,7 +1404,9 @@ describe("normalized reporting anchors migration", () => {
       from public.client_rollout_states rollout
       join public.ad_accounts account on account.id = $2
       where rollout.client_id = $1
-    `, [CLIENT, accountBefore.rows[0]!.id, SESSION]);
+    `,
+      [CLIENT, accountBefore.rows[0]!.id, SESSION],
+    );
     expect(result.rows[0]).toEqual({
       surface: "v2_active",
       cutover_at: expect.any(String),
@@ -1406,7 +1489,8 @@ describe("normalized reporting anchors migration", () => {
       rollback_events: string;
       rollback_reason: string;
       fingerprint: string;
-    }>(`
+    }>(
+      `
       select rollout.operational_surface as surface,
         rollout.reporting_cutover_at::text as cutover_at,
         rollout.reporting_cutover_by::text as cutover_by,
@@ -1425,7 +1509,9 @@ describe("normalized reporting anchors migration", () => {
         )::text) as fingerprint
       from public.client_rollout_states rollout
       where rollout.client_id = $1
-    `, [CLIENT, SESSION]);
+    `,
+      [CLIENT, SESSION],
+    );
     expect(rolledBack.rows[0]).toEqual({
       surface: "rollback_legacy",
       cutover_at: result.rows[0]!.cutover_at,
@@ -1463,9 +1549,391 @@ describe("normalized reporting anchors migration", () => {
     }
   });
 
+  it("repairs only the recent exact Phase 2 rollback without changing reporting or finance", async () => {
+    const definitionResult = await db.query<{ definition: string }>(
+      `select pg_get_functiondef(
+         'public.reactivate_client_reporting_cutover(uuid,uuid,text)'::regprocedure
+       ) as definition`,
+    );
+    const definition = definitionResult.rows[0]!.definition.toLowerCase();
+    for (const table of [
+      "client_shopify_connections",
+      "client_shopify_credentials",
+      "client_google_ads_connections",
+      "client_asset_mappings",
+      "client_reporting_bindings",
+      "client_reporting_sync_states",
+      "daily_metrics",
+    ]) {
+      expect(definition).toContain(table);
+    }
+    expect(definition).toContain("share row exclusive");
+    expect(definition).toContain(
+      "materialized.max_computed_at > shopify_receipt.last_success_at",
+    );
+    expect(definition).toContain(
+      "materialized.max_computed_at > google_receipt.last_success_at",
+    );
+
+    await db.query(
+      "update public.client_shopify_connections set status = 'revoked' where id = $1",
+      [SHOPIFY_2],
+    );
+    await db.query(
+      "update public.client_google_ads_connections set status = 'revoked' where id = $1",
+      [GOOGLE_2],
+    );
+    await db.query(
+      `insert into public.client_asset_mappings(
+         session_id, shopify_connection_id, google_ads_connection_id
+       ) values ($1, $2, $3)`,
+      [SESSION, SHOPIFY, GOOGLE],
+    );
+    const binding = await provision({
+      google: GOOGLE,
+      key: "anchor:incident:repair",
+    });
+    const account = await db.query<{ id: string }>(
+      `select account.id
+       from public.client_reporting_bindings binding
+       join public.ad_accounts account on account.id = binding.ad_account_id
+       where binding.id = $1`,
+      [binding.rows[0]!.id],
+    );
+    await db.query(
+      `insert into public.ad_account_billing_starts(
+         ad_account_id, google_ads_customer_id, currency
+       ) values ($1, '1111111111', 'USD')`,
+      [account.rows[0]!.id],
+    );
+    await db.query(
+      "update public.ad_accounts set status = 'active' where id = $1",
+      [account.rows[0]!.id],
+    );
+    await materializeBindingWindow(binding.rows[0]!.id);
+    for (const source of ["shopify", "google_ads"]) {
+      await db.query(
+        `select public.record_client_reporting_sync_success(
+           $1, $2, current_date - 90, current_date - 1, 'USD', 90
+         )`,
+        [binding.rows[0]!.id, source],
+      );
+    }
+    await db.query(
+      "select public.activate_client_reporting_cutover($1, $2, 'Incident cutover baseline')",
+      [CLIENT, ADMIN],
+    );
+    const markerBefore = await db.query<{
+      cutover_at: string;
+      cutover_by: string;
+      cutover_reason: string;
+    }>(
+      `select reporting_cutover_at::text as cutover_at,
+              reporting_cutover_by::text as cutover_by,
+              reporting_cutover_reason as cutover_reason
+       from public.client_rollout_states where client_id = $1`,
+      [CLIENT],
+    );
+    await db.query(
+      "select public.rollback_client_reporting_cutover($1, $2, $3)",
+      [CLIENT, ADMIN, INCIDENT_ROLLBACK_REASON],
+    );
+
+    // The convenience pointer may move; repair authority comes from the
+    // immutable activation and rollback event session instead.
+    await db.query(
+      `insert into public.client_onboarding_sessions(
+         id, mode, requested_assets, status, target_client_id,
+         claimed_user_id, created_by
+       ) values ($1, 'add_assets', array['shopify'], 'collecting', $2, $2, $3)`,
+      [LATER_SESSION, CLIENT, ADMIN],
+    );
+    await db.query(
+      `update public.client_rollout_states
+       set onboarding_session_id = $2, updated_at = updated_at
+       where client_id = $1`,
+      [CLIENT, LATER_SESSION],
+    );
+
+    const fingerprint = async () =>
+      db.query<{ value: string }>(`
+        select md5(jsonb_build_object(
+          'accounts', (select coalesce(jsonb_agg(to_jsonb(row) order by row.id), '[]')
+            from public.ad_accounts row),
+          'shopify', (select coalesce(jsonb_agg(to_jsonb(row) order by row.id), '[]')
+            from public.client_shopify_connections row),
+          'google', (select coalesce(jsonb_agg(to_jsonb(row) order by row.id), '[]')
+            from public.client_google_ads_connections row),
+          'mappings', (select coalesce(jsonb_agg(to_jsonb(row) order by row.id), '[]')
+            from public.client_asset_mappings row),
+          'bindings', (select coalesce(jsonb_agg(to_jsonb(row) order by row.id), '[]')
+            from public.client_reporting_bindings row),
+          'receipts', (select coalesce(jsonb_agg(to_jsonb(row) order by row.binding_id, row.source_type), '[]')
+            from public.client_reporting_sync_states row),
+          'metrics', (select coalesce(jsonb_agg(to_jsonb(row) order by row.ad_account_id, row.day), '[]')
+            from public.daily_metrics row),
+          'commissions', (select coalesce(jsonb_agg(to_jsonb(row) order by row.id), '[]')
+            from public.commissions row),
+          'starts', (select coalesce(jsonb_agg(to_jsonb(row) order by row.id), '[]')
+            from public.ad_account_billing_starts row),
+          'ends', (select coalesce(jsonb_agg(to_jsonb(row) order by row.id), '[]')
+            from public.ad_account_billing_ends row),
+          'invoices', (select coalesce(jsonb_agg(to_jsonb(row) order by row.id), '[]')
+            from public.invoices row),
+          'invoiceRows', (select coalesce(jsonb_agg(to_jsonb(row) order by row.id), '[]')
+            from public.invoice_commission_rows row)
+        )::text) as value
+      `);
+    const beforeRepair = await fingerprint();
+
+    await expect(
+      db.query(
+        "update public.client_rollout_states set operational_surface = 'v2_active' where client_id = $1",
+        [CLIENT],
+      ),
+    ).rejects.toThrow(/cannot be reactivated generically/i);
+    await expectSqlState(
+      db.query(
+        "select public.reactivate_client_reporting_cutover($1, $2, 'Generic repair')",
+        [CLIENT, ADMIN],
+      ),
+      "22023",
+    );
+
+    await db.exec("begin");
+    try {
+      await db.query(
+        `update public.daily_metrics
+         set computed_at = clock_timestamp()
+         where ad_account_id = $1 and day = current_date - 1`,
+        [account.rows[0]!.id],
+      );
+      await expect(
+        db.query(
+          "select public.reactivate_client_reporting_cutover($1, $2, $3)",
+          [CLIENT, ADMIN, INCIDENT_REACTIVATION_REASON],
+        ),
+      ).rejects.toThrow(/receipt-owned current 90-day facts/i);
+    } finally {
+      await db.exec("rollback");
+    }
+
+    await db.exec("begin");
+    try {
+      await db.query(
+        "update public.client_shopify_connections set last_error_code = 'health-failed' where id = $1",
+        [SHOPIFY],
+      );
+      await expect(
+        db.query(
+          "select public.reactivate_client_reporting_cutover($1, $2, $3)",
+          [CLIENT, ADMIN, INCIDENT_REACTIVATION_REASON],
+        ),
+      ).rejects.toThrow(/covered exactly once and healthy/i);
+    } finally {
+      await db.exec("rollback");
+    }
+
+    await db.exec("begin");
+    try {
+      await db.query(
+        `insert into public.ad_account_billing_ends(
+           ad_account_id, google_ads_customer_id, currency
+         ) values ($1, '1111111111', 'USD')`,
+        [account.rows[0]!.id],
+      );
+      await expect(
+        db.query(
+          "select public.reactivate_client_reporting_cutover($1, $2, $3)",
+          [CLIENT, ADMIN, INCIDENT_REACTIVATION_REASON],
+        ),
+      ).rejects.toThrow(/open exact immutable billing start/i);
+    } finally {
+      await db.exec("rollback");
+    }
+
+    await actAs("authenticated", ADMIN);
+    await db.exec("set role authenticated");
+    try {
+      await expectSqlState(
+        db.query(
+          "select public.reactivate_client_reporting_cutover($1, $2, $3)",
+          [CLIENT, ADMIN, INCIDENT_REACTIVATION_REASON],
+        ),
+        "42501",
+      );
+    } finally {
+      await db.exec("reset role");
+      await actAs("service_role");
+    }
+
+    await db.query(
+      "select public.reactivate_client_reporting_cutover($1, $2, $3)",
+      [CLIENT, ADMIN, INCIDENT_REACTIVATION_REASON],
+    );
+    // Simulate the same fully linked request being retried after the incident
+    // window. Expiry gates the first repair, never an already-recorded retry.
+    await db.exec(
+      "alter table public.client_onboarding_events disable trigger client_onboarding_events_guard_reporting_cutover",
+    );
+    try {
+      await db.query(`
+        with aged as (select clock_timestamp() - interval '2 hours' as at)
+        update public.client_onboarding_events event
+        set details = jsonb_set(
+              event.details,
+              '{reportingRollbackAt}',
+              to_jsonb(aged.at)
+            ),
+            created_at = case
+              when event.event_type = 'reporting_rollback' then aged.at
+              else event.created_at
+            end
+        from aged
+        where event.event_type in ('reporting_rollback', 'reporting_reactivation')
+      `);
+    } finally {
+      await db.exec(
+        "alter table public.client_onboarding_events enable trigger client_onboarding_events_guard_reporting_cutover",
+      );
+    }
+    await db.query(
+      "select public.reactivate_client_reporting_cutover($1, $2, $3)",
+      [CLIENT, ADMIN, INCIDENT_REACTIVATION_REASON],
+    );
+    await db.query("update public.profiles set role = 'admin' where id = $1", [
+      OTHER,
+    ]);
+    await expect(
+      db.query(
+        "select public.reactivate_client_reporting_cutover($1, $2, $3)",
+        [CLIENT, OTHER, INCIDENT_REACTIVATION_REASON],
+      ),
+    ).rejects.toThrow(/already recorded with different authority or reason/i);
+
+    const afterRepair = await fingerprint();
+    expect(afterRepair.rows[0]!.value).toBe(beforeRepair.rows[0]!.value);
+    const result = await db.query<{
+      surface: string;
+      cutover_at: string;
+      cutover_by: string;
+      cutover_reason: string;
+      reactivations: string;
+      activation_linked: boolean;
+      rollback_linked: boolean;
+      event_reason: string;
+    }>(
+      `
+      select rollout.operational_surface as surface,
+             rollout.reporting_cutover_at::text as cutover_at,
+             rollout.reporting_cutover_by::text as cutover_by,
+             rollout.reporting_cutover_reason as cutover_reason,
+             count(*) filter (where repair.event_type = 'reporting_reactivation')::text
+               as reactivations,
+             bool_and(activation.id::text = repair.details ->> 'reportingActivationEventId')
+               as activation_linked,
+             bool_and(rollback.id::text = repair.details ->> 'reportingRollbackEventId')
+               as rollback_linked,
+             min(repair.details ->> 'reason') as event_reason
+      from public.client_rollout_states rollout
+      join public.client_onboarding_events repair
+        on repair.event_type = 'reporting_reactivation'
+      join public.client_onboarding_events activation
+        on activation.id::text = repair.details ->> 'reportingActivationEventId'
+       and activation.session_id = repair.session_id
+      join public.client_onboarding_events rollback
+        on rollback.id::text = repair.details ->> 'reportingRollbackEventId'
+       and rollback.session_id = repair.session_id
+      where rollout.client_id = $1
+      group by rollout.client_id, rollout.operational_surface,
+               rollout.reporting_cutover_at, rollout.reporting_cutover_by,
+               rollout.reporting_cutover_reason
+    `,
+      [CLIENT],
+    );
+    expect(result.rows[0]).toEqual({
+      surface: "v2_active",
+      ...markerBefore.rows[0],
+      reactivations: "1",
+      activation_linked: true,
+      rollback_linked: true,
+      event_reason: INCIDENT_REACTIVATION_REASON,
+    });
+    await expectSqlState(
+      db.query(
+        "delete from public.client_onboarding_events where event_type = 'reporting_reactivation'",
+      ),
+      "23514",
+    );
+  });
+
+  it("rejects a rollback that was not emitted by the Phase 2 incident endpoint", async () => {
+    await cutOverWithShopifyAnchor();
+    await db.query(
+      "select public.rollback_client_reporting_cutover($1, $2, 'Unrelated operator rollback')",
+      [CLIENT, ADMIN],
+    );
+    await expect(
+      db.query(
+        "select public.reactivate_client_reporting_cutover($1, $2, $3)",
+        [CLIENT, ADMIN, INCIDENT_REACTIVATION_REASON],
+      ),
+    ).rejects.toThrow(/does not match the Phase 2 incident/i);
+  });
+
+  it("rejects the first incident repair after its one-hour window", async () => {
+    await cutOverWithShopifyAnchor();
+    await db.query(
+      "select public.rollback_client_reporting_cutover($1, $2, $3)",
+      [CLIENT, ADMIN, INCIDENT_ROLLBACK_REASON],
+    );
+    await db.exec(
+      "alter table public.client_onboarding_events disable trigger client_onboarding_events_guard_reporting_cutover",
+    );
+    try {
+      await db.query(`
+        with aged as (select clock_timestamp() - interval '2 hours' as at)
+        update public.client_onboarding_events event
+        set details = jsonb_set(
+              event.details,
+              '{reportingRollbackAt}',
+              to_jsonb(aged.at)
+            ),
+            created_at = aged.at
+        from aged
+        where event.event_type = 'reporting_rollback'
+      `);
+    } finally {
+      await db.exec(
+        "alter table public.client_onboarding_events enable trigger client_onboarding_events_guard_reporting_cutover",
+      );
+    }
+    await db.query(
+      `update public.client_rollout_states
+       set updated_at = (
+         select (event.details ->> 'reportingRollbackAt')::timestamptz
+         from public.client_onboarding_events event
+         where event.event_type = 'reporting_rollback'
+       )
+       where client_id = $1`,
+      [CLIENT],
+    );
+    await expect(
+      db.query(
+        "select public.reactivate_client_reporting_cutover($1, $2, $3)",
+        [CLIENT, ADMIN, INCIDENT_REACTIVATION_REASON],
+      ),
+    ).rejects.toThrow(/outside the one-hour repair window/i);
+  });
+
   it("keeps a Google-only client ready until it has an active Shopify anchor", async () => {
-    await db.query("update public.client_shopify_connections set status = 'revoked'");
-    await db.query("update public.client_google_ads_connections set status = 'revoked' where id = $1", [GOOGLE_2]);
+    await db.query(
+      "update public.client_shopify_connections set status = 'revoked'",
+    );
+    await db.query(
+      "update public.client_google_ads_connections set status = 'revoked' where id = $1",
+      [GOOGLE_2],
+    );
     const binding = await provision({
       shopify: null,
       google: GOOGLE,
@@ -1483,7 +1951,10 @@ describe("normalized reporting anchors migration", () => {
         [CLIENT, ADMIN],
       ),
     ).rejects.toThrow(/requires at least one active Shopify anchor/i);
-    const rollout = await db.query<{ surface: string; cutover_at: string | null }>(
+    const rollout = await db.query<{
+      surface: string;
+      cutover_at: string | null;
+    }>(
       `select operational_surface as surface, reporting_cutover_at as cutover_at
        from public.client_rollout_states where client_id = $1`,
       [CLIENT],
@@ -1495,8 +1966,13 @@ describe("normalized reporting anchors migration", () => {
   });
 
   it("requires complete receipt-owned materialization before Shopify-only cutover", async () => {
-    await db.query("update public.client_shopify_connections set status = 'revoked' where id = $1", [SHOPIFY_2]);
-    await db.query("update public.client_google_ads_connections set status = 'revoked'");
+    await db.query(
+      "update public.client_shopify_connections set status = 'revoked' where id = $1",
+      [SHOPIFY_2],
+    );
+    await db.query(
+      "update public.client_google_ads_connections set status = 'revoked'",
+    );
     await db.query(
       "update public.client_shopify_connections set shopify_currency = 'JPY' where id = $1",
       [SHOPIFY],
@@ -1599,7 +2075,8 @@ describe("normalized reporting anchors migration", () => {
       binding_status: string;
       billing_starts: string;
       metric_fingerprint: string;
-    }>(`
+    }>(
+      `
       select rollout.operational_surface as surface,
              rollout.reporting_cutover_at::text as cutover_at,
              account.reporting_role as role,
@@ -1618,7 +2095,9 @@ describe("normalized reporting anchors migration", () => {
         on binding.client_id = rollout.client_id and binding.id = $2
       join public.ad_accounts account on account.id = binding.ad_account_id
       where rollout.client_id = $1
-    `, [CLIENT, binding.rows[0]!.id]);
+    `,
+      [CLIENT, binding.rows[0]!.id],
+    );
     expect(rolledBack.rows[0]).toEqual({
       surface: "rollback_legacy",
       cutover_at: result.rows[0]!.cutover_at,
@@ -1639,6 +2118,8 @@ describe("normalized reporting anchors migration", () => {
       service_receipt: boolean;
       authenticated_rollback: boolean;
       service_rollback: boolean;
+      authenticated_reactivation: boolean;
+      service_reactivation: boolean;
       service_event_insert: boolean;
       service_receipt_insert: boolean;
       authenticated_normalizer: boolean;
@@ -1658,6 +2139,10 @@ describe("normalized reporting anchors migration", () => {
           'public.rollback_client_reporting_cutover(uuid,uuid,text)', 'EXECUTE') as authenticated_rollback,
         has_function_privilege('service_role',
           'public.rollback_client_reporting_cutover(uuid,uuid,text)', 'EXECUTE') as service_rollback,
+        has_function_privilege('authenticated',
+          'public.reactivate_client_reporting_cutover(uuid,uuid,text)', 'EXECUTE') as authenticated_reactivation,
+        has_function_privilege('service_role',
+          'public.reactivate_client_reporting_cutover(uuid,uuid,text)', 'EXECUTE') as service_reactivation,
         has_table_privilege('service_role', 'public.client_reporting_anchor_events', 'INSERT') as service_event_insert,
         has_table_privilege('service_role', 'public.client_reporting_sync_states', 'INSERT') as service_receipt_insert,
         has_function_privilege('authenticated',
@@ -1677,6 +2162,8 @@ describe("normalized reporting anchors migration", () => {
       service_receipt: true,
       authenticated_rollback: false,
       service_rollback: true,
+      authenticated_reactivation: false,
+      service_reactivation: true,
       service_event_insert: false,
       service_receipt_insert: false,
       authenticated_normalizer: true,
@@ -1769,7 +2256,8 @@ describe("normalized reporting anchors migration", () => {
       shopify_currency: string;
       account_currency: string;
       google_currency: string;
-    }>(`
+    }>(
+      `
       select old.status as old_status, fresh.status as new_status,
              fresh.shopify_connection_id as shopify_id,
              fresh.google_ads_connection_id as google_id,
@@ -1785,7 +2273,9 @@ describe("normalized reporting anchors migration", () => {
       join public.client_shopify_connections shopify on shopify.id = fresh.shopify_connection_id
       join public.client_google_ads_connections google_ads on google_ads.id = fresh.google_ads_connection_id
       where old.id = $1
-    `, [old.rows[0]!.id, upgraded.rows[0]!.id, SHOPIFY_2, GOOGLE_2]);
+    `,
+      [old.rows[0]!.id, upgraded.rows[0]!.id, SHOPIFY_2, GOOGLE_2],
+    );
     expect(result.rows[0]).toEqual({
       old_status: "revoked",
       new_status: "active",
@@ -1824,7 +2314,8 @@ describe("normalized reporting anchors migration", () => {
         child_role: string;
         anchor_id: string;
         shopify_fact_sources: string;
-      }>(`
+      }>(
+        `
         select anchor_account.reporting_role as anchor_role,
                child_account.reporting_role as child_role,
                child.shopify_anchor_binding_id::text as anchor_id,
@@ -1840,7 +2331,9 @@ describe("normalized reporting anchors migration", () => {
           on anchor.id = child.shopify_anchor_binding_id
         join public.ad_accounts anchor_account on anchor_account.id = anchor.ad_account_id
         where child.id = $1
-      `, [child.rows[0]!.id, SHOPIFY_2]);
+      `,
+        [child.rows[0]!.id, SHOPIFY_2],
+      );
       expect(anchored.rows[0]).toEqual({
         anchor_role: "legacy_hybrid",
         child_role: "google_spend",
@@ -1864,7 +2357,10 @@ describe("normalized reporting anchors migration", () => {
       await db.exec("reset role");
       await actAs("service_role");
     }
-    for (const [source, currency] of [["shopify", "JPY"], ["google_ads", "USD"]]) {
+    for (const [source, currency] of [
+      ["shopify", "JPY"],
+      ["google_ads", "USD"],
+    ]) {
       await db.query(
         `select public.record_client_reporting_sync_success(
            $1, $2, current_date - 90, current_date - 1, $3, 90
@@ -1921,7 +2417,8 @@ describe("normalized reporting anchors migration", () => {
       binding_status: string;
       billing_starts: string;
       revenue: string;
-    }>(`
+    }>(
+      `
       select rollout.operational_surface as surface,
              account.reporting_role as role,
              account.status,
@@ -1938,7 +2435,9 @@ describe("normalized reporting anchors migration", () => {
       join public.client_reporting_bindings binding on binding.id = $2
       join public.ad_accounts account on account.id = binding.ad_account_id
       where rollout.client_id = $1
-    `, [CLIENT, upgraded.rows[0]!.id]);
+    `,
+      [CLIENT, upgraded.rows[0]!.id],
+    );
     expect(legacyFallback.rows[0]).toEqual({
       surface: "rollback_legacy",
       role: "legacy_hybrid",
@@ -1991,15 +2490,26 @@ describe("normalized reporting anchors migration", () => {
       ),
       "23505",
     );
-    const result = await db.query<{ status: string; mappings: string; active: string }>(`
+    const result = await db.query<{
+      status: string;
+      mappings: string;
+      active: string;
+    }>(
+      `
       select status,
         (select count(*)::text from public.client_asset_mappings
           where google_ads_connection_id = $2) as mappings,
         (select count(*)::text from public.client_reporting_bindings
           where ad_account_id = $3 and status = 'active') as active
       from public.client_reporting_bindings where id = $1
-    `, [old.rows[0]!.id, GOOGLE_2, LEGACY_PAIR]);
-    expect(result.rows[0]).toEqual({ status: "active", mappings: "0", active: "1" });
+    `,
+      [old.rows[0]!.id, GOOGLE_2, LEGACY_PAIR],
+    );
+    expect(result.rows[0]).toEqual({
+      status: "active",
+      mappings: "0",
+      active: "1",
+    });
   });
 
   it("rejects an exact reconnect replacement after cutover without changing any history", async () => {
@@ -2043,9 +2553,10 @@ describe("normalized reporting anchors migration", () => {
        ) values ($1, '7777777777', 'USD')`,
       [LEGACY_PAIR],
     );
-    await db.query("update public.ad_accounts set status = 'active' where id = $1", [
-      LEGACY_PAIR,
-    ]);
+    await db.query(
+      "update public.ad_accounts set status = 'active' where id = $1",
+      [LEGACY_PAIR],
+    );
     await db.query(
       "select public.activate_client_reporting_cutover($1, $2, 'Cut over before reconnect replacement')",
       [CLIENT, ADMIN],
@@ -2154,7 +2665,8 @@ describe("normalized reporting anchors migration", () => {
       account_currency: string;
       owned: boolean;
       finance: string;
-    }>(`
+    }>(
+      `
       select binding.status, account.status as account_status,
         account.currency as account_currency,
         public.owns_ad_account(account.id) as owned,
@@ -2166,7 +2678,9 @@ describe("normalized reporting anchors migration", () => {
       from public.client_reporting_bindings binding
       join public.ad_accounts account on account.id = binding.ad_account_id
       where binding.id = $1
-    `, [staged.rows[0]!.id]);
+    `,
+      [staged.rows[0]!.id],
+    );
     expect(before.rows[0]).toMatchObject({
       status: "staged",
       account_status: "pending",
@@ -2256,7 +2770,8 @@ describe("normalized reporting anchors migration", () => {
       finance: string;
       events: string;
       cutover_at: string;
-    }>(`
+    }>(
+      `
       select binding.status, account.status as account_status,
         public.owns_ad_account(account.id) as owned,
         md5(jsonb_build_object(
@@ -2271,7 +2786,9 @@ describe("normalized reporting anchors migration", () => {
       join public.ad_accounts account on account.id = binding.ad_account_id
       join public.client_rollout_states rollout on rollout.client_id = binding.client_id
       where binding.id = $1
-    `, [staged.rows[0]!.id]);
+    `,
+      [staged.rows[0]!.id],
+    );
     expect(after.rows[0]).toMatchObject({
       status: "active",
       account_status: before.rows[0]!.account_status,
@@ -2406,9 +2923,10 @@ describe("normalized reporting anchors migration", () => {
         [stagedAccount.rows[0]!.id],
       );
       await expectSqlState(
-        db.query("update public.ad_accounts set status = 'active' where id = $1", [
-          stagedAccount.rows[0]!.id,
-        ]),
+        db.query(
+          "update public.ad_accounts set status = 'active' where id = $1",
+          [stagedAccount.rows[0]!.id],
+        ),
         "23514",
       );
     } finally {
@@ -2452,23 +2970,31 @@ describe("normalized reporting anchors migration", () => {
        ) values ($1, '1111111111', 'EUR')`,
       [account.rows[0]!.id],
     );
-    await db.query("update public.ad_accounts set status = 'active' where id = $1", [
-      account.rows[0]!.id,
-    ]);
+    await db.query(
+      "update public.ad_accounts set status = 'active' where id = $1",
+      [account.rows[0]!.id],
+    );
     await db.query(
       `select public.promote_client_reporting_source(
          $1, $2, 'promote:google:child', 'Reviewed Google source promotion'
        )`,
       [staged.rows[0]!.id, ADMIN],
     );
-    const result = await db.query<{ status: string; account_status: string; events: string }>(`
+    const result = await db.query<{
+      status: string;
+      account_status: string;
+      events: string;
+    }>(
+      `
       select binding.status, account.status as account_status,
         (select count(*)::text from public.client_reporting_anchor_events event
           where event.binding_id = binding.id and event.event_type = 'source_added') as events
       from public.client_reporting_bindings binding
       join public.ad_accounts account on account.id = binding.ad_account_id
       where binding.id = $1
-    `, [staged.rows[0]!.id]);
+    `,
+      [staged.rows[0]!.id],
+    );
     expect(result.rows[0]).toEqual({
       status: "active",
       account_status: "active",
@@ -2565,7 +3091,8 @@ describe("normalized reporting anchors migration", () => {
       metrics: string;
       abandoned_events: string;
       restaged_events: string;
-    }>(`
+    }>(
+      `
       select old.status as old_status, fresh.status as new_status,
         old.ad_account_id::text as old_account,
         fresh.ad_account_id::text as new_account,
@@ -2578,7 +3105,9 @@ describe("normalized reporting anchors migration", () => {
       from public.client_reporting_bindings old
       join public.client_reporting_bindings fresh on fresh.id = $2
       where old.id = $1
-    `, [staged.rows[0]!.id, restaged.rows[0]!.id]);
+    `,
+      [staged.rows[0]!.id, restaged.rows[0]!.id],
+    );
     expect(result.rows[0]).toEqual({
       old_status: "revoked",
       new_status: "staged",
@@ -2632,9 +3161,10 @@ describe("normalized reporting anchors migration", () => {
         [account.rows[0]!.id],
       );
       await expectSqlState(
-        db.query("update public.ad_accounts set status = 'active' where id = $1", [
-          account.rows[0]!.id,
-        ]),
+        db.query(
+          "update public.ad_accounts set status = 'active' where id = $1",
+          [account.rows[0]!.id],
+        ),
         "23514",
       );
     } finally {
@@ -2674,9 +3204,10 @@ describe("normalized reporting anchors migration", () => {
          ) values ($1, '1111111111', 'EUR')`,
         [account.rows[0]!.id],
       );
-      await db.query("update public.ad_accounts set status = 'active' where id = $1", [
-        account.rows[0]!.id,
-      ]);
+      await db.query(
+        "update public.ad_accounts set status = 'active' where id = $1",
+        [account.rows[0]!.id],
+      );
       await db.exec("commit");
     } catch (error) {
       await db.exec("rollback");

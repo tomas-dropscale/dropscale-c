@@ -1074,6 +1074,7 @@ export type ClientOnboardingEvent = {
     | "reviewed"
     | "activated"
     | "reporting_rollback"
+    | "reporting_reactivation"
     | "invitation_revoked"
     | "connections_revoked"
     | "verification_succeeded"
@@ -2868,6 +2869,14 @@ export type Database = {
         Returns: string;
       };
       rollback_client_reporting_cutover: {
+        Args: {
+          p_client_id: string;
+          p_admin_id: string;
+          p_reason: string;
+        };
+        Returns: string;
+      };
+      reactivate_client_reporting_cutover: {
         Args: {
           p_client_id: string;
           p_admin_id: string;
