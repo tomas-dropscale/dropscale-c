@@ -228,6 +228,32 @@ describe("CampaignsView approved visual structure", () => {
     expect(html).toContain("DGEN · Summer Living · Scale");
   });
 
+  it("shows each store's last successful snapshot and failed attempt", () => {
+    const degraded: CampaignViewClient[] = [{
+      ...clients[0],
+      stores: [{
+        ...clients[0].stores[0],
+        campaignState: "partial",
+        providerFreshness: {
+          state: "partial",
+          refreshedAt: "2026-08-14T10:00:00.000Z",
+          lastAttemptAt: "2026-08-15T11:30:00.000Z",
+          lastErrorCode: "provider_failed",
+          stale: false,
+        },
+      }],
+    }];
+    const html = renderToStaticMarkup(
+      <CampaignsView clients={degraded} history={history} historyTruncated={false} range={range} />,
+    );
+
+    expect(html).toContain("Refresh failed");
+    expect(html).toContain("Refreshed");
+    expect(html).toContain("attempted");
+    expect(html).toContain("error provider_failed");
+    expect(html).toContain("DGEN · Summer Living · Scale");
+  });
+
   it("shows unavailable totals without hiding live campaigns when rollup coverage fails", () => {
     const incomplete: CampaignViewClient[] = [{
       ...clients[0],

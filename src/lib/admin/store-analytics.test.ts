@@ -19,6 +19,10 @@ const mocks = vi.hoisted(() => ({
   resolveReportingSources: vi.fn(),
   listCampaignActionActivity: vi.fn(),
   refreshAccountsNow: vi.fn(),
+  adminReportingSnapshotIsStale: vi.fn(),
+  adminReportingAuthority: vi.fn(),
+  readAdminReportingSnapshotFamilies: vi.fn(),
+  refreshAdminReportingSnapshot: vi.fn(),
 }));
 
 vi.mock("@/lib/client-onboarding/sessions", () => ({
@@ -58,10 +62,17 @@ vi.mock("@/lib/admin/campaign-actions", () => ({
 vi.mock("@/lib/metrics/recompute", () => ({
   refreshAccountsNow: mocks.refreshAccountsNow,
 }));
+vi.mock("@/lib/admin/reporting-snapshots", () => ({
+  adminReportingSnapshotIsStale: mocks.adminReportingSnapshotIsStale,
+  adminReportingAuthority: mocks.adminReportingAuthority,
+  readAdminReportingSnapshotFamilies: mocks.readAdminReportingSnapshotFamilies,
+  refreshAdminReportingSnapshot: mocks.refreshAdminReportingSnapshot,
+}));
 
 import {
   ensureAdminAnalyticsRollupCoverage,
   fetchAdminStoreAnalytics,
+  fetchCachedAdminStoreAnalytics,
 } from "./store-analytics";
 import { ShopifyReportingAdapterError } from "@/lib/reporting/shopify";
 
@@ -91,6 +102,12 @@ function service(
   accounts: unknown[],
   rollout: unknown,
   metricResponses?: unknown[][],
+  supplemental?: {
+    connections?: unknown[];
+    connectionError?: unknown;
+    credential?: unknown;
+    credentialError?: unknown;
+  },
 ) {
   const accountQuery: Record<string, ReturnType<typeof vi.fn>> = {};
   accountQuery.select = vi.fn(() => accountQuery);
@@ -121,12 +138,60 @@ function service(
     metricRead += 1;
     return { data, error: null };
   });
+  const connectionQuery: Record<string, ReturnType<typeof vi.fn>> & {
+    then?: Promise<unknown>["then"];
+  } = { select: vi.fn(), eq: vi.fn() };
+  connectionQuery.select.mockReturnValue(connectionQuery);
+  connectionQuery.eq.mockReturnValue(connectionQuery);
+  connectionQuery.then = (resolve, reject) => Promise.resolve({
+    data: supplemental?.connections ?? [],
+    error: supplemental?.connectionError ?? null,
+  }).then(resolve, reject);
+  const credentialQuery: Record<string, ReturnType<typeof vi.fn>> = {};
+  credentialQuery.select = vi.fn(() => credentialQuery);
+  credentialQuery.eq = vi.fn(() => credentialQuery);
+  credentialQuery.maybeSingle = vi.fn().mockResolvedValue({
+    data: supplemental?.credential ?? null,
+    error: supplemental?.credentialError ?? null,
+  });
   return {
     from: vi.fn((table: string) => {
       if (table === "ad_accounts") return accountQuery;
       if (table === "daily_metrics") return metricsQuery;
+      if (table === "client_shopify_connections") return connectionQuery;
+      if (table === "client_shopify_credentials") return credentialQuery;
       return rolloutQuery;
     }),
+  };
+}
+
+function supplementalConnection(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "40000000-0000-4000-8000-000000000001",
+    client_id: CLIENT_ID,
+    status: "connected",
+    shopify_shop_id: "gid://shopify/Shop/1",
+    shopify_name: "Northwind",
+    shopify_domain: "northwind.myshopify.com",
+    primary_domain: "northwind.example",
+    shopify_currency: "EUR",
+    credential_hint: "client-id…1234",
+    granted_scopes: ["read_reports", "read_products"],
+    scope_profile: "client-reporting-read-v1",
+    updated_at: "2026-08-15T10:00:00.000Z",
+    last_verified_at: "2026-08-15T10:00:00.000Z",
+    last_error_code: null,
+    ...overrides,
+  };
+}
+
+function supplementalCredential(overrides: Record<string, unknown> = {}) {
+  return {
+    connection_id: "40000000-0000-4000-8000-000000000001",
+    shopify_client_id: "shopify-client-id",
+    client_secret_ciphertext: "encrypted-v2-client-secret",
+    updated_at: "2026-08-15T10:00:00.000Z",
+    ...overrides,
   };
 }
 
@@ -279,6 +344,12 @@ describe("admin store analytics DAL", () => {
     mocks.hasGoogleAdsEnv.mockReturnValue(true);
     mocks.hasWindsorEnv.mockReturnValue(true);
     mocks.refreshAccountsNow.mockResolvedValue(undefined);
+    mocks.adminReportingSnapshotIsStale.mockReturnValue(false);
+    mocks.adminReportingAuthority.mockImplementation(async (manifest) => ({
+      key: "a".repeat(64),
+      manifest,
+    }));
+    mocks.readAdminReportingSnapshotFamilies.mockResolvedValue(new Map());
     mocks.fetchLiveGoogleDemandGenBreakdowns.mockResolvedValue([]);
     mocks.fetchLiveGooglePmaxProductBreakdowns.mockResolvedValue([]);
     mocks.fetchGoogleReportingDemandGenAds.mockResolvedValue([]);
@@ -313,6 +384,130 @@ describe("admin store analytics DAL", () => {
     });
 
     expect(mocks.requireAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders cached provider families plus DB rollups without opening a provider", async () => {
+    mocks.createServiceClient.mockReturnValue(service([account()], null));
+    const snapshot = (rows: unknown[]) => ({
+      state: "ready",
+      rows,
+      message: null,
+      refreshedAt: "2026-08-15T10:00:00.000Z",
+      lastAttemptAt: "2026-08-15T10:00:00.000Z",
+      lastErrorCode: null,
+      revision: 1,
+    });
+    mocks.readAdminReportingSnapshotFamilies.mockResolvedValue(new Map([
+      ["shopify_funnel", snapshot([{
+        daily: [{
+          day: "2026-08-14",
+          sessions: 200,
+          addedToCart: 44,
+          reachedCheckout: 19,
+          completedCheckout: 8,
+        }],
+        totals: {
+          sessions: 200,
+          addedToCart: 44,
+          reachedCheckout: 19,
+          completedCheckout: 8,
+        },
+      }])],
+      ["store_campaign_performance", snapshot([{ rows: [] }])],
+      ["shopify_collection_sales", snapshot([{ rows: [] }])],
+    ]));
+
+    const result = await fetchCachedAdminStoreAnalytics({
+      clientId: CLIENT_ID,
+      store: {
+        accountId: STORE_ID,
+        activityAccountIds: [STORE_ID],
+        currency: "EUR",
+        days: [],
+      },
+      range: RANGE,
+    });
+
+    expect(result).toMatchObject({
+      funnel: { state: "ready", data: { totals: { sessions: 200 } } },
+      campaigns: { state: "ready", data: { rows: [] } },
+      collections: { state: "ready", data: { rows: [] } },
+      spend: { state: "ready", data: { daily: expect.any(Array) } },
+      providerFreshness: {
+        state: "ready",
+        refreshedAt: "2026-08-15T10:00:00.000Z",
+      },
+    });
+    expect(mocks.readAdminReportingSnapshotFamilies).toHaveBeenCalledWith({
+      client: expect.any(Object),
+      families: [
+        "shopify_funnel",
+        "store_campaign_performance",
+        "shopify_collection_sales",
+      ],
+      accountId: STORE_ID,
+      authorityKey: "a".repeat(64),
+      from: RANGE.from,
+      to: RANGE.to,
+    });
+    expect(mocks.createShopifyReportingAdapter).not.toHaveBeenCalled();
+    expect(mocks.createLegacyShopifyReportingAdapter).not.toHaveBeenCalled();
+    expect(mocks.fetchLiveCampaignsDetailed).not.toHaveBeenCalled();
+    expect(mocks.fetchGoogleReportingCampaigns).not.toHaveBeenCalled();
+    expect(mocks.refreshAccountsNow).not.toHaveBeenCalled();
+  });
+
+  it("degrades current provider freshness while preserving ready data after a failed refresh", async () => {
+    mocks.createServiceClient.mockReturnValue(service([account()], null));
+    mocks.adminReportingSnapshotIsStale.mockReturnValue(true);
+    const snapshot = (rows: unknown[], lastErrorCode: string | null = null) => ({
+      state: "ready",
+      rows,
+      message: null,
+      refreshedAt: "2026-08-15T08:00:00.000Z",
+      lastAttemptAt: "2026-08-15T11:30:00.000Z",
+      lastErrorCode,
+      revision: 2,
+    });
+    mocks.readAdminReportingSnapshotFamilies.mockResolvedValue(new Map([
+      ["shopify_funnel", snapshot([{
+        daily: [],
+        totals: {
+          sessions: 200,
+          addedToCart: 44,
+          reachedCheckout: 19,
+          completedCheckout: 8,
+        },
+      }], "provider_failed")],
+      ["store_campaign_performance", snapshot([{ rows: [] }])],
+      ["shopify_collection_sales", snapshot([{ rows: [] }])],
+    ]));
+
+    const result = await fetchCachedAdminStoreAnalytics({
+      clientId: CLIENT_ID,
+      store: {
+        accountId: STORE_ID,
+        activityAccountIds: [STORE_ID],
+        currency: "EUR",
+        days: [],
+      },
+      range: { from: "2026-08-15", to: "2026-08-15" },
+    });
+
+    expect(result.funnel).toMatchObject({
+      state: "ready",
+      data: { totals: { sessions: 200 } },
+      message: expect.stringContaining("last refresh failed (provider_failed)"),
+    });
+    expect(result.providerFreshness).toEqual({
+      state: "partial",
+      refreshedAt: "2026-08-15T08:00:00.000Z",
+      lastAttemptAt: "2026-08-15T11:30:00.000Z",
+      lastErrorCode: "provider_failed",
+      stale: true,
+    });
+    expect(mocks.createShopifyReportingAdapter).not.toHaveBeenCalled();
+    expect(mocks.fetchGoogleReportingCampaigns).not.toHaveBeenCalled();
   });
 
   it("does not let one malformed provider projection erase independent families", async () => {
@@ -486,6 +681,195 @@ describe("admin store analytics DAL", () => {
     });
   });
 
+  it("uses one exact verified onboarding Shopify source only for pre-cutover detail families", async () => {
+    const rollout = {
+      operational_surface: "v2_ready_for_cutover",
+      reporting_cutover_at: null,
+      reporting_cutover_by: null,
+      reporting_cutover_reason: null,
+    };
+    const scopedService = service([account()], rollout, undefined, {
+      connections: [supplementalConnection()],
+      credential: supplementalCredential(),
+    });
+    mocks.createServiceClient.mockReturnValue(scopedService);
+    const adapter = shopifyAdapter();
+    mocks.createShopifyReportingAdapter.mockResolvedValue(adapter);
+    mocks.fetchLiveCampaignsDetailed.mockResolvedValue([googleCampaign()]);
+
+    const result = await fetchAdminStoreAnalytics({
+      clientId: CLIENT_ID,
+      store: {
+        accountId: STORE_ID,
+        activityAccountIds: [STORE_ID],
+        currency: "EUR",
+        days: [],
+      },
+      range: RANGE,
+    });
+
+    expect(mocks.createShopifyReportingAdapter).toHaveBeenCalledWith(
+      expect.objectContaining({
+        clientId: CLIENT_ID,
+        adAccountId: STORE_ID,
+        kind: "shopify",
+        shopify: expect.objectContaining({
+          connectionId: "40000000-0000-4000-8000-000000000001",
+          shopId: "gid://shopify/Shop/1",
+          domain: "northwind.myshopify.com",
+          currency: "EUR",
+        }),
+      }),
+    );
+    expect(mocks.createLegacyShopifyReportingAdapter).not.toHaveBeenCalled();
+    expect(mocks.fetchLiveCampaignsDetailed).toHaveBeenCalledOnce();
+    expect(mocks.fetchGoogleReportingCampaigns).not.toHaveBeenCalled();
+    expect(mocks.refreshAccountsNow).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      shopifyProvenance: "supplemental_v2_shopify",
+      funnel: { state: "ready" },
+      campaigns: { state: "ready" },
+      collections: { state: "ready" },
+      spend: { state: "ready" },
+    });
+
+    const manifest = mocks.adminReportingAuthority.mock.calls[0]?.[0];
+    expect(manifest).toMatchObject({
+      mode: "legacy",
+      operationalSurface: "v2_ready_for_cutover",
+      shopifyProvider: {
+        provenance: "supplemental_v2_shopify",
+        connectionId: "40000000-0000-4000-8000-000000000001",
+        shopId: "gid://shopify/Shop/1",
+        domain: "northwind.myshopify.com",
+        currency: "EUR",
+        verifiedAt: "2026-08-15T10:00:00.000Z",
+        connectionUpdatedAt: "2026-08-15T10:00:00.000Z",
+        shopifyClientId: "shopify-client-id",
+        credentialUpdatedAt: "2026-08-15T10:00:00.000Z",
+        credentialKey: expect.stringMatching(/^[0-9a-f]{64}$/),
+      },
+    });
+    expect(JSON.stringify(manifest)).not.toContain("encrypted-v2-client-secret");
+  });
+
+  it.each([
+    {
+      reason: "cross-client connection",
+      connections: [supplementalConnection({ client_id: "10000000-0000-4000-8000-000000000099" })],
+      credential: supplementalCredential(),
+    },
+    {
+      reason: "different canonical domain",
+      connections: [supplementalConnection({ shopify_domain: "other.myshopify.com" })],
+      credential: supplementalCredential(),
+    },
+    {
+      reason: "different currency",
+      connections: [supplementalConnection({ shopify_currency: "GBP" })],
+      credential: supplementalCredential(),
+    },
+    {
+      reason: "invalid Shopify shop identity",
+      connections: [supplementalConnection({ shopify_shop_id: "gid://shopify/Shop/not-a-number" })],
+      credential: supplementalCredential(),
+    },
+    {
+      reason: "duplicate exact connections",
+      connections: [
+        supplementalConnection(),
+        supplementalConnection({ id: "40000000-0000-4000-8000-000000000002" }),
+      ],
+      credential: supplementalCredential(),
+    },
+    {
+      reason: "unhealthy connection",
+      connections: [supplementalConnection({ last_error_code: "health_check_failed" })],
+      credential: supplementalCredential(),
+    },
+    {
+      reason: "unverified connection",
+      connections: [supplementalConnection({ last_verified_at: null })],
+      credential: supplementalCredential(),
+    },
+    {
+      reason: "missing required detail scope",
+      connections: [supplementalConnection({ granted_scopes: ["read_reports"] })],
+      credential: supplementalCredential(),
+    },
+    {
+      reason: "credential for another connection",
+      connections: [supplementalConnection()],
+      credential: supplementalCredential({
+        connection_id: "40000000-0000-4000-8000-000000000099",
+      }),
+    },
+  ])("fails closed to the legacy Shopify source for a $reason", async ({ connections, credential }) => {
+    mocks.createServiceClient.mockReturnValue(service(
+      [account()],
+      {
+        operational_surface: "v2_ready_for_cutover",
+        reporting_cutover_at: null,
+        reporting_cutover_by: null,
+        reporting_cutover_reason: null,
+      },
+      undefined,
+      { connections, credential },
+    ));
+    mocks.createLegacyShopifyReportingAdapter.mockResolvedValue(shopifyAdapter());
+    mocks.fetchLiveCampaignsDetailed.mockResolvedValue([]);
+
+    const result = await fetchAdminStoreAnalytics({
+      clientId: CLIENT_ID,
+      store: {
+        accountId: STORE_ID,
+        activityAccountIds: [STORE_ID],
+        currency: "EUR",
+        days: [],
+      },
+      range: RANGE,
+    });
+
+    expect(mocks.createShopifyReportingAdapter).not.toHaveBeenCalled();
+    expect(mocks.createLegacyShopifyReportingAdapter).toHaveBeenCalledOnce();
+    expect(result.shopifyProvenance).toBe("legacy");
+    expect(mocks.refreshAccountsNow).not.toHaveBeenCalled();
+  });
+
+  it("never uses the supplemental source outside v2_ready_for_cutover", async () => {
+    mocks.createServiceClient.mockReturnValue(service(
+      [account()],
+      {
+        operational_surface: "v2_onboarding",
+        reporting_cutover_at: null,
+        reporting_cutover_by: null,
+        reporting_cutover_reason: null,
+      },
+      undefined,
+      {
+        connections: [supplementalConnection()],
+        credential: supplementalCredential(),
+      },
+    ));
+    mocks.createLegacyShopifyReportingAdapter.mockResolvedValue(shopifyAdapter());
+    mocks.fetchLiveCampaignsDetailed.mockResolvedValue([]);
+
+    const result = await fetchAdminStoreAnalytics({
+      clientId: CLIENT_ID,
+      store: {
+        accountId: STORE_ID,
+        activityAccountIds: [STORE_ID],
+        currency: "EUR",
+        days: [],
+      },
+      range: RANGE,
+    });
+
+    expect(mocks.createShopifyReportingAdapter).not.toHaveBeenCalled();
+    expect(mocks.createLegacyShopifyReportingAdapter).toHaveBeenCalledOnce();
+    expect(result.shopifyProvenance).toBe("legacy");
+  });
+
   it("marks an all-zero, fully materialised funnel as empty", async () => {
     mocks.createServiceClient.mockReturnValue(service([account()], null));
     const adapter = shopifyAdapter();
@@ -640,7 +1024,7 @@ describe("admin store analytics DAL", () => {
       RANGE.to,
     );
     expect(result.campaigns).toMatchObject({
-      state: "ready",
+      state: "partial",
       message: expect.stringContaining("Some Google Ads accounts"),
       data: { rows: [{ accountId: CHILD_ID }] },
     });
@@ -785,6 +1169,46 @@ describe("admin store analytics DAL", () => {
       to: RANGE.to,
     });
     expect(mocks.fetchLiveCampaignsDetailed).not.toHaveBeenCalled();
+    expect(mocks.createLegacyShopifyReportingAdapter).not.toHaveBeenCalled();
+  });
+
+  it("keeps a 5/7 spend grid partial after manual refresh and reports exact coverage", async () => {
+    const partial = ["08", "09", "10", "11", "12"].map((day, index) => ({
+      ad_account_id: STORE_ID,
+      day: `2026-08-${day}`,
+      ad_spend: index + 1,
+      attributed_revenue: index + 10,
+      attributed_orders: 1,
+      computed_at: "2026-08-15T10:00:00.000Z",
+    }));
+    mocks.createServiceClient.mockReturnValue(
+      service([account()], null, [partial, partial]),
+    );
+
+    await expect(
+      ensureAdminAnalyticsRollupCoverage({
+        clientId: CLIENT_ID,
+        stores: [{
+          accountId: STORE_ID,
+          activityAccountIds: [STORE_ID],
+          currency: "EUR",
+        }],
+        range: RANGE,
+      }),
+    ).resolves.toMatchObject({
+      state: "partial",
+      data: {
+        storeCount: 1,
+        dayCount: 7,
+        refreshed: true,
+        materializedAccountDays: 5,
+        expectedAccountDays: 7,
+      },
+      message: "5 of 7 account-days are materialised after the exact-range refresh.",
+    });
+    expect(mocks.refreshAccountsNow).toHaveBeenCalledOnce();
+    expect(mocks.fetchLiveCampaignsDetailed).not.toHaveBeenCalled();
+    expect(mocks.createShopifyReportingAdapter).not.toHaveBeenCalled();
     expect(mocks.createLegacyShopifyReportingAdapter).not.toHaveBeenCalled();
   });
 

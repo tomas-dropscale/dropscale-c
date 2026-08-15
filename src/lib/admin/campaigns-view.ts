@@ -7,6 +7,7 @@ export type CampaignViewLoadState =
   | "empty"
   | "partial"
   | "failed"
+  | "not_synced"
   | "disconnected";
 export type CampaignViewCampaign = {
   bindingId: string;
@@ -31,7 +32,15 @@ export type CampaignViewStore = {
   realRoas: number | null;
   rollupSpend: number | null;
   rollupComplete: boolean;
+  rollupMaterialized?: boolean;
   campaignState: CampaignViewLoadState;
+  providerFreshness?: {
+    state: "live" | "ready" | "partial" | "not_synced" | "unavailable";
+    refreshedAt: string | null;
+    lastAttemptAt: string | null;
+    lastErrorCode: string | null;
+    stale: boolean;
+  };
   campaigns: CampaignViewCampaign[];
 };
 
@@ -256,12 +265,16 @@ export function projectAdminCampaignsView(
       name: entry.account.store_name,
       domain: storeDomain(entry.account.shopify_url),
       currency: entry.account.currency,
-      realRoas: entry.rollupComplete
+      realRoas: (entry.rollupMaterialized ?? entry.rollupComplete)
         ? storeRealRoas(entry.rollupRevenue, entry.rollupSpend)
         : null,
-      rollupSpend: entry.rollupComplete ? entry.rollupSpend : null,
+      rollupSpend: (entry.rollupMaterialized ?? entry.rollupComplete)
+        ? entry.rollupSpend
+        : null,
       rollupComplete: entry.rollupComplete,
+      rollupMaterialized: entry.rollupMaterialized,
       campaignState: entry.campaignState,
+      providerFreshness: entry.providerFreshness,
       campaigns: entry.campaigns.map((campaign): CampaignViewCampaign => {
         const bindingId = campaign.reportingBindingId ?? "";
 

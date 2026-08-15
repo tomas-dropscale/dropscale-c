@@ -42,7 +42,7 @@ vi.mock("@/lib/admin/client-overview", () => ({
 }));
 
 vi.mock("@/lib/admin/store-analytics", () => ({
-  fetchAdminStoreAnalytics: mocks.fetchStoreAnalytics,
+  fetchCachedAdminStoreAnalytics: mocks.fetchStoreAnalytics,
 }));
 
 vi.mock("@/lib/i18n/server", () => ({

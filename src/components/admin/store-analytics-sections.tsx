@@ -55,17 +55,18 @@ function FamilyNotice({
   message: string | null;
   empty: string;
 }) {
-  if (state === "ready") return null;
+  if (state === "ready" && !message) return null;
   const unavailable = state === "unavailable" || state === "failed";
+  const degraded = unavailable || Boolean(message?.toLowerCase().includes("last refresh failed"));
   return (
     <div
-      role={unavailable ? "alert" : "status"}
+      role={degraded ? "alert" : "status"}
       className={cn(
         "flex min-h-20 items-center justify-center gap-2 px-5 py-5 text-center text-sm text-[var(--text-muted)]",
-        unavailable && "text-[var(--warning-orange)]",
+        degraded && "text-[var(--warning-orange)]",
       )}
     >
-      {unavailable && <AlertTriangle className="size-4 shrink-0" aria-hidden />}
+      {degraded && <AlertTriangle className="size-4 shrink-0" aria-hidden />}
       <span>{message || empty}</span>
     </div>
   );
@@ -114,6 +115,14 @@ function ShopifyFunnel({
           Store behaviour across the selected period.
         </p>
       </header>
+
+      {funnel.state === "ready" && familyMessage(funnel) && (
+        <FamilyNotice
+          state="ready"
+          message={familyMessage(funnel)}
+          empty="No Shopify funnel events were returned for this period."
+        />
+      )}
 
       {funnel.state === "empty" ? (
         <FamilyNotice
@@ -175,8 +184,16 @@ export function StoreFunnelSections({
 
   return (
     <>
-      {funnel.state === "ready" ? (
-        <FunnelDevelopmentChart points={points} granularity="day" />
+      {"data" in funnel && funnel.state !== "empty" ? (
+        <>
+          <FunnelDevelopmentChart points={points} granularity="day" />
+          {funnel.state === "partial" && (
+            <div role="status" className="panel flex items-center gap-2 px-4 py-3 text-xs text-[var(--warning-orange)]">
+              <AlertTriangle className="size-4 shrink-0" aria-hidden />
+              {familyMessage(funnel)}
+            </div>
+          )}
+        </>
       ) : (
         <section className="panel overflow-hidden" aria-labelledby="funnel-development-title">
           <header className="border-b border-[var(--border-subtle)] px-4 py-3.5 sm:px-5">
@@ -206,16 +223,24 @@ export function StoreSpendSection({
   spend: AdminStoreAnalytics["spend"];
   currency: string;
 }) {
-  if (spend.state === "ready") {
+  if ("data" in spend && spend.state !== "empty") {
     return (
-      <SpendDevelopmentChart
-        points={spend.data.daily.map((row) => ({
-          date: row.day,
-          googleSpend: row.spend,
-        }))}
-        currency={currency}
-        granularity="day"
-      />
+      <>
+        <SpendDevelopmentChart
+          points={spend.data.daily.map((row) => ({
+            date: row.day,
+            googleSpend: row.spend,
+          }))}
+          currency={currency}
+          granularity="day"
+        />
+        {spend.state === "partial" && (
+          <div role="status" className="panel flex items-center gap-2 px-4 py-3 text-xs text-[var(--warning-orange)]">
+            <AlertTriangle className="size-4 shrink-0" aria-hidden />
+            {familyMessage(spend)}
+          </div>
+        )}
+      </>
     );
   }
 

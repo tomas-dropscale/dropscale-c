@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Check, ChevronDown, Search } from "lucide-react";
 
 import { Input } from "../ui/input";
+import { Badge } from "../ui/badge";
 import {
   Select,
   SelectContent,
@@ -12,10 +13,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "../ui/select";
-import type {
-  AdminAnalyticsClient,
-  AdminAnalyticsStore,
-} from "../../lib/admin/analytics";
+import type { AdminAnalyticsClient } from "../../lib/admin/analytics";
 import {
   analyticsBaseHref,
   analyticsClientHref,
@@ -239,7 +237,15 @@ export function AnalyticsScopeControls({
 }: {
   clients: AdminAnalyticsClient[];
   clientId: string | null;
-  stores: AdminAnalyticsStore[];
+  stores: Array<{
+    id: string | null;
+    name: string;
+    domain: string;
+    reportingState?: "running" | "partial" | "not_materialized";
+    reportingCoverage?: { rows: number; expectedRows: number };
+    updatedAt: string | null;
+    adSpend: number;
+  }>;
   storeId: string | null;
   range: RangeSelection;
 }) {
@@ -295,9 +301,47 @@ export function AnalyticsScopeControls({
           </SelectTrigger>
           <SelectContent>
             <SelectItem value={ALL_STORES}>All stores</SelectItem>
-            {stores.map((store) => (
-              <SelectItem key={store.id} value={store.id}>
-                {store.domain || store.name}
+            {stores.map((store, index) => (
+              <SelectItem
+                key={store.id ?? `not-activated-${store.domain}-${index}`}
+                value={store.id ?? `not-activated:${index}`}
+                disabled={store.id === null}
+              >
+                <span className="flex w-full min-w-0 items-center gap-2">
+                  <span className="min-w-0 flex-1 truncate">{store.domain || store.name}</span>
+                  {store.reportingState === "running" && (
+                    <Badge
+                      variant="success"
+                      title={`${store.updatedAt ? `Synced ${store.updatedAt}` : "Synced"} · complete selected-period grid${store.adSpend > 0 ? " · positive ad spend" : " · valid zero-spend data"}`}
+                      aria-label="Running with complete selected-period data"
+                    >
+                      <span className="size-1.5 rounded-full bg-current" aria-hidden />
+                      Running
+                    </Badge>
+                  )}
+                  {store.reportingState === "partial" && (
+                    <Badge
+                      variant="warning"
+                      title={store.reportingCoverage
+                        ? `${store.reportingCoverage.rows} of ${store.reportingCoverage.expectedRows} account-days are materialised.`
+                        : "Partial selected-period reporting grid."}
+                      aria-label={store.reportingCoverage
+                        ? `Partial. ${store.reportingCoverage.rows} of ${store.reportingCoverage.expectedRows} account-days are materialised.`
+                        : "Partial selected-period reporting grid."}
+                    >
+                      Partial
+                    </Badge>
+                  )}
+                  {store.id === null && (
+                    <Badge
+                      variant="neutral"
+                      title="Verified Shopify connection without an activated reporting store."
+                      aria-label="Not activated for reporting"
+                    >
+                      Not activated
+                    </Badge>
+                  )}
+                </span>
               </SelectItem>
             ))}
           </SelectContent>

@@ -1,3 +1,5 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
+
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/service";
 import { requireClientOnboardingAdmin } from "@/lib/client-onboarding/sessions";
@@ -8,15 +10,24 @@ import { markIfAuthRevoked } from "@/lib/google-ads/revoked";
 import { fetchHstClientKeys } from "@/lib/admin/hst";
 import { googleProfit, googleRoas } from "@/lib/admin/google-attribution";
 import { fetchDailyMetrics, groupByAccount, sumMetrics } from "@/lib/metrics/queries";
+import { refreshAccountsNow } from "@/lib/metrics/recompute";
 import { ACCOUNT_COLUMNS } from "@/lib/portal/data";
-import type { AdAccount } from "@/lib/supabase/types";
-import type { RangeSelection } from "@/lib/portal/range";
+import type { AdAccount, Database, Json } from "@/lib/supabase/types";
+import { rangeDays, type RangeSelection } from "@/lib/portal/range";
 import { hasWindsorEnv } from "@/lib/windsor/client";
 import { fetchGoogleReportingCampaigns } from "@/lib/reporting/google";
 import {
   resolveReportingSources,
   type CanonicalReportingSource,
 } from "@/lib/reporting/sources";
+import {
+  adminReportingSnapshotIsStale,
+  adminReportingAuthority,
+  readAdminReportingSnapshots,
+  refreshAdminReportingSnapshot,
+  type AdminReportingAuthority,
+  type AdminReportingSnapshotValue,
+} from "@/lib/admin/reporting-snapshots";
 
 /**
  * The admin zone's cross-client campaigns view.
@@ -26,6 +37,16 @@ import {
  * module reads unscoped and lets the admin RLS policies return every row.
  * Zone decides visibility — this file IS the admin zone's reader.
  */
+
+type Supabase = SupabaseClient<Database>;
+
+export type AdminCampaignProviderFreshness = {
+  state: "live" | "ready" | "partial" | "not_synced" | "unavailable";
+  refreshedAt: string | null;
+  lastAttemptAt: string | null;
+  lastErrorCode: string | null;
+  stale: boolean;
+};
 
 export type AdminAccountCampaigns = {
   account: AdAccount;
@@ -45,7 +66,15 @@ export type AdminAccountCampaigns = {
    */
   authRevoked: boolean;
   /** Never collapse an upstream failure into an honest zero-campaign result. */
-  campaignState: "ready" | "empty" | "partial" | "failed" | "disconnected";
+  campaignState:
+    | "ready"
+    | "empty"
+    | "partial"
+    | "failed"
+    | "not_synced"
+    | "disconnected";
+  /** Exact-range snapshot status; provider failures never hide the last success. */
+  providerFreshness?: AdminCampaignProviderFreshness;
   spend: number;
   commission: number;
   /** Reporting-rollup revenue for the exact store group in the selected window. */
@@ -54,6 +83,8 @@ export type AdminAccountCampaigns = {
   rollupSpend: number;
   /** This store has materialised rollup rows in one canonical currency. */
   rollupComplete: boolean;
+  /** At least one exact daily_metrics row exists, even when the grid is partial. */
+  rollupMaterialized?: boolean;
   /** At least one connected, active reporting source is expected to materialise. */
   rollupRequired: boolean;
   /** Canonical currencies of the physical metric accounts behind this store row. */
@@ -102,7 +133,7 @@ export type AdminCampaignsOverview = {
   totals: {
     spend: number | null;
     commission: number | null;
-    activeCampaigns: number;
+    activeCampaigns: number | null;
     connectedAccounts: number;
     /**
      * Portfolio revenue: every client store in the period, narrowed to orders
@@ -140,13 +171,63 @@ type Owner = { name: string; email: string; crmClientId: string | null; inHst: b
 
 type AdminAccountInventory = {
   account: AdAccount;
+  /** True only for a physical Shopify store scope, never a standalone Google binding. */
+  isStoreScope: boolean;
   googleSources: CanonicalReportingSource[] | null;
+  /** Exact physical Google account IDs allowed inside this scope's campaign snapshot. */
+  campaignAccountIds: string[];
   metricAccountIds: string[];
   metricCurrencies: string[];
   commissionRateByMetricAccount: Map<string, number>;
   /** Campaign mutations remain marker-gated even when Windsor is used read-only before cutover. */
   campaignControlsEnabled: boolean;
+  authority: AdminReportingAuthority;
 };
+
+async function campaignReportingAuthority(input: {
+  account: AdAccount;
+  operationalSurface: string;
+  reportingCutoverAt: string | null;
+  sources: CanonicalReportingSource[] | null;
+}): Promise<AdminReportingAuthority> {
+  const sources = input.sources
+    ?.map((source) => ({
+      bindingId: source.bindingId,
+      clientId: source.clientId,
+      adAccountId: source.adAccountId,
+      kind: source.kind,
+      anchorBindingId: source.group.shopifyAnchorBindingId,
+      anchorAccountId: source.group.shopifyAnchorAdAccountId,
+      shopifyConnectionId: source.shopify?.connectionId ?? null,
+      googleAds: source.googleAds
+        ? {
+            connectionId: source.googleAds.connectionId,
+            accountId: source.googleAds.accountId,
+            customerId: source.googleAds.customerId,
+            currency: source.googleAds.currency,
+            timeZone: source.googleAds.timeZone,
+          }
+        : null,
+    }))
+    .sort((left, right) => left.bindingId.localeCompare(right.bindingId)) ?? null;
+  return adminReportingAuthority({
+    version: 1,
+    purpose: "admin_google_campaigns",
+    mode: input.sources === null ? "legacy" : "v2",
+    clientId: input.account.client_id,
+    scopeAccountId: input.account.id,
+    operationalSurface: input.operationalSurface,
+    reportingCutoverAt: input.reportingCutoverAt,
+    legacyGoogle: input.sources === null
+      ? {
+          customerId: input.account.google_ads_customer_id,
+          connected: input.account.google_ads_connected,
+          currency: input.account.currency,
+        }
+      : null,
+    sources: sources as unknown as Json,
+  });
+}
 
 function projectedShopDomain(source: CanonicalReportingSource): string {
   return source.shopify!.primaryDomain?.trim().toLowerCase() || source.shopify!.domain;
@@ -278,24 +359,34 @@ async function adminAccountInventory(
   );
   if (unknown) throw new Error("Admin reporting inventory is unavailable.");
 
-  const legacy = accounts
+  const legacy = await Promise.all(accounts
     .filter((account) => !v2ClientIds.includes(account.client_id))
-    .map((account) => {
+    .map(async (account) => {
       const materializable =
         account.status !== "pending" &&
         ((account.google_ads_connected && Boolean(account.google_ads_customer_id)) ||
           (account.shopify_connected && Boolean(account.shopify_url)));
+      const rollout = rollouts.get(account.client_id);
       return {
         account,
+        isStoreScope: account.shopify_connected && Boolean(account.shopify_url),
         googleSources: null,
+        campaignAccountIds:
+          account.google_ads_connected && account.google_ads_customer_id ? [account.id] : [],
         metricAccountIds: materializable ? [account.id] : [],
         metricCurrencies: materializable ? [account.currency] : [],
         commissionRateByMetricAccount: new Map([
           [account.id, Number(account.commission_rate)],
         ]),
         campaignControlsEnabled: false,
+        authority: await campaignReportingAuthority({
+          account,
+          operationalSurface: rollout?.operational_surface ?? "legacy_only",
+          reportingCutoverAt: rollout?.reporting_cutover_at ?? null,
+          sources: null,
+        }),
       };
-    });
+    }));
   if (v2ClientIds.length === 0) return legacy;
 
   const sources = await resolveReportingSources({
@@ -339,7 +430,11 @@ async function adminAccountInventory(
         google_ads_connected: grouped.some((source) => source.googleAds !== null),
         google_ads_customer_id: anchor.googleAds?.customerId ?? null,
       },
+      isStoreScope: true,
       googleSources: grouped.filter((source) => source.googleAds !== null),
+      campaignAccountIds: grouped
+        .filter((source) => source.googleAds !== null)
+        .map((source) => source.adAccountId),
       metricAccountIds: grouped.map((source) => source.adAccountId),
       metricCurrencies: [
         ...new Set(grouped.map((source) => baseById.get(source.adAccountId)!.currency)),
@@ -351,6 +446,12 @@ async function adminAccountInventory(
         ]),
       ),
       campaignControlsEnabled: true,
+      authority: await campaignReportingAuthority({
+        account: base,
+        operationalSurface: "v2_active",
+        reportingCutoverAt: rollouts.get(base.client_id)?.reporting_cutover_at ?? null,
+        sources: grouped,
+      }),
     });
   }
 
@@ -373,13 +474,21 @@ async function adminAccountInventory(
         google_ads_connected: true,
         google_ads_customer_id: source.googleAds.customerId,
       },
+      isStoreScope: false,
       googleSources: [source],
+      campaignAccountIds: [source.adAccountId],
       metricAccountIds: [source.adAccountId],
       metricCurrencies: [base.currency],
       commissionRateByMetricAccount: new Map([
         [source.adAccountId, Number(base.commission_rate)],
       ]),
       campaignControlsEnabled: true,
+      authority: await campaignReportingAuthority({
+        account: base,
+        operationalSurface: "v2_active",
+        reportingCutoverAt: rollouts.get(base.client_id)?.reporting_cutover_at ?? null,
+        sources: [source],
+      }),
     });
   }
 
@@ -413,6 +522,8 @@ function groupByOwner(
     rollupSpend: number;
     currencies: Set<string>;
     complete: number;
+    materialized: number;
+    required: number;
   };
   const byClient = new Map<string, Group>();
 
@@ -430,13 +541,19 @@ function groupByOwner(
       rollupSpend: 0,
       currencies: new Set<string>(),
       complete: 0,
+      materialized: 0,
+      required: 0,
     };
     group.accounts.push(entry);
     if (entry.rollupRequired) {
+      group.required += 1;
       entry.rollupCurrencies.forEach((currency) => group.currencies.add(currency));
     }
     if (entry.rollupComplete) {
       group.complete += 1;
+    }
+    if (entry.rollupMaterialized ?? entry.rollupComplete) {
+      group.materialized += 1;
       group.spend += entry.spend;
       group.commission += entry.commission;
       if (entry.rollupRevenue !== null) {
@@ -450,8 +567,8 @@ function groupByOwner(
   return [...byClient.values()]
     .map((group): AdminClientCampaigns => {
       const currencies = [...group.currencies].sort();
-      const rollupComplete = group.complete > 0;
-      const financialReady = rollupComplete && currencies.length === 1;
+      const rollupComplete = group.required > 0 && group.complete === group.required;
+      const financialReady = group.materialized > 0 && currencies.length === 1;
       return {
         clientId: group.clientId,
         clientName: group.clientName,
@@ -474,11 +591,52 @@ function groupByOwner(
     .sort((a, b) => (b.spend ?? -1) - (a.spend ?? -1));
 }
 
-export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminCampaignsOverview> {
-  await requireClientOnboardingAdmin();
-  const service = createServiceClient();
+function campaignProviderFreshness(
+  snapshot: AdminReportingSnapshotValue<unknown> | undefined,
+  range: Pick<RangeSelection, "to">,
+): AdminCampaignProviderFreshness {
+  if (!snapshot) {
+    return {
+      state: "not_synced",
+      refreshedAt: null,
+      lastAttemptAt: null,
+      lastErrorCode: null,
+      stale: false,
+    };
+  }
+  const stale = adminReportingSnapshotIsStale({
+    to: range.to,
+    refreshedAt: snapshot.refreshedAt,
+  });
+  return {
+    state:
+      snapshot.state === "not_synced"
+        ? "not_synced"
+        : snapshot.state === "unavailable"
+          ? "unavailable"
+          : snapshot.state === "partial" || snapshot.lastErrorCode !== null || stale
+            ? "partial"
+            : "ready",
+    refreshedAt: snapshot.refreshedAt,
+    lastAttemptAt: snapshot.lastAttemptAt,
+    lastErrorCode: snapshot.lastErrorCode,
+    stale,
+  };
+}
+
+export async function fetchAdminCampaigns(
+  range: RangeSelection,
+  options: {
+    campaignSource?: "live" | "snapshot";
+    authenticate?: boolean;
+    client?: Supabase;
+    providerOnly?: boolean;
+  } = {},
+): Promise<AdminCampaignsOverview> {
+  if (options.authenticate !== false) await requireClientOnboardingAdmin();
+  const service = options.client ?? createServiceClient();
   if (!service) throw new Error("Admin reporting inventory is unavailable.");
-  const supabase = await createClient();
+  const supabase = options.client ?? (await createClient());
   const googleConfigured = hasGoogleAdsEnv();
   const windsorConfigured = hasWindsorEnv();
   const configured = googleConfigured || windsorConfigured;
@@ -487,7 +645,9 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
     supabase.from("ad_accounts").select(ACCOUNT_COLUMNS).order("created_at", { ascending: true }),
     supabase.from("portal_clients").select("id, full_name, email, crm_client_id"),
     supabase.from("profiles").select("id").eq("role", "admin"),
-    fetchHstClientKeys(),
+    options.providerOnly
+      ? Promise.resolve({ crmIds: new Set<string>(), names: new Set<string>() })
+      : fetchHstClientKeys(),
   ]);
 
   // Staff-admins hold portal accounts too, but theirs are internal/test stores
@@ -521,10 +681,24 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
     ]),
   );
 
+  const campaignSnapshots = options.campaignSource === "snapshot"
+    ? await readAdminReportingSnapshots<AdminLiveCampaign>({
+        client: service,
+        family: "google_campaigns",
+        scopes: inventory.map((entry) => ({
+          accountId: entry.account.id,
+          authorityKey: entry.authority.key,
+        })),
+        from: range.from,
+        to: range.to,
+      }).catch(() => new Map<string, AdminReportingSnapshotValue<AdminLiveCampaign>>())
+    : new Map();
+
   const perAccount = await Promise.all(
     inventory.map(async ({
       account,
       googleSources,
+      campaignAccountIds,
       campaignControlsEnabled,
     }): Promise<AdminAccountCampaigns> => {
       const connected = googleSources === null
@@ -535,8 +709,53 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
       let failed = false;
       let authRevoked = false;
       let campaignState: AdminAccountCampaigns["campaignState"] = "disconnected";
+      const snapshot = options.campaignSource === "snapshot"
+        ? campaignSnapshots.get(account.id)
+        : undefined;
+      let providerFreshness: AdminCampaignProviderFreshness =
+        options.campaignSource === "snapshot"
+          ? campaignProviderFreshness(snapshot, range)
+          : {
+              state: "live",
+              refreshedAt: null,
+              lastAttemptAt: null,
+              lastErrorCode: null,
+              stale: false,
+            };
+      if (!connected && options.campaignSource === "snapshot") {
+        providerFreshness = { ...providerFreshness, state: "unavailable" };
+      }
 
-      if (connected) {
+      if (connected && options.campaignSource === "snapshot") {
+        if (!snapshot || snapshot.state === "not_synced") {
+          campaignState = "not_synced";
+        } else if (snapshot.state === "unavailable") {
+          campaignState = "disconnected";
+        } else {
+          const allowedPhysicalIds = new Set(campaignAccountIds);
+          const escaped = snapshot.rows.some(
+            (row: AdminLiveCampaign) => !allowedPhysicalIds.has(row.ad_account_id),
+          );
+          if (escaped) {
+            failed = true;
+            campaignState = "failed";
+            providerFreshness = {
+              ...providerFreshness,
+              state: "partial",
+              lastErrorCode: "scope_escape",
+            };
+          } else {
+            campaigns = snapshot.rows;
+            failed = snapshot.lastErrorCode !== null;
+            campaignState =
+              snapshot.lastErrorCode || snapshot.state === "partial" || providerFreshness.stale
+              ? "partial"
+              : snapshot.state === "empty"
+                ? "empty"
+                : "ready";
+          }
+        }
+      } else if (connected) {
         if (googleSources === null) {
           try {
             const { data } = await supabase
@@ -617,6 +836,7 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
         failed,
         authRevoked,
         campaignState,
+        providerFreshness,
         spend,
         commission: (spend * Number(account.commission_rate)) / 100,
         rollupRevenue: null,
@@ -643,6 +863,7 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
     rollupRevenue: null,
     rollupSpend: 0,
     rollupComplete: false,
+    rollupMaterialized: false,
     rollupRequired: false,
     rollupCurrencies: [],
   }));
@@ -650,20 +871,29 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
   // Campaigns is a read-only portfolio view: use only the rollup rows already
   // materialised for this exact inclusive range. Provider refreshes belong to
   // sync/reporting jobs, never to an admin page render.
-  const metricRows = await fetchDailyMetrics(
-    [...new Set(inventory.flatMap((entry) => entry.metricAccountIds))],
-    range.from,
-    range.to,
-  );
+  const metricAccountIds = [
+    ...new Set(inventory.flatMap((entry) => entry.metricAccountIds)),
+  ];
+  const metricRows = options.providerOnly
+    ? []
+    : await fetchDailyMetrics(metricAccountIds, range.from, range.to);
   const metricRowsByAccount = groupByAccount(metricRows);
   const accountsWithRollups = perAccount.map((entry, index) => {
     const inventoryEntry = inventory[index];
     const rows = inventoryEntry.metricAccountIds.flatMap(
       (accountId) => metricRowsByAccount.get(accountId) ?? [],
     );
-    const rollupComplete = rows.length > 0 && inventoryEntry.metricCurrencies.length === 1;
+    const coverageRows = new Set(
+      rows.map((row) => `${row.ad_account_id}\n${row.day}`),
+    ).size;
+    const expectedRows = inventoryEntry.metricAccountIds.length * rangeDays(range);
+    const rollupMaterialized = coverageRows > 0;
+    const rollupComplete =
+      expectedRows > 0 &&
+      coverageRows === expectedRows &&
+      inventoryEntry.metricCurrencies.length === 1;
     const totals = sumMetrics(rows);
-    const commission = rollupComplete
+    const commission = rollupMaterialized && inventoryEntry.metricCurrencies.length === 1
       ? inventoryEntry.metricAccountIds.reduce((total, accountId) => {
           const accountRate = inventoryEntry.commissionRateByMetricAccount.get(accountId);
           if (typeof accountRate !== "number" || !Number.isFinite(accountRate)) {
@@ -680,6 +910,7 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
       rollupRevenue: totals.attributedRevenue,
       rollupSpend: totals.adSpend,
       rollupComplete,
+      rollupMaterialized,
       rollupRequired: inventoryEntry.metricAccountIds.length > 0,
       rollupCurrencies: inventoryEntry.metricCurrencies,
     };
@@ -690,11 +921,21 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
   const spend = accountsWithRollups.reduce((sum, entry) => sum + entry.spend, 0);
   const commission = accountsWithRollups.reduce((sum, entry) => sum + entry.commission, 0);
   const requiredScopes = inventory.filter((entry) => entry.metricAccountIds.length > 0);
-  const rollupComplete = metricRows.length > 0;
+  const portfolioCoverageRows = new Set(
+    metricRows.map((row) => `${row.ad_account_id}\n${row.day}`),
+  ).size;
+  const expectedPortfolioRows = metricAccountIds.length * rangeDays(range);
+  const rollupComplete =
+    expectedPortfolioRows > 0 && portfolioCoverageRows === expectedPortfolioRows;
   const currencies = [
     ...new Set(requiredScopes.flatMap((entry) => entry.metricCurrencies)),
   ].sort();
-  const financialReady = rollupComplete && currencies.length === 1;
+  const financialReady = metricRows.length > 0 && currencies.length === 1;
+  const campaignTotalsReady = perAccount
+    .filter((entry) => entry.connected)
+    .every(
+      (entry) => entry.campaignState === "ready" || entry.campaignState === "empty",
+    );
 
   // Costs are recorded per day for the whole shop, so only the Google share of
   // them is charged here — see lib/admin/google-attribution.ts. Our own fee is
@@ -721,10 +962,13 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
     totals: {
       spend: financialReady ? spend : null,
       commission: financialReady ? commission : null,
-      activeCampaigns: perAccount.reduce(
-        (sum, entry) => sum + entry.campaigns.filter((c) => c.status === "active").length,
-        0,
-      ),
+      activeCampaigns: campaignTotalsReady
+        ? perAccount.reduce(
+            (sum, entry) =>
+              sum + entry.campaigns.filter((campaign) => campaign.status === "active").length,
+            0,
+          )
+        : null,
       connectedAccounts: accountsWithRollups.filter((entry) => entry.connected).length,
       revenue: financialReady ? revenue : null,
       profit,
@@ -737,5 +981,188 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
       currencies,
       rollupComplete,
     },
+  };
+}
+
+async function campaignSnapshotInventory(
+  service: Supabase,
+): Promise<AdminAccountInventory[]> {
+  const [accountsResult, adminsResult] = await Promise.all([
+    service.from("ad_accounts").select(ACCOUNT_COLUMNS).order("created_at", { ascending: true }),
+    service.from("profiles").select("id").eq("role", "admin"),
+  ]);
+  if (accountsResult.error || adminsResult.error || !Array.isArray(accountsResult.data)) {
+    throw new Error("Admin reporting inventory is unavailable.");
+  }
+  return adminAccountInventory(
+    accountsResult.data as AdAccount[],
+    new Set((adminsResult.data ?? []).map((row) => row.id)),
+    service,
+  );
+}
+
+export type AdminReportingStoreScope = {
+  clientId: string;
+  store: {
+    accountId: string;
+    activityAccountIds: string[];
+    currency: string;
+  };
+};
+
+/** DB-only inventory for hourly store snapshot refreshes. */
+export async function listAdminReportingStoreScopes(
+  service: Supabase,
+): Promise<AdminReportingStoreScope[]> {
+  return (await campaignSnapshotInventory(service))
+    .filter((entry) => entry.isStoreScope)
+    .map((entry) => ({
+      clientId: entry.account.client_id,
+      store: {
+        accountId: entry.account.id,
+        activityAccountIds: [...entry.metricAccountIds],
+        currency: entry.account.currency,
+      },
+    }));
+}
+
+/** Explicit provider sync; page renders use campaignSource=snapshot. */
+export async function refreshAdminCampaignSnapshots(
+  range: RangeSelection,
+  options: {
+    authenticate?: boolean;
+    client?: Supabase;
+    refreshMetrics?: boolean;
+  } = {},
+) {
+  if (options.authenticate !== false) await requireClientOnboardingAdmin();
+  const service = options.client ?? createServiceClient();
+  if (!service) throw new Error("Admin reporting inventory is unavailable.");
+
+  const inventory = await campaignSnapshotInventory(service);
+  const metricAccountIds = [
+    ...new Set(inventory.flatMap((entry) => entry.metricAccountIds)),
+  ];
+  let metricCoverage: {
+    state: "ready" | "partial";
+    accounts: number;
+    expectedRows: number;
+    rows: number;
+  } | null = null;
+  if (options.refreshMetrics) {
+    await refreshAccountsNow(metricAccountIds, {
+      client: service,
+      reportingClient: service,
+      from: range.from,
+      to: range.to,
+    });
+    const { data, error } = metricAccountIds.length === 0
+      ? { data: [], error: null }
+      : await service
+          .from("daily_metrics")
+          .select("ad_account_id, day")
+          .in("ad_account_id", metricAccountIds)
+          .gte("day", range.from)
+          .lte("day", range.to);
+    if (error || !Array.isArray(data)) {
+      throw new Error("The exact campaign metric coverage could not be verified.");
+    }
+    const allowed = new Set(metricAccountIds);
+    const unique = new Set(
+      data
+        .filter(
+          (row) =>
+            allowed.has(row.ad_account_id) &&
+            row.day >= range.from &&
+            row.day <= range.to,
+        )
+        .map((row) => `${row.ad_account_id}\n${row.day}`),
+    );
+    const expectedRows = metricAccountIds.length * rangeDays(range);
+    metricCoverage = {
+      state: unique.size === expectedRows ? "ready" : "partial",
+      accounts: metricAccountIds.length,
+      expectedRows,
+      rows: unique.size,
+    };
+  }
+  let livePromise: Promise<AdminCampaignsOverview> | null = null;
+  const live = () => {
+    livePromise ??= fetchAdminCampaigns(range, {
+      campaignSource: "live",
+      authenticate: false,
+      client: service,
+      providerOnly: true,
+    });
+    return livePromise;
+  };
+  let verifiedInventory: Promise<Map<string, AdminAccountInventory>> | null = null;
+  const verified = () => {
+    verifiedInventory ??= campaignSnapshotInventory(service).then(
+      (entries) => new Map(entries.map((entry) => [entry.account.id, entry])),
+    );
+    return verifiedInventory;
+  };
+
+  const results = await Promise.all(
+    inventory.map((entry) =>
+      refreshAdminReportingSnapshot<AdminLiveCampaign>({
+        client: service,
+        family: "google_campaigns",
+        accountId: entry.account.id,
+        from: range.from,
+        to: range.to,
+        authority: entry.authority,
+        verifyAuthority: async () => {
+          const current = (await verified()).get(entry.account.id);
+          if (!current) {
+            return adminReportingAuthority({ removedAccountId: entry.account.id });
+          }
+          return current.authority;
+        },
+        load: async () => {
+          const overview = await live();
+          const liveByAccount = new Map(
+            overview.clients
+              .flatMap((client) => client.accounts)
+              .map((result) => [result.account.id, result]),
+          );
+          const result = liveByAccount.get(entry.account.id);
+          if (!result) throw new Error("The live campaign scope disappeared.");
+          if (result.campaignState === "failed" || result.campaignState === "not_synced") {
+            throw new Error("Google campaign reporting failed.");
+          }
+          if (result.campaignState === "disconnected") {
+            return {
+              state: "unavailable",
+              rows: [],
+              message: "Campaign reporting is unavailable until this Google Ads connection is restored.",
+            };
+          }
+          if (result.campaignState === "empty") {
+            return { state: "empty", rows: [], message: null };
+          }
+          return {
+            state: result.campaignState === "partial" ? "partial" : "ready",
+            rows: result.campaigns,
+            message: result.campaignState === "partial"
+              ? "Some Google Ads sources failed; this snapshot is partial."
+              : null,
+          };
+        },
+      })),
+  );
+
+  return {
+    from: range.from,
+    to: range.to,
+    accounts: inventory.length,
+    metricCoverage,
+    refreshed: results.filter((result) => result.state === "refreshed").length,
+    partial: results.filter(
+      (result) => result.state === "refreshed" && result.snapshotState === "partial",
+    ).length,
+    busy: results.filter((result) => result.state === "busy").length,
+    failed: results.filter((result) => result.state === "failed").length,
   };
 }

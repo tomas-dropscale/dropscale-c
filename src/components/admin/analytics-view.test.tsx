@@ -15,6 +15,10 @@ vi.mock("@/components/portal/range-picker", () => ({
   RangePicker: () => <span>Range picker</span>,
 }));
 
+vi.mock("./reporting-sync-button", () => ({
+  ReportingSyncButton: () => <span>Sync reporting</span>,
+}));
+
 vi.mock("@/components/admin/performance-charts", () => ({
   SpendDevelopmentChart: () => <div>Store spend development chart</div>,
   FunnelDevelopmentChart: () => <div>Funnel Development chart</div>,
@@ -25,7 +29,9 @@ vi.mock("@/components/admin/store-analytics-sections", async () =>
 );
 
 vi.mock("@/components/ui/badge", () => ({
-  Badge: ({ children }: { children: ReactNode }) => <span>{children}</span>,
+  Badge: ({ children, ...props }: { children: ReactNode } & Record<string, unknown>) => (
+    <span {...props}>{children}</span>
+  ),
 }));
 
 vi.mock("@/components/ui/page-container", () => ({
@@ -333,11 +339,46 @@ describe("AnalyticsView", () => {
     expect(html).not.toContain("Shopify revenue and Google spend coverage could not be proved");
   });
 
-  it("renders immediate scope controls and the approved all-stores table", () => {
+  it("shows stale provider freshness and the last failed attempt without hiding ready payload", () => {
+    const analytics = storeAnalytics();
+    analytics.providerFreshness = {
+      state: "partial",
+      refreshedAt: "2026-08-07T08:00:00.000Z",
+      lastAttemptAt: "2026-08-07T11:30:00.000Z",
+      lastErrorCode: "provider_failed",
+      stale: true,
+    };
+    analytics.funnel = {
+      ...analytics.funnel,
+      message: "The last refresh failed (provider_failed); showing the last successful snapshot.",
+    };
     const html = renderToStaticMarkup(
       <AnalyticsView
         clients={clients}
         overview={overview()}
+        selectedStoreId="store-gbp"
+        range={{ key: "custom", from: "2026-08-07", to: "2026-08-07" }}
+        storeAnalytics={analytics}
+      />,
+    );
+
+    expect(html).toContain("Stale");
+    expect(html).toContain("Refreshed");
+    expect(html).toContain("Last attempt");
+    expect(html).toContain("Last refresh error: provider_failed");
+    expect(html).toContain("older than 90 minutes");
+    expect(html).toContain("last refresh failed (provider_failed)");
+    expect(html).toContain("200");
+  });
+
+  it("renders immediate scope controls and the approved all-stores table", () => {
+    const running = overview();
+    running.stores[0].reportingState = "running";
+    running.stores[0].reportingCoverage = { rows: 14, expectedRows: 14 };
+    const html = renderToStaticMarkup(
+      <AnalyticsView
+        clients={clients}
+        overview={running}
         selectedStoreId={null}
         range={{ key: "d7", from: "2026-08-01", to: "2026-08-07" }}
         storeAnalytics={null}
@@ -352,12 +393,34 @@ describe("AnalyticsView", () => {
     expect(html).toContain("Store URL");
     expect(html).toContain("northwind-uk.example");
     expect(html).toContain("Synced");
+    expect(html).toContain("Running");
+    expect(html).toContain("complete selected-period grid");
     expect(html).toContain("Mixed currencies (EUR, GBP)");
     expect(html.match(/title="Unavailable across mixed currencies/g)).toHaveLength(5);
     expect(html).toContain("GBP 5000.00");
     expect(html).toContain("GBP 2000.00");
     expect(html).not.toContain("Store Activity Log");
     expect(html).not.toContain("Campaign Performance");
+  });
+
+  it("labels a partial account-day grid without calling it Running", () => {
+    const partial = overview();
+    partial.stores[0].reportingState = "partial";
+    partial.stores[0].reportingCoverage = { rows: 10, expectedRows: 14 };
+
+    const html = renderToStaticMarkup(
+      <AnalyticsView
+        clients={clients}
+        overview={partial}
+        selectedStoreId="store-gbp"
+        range={{ key: "d7", from: "2026-08-01", to: "2026-08-07" }}
+        storeAnalytics={storeAnalytics()}
+      />,
+    );
+
+    expect(html).toContain("Partial");
+    expect(html).toContain("10 of 14 account-days");
+    expect(html).not.toContain("Running");
   });
 
   it("shows a dash instead of 0.00x for a fresh spend-only scope", () => {

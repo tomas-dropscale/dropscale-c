@@ -18,7 +18,7 @@ import {
   analyticsStoreHref,
 } from "@/lib/admin/analytics-view";
 import { fetchClientOverview } from "@/lib/admin/client-overview";
-import { fetchAdminStoreAnalytics } from "@/lib/admin/store-analytics";
+import { fetchCachedAdminStoreAnalytics } from "@/lib/admin/store-analytics";
 import { getServerDictionary } from "@/lib/i18n/server";
 import { parseRange, type RangeSelection } from "@/lib/portal/range";
 
@@ -165,12 +165,29 @@ function ClientChooser({
                   {client.stores.length > 0 && (
                     <ul className="border-t border-[var(--border-subtle)] bg-[var(--bg-base)]">
                       {client.stores.map((store) => (
-                        <li key={store.id}>
-                          <Link
-                            href={analyticsStoreHref(client.id, store.id, range)}
-                            aria-label={`Open ${store.domain} for ${client.name}`}
-                            className="transition-smooth flex min-h-11 items-center gap-3 border-t border-[var(--border-subtle)] px-4 py-2 first:border-t-0 hover:bg-[var(--bg-panel-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--accent-gold)]/40 sm:px-5 sm:pl-16"
-                          >
+                        <li key={store.id ?? `not-activated:${store.domain}`}>
+                          {store.id ? (
+                            <Link
+                              href={analyticsStoreHref(client.id, store.id, range)}
+                              aria-label={`Open ${store.domain} for ${client.name}`}
+                              className="transition-smooth flex min-h-11 items-center gap-3 border-t border-[var(--border-subtle)] px-4 py-2 first:border-t-0 hover:bg-[var(--bg-panel-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--accent-gold)]/40 sm:px-5 sm:pl-16"
+                            >
+                              <Store className="size-3.5 shrink-0 text-[var(--accent-gold)]" aria-hidden />
+                              <span className="min-w-0 flex-1">
+                                <span className="block truncate text-[12.5px] font-medium text-[var(--text-primary)]">
+                                  {store.domain}
+                                </span>
+                                <span className="mt-0.5 block truncate text-[10.5px] text-[var(--text-muted)]">
+                                  {store.name}
+                                </span>
+                              </span>
+                              <ChevronRight className="size-3.5 shrink-0 text-[var(--text-muted)]" aria-hidden />
+                            </Link>
+                          ) : (
+                            <div
+                              aria-label={`${store.domain} is connected but not activated for Analytics`}
+                              className="flex min-h-11 items-center gap-3 border-t border-[var(--border-subtle)] px-4 py-2 first:border-t-0 text-[var(--text-muted)] sm:px-5 sm:pl-16"
+                            >
                             <Store className="size-3.5 shrink-0 text-[var(--accent-gold)]" aria-hidden />
                             <span className="min-w-0 flex-1">
                               <span className="block truncate text-[12.5px] font-medium text-[var(--text-primary)]">
@@ -180,8 +197,9 @@ function ClientChooser({
                                 {store.name}
                               </span>
                             </span>
-                            <ChevronRight className="size-3.5 shrink-0 text-[var(--text-muted)]" aria-hidden />
-                          </Link>
+                              <Badge variant="warning">Not activated</Badge>
+                            </div>
+                          )}
                         </li>
                       ))}
                     </ul>
@@ -247,7 +265,7 @@ export default async function AnalyticsPage({
     ? overview.stores.find((store) => store.accountId === requestedStoreId) ?? null
     : null;
   const storeAnalytics = selectedStore
-    ? await fetchAdminStoreAnalytics({
+    ? await fetchCachedAdminStoreAnalytics({
         clientId: selectedClient.id,
         store: selectedStore,
         range,

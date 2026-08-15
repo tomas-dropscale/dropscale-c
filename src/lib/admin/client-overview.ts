@@ -45,6 +45,7 @@ import {
   groupByAccount,
   groupByDay,
   sumMetrics,
+  type DailyMetricRow,
 } from "@/lib/metrics/queries";
 import type { AdAccount } from "@/lib/supabase/types";
 import type { RangeSelection } from "@/lib/portal/range";
@@ -296,6 +297,9 @@ export type AdminStoreOverview = {
   activityAccountIds: string[];
   /** Freshness of this exact store group; null means no verified rollup rows. */
   updatedAt: string | null;
+  /** Exact account×day materialisation state for the selected URL range. */
+  reportingState?: "running" | "partial" | "not_materialized";
+  reportingCoverage?: { rows: number; expectedRows: number };
   storeName: string;
   storeDomain: string;
   colorDot: string;
@@ -410,6 +414,65 @@ export type AdminClientOverview = {
   updatedAt: string | null;
 };
 
+function selectedDays(range: Pick<RangeSelection, "from" | "to">): string[] {
+  const days: string[] = [];
+  const cursor = new Date(`${range.from}T00:00:00.000Z`);
+  const end = new Date(`${range.to}T00:00:00.000Z`);
+  while (cursor <= end) {
+    days.push(cursor.toISOString().slice(0, 10));
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return days;
+}
+
+function exactStoreGrid(
+  rows: DailyMetricRow[],
+  accountIds: string[],
+  anchorAccountId: string,
+  range: Pick<RangeSelection, "from" | "to">,
+): { complete: boolean; rows: number; expectedRows: number } {
+  const days = selectedDays(range);
+  const expected = new Set(
+    accountIds.flatMap((accountId) =>
+      days.map((day) => `${accountId}\u0000${day}`),
+    ),
+  );
+  const seen = new Set<string>();
+  let validRows = true;
+  const anchorAttribution = new Set<string>();
+  for (const row of rows) {
+    const key = `${row.ad_account_id}\u0000${row.day}`;
+    const computedAt = Date.parse(row.computed_at);
+    if (!expected.has(key) || seen.has(key) || !Number.isFinite(computedAt)) {
+      validRows = false;
+      continue;
+    }
+    seen.add(key);
+    if (row.ad_account_id === anchorAccountId) {
+      const revenue = Number(row.attributed_revenue);
+      const orders = Number(row.attributed_orders);
+      if (
+        row.attributed_revenue !== null &&
+        row.attributed_orders !== null &&
+        Number.isFinite(revenue) &&
+        Number.isSafeInteger(orders) &&
+        orders >= 0
+      ) {
+        anchorAttribution.add(row.day);
+      }
+    }
+  }
+  return {
+    complete:
+      validRows &&
+      rows.length === expected.size &&
+      seen.size === expected.size &&
+      days.every((day) => anchorAttribution.has(day)),
+    rows: seen.size,
+    expectedRows: expected.size,
+  };
+}
+
 export async function fetchClientOverview(
   clientId: string,
   range: RangeSelection,
@@ -451,10 +514,12 @@ export async function fetchClientOverview(
   );
 
   const stores: AdminStoreOverview[] = scope.stores
-    .map((account) => {
+    .map((account): AdminStoreOverview => {
       const metricIds = scope.metricIdsByStore.get(account.id);
       if (!metricIds) throw new Error("A client reporting store group is missing.");
       const accountRows = metricIds.flatMap((id) => byAccount.get(id) ?? []);
+      const grid = exactStoreGrid(accountRows, metricIds, account.id, range);
+      const updatedAt = freshness(accountRows).updatedAt;
       const totals = sumMetrics(accountRows);
       const commission = metricIds.reduce((sum, id) => {
         const physicalSpend = sumMetrics(byAccount.get(id) ?? []).adSpend;
@@ -476,7 +541,17 @@ export async function fetchClientOverview(
       return {
         accountId: account.id,
         activityAccountIds: [...metricIds],
-        updatedAt: freshness(accountRows).updatedAt,
+        updatedAt,
+        reportingState:
+          grid.complete
+            ? "running"
+            : accountRows.length > 0
+              ? "partial"
+              : "not_materialized",
+        reportingCoverage: {
+          rows: grid.rows,
+          expectedRows: grid.expectedRows,
+        },
         storeName: account.store_name,
         storeDomain: normalizedStoreDomain(account.shopify_url),
         colorDot: account.color_dot,

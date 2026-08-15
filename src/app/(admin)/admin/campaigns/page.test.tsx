@@ -155,11 +155,14 @@ describe("Campaigns page approved summary", () => {
 
     expect(mocks.parseRange).toHaveBeenCalledWith(params);
     expect(mocks.presetSelection).not.toHaveBeenCalled();
-    expect(mocks.fetchAdminCampaigns).toHaveBeenCalledWith({
-      key: "d30",
-      from: "2026-07-16",
-      to: "2026-08-14",
-    });
+    expect(mocks.fetchAdminCampaigns).toHaveBeenCalledWith(
+      {
+        key: "d30",
+        from: "2026-07-16",
+        to: "2026-08-14",
+      },
+      { campaignSource: "snapshot" },
+    );
   });
 
   it("does not present mixed currencies as a single portfolio total", async () => {
@@ -214,5 +217,33 @@ describe("Campaigns page approved summary", () => {
 
     expect(html).not.toContain("every mapped account and selected day");
     expect(html).not.toContain("could not be verified");
+  });
+
+  it("does not invent an active-campaign count before every exact snapshot is ready", async () => {
+    mocks.fetchAdminCampaigns.mockResolvedValueOnce({
+      configured: true,
+      clients: [],
+      internal: [],
+      totals: {
+        revenue: 100,
+        profit: 10,
+        roas: 2,
+        rollupSpend: 50,
+        spend: 50,
+        commission: 5,
+        activeCampaigns: null,
+        connectedAccounts: 1,
+        currency: "EUR",
+        currencies: ["EUR"],
+        rollupComplete: true,
+      },
+    });
+
+    const page = await AdminCampaignsPage({ searchParams: Promise.resolve({}) });
+    const html = renderToStaticMarkup(page);
+
+    expect(html).toContain("Active campaigns");
+    expect(html).toContain("Not synced for this exact period");
+    expect(html).toContain("—");
   });
 });

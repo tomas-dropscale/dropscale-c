@@ -1,10 +1,9 @@
 "use client";
 
-import { useRouter } from "next/navigation";
-import { useTransition } from "react";
-import { Plus, RefreshCw } from "lucide-react";
+import { Plus } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { ReportingSyncButton } from "@/components/admin/reporting-sync-button";
 import {
   Dialog,
   DialogClose,
@@ -15,11 +14,9 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import type { RangeSelection } from "@/lib/portal/range";
 
-export function CampaignsToolbar() {
-  const router = useRouter();
-  const [syncing, startSync] = useTransition();
-
+export function CampaignsToolbar({ range }: { range: RangeSelection }) {
   return (
     <>
       <Dialog>
@@ -51,16 +48,7 @@ export function CampaignsToolbar() {
         </DialogContent>
       </Dialog>
 
-      <Button
-        type="button"
-        variant="secondary"
-        size="sm"
-        loading={syncing}
-        onClick={() => startSync(() => router.refresh())}
-      >
-        <RefreshCw aria-hidden />
-        Sync
-      </Button>
+      <ReportingSyncButton request={{ scope: "campaigns", range }} />
     </>
   );
 }

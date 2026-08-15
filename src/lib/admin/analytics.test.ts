@@ -283,6 +283,76 @@ describe("admin analytics client catalogue", () => {
     ]);
   });
 
+  it("lists healthy connection-only domains as unselectable onboarding stores", async () => {
+    const setup = service({
+      clients: [
+        {
+          id: "client-1",
+          full_name: "Northwind",
+          email: "northwind@example.com",
+          approval_status: "approved",
+        },
+        {
+          id: "client-2",
+          full_name: "Connection Only",
+          email: "connection@example.com",
+          approval_status: "approved",
+        },
+      ],
+      accounts: [
+        {
+          id: "account-1",
+          client_id: "client-1",
+          store_name: "Existing Store",
+          shopify_url: "existing.myshopify.com",
+        },
+      ],
+      shopifyConnections: [
+        {
+          client_id: "client-1",
+          status: "connected",
+          shopify_domain: "other.myshopify.com",
+          primary_domain: "other.example",
+          last_verified_at: "2026-08-15T10:00:00Z",
+          last_error_code: null,
+        },
+        {
+          client_id: "client-2",
+          status: "connected",
+          shopify_domain: "only.myshopify.com",
+          primary_domain: "only.example",
+          last_verified_at: "2026-08-15T10:00:00Z",
+          last_error_code: null,
+        },
+      ],
+    });
+    mocks.createServiceClient.mockReturnValue(setup.client);
+
+    await expect(listAdminAnalyticsClients()).resolves.toEqual([
+      {
+        id: "client-2",
+        name: "Connection Only",
+        email: "connection@example.com",
+        storeCount: 1,
+        stores: [{ id: null, name: "only.example", domain: "only.example" }],
+      },
+      {
+        id: "client-1",
+        name: "Northwind",
+        email: "northwind@example.com",
+        storeCount: 2,
+        stores: [
+          {
+            id: "account-1",
+            name: "Existing Store",
+            domain: "existing.myshopify.com",
+          },
+          { id: null, name: "other.example", domain: "other.example" },
+        ],
+      },
+    ]);
+  });
+
   it("does not construct the service client when admin reauthentication fails", async () => {
     mocks.requireAdmin.mockRejectedValue(new Error("Forbidden"));
 

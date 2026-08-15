@@ -1210,6 +1210,30 @@ export type ClientReportingSyncState = {
   row_count: number;
 };
 
+export type AdminReportingSnapshotFamily =
+  | "google_campaigns"
+  | "store_campaign_performance"
+  | "shopify_funnel"
+  | "shopify_collection_sales";
+
+export type AdminReportingRangeSnapshot = {
+  family: AdminReportingSnapshotFamily;
+  scope_account_id: string;
+  from_day: string;
+  to_day: string;
+  authority_key: string;
+  authority_manifest: Json;
+  state: "ready" | "partial" | "empty" | "unavailable" | null;
+  payload: Json | null;
+  message: string | null;
+  last_success_at: string | null;
+  last_attempt_at: string;
+  last_error_code: string | null;
+  lease_token: string | null;
+  lease_expires_at: string | null;
+  revision: number;
+};
+
 export type ClientGoogleAdsReportingIdentityEvent = {
   id: string;
   connection_id: string;
@@ -1973,6 +1997,31 @@ export type Database = {
             columns: ["binding_id"];
             isOneToOne: false;
             referencedRelation: "client_reporting_bindings";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      admin_reporting_range_snapshots: {
+        Row: Row<AdminReportingRangeSnapshot>;
+        Insert: Insert<
+          AdminReportingRangeSnapshot,
+          | "state"
+          | "payload"
+          | "message"
+          | "last_success_at"
+          | "last_attempt_at"
+          | "last_error_code"
+          | "lease_token"
+          | "lease_expires_at"
+          | "revision"
+        >;
+        Update: Partial<AdminReportingRangeSnapshot>;
+        Relationships: [
+          {
+            foreignKeyName: "admin_reporting_range_snapshots_scope_account_id_fkey";
+            columns: ["scope_account_id"];
+            isOneToOne: false;
+            referencedRelation: "ad_accounts";
             referencedColumns: ["id"];
           },
         ];
@@ -3187,6 +3236,44 @@ export type Database = {
           p_row_count: number;
         };
         Returns: string;
+      };
+      claim_admin_reporting_snapshot_refresh: {
+        Args: {
+          p_family: AdminReportingSnapshotFamily;
+          p_scope_account_id: string;
+          p_from_day: string;
+          p_to_day: string;
+          p_authority_key: string;
+          p_authority_manifest: Json;
+          p_lease_seconds?: number;
+        };
+        Returns: string | null;
+      };
+      complete_admin_reporting_snapshot_refresh: {
+        Args: {
+          p_family: AdminReportingSnapshotFamily;
+          p_scope_account_id: string;
+          p_from_day: string;
+          p_to_day: string;
+          p_authority_key: string;
+          p_lease_token: string;
+          p_state: "ready" | "partial" | "empty" | "unavailable";
+          p_payload: Json;
+          p_message?: string | null;
+        };
+        Returns: boolean;
+      };
+      fail_admin_reporting_snapshot_refresh: {
+        Args: {
+          p_family: AdminReportingSnapshotFamily;
+          p_scope_account_id: string;
+          p_from_day: string;
+          p_to_day: string;
+          p_authority_key: string;
+          p_lease_token: string;
+          p_error_code: string;
+        };
+        Returns: boolean;
       };
       record_client_google_ads_reporting_identity: {
         Args: {

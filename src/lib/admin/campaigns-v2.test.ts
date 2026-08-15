@@ -20,6 +20,11 @@ const mocks = vi.hoisted(() => ({
   sumMetrics: vi.fn(),
   resolveReportingSources: vi.fn(),
   fetchGoogleReportingCampaigns: vi.fn(),
+  refreshAccountsNow: vi.fn(),
+  adminReportingSnapshotIsStale: vi.fn(),
+  adminReportingAuthority: vi.fn(),
+  readAdminReportingSnapshots: vi.fn(),
+  refreshAdminReportingSnapshot: vi.fn(),
 }));
 
 vi.mock("@/lib/supabase/server", () => ({ createClient: mocks.createClient }));
@@ -48,12 +53,29 @@ vi.mock("@/lib/metrics/queries", () => ({
   groupByAccount: mocks.groupByAccount,
   sumMetrics: mocks.sumMetrics,
 }));
+vi.mock("@/lib/metrics/recompute", () => ({
+  refreshAccountsNow: mocks.refreshAccountsNow,
+}));
 vi.mock("@/lib/portal/data", () => ({ ACCOUNT_COLUMNS: "columns" }));
+vi.mock("@/lib/portal/range", () => ({
+  rangeDays: (selection: { from: string; to: string }) =>
+    Math.round(
+      (Date.parse(`${selection.to}T00:00:00Z`) -
+        Date.parse(`${selection.from}T00:00:00Z`)) /
+        86_400_000,
+    ) + 1,
+}));
 vi.mock("@/lib/reporting/sources", () => ({
   resolveReportingSources: mocks.resolveReportingSources,
 }));
 vi.mock("@/lib/reporting/google", () => ({
   fetchGoogleReportingCampaigns: mocks.fetchGoogleReportingCampaigns,
+}));
+vi.mock("@/lib/admin/reporting-snapshots", () => ({
+  adminReportingSnapshotIsStale: mocks.adminReportingSnapshotIsStale,
+  adminReportingAuthority: mocks.adminReportingAuthority,
+  readAdminReportingSnapshots: mocks.readAdminReportingSnapshots,
+  refreshAdminReportingSnapshot: mocks.refreshAdminReportingSnapshot,
 }));
 import { fetchAdminCampaigns } from "./campaigns";
 
@@ -201,6 +223,12 @@ describe("admin V2 campaign inventory", () => {
     mocks.googleProfit.mockReturnValue(0);
     mocks.googleRoas.mockReturnValue(0);
     mocks.markIfAuthRevoked.mockResolvedValue(false);
+    mocks.adminReportingSnapshotIsStale.mockReturnValue(false);
+    mocks.adminReportingAuthority.mockResolvedValue({
+      key: "a".repeat(64),
+      manifest: {},
+    });
+    mocks.readAdminReportingSnapshots.mockResolvedValue(new Map());
   });
 
   it("authenticates before constructing either database client", async () => {
@@ -212,6 +240,61 @@ describe("admin V2 campaign inventory", () => {
 
     expect(mocks.createClient).not.toHaveBeenCalled();
     expect(mocks.createServiceClient).not.toHaveBeenCalled();
+  });
+
+  it("renders snapshot read failures with available DB totals and never opens a provider", async () => {
+    const legacy = account("legacy", "client-1", {
+      status: "active",
+      google_ads_connected: true,
+      google_ads_customer_id: "1234567890",
+    });
+    mocks.createClient.mockResolvedValue(supabaseFor([legacy], "ciphertext"));
+    mocks.createServiceClient.mockReturnValue({ from: vi.fn(() => query([])) });
+    mocks.readAdminReportingSnapshots.mockRejectedValueOnce(
+      new Error("snapshot DB unavailable"),
+    );
+    mocks.fetchDailyMetrics.mockResolvedValue(
+      ["09", "10", "11", "12", "13"].map((day) => ({
+        ad_account_id: "legacy",
+        day: `2026-08-${day}`,
+      })),
+    );
+    mocks.sumMetrics.mockImplementation((rows: unknown[]) =>
+      rows.length > 0
+        ? { ...emptyRollup, attributedRevenue: 164.07, revenue: 164.07, adSpend: 72.56 }
+        : emptyRollup,
+    );
+
+    const overview = await fetchAdminCampaigns(
+      { key: "d7", from: "2026-08-09", to: "2026-08-15" },
+      { campaignSource: "snapshot" },
+    );
+
+    expect(overview.clients[0].accounts[0]).toEqual(expect.objectContaining({
+      campaignState: "not_synced",
+      campaigns: [],
+      rollupMaterialized: true,
+      rollupComplete: false,
+      spend: 72.56,
+      rollupRevenue: 164.07,
+    }));
+    expect(overview.totals).toEqual(expect.objectContaining({
+      spend: 72.56,
+      revenue: 164.07,
+      rollupComplete: false,
+      activeCampaigns: null,
+    }));
+    expect(mocks.readAdminReportingSnapshots).toHaveBeenCalledWith(
+      expect.objectContaining({
+        family: "google_campaigns",
+        from: "2026-08-09",
+        to: "2026-08-15",
+      }),
+    );
+    expect(mocks.decryptToken).not.toHaveBeenCalled();
+    expect(mocks.fetchLiveCampaignsDetailed).not.toHaveBeenCalled();
+    expect(mocks.fetchGoogleReportingCampaigns).not.toHaveBeenCalled();
+    expect(mocks.refreshAccountsNow).not.toHaveBeenCalled();
   });
 
   it("projects one Shopify anchor, reads its pair and child, and counts metrics once", async () => {
@@ -340,6 +423,101 @@ describe("admin V2 campaign inventory", () => {
         campaigns: [expect.objectContaining({ id: "campaign-anchor" })],
       }),
     );
+    expect(partial.totals.activeCampaigns).toBeNull();
+  });
+
+  it("accepts an exact V2 anchor-plus-child snapshot and rejects rows outside its physical inventory", async () => {
+    const accounts = [
+      account("anchor", "client-1", { reporting_role: "shopify_anchor" }),
+      account("child", "client-1", { reporting_role: "google_spend" }),
+    ];
+    mocks.createClient.mockResolvedValue(supabaseFor(accounts));
+    mocks.createServiceClient.mockReturnValue({
+      from: vi.fn(() => query([{
+        client_id: "client-1",
+        operational_surface: "v2_active",
+        reporting_cutover_at: "2026-08-14T01:00:00.000Z",
+      }])),
+    });
+    mocks.resolveReportingSources.mockResolvedValue([
+      source("anchor", { anchor: true }),
+      source("child", { child: true }),
+    ]);
+    const campaign = (adAccountId: string) => ({
+      id: `campaign-${adAccountId}`,
+      providerCampaignId: `provider-${adAccountId}`,
+      ad_account_id: adAccountId,
+      name: adAccountId,
+      status: "active",
+      spend: 10,
+      impressions: 100,
+      clicks: 10,
+      ctr: 0.1,
+      cpc: 1,
+      daily_budget: 20,
+      updated_at: "2026-08-14T00:00:00.000Z",
+      startDate: "2026-08-01",
+      conversions: 2,
+      reportingBindingId: `binding-${adAccountId}`,
+      googleAdsConnectionId: `google-${adAccountId}`,
+    });
+    const snapshot = (rows: unknown[]) => ({
+      state: "ready",
+      rows,
+      message: null,
+      refreshedAt: "2026-08-14T12:00:00.000Z",
+      lastAttemptAt: "2026-08-14T12:00:00.000Z",
+      lastErrorCode: null,
+      revision: 1,
+    });
+    mocks.readAdminReportingSnapshots
+      .mockResolvedValueOnce(new Map([["anchor", snapshot([
+        campaign("anchor"),
+        campaign("child"),
+      ])]]))
+      .mockResolvedValueOnce(new Map([["anchor", snapshot([
+        campaign("anchor"),
+        campaign("outside"),
+      ])]]));
+
+    const range = { key: "custom", from: "2026-08-01", to: "2026-08-14" } as const;
+    const exact = await fetchAdminCampaigns(range, { campaignSource: "snapshot" });
+    expect(exact.clients[0].accounts[0]).toEqual(expect.objectContaining({
+      campaignState: "ready",
+      campaigns: [
+        expect.objectContaining({ ad_account_id: "anchor" }),
+        expect.objectContaining({ ad_account_id: "child" }),
+      ],
+    }));
+    expect(exact.totals.activeCampaigns).toBe(2);
+
+    const escaped = await fetchAdminCampaigns(range, { campaignSource: "snapshot" });
+    expect(escaped.clients[0].accounts[0]).toEqual(expect.objectContaining({
+      campaignState: "failed",
+      campaigns: [],
+      providerFreshness: expect.objectContaining({
+        state: "partial",
+        lastErrorCode: "scope_escape",
+      }),
+    }));
+    expect(escaped.totals.activeCampaigns).toBeNull();
+
+    mocks.adminReportingSnapshotIsStale.mockReturnValueOnce(true);
+    mocks.readAdminReportingSnapshots.mockResolvedValueOnce(new Map([["anchor", snapshot([
+      campaign("anchor"),
+      campaign("child"),
+    ])]]));
+    const stale = await fetchAdminCampaigns(range, { campaignSource: "snapshot" });
+    expect(stale.clients[0].accounts[0]).toEqual(expect.objectContaining({
+      campaignState: "partial",
+      campaigns: expect.arrayContaining([
+        expect.objectContaining({ ad_account_id: "anchor" }),
+        expect.objectContaining({ ad_account_id: "child" }),
+      ]),
+      providerFreshness: expect.objectContaining({ state: "partial", stale: true }),
+    }));
+    expect(stale.totals.activeCampaigns).toBeNull();
+    expect(mocks.fetchGoogleReportingCampaigns).not.toHaveBeenCalled();
   });
 
   it("keeps a client with no rollout row on the legacy token reader", async () => {

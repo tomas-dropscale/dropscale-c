@@ -160,6 +160,45 @@ function CampaignMetric({ label, children }: { label: string; children: React.Re
   );
 }
 
+function StoreProviderFreshness({
+  freshness,
+}: {
+  freshness: CampaignViewClient["stores"][number]["providerFreshness"];
+}) {
+  if (!freshness || freshness.state === "live") return null;
+  const label = freshness.state === "not_synced"
+    ? "Not synced"
+    : freshness.state === "unavailable"
+      ? "Unavailable"
+      : freshness.stale
+        ? "Stale"
+        : freshness.lastErrorCode
+          ? "Refresh failed"
+          : freshness.state === "partial"
+            ? "Partial"
+            : "Refreshed";
+  const refreshed = freshness.refreshedAt
+    ? `Refreshed ${safeDate(SCALE_DATE_TIME, freshness.refreshedAt)}`
+    : "No successful refresh";
+  const attempted = freshness.lastAttemptAt
+    ? `attempted ${safeDate(SCALE_DATE_TIME, freshness.lastAttemptAt)}`
+    : "not attempted";
+  const error = freshness.lastErrorCode
+    ? ` · error ${freshness.lastErrorCode}`
+    : "";
+  return (
+    <p
+      role={freshness.state === "ready" ? "status" : "alert"}
+      className="mt-1 flex min-w-0 items-center gap-1.5 text-[10.5px] text-[var(--text-muted)]"
+    >
+      <Badge variant={freshness.state === "ready" ? "success" : "warning"}>{label}</Badge>
+      <span className="truncate" title={`${refreshed} · ${attempted}${error}`}>
+        {refreshed} · {attempted}{error}
+      </span>
+    </p>
+  );
+}
+
 function BudgetControl({
   campaign,
   busy,
@@ -618,12 +657,15 @@ function StoreGroup({
       >
         <div className="flex min-w-0 items-center gap-2.5 xl:col-span-7 xl:pl-6">
           <Store className="size-4 shrink-0 text-[var(--accent-gold)]" aria-hidden />
-          <h3
-            id={headingId}
-            className="min-w-0 flex-1 truncate text-[13px] font-semibold text-[var(--text-primary)]"
-          >
-            {storeLabel}
-          </h3>
+          <div className="min-w-0 flex-1">
+            <h3
+              id={headingId}
+              className="truncate text-[13px] font-semibold text-[var(--text-primary)]"
+            >
+              {storeLabel}
+            </h3>
+            <StoreProviderFreshness freshness={store.providerFreshness} />
+          </div>
         </div>
 
         <Button
@@ -702,14 +744,22 @@ function StoreGroup({
               (store.rollupComplete
                 ? "Campaign reporting failed for this store. Its verified rollup total is still shown above."
                 : "Campaign reporting and the complete selected-period rollup could not be verified for this store.")}
+            {store.campaignState === "not_synced" &&
+              "Campaign rows for this exact period have not been synced yet. The verified rollup total is still shown above."}
             {store.campaignState === "disconnected" &&
               "Campaign reporting is unavailable until this Google Ads connection is restored."}
           </li>
         )}
 
-        {!store.rollupComplete && store.campaignState === "ready" && (
+        {!store.rollupComplete && store.rollupMaterialized && (
           <li className="border-t border-[var(--border-subtle)] bg-[var(--bg-base)] px-5 py-4 text-[12.5px] text-[var(--warning-orange)]">
-            Store totals are unavailable because every reporting account and selected day could not be verified.
+            Store totals use the available materialised days; the exact selected-period grid is still partial.
+          </li>
+        )}
+
+        {!store.rollupComplete && !store.rollupMaterialized && store.campaignState === "ready" && (
+          <li className="border-t border-[var(--border-subtle)] bg-[var(--bg-base)] px-5 py-4 text-[12.5px] text-[var(--warning-orange)]">
+            Store totals are unavailable because no selected-period rollup rows are materialised yet.
           </li>
         )}
 

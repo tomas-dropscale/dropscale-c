@@ -16,6 +16,7 @@ import {
   StoreSpendSection,
 } from "@/components/admin/store-analytics-sections";
 import { AnalyticsScopeControls } from "./analytics-scope-controls";
+import { ReportingSyncButton } from "./reporting-sync-button";
 import { RangePicker } from "@/components/portal/range-picker";
 import { Badge } from "@/components/ui/badge";
 import { PageContainer } from "@/components/ui/page-container";
@@ -94,6 +95,80 @@ function freshnessLabel(value: string | null): string {
     : "No verified rollup yet";
 }
 
+function RunningIndicator({
+  store,
+}: {
+  store: Pick<
+    AdminClientOverview["stores"][number],
+    "reportingState" | "reportingCoverage" | "updatedAt" | "adSpend"
+  >;
+}) {
+  if (store.reportingState === "running") {
+    const title = `${freshnessLabel(store.updatedAt)} · complete selected-period grid${
+      store.adSpend > 0 ? " · positive ad spend" : " · valid zero-spend data"
+    }`;
+    return (
+      <Badge variant="success" title={title} aria-label={`Running. ${title}`}>
+        <span className="size-1.5 rounded-full bg-current" aria-hidden />
+        Running
+      </Badge>
+    );
+  }
+  if (store.reportingState === "partial") {
+    const coverage = store.reportingCoverage;
+    const title = coverage
+      ? `Partial selected-period grid: ${coverage.rows} of ${coverage.expectedRows} account-days.`
+      : "Partial selected-period reporting grid.";
+    return (
+      <Badge variant="warning" title={title} aria-label={title}>
+        Partial
+      </Badge>
+    );
+  }
+  return null;
+}
+
+function ProviderFreshnessNotice({
+  freshness,
+}: {
+  freshness: NonNullable<AdminStoreAnalytics["providerFreshness"]>;
+}) {
+  if (freshness.state === "live") return null;
+  const label = freshness.state === "not_synced"
+    ? "Not synced"
+    : freshness.stale
+      ? "Stale"
+      : freshness.lastErrorCode
+        ? "Refresh failed"
+        : freshness.state === "partial"
+          ? "Partial"
+          : "Ready";
+  const refreshed = validTimestamp(freshness.refreshedAt)
+    ? `Refreshed ${ACTIVITY_DATE.format(new Date(freshness.refreshedAt))}`
+    : "No successful provider refresh";
+  const attempted = validTimestamp(freshness.lastAttemptAt)
+    ? `Last attempt ${ACTIVITY_DATE.format(new Date(freshness.lastAttemptAt))}`
+    : "No provider refresh attempt";
+  const error = freshness.lastErrorCode
+    ? ` Last refresh error: ${freshness.lastErrorCode}. The last successful payload remains visible.`
+    : "";
+  const stale = freshness.stale
+    ? " This current-day snapshot is older than 90 minutes; sync this exact period."
+    : "";
+  return (
+    <p
+      role={freshness.state === "ready" ? "status" : "alert"}
+      className={cn(
+        "panel flex flex-wrap items-center gap-2 px-4 py-3 text-xs text-[var(--text-secondary)]",
+        freshness.state !== "ready" && "border-[var(--warning-orange)]/25 text-[var(--warning-orange)]",
+      )}
+    >
+      <Badge variant={freshness.state === "ready" ? "success" : "warning"}>{label}</Badge>
+      <span>{refreshed} · {attempted}.{error}{stale}</span>
+    </p>
+  );
+}
+
 export function AnalyticsScopeSelector({
   clients,
   overview,
@@ -115,6 +190,26 @@ export function AnalyticsScopeSelector({
       : `${clients.length} ${clients.length === 1 ? "client" : "clients"}`;
   const ContextIcon = selectedStore ? Store : overview ? ShoppingBag : Users;
   const updatedAt = selectedStore?.updatedAt ?? overview?.updatedAt ?? null;
+  const projectedStores = (overview?.stores ?? []).map((store) => ({
+    id: store.accountId,
+    name: store.storeName,
+    domain: store.storeDomain,
+    reportingState: store.reportingState,
+    reportingCoverage: store.reportingCoverage,
+    updatedAt: store.updatedAt,
+    adSpend: store.adSpend,
+  }));
+  const onboardingOnlyStores = overview
+    ? (clients.find((client) => client.id === overview.clientId)?.stores ?? [])
+        .filter((store) => store.id === null)
+        .map((store) => ({
+          ...store,
+          reportingState: "not_materialized" as const,
+          reportingCoverage: { rows: 0, expectedRows: 0 },
+          updatedAt: null,
+          adSpend: 0,
+        }))
+    : [];
 
   return (
     <section className="panel p-4" aria-labelledby="analytics-scope-title">
@@ -132,11 +227,7 @@ export function AnalyticsScopeSelector({
         <AnalyticsScopeControls
           clients={clients}
           clientId={overview?.clientId ?? null}
-          stores={(overview?.stores ?? []).map((store) => ({
-            id: store.accountId,
-            name: store.storeName,
-            domain: store.storeDomain,
-          }))}
+          stores={[...projectedStores, ...onboardingOnlyStores]}
           storeId={selectedStore?.accountId ?? null}
           range={range}
         />
@@ -144,7 +235,10 @@ export function AnalyticsScopeSelector({
         <div className="flex min-w-0 items-start gap-2 text-[11.5px] text-[var(--text-muted)] lg:max-w-64 lg:justify-end lg:text-right">
           <ContextIcon className="mt-0.5 size-3.5 shrink-0 text-[var(--accent-gold)]" aria-hidden />
           <span className="min-w-0">
-            <span className="block truncate" id="analytics-scope-title">{context}</span>
+            <span className="flex min-w-0 items-center justify-end gap-2" id="analytics-scope-title">
+              <span className="truncate">{context}</span>
+              {selectedStore && <RunningIndicator store={selectedStore} />}
+            </span>
             {overview && <span className="mt-0.5 block text-[10.5px]">{freshnessLabel(updatedAt)}</span>}
           </span>
         </div>
@@ -212,9 +306,12 @@ function AllStoresTable({
                     className="transition-smooth border-t border-[var(--border-subtle)] first:border-t-0 hover:bg-[var(--bg-panel-hover)]"
                   >
                     <td className="px-5 py-3">
-                      <p className="font-medium text-[var(--text-primary)]">
-                        {store.storeDomain || store.storeName}
-                      </p>
+                      <div className="flex items-center gap-2">
+                        <p className="font-medium text-[var(--text-primary)]">
+                          {store.storeDomain || store.storeName}
+                        </p>
+                        <RunningIndicator store={store} />
+                      </div>
                       <p className="mt-0.5 text-[10.5px] text-[var(--text-muted)]">
                         {store.storeName} · {freshnessLabel(store.updatedAt)}
                       </p>
@@ -447,7 +544,25 @@ export function AnalyticsView({
     <PageContainer
       title="Analytics"
       description={`Store-first performance · ${range.from} → ${range.to}`}
-      actions={<RangePicker current={range} />}
+      actions={
+        <>
+          {scope.selectedStore && (
+            <ReportingSyncButton
+              request={{
+                scope: "store",
+                clientId: overview.clientId,
+                store: {
+                  accountId: scope.selectedStore.accountId,
+                  activityAccountIds: scope.selectedStore.activityAccountIds,
+                  currency: scope.selectedStore.currency,
+                },
+                range,
+              }}
+            />
+          )}
+          <RangePicker current={range} />
+        </>
+      }
     >
       <div className="space-y-4">
         <AnalyticsScopeSelector
@@ -480,6 +595,14 @@ export function AnalyticsView({
 
         {scope.selectedStore && storeAnalytics ? (
           <>
+            {storeAnalytics.providerFreshness && (
+              <ProviderFreshnessNotice freshness={storeAnalytics.providerFreshness} />
+            )}
+            {storeAnalytics.shopifyProvenance === "supplemental_v2_shopify" && (
+              <p role="status" className="panel border-[var(--accent-gold)]/25 px-4 py-3 text-xs text-[var(--text-secondary)]">
+                Shopify detail snapshots use this store&apos;s verified read-only onboarding connection. Revenue, spend and KPI totals remain on the internal legacy rollup until reporting cutover.
+              </p>
+            )}
             <StoreFunnelSections analytics={storeAnalytics} />
             <StoreSpendSection
               spend={storeAnalytics.spend}

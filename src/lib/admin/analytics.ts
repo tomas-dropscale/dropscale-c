@@ -20,7 +20,8 @@ export type AdminAnalyticsClient = {
 };
 
 export type AdminAnalyticsStore = {
-  id: string;
+  /** Null means a healthy Shopify connection that has no reporting projection yet. */
+  id: string | null;
   name: string;
   domain: string;
 };
@@ -125,6 +126,7 @@ export async function listAdminAnalyticsClients(): Promise<AdminAnalyticsClient[
   }
 
   const publicDomainByStore = new Map<string, string>();
+  const healthyShopifyByStore = new Map<string, ShopifyConnectionRow>();
   for (const row of shopifyConnections as ShopifyConnectionRow[]) {
     const shopifyDomain = canonicalShopifyDomain(row.shopify_domain);
     const primaryDomain = publicStoreDomain(row.primary_domain);
@@ -132,15 +134,13 @@ export async function listAdminAnalyticsClients(): Promise<AdminAnalyticsClient[
       row.status !== "connected" ||
       !row.last_verified_at ||
       row.last_error_code !== null ||
-      shopifyDomain !== row.shopify_domain ||
-      !primaryDomain
+      shopifyDomain !== row.shopify_domain
     ) {
       continue;
     }
-    publicDomainByStore.set(
-      storeIdentity(row.client_id, shopifyDomain),
-      primaryDomain,
-    );
+    const identity = storeIdentity(row.client_id, shopifyDomain);
+    healthyShopifyByStore.set(identity, row);
+    if (primaryDomain) publicDomainByStore.set(identity, primaryDomain);
   }
 
   const completeReportingMarkers = new Set<string>();
@@ -189,10 +189,23 @@ export async function listAdminAnalyticsClients(): Promise<AdminAnalyticsClient[
         shopifyDomain,
     };
     const current = stores.get(shopifyDomain);
-    if (!current || textOrder(candidate.id, current.id) < 0) {
+    if (!current || current.id === null || textOrder(candidate.id, current.id) < 0) {
       stores.set(shopifyDomain, candidate);
     }
     storesByClient.set(account.client_id, stores);
+  }
+
+  // A verified Shopify connection is onboarding evidence, but without an
+  // exact ad_account projection it is not a reporting scope. Keep it visible
+  // as not activated and never mint a fake selectable account id.
+  for (const [identity, connection] of healthyShopifyByStore) {
+    const shopifyDomain = canonicalShopifyDomain(connection.shopify_domain)!;
+    const stores = storesByClient.get(connection.client_id) ?? new Map<string, AdminAnalyticsStore>();
+    if (!stores.has(shopifyDomain)) {
+      const domain = publicDomainByStore.get(identity) ?? shopifyDomain;
+      stores.set(shopifyDomain, { id: null, name: domain, domain });
+      storesByClient.set(connection.client_id, stores);
+    }
   }
 
   const adminIds = new Set(
@@ -204,12 +217,15 @@ export async function listAdminAnalyticsClients(): Promise<AdminAnalyticsClient[
         client.approval_status === "approved" &&
         !adminIds.has(client.id) &&
         (clientsWithAccounts.has(client.id) ||
-          completeReportingMarkers.has(client.id)),
+          completeReportingMarkers.has(client.id) ||
+          [...healthyShopifyByStore.values()].some(
+            (connection) => connection.client_id === client.id,
+          )),
     )
     .map((client) => {
       const stores = [...(storesByClient.get(client.id)?.values() ?? [])].sort(
         (left, right) =>
-          textOrder(left.domain, right.domain) || textOrder(left.id, right.id),
+          textOrder(left.domain, right.domain) || textOrder(left.id ?? "", right.id ?? ""),
       );
       return {
         id: client.id,

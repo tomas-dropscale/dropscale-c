@@ -34,7 +34,16 @@ import {
   resolveReportingSources,
   type CanonicalReportingSource,
 } from "@/lib/reporting/sources";
+import {
+  adminReportingSnapshotIsStale,
+  adminReportingAuthority,
+  readAdminReportingSnapshotFamilies,
+  refreshAdminReportingSnapshot,
+  type AdminReportingAuthority,
+  type AdminReportingSnapshotValue,
+} from "@/lib/admin/reporting-snapshots";
 import { createServiceClient } from "@/lib/supabase/service";
+import type { ClientShopifyConnection, Json } from "@/lib/supabase/types";
 import { hasWindsorEnv } from "@/lib/windsor/client";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -49,7 +58,8 @@ const ROLLOUT_SURFACES = new Set([
 
 export type AdminAnalyticsFamily<T> =
   | { state: "ready" | "empty"; data: T; message?: string | null }
-  | { state: "unavailable" | "failed"; message: string };
+  | { state: "partial"; data: T; message: string }
+  | { state: "not_synced" | "unavailable" | "failed"; message: string };
 
 export type AdminAnalyticsFunnelDay = {
   day: string;
@@ -163,11 +173,26 @@ export type AdminStoreAnalytics = {
   campaigns: AdminAnalyticsFamily<{ rows: AdminAnalyticsCampaign[] }>;
   collections: AdminAnalyticsFamily<{ rows: AdminAnalyticsCollection[] }>;
   spend: AdminAnalyticsFamily<{ daily: Array<{ day: string; spend: number }> }>;
-  rollupCoverage: AdminAnalyticsFamily<{ dayCount: number; refreshed: boolean }>;
+  rollupCoverage: AdminAnalyticsFamily<{
+    dayCount: number;
+    refreshed: boolean;
+    materializedAccountDays?: number;
+    expectedAccountDays?: number;
+  }>;
   activity: AdminAnalyticsFamily<{
     rows: CampaignActionHistory[];
     truncated: boolean;
   }>;
+  providerFreshness?: AdminProviderFreshness;
+  shopifyProvenance?: "legacy" | "v2_cutover" | "supplemental_v2_shopify";
+};
+
+export type AdminProviderFreshness = {
+    state: "live" | "ready" | "partial" | "not_synced";
+    refreshedAt: string | null;
+    lastAttemptAt: string | null;
+    lastErrorCode: string | null;
+    stale: boolean;
 };
 
 export type FetchAdminStoreAnalyticsInput = {
@@ -206,16 +231,44 @@ type StoreTopology =
       service: NonNullable<ReturnType<typeof createServiceClient>>;
       anchor: CanonicalReportingSource;
       googleSources: CanonicalReportingSource[];
+      authority: AdminReportingAuthority;
+      shopifyProvenance: "v2_cutover";
     }
   | {
       kind: "legacy";
       service: NonNullable<ReturnType<typeof createServiceClient>>;
       account: StoreAccountRow;
+      authority: AdminReportingAuthority;
+      supplementalShopify: CanonicalReportingSource | null;
+      shopifyProvenance: "legacy" | "supplemental_v2_shopify";
     };
 
 type Attempt<T> =
   | { ok: true; value: T; message?: string | null }
   | { ok: false; state: "unavailable" | "failed"; message: string };
+
+type RolloutRow = {
+  operational_surface: string;
+  reporting_cutover_at: string | null;
+  reporting_cutover_by: string | null;
+  reporting_cutover_reason: string | null;
+};
+
+type SupplementalShopifyManifest = {
+  provenance: "supplemental_v2_shopify";
+  connectionId: string;
+  shopId: string;
+  domain: string;
+  currency: string;
+  verifiedAt: string;
+  connectionUpdatedAt: string;
+  scopeProfile: string;
+  grantedScopes: string[];
+  credentialHint: string;
+  shopifyClientId: string;
+  credentialUpdatedAt: string;
+  credentialKey: string;
+};
 
 function isDay(value: string): boolean {
   if (!ISO_DAY.test(value)) return false;
@@ -253,6 +306,220 @@ function failed<T>(message: string): AdminAnalyticsFamily<T> {
 
 function unavailable<T>(message: string): AdminAnalyticsFamily<T> {
   return { state: "unavailable", message };
+}
+
+function notSynced<T>(message: string): AdminAnalyticsFamily<T> {
+  return { state: "not_synced", message };
+}
+
+async function legacyAuthority(
+  input: FetchAdminStoreAnalyticsInput,
+  rollout: RolloutRow | null,
+  account: StoreAccountRow,
+  supplemental: SupplementalShopifyManifest | null,
+): Promise<AdminReportingAuthority> {
+  return adminReportingAuthority({
+    version: 1,
+    mode: "legacy",
+    clientId: input.clientId,
+    storeAccountId: input.store.accountId,
+    operationalSurface: rollout?.operational_surface ?? "legacy_only",
+    cutoverAt: rollout?.reporting_cutover_at ?? null,
+    cutoverBy: rollout?.reporting_cutover_by ?? null,
+    cutoverReason: rollout?.reporting_cutover_reason ?? null,
+    account: {
+      id: account.id,
+      currency: account.currency,
+      shopifyUrl: account.shopify_url,
+      shopifyConnected: account.shopify_connected,
+      googleAdsCustomerId: account.google_ads_customer_id,
+      googleAdsConnected: account.google_ads_connected,
+    },
+    shopifyProvider: supplemental as unknown as Json,
+  });
+}
+
+function canonicalLegacyShopifyDomain(value: string | null): string | null {
+  const domain = (value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/\/.*$/, "");
+  return /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(domain) ? domain : null;
+}
+
+async function credentialKey(ciphertext: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(ciphertext),
+  );
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+async function supplementalShopifySource(
+  service: NonNullable<ReturnType<typeof createServiceClient>>,
+  input: FetchAdminStoreAnalyticsInput,
+  rollout: RolloutRow | null,
+  account: StoreAccountRow,
+): Promise<{
+  source: CanonicalReportingSource;
+  manifest: SupplementalShopifyManifest;
+} | null> {
+  if (rollout?.operational_surface !== "v2_ready_for_cutover") return null;
+  const domain = canonicalLegacyShopifyDomain(account.shopify_url);
+  if (!domain) return null;
+
+  const { data, error } = await service
+    .from("client_shopify_connections")
+    .select(
+      "id, client_id, status, shopify_shop_id, shopify_name, shopify_domain, primary_domain, shopify_currency, credential_hint, granted_scopes, scope_profile, updated_at, last_verified_at, last_error_code",
+    )
+    .eq("client_id", input.clientId)
+    .eq("status", "connected")
+    .eq("shopify_domain", domain);
+  if (error || !Array.isArray(data) || data.length !== 1) return null;
+  const connection = data[0] as Pick<
+    ClientShopifyConnection,
+    | "id"
+    | "client_id"
+    | "status"
+    | "shopify_shop_id"
+    | "shopify_name"
+    | "shopify_domain"
+    | "primary_domain"
+    | "shopify_currency"
+    | "credential_hint"
+    | "granted_scopes"
+    | "scope_profile"
+    | "updated_at"
+    | "last_verified_at"
+    | "last_error_code"
+  >;
+  const scopes = [...new Set(connection.granted_scopes)].sort();
+  if (
+    connection.client_id !== input.clientId ||
+    connection.status !== "connected" ||
+    connection.shopify_domain !== domain ||
+    connection.shopify_currency !== account.currency ||
+    connection.shopify_currency !== input.store.currency ||
+    !/^gid:\/\/shopify\/Shop\/\d+$/.test(connection.shopify_shop_id) ||
+    !connection.shopify_name.trim() ||
+    connection.scope_profile !== "client-reporting-read-v1" ||
+    !connection.credential_hint ||
+    !connection.last_verified_at ||
+    !Number.isFinite(Date.parse(connection.last_verified_at)) ||
+    connection.last_error_code !== null ||
+    !scopes.includes("read_reports") ||
+    !scopes.includes("read_products") ||
+    scopes.some((scope) => scope.startsWith("write_"))
+  ) {
+    return null;
+  }
+
+  const credentialResult = await service
+    .from("client_shopify_credentials")
+    .select("connection_id, shopify_client_id, client_secret_ciphertext, updated_at")
+    .eq("connection_id", connection.id)
+    .maybeSingle();
+  const credential = credentialResult.data;
+  if (
+    credentialResult.error ||
+    !credential ||
+    credential.connection_id !== connection.id ||
+    !credential.shopify_client_id.trim() ||
+    !credential.client_secret_ciphertext.trim()
+  ) {
+    return null;
+  }
+
+  const source: CanonicalReportingSource = {
+    bindingId: connection.id,
+    clientId: input.clientId,
+    adAccountId: account.id,
+    kind: "shopify",
+    group: {
+      id: connection.id,
+      shopifyAnchorBindingId: connection.id,
+      shopifyAnchorAdAccountId: account.id,
+    },
+    shopify: {
+      connectionId: connection.id,
+      shopId: connection.shopify_shop_id,
+      shopifyName: connection.shopify_name.trim(),
+      domain,
+      primaryDomain: connection.primary_domain,
+      currency: connection.shopify_currency,
+      credential: {
+        shopifyClientId: credential.shopify_client_id.trim(),
+        clientSecretCiphertext: credential.client_secret_ciphertext.trim(),
+      },
+    },
+    googleAds: null,
+  };
+  return {
+    source,
+    manifest: {
+      provenance: "supplemental_v2_shopify",
+      connectionId: connection.id,
+      shopId: connection.shopify_shop_id,
+      domain,
+      currency: connection.shopify_currency,
+      verifiedAt: connection.last_verified_at,
+      connectionUpdatedAt: connection.updated_at,
+      scopeProfile: connection.scope_profile,
+      grantedScopes: scopes,
+      credentialHint: connection.credential_hint,
+      shopifyClientId: credential.shopify_client_id,
+      credentialUpdatedAt: credential.updated_at,
+      credentialKey: await credentialKey(credential.client_secret_ciphertext),
+    },
+  };
+}
+
+async function v2Authority(
+  input: FetchAdminStoreAnalyticsInput,
+  rollout: RolloutRow,
+  sources: CanonicalReportingSource[],
+): Promise<AdminReportingAuthority> {
+  const manifestSources = sources
+    .map((source) => ({
+      bindingId: source.bindingId,
+      clientId: source.clientId,
+      adAccountId: source.adAccountId,
+      kind: source.kind,
+      anchorBindingId: source.group.shopifyAnchorBindingId,
+      anchorAccountId: source.group.shopifyAnchorAdAccountId,
+      shopify: source.shopify
+        ? {
+            connectionId: source.shopify.connectionId,
+            domain: source.shopify.domain,
+            currency: source.shopify.currency,
+          }
+        : null,
+      googleAds: source.googleAds
+        ? {
+            connectionId: source.googleAds.connectionId,
+            accountId: source.googleAds.accountId,
+            customerId: source.googleAds.customerId,
+            currency: source.googleAds.currency,
+            timeZone: source.googleAds.timeZone,
+          }
+        : null,
+    }))
+    .sort((left, right) => left.bindingId.localeCompare(right.bindingId));
+  return adminReportingAuthority({
+    version: 1,
+    mode: "v2",
+    clientId: input.clientId,
+    storeAccountId: input.store.accountId,
+    operationalSurface: rollout.operational_surface,
+    cutoverAt: rollout.reporting_cutover_at,
+    cutoverBy: rollout.reporting_cutover_by,
+    cutoverReason: rollout.reporting_cutover_reason,
+    sources: manifestSources as unknown as Json,
+  });
 }
 
 function shopifyFailure<T>(error: unknown, operation: string): AdminAnalyticsFamily<T> {
@@ -303,7 +570,7 @@ async function loadTopology(
     throw new Error("The selected analytics scope does not belong to this client.");
   }
 
-  const rollout = rolloutResult.data;
+  const rollout = rolloutResult.data as RolloutRow | null;
   const marker = rollout
     ? [
         rollout.reporting_cutover_at,
@@ -328,7 +595,20 @@ async function loadTopology(
     }
     const account = accountById.get(input.store.accountId);
     if (!account) throw new Error("The selected store is unavailable.");
-    return { kind: "legacy", service, account };
+    const supplemental = await supplementalShopifySource(
+      service,
+      input,
+      rollout,
+      account,
+    );
+    return {
+      kind: "legacy",
+      service,
+      account,
+      authority: await legacyAuthority(input, rollout, account, supplemental?.manifest ?? null),
+      supplementalShopify: supplemental?.source ?? null,
+      shopifyProvenance: supplemental ? "supplemental_v2_shopify" : "legacy",
+    };
   }
 
   const sources = await resolveReportingSources({
@@ -373,6 +653,8 @@ async function loadTopology(
     service,
     anchor,
     googleSources: sources.filter((source) => source.googleAds !== null),
+    authority: await v2Authority(input, rollout!, sources),
+    shopifyProvenance: "v2_cutover",
   };
 }
 
@@ -380,6 +662,12 @@ async function openShopify(topology: StoreTopology): Promise<Attempt<ShopifyRepo
   try {
     if (topology.kind === "v2") {
       return { ok: true, value: await createShopifyReportingAdapter(topology.anchor) };
+    }
+    if (topology.supplementalShopify) {
+      return {
+        ok: true,
+        value: await createShopifyReportingAdapter(topology.supplementalShopify),
+      };
     }
     const account = topology.account;
     if (
@@ -674,7 +962,7 @@ async function readSpendRows(
   return data as DailySpendRow[];
 }
 
-function projectCompleteRollup(
+function projectRollup(
   rows: DailySpendRow[],
   accountIds: string[],
   days: string[],
@@ -686,14 +974,15 @@ function projectCompleteRollup(
     accountIds.flatMap((accountId) => days.map((day) => `${accountId}\u0000${day}`)),
   );
   const seen = new Set<string>();
-  const byDay = new Map(days.map((day) => [day, 0]));
+  const allowedDays = new Set(days);
+  const byDay = new Map<string, number>();
   for (const row of rows) {
     const spend = Number(row.ad_spend);
     const computedAt = row.computed_at ? Date.parse(row.computed_at) : Number.NaN;
     const key = `${row.ad_account_id}\u0000${row.day}`;
     if (
       !allowedAccounts.has(row.ad_account_id) ||
-      !byDay.has(row.day) ||
+      !allowedDays.has(row.day) ||
       seen.has(key) ||
       !Number.isFinite(spend) ||
       spend < 0 ||
@@ -715,22 +1004,37 @@ function projectCompleteRollup(
       }
     }
     seen.add(key);
-    byDay.set(row.day, byDay.get(row.day)! + spend);
+    byDay.set(row.day, (byDay.get(row.day) ?? 0) + spend);
   }
-  if (seen.size !== expected.size || [...expected].some((key) => !seen.has(key))) {
-    return null;
+  const complete = seen.size === expected.size && [...expected].every((key) => seen.has(key));
+  const missing = expected.size - seen.size;
+  const partialMessage = `${missing} of ${expected.size} account-days are not materialised; showing available spend only.`;
+  const spendData = {
+    daily: [...byDay]
+      .map(([day, spend]) => ({ day, spend }))
+      .sort((left, right) => left.day.localeCompare(right.day)),
+  };
+  const coverageData = {
+    dayCount: days.length,
+    refreshed,
+    materializedAccountDays: seen.size,
+    expectedAccountDays: expected.size,
+  };
+  if (!complete) {
+    return {
+      spend: { state: "partial", data: spendData, message: partialMessage },
+      rollupCoverage: { state: "partial", data: coverageData, message: partialMessage },
+    };
   }
   return {
     spend: {
       state: "ready",
-      data: { daily: [...byDay].map(([day, spend]) => ({ day, spend })) },
-      message: refreshed
-        ? "The exact spend window was materialised on demand."
-        : null,
+      data: spendData,
+      message: refreshed ? "The exact spend window was materialised on demand." : null,
     },
     rollupCoverage: {
       state: "ready",
-      data: { dayCount: days.length, refreshed },
+      data: coverageData,
       message: refreshed
         ? "Shopify revenue and Google spend coverage were verified after an on-demand refresh."
         : "Shopify revenue and Google spend coverage are verified for the exact selected period.",
@@ -750,18 +1054,20 @@ async function rollupFamilies(
     : topology.account.id;
   try {
     let rows = await readSpendRows(topology, accountIds, range);
-    const current = projectCompleteRollup(
+    const current = projectRollup(
       rows,
       accountIds,
       days,
       revenueAccountId,
       false,
     );
-    if (current) return current;
-    if (!refreshMissing) {
+    if (current?.rollupCoverage.state === "ready" || (current && !refreshMissing)) {
+      return current;
+    }
+    if (!current && !refreshMissing) {
       return {
-        spend: failed("Spend is not yet available for every day in the selected period."),
-        rollupCoverage: failed("The selected-period reporting rollup is still being materialised."),
+        spend: failed("Stored spend rows are invalid for the selected period."),
+        rollupCoverage: failed("The selected-period reporting rollup could not be verified."),
       };
     }
 
@@ -772,7 +1078,7 @@ async function rollupFamilies(
       to: range.to,
     });
     rows = await readSpendRows(topology, accountIds, range);
-    return projectCompleteRollup(
+    return projectRollup(
       rows,
       accountIds,
       days,
@@ -1024,6 +1330,17 @@ function campaignFamily(
       ? "Some campaign breakdown sources failed for the selected period."
       : null,
   ].filter((message): message is string => Boolean(message));
+  const partial = Boolean(google.message) ||
+    !attribution.ok ||
+    rows.some((row) =>
+      row.breakdown.sources.some((source) => source.state === "failed"));
+  if (partial) {
+    return {
+      state: "partial",
+      data: { rows },
+      message: messages.join(" ") || "Some campaign detail sources are partial.",
+    };
+  }
   return {
     state: rows.length === 0 ? "empty" : "ready",
     data: { rows },
@@ -1174,34 +1491,32 @@ function failedShopifyFamilies(): ShopifyFamilies {
   };
 }
 
-/**
- * Purpose-bound analytics DAL. Authentication and exact ownership are proved
- * before service-role topology or encrypted credentials are read.
- */
-export async function fetchAdminStoreAnalytics(
-  input: FetchAdminStoreAnalyticsInput,
-): Promise<AdminStoreAnalytics> {
-  assertInput(input);
-  await requireClientOnboardingAdmin();
-  let topology: StoreTopology;
-  try {
-    topology = await loadTopology(input);
-  } catch (error) {
-    console.error("Admin store analytics load failed:", error);
-    return {
-      clientId: input.clientId,
-      storeAccountId: input.store.accountId,
-      currency: input.store.currency,
-      range: { from: input.range.from, to: input.range.to },
-      funnel: failed("Shopify funnel data could not be loaded for this store."),
-      campaigns: failed("Campaign performance could not be loaded for this store."),
-      collections: failed("Collection performance could not be loaded for this store."),
-      spend: failed("Spend could not be loaded for this store."),
-      rollupCoverage: failed("The reporting rollup could not be loaded for this store."),
-      activity: failed("Campaign activity could not be loaded for this store."),
-    };
-  }
+function failedStoreAnalytics(input: FetchAdminStoreAnalyticsInput): AdminStoreAnalytics {
+  return {
+    clientId: input.clientId,
+    storeAccountId: input.store.accountId,
+    currency: input.store.currency,
+    range: { from: input.range.from, to: input.range.to },
+    funnel: failed("Shopify funnel data could not be loaded for this store."),
+    campaigns: failed("Campaign performance could not be loaded for this store."),
+    collections: failed("Collection performance could not be loaded for this store."),
+    spend: failed("Spend could not be loaded for this store."),
+    rollupCoverage: failed("The reporting rollup could not be loaded for this store."),
+    activity: failed("Campaign activity could not be loaded for this store."),
+    providerFreshness: {
+      state: "not_synced",
+      refreshedAt: null,
+      lastAttemptAt: null,
+      lastErrorCode: "topology_failed",
+      stale: false,
+    },
+  };
+}
 
+async function buildLiveAdminStoreAnalytics(
+  input: FetchAdminStoreAnalyticsInput,
+  topology: StoreTopology,
+): Promise<AdminStoreAnalytics> {
   const accountIds = [...new Set(input.store.activityAccountIds)];
   const googlePromise = loadGoogleCampaigns(topology, input.range);
   const breakdownPromise = loadGoogleBreakdowns(topology, input.range);
@@ -1272,6 +1587,261 @@ export async function fetchAdminStoreAnalytics(
     spend: rollup.spend,
     rollupCoverage: rollup.rollupCoverage,
     activity,
+    providerFreshness: {
+      state: "live",
+      refreshedAt: null,
+      lastAttemptAt: null,
+      lastErrorCode: null,
+      stale: false,
+    },
+    shopifyProvenance: topology.shopifyProvenance,
+  };
+}
+
+/**
+ * Purpose-bound live builder used only by explicit sync jobs. Page renders use
+ * fetchCachedAdminStoreAnalytics below and never wait on a provider.
+ */
+export async function fetchAdminStoreAnalytics(
+  input: FetchAdminStoreAnalyticsInput,
+  options: { authenticate?: boolean } = {},
+): Promise<AdminStoreAnalytics> {
+  assertInput(input);
+  if (options.authenticate !== false) await requireClientOnboardingAdmin();
+  try {
+    return await buildLiveAdminStoreAnalytics(input, await loadTopology(input));
+  } catch (error) {
+    console.error("Admin store analytics load failed:", error);
+    return failedStoreAnalytics(input);
+  }
+}
+
+function storedFamily<T>(
+  snapshot: AdminReportingSnapshotValue<unknown>,
+  emptyData: T,
+): AdminAnalyticsFamily<T> {
+  const failedAttempt = snapshot.lastErrorCode
+    ? ` The last refresh failed (${snapshot.lastErrorCode}); showing the last successful snapshot.`
+    : "";
+  if (snapshot.state === "not_synced") {
+    return notSynced("Sync this exact reporting period to load this provider data.");
+  }
+  if (snapshot.state === "unavailable") {
+    return unavailable(snapshot.message || "This provider family is unavailable.");
+  }
+  if (snapshot.state === "empty") {
+    return {
+      state: "empty",
+      data: emptyData,
+      message: `${snapshot.message ?? ""}${failedAttempt}`.trim() || null,
+    };
+  }
+  if (snapshot.rows.length !== 1) {
+    return notSynced("The stored provider snapshot is invalid. Sync this exact period again.");
+  }
+  const message = `${snapshot.message ?? ""}${failedAttempt}`.trim();
+  if (snapshot.state === "partial") {
+    return {
+      state: "partial",
+      data: snapshot.rows[0] as T,
+      message: message || "This provider snapshot is partial.",
+    };
+  }
+  return { state: "ready", data: snapshot.rows[0] as T, message: message || null };
+}
+
+function providerFreshness(
+  snapshots: AdminReportingSnapshotValue<unknown>[],
+  range: Pick<RangeSelection, "to">,
+): AdminProviderFreshness {
+  const refreshed = snapshots
+    .flatMap((snapshot) => snapshot.refreshedAt ? [snapshot.refreshedAt] : [])
+    .sort();
+  const attempted = snapshots
+    .flatMap((snapshot) => snapshot.lastAttemptAt ? [snapshot.lastAttemptAt] : [])
+    .sort();
+  const error = snapshots.find((snapshot) => snapshot.lastErrorCode)?.lastErrorCode ?? null;
+  const missing = snapshots.filter((snapshot) => snapshot.state === "not_synced").length;
+  const partial = snapshots.some((snapshot) => snapshot.state === "partial");
+  const refreshedAt = refreshed[0] ?? null;
+  const stale = adminReportingSnapshotIsStale({ to: range.to, refreshedAt });
+  return {
+    state: missing === snapshots.length
+      ? "not_synced"
+      : missing > 0 || partial || error || stale
+        ? "partial"
+        : "ready",
+    // Oldest success is the conservative point at which every ready family is fresh.
+    refreshedAt,
+    lastAttemptAt: attempted.at(-1) ?? null,
+    lastErrorCode: error,
+    stale,
+  };
+}
+
+function missingStoredSnapshot(): AdminReportingSnapshotValue<unknown> {
+  return {
+    state: "not_synced",
+    rows: [],
+    message: "This exact reporting period has not been synced yet.",
+    refreshedAt: null,
+    lastAttemptAt: null,
+    lastErrorCode: null,
+    revision: 0,
+  };
+}
+
+async function currentActivity(
+  input: FetchAdminStoreAnalyticsInput,
+): Promise<AdminStoreAnalytics["activity"]> {
+  try {
+    const result = await listCampaignActionActivity(
+      input.clientId,
+      [...new Set(input.store.activityAccountIds)],
+      input.range,
+    );
+    return readyOrEmpty(
+      { rows: result.history, truncated: result.truncated },
+      result.history.length === 0,
+    );
+  } catch {
+    return failed("Campaign activity could not be loaded for the selected period.");
+  }
+}
+
+/** Fast page read: internal rollups/activity plus exact-range provider snapshots. */
+export async function fetchCachedAdminStoreAnalytics(
+  input: FetchAdminStoreAnalyticsInput,
+): Promise<AdminStoreAnalytics> {
+  assertInput(input);
+  await requireClientOnboardingAdmin();
+  let topology: StoreTopology;
+  try {
+    topology = await loadTopology(input);
+  } catch (error) {
+    console.error("Admin cached store analytics topology failed:", error);
+    return failedStoreAnalytics(input);
+  }
+
+  const families = [
+    "shopify_funnel",
+    "store_campaign_performance",
+    "shopify_collection_sales",
+  ] as const;
+  const [stored, rollup, activity] = await Promise.all([
+    readAdminReportingSnapshotFamilies({
+      client: topology.service,
+      families: [...families],
+      accountId: input.store.accountId,
+      authorityKey: topology.authority.key,
+      from: input.range.from,
+      to: input.range.to,
+    }).catch(() => new Map()),
+    rollupFamilies(
+      topology,
+      [...new Set(input.store.activityAccountIds)],
+      input.range,
+    ),
+    currentActivity(input),
+  ]);
+  const snapshots = families.map(
+    (family) => stored.get(family) ?? missingStoredSnapshot(),
+  );
+  const [funnelSnapshot, campaignsSnapshot, collectionsSnapshot] = snapshots;
+  return {
+    clientId: input.clientId,
+    storeAccountId: input.store.accountId,
+    currency: input.store.currency,
+    range: { from: input.range.from, to: input.range.to },
+    funnel: storedFamily(funnelSnapshot, {
+      daily: [],
+      totals: { sessions: 0, addedToCart: 0, reachedCheckout: 0, completedCheckout: 0 },
+    }),
+    campaigns: storedFamily(campaignsSnapshot, { rows: [] }),
+    collections: storedFamily(collectionsSnapshot, { rows: [] }),
+    spend: rollup.spend,
+    rollupCoverage: rollup.rollupCoverage,
+    activity,
+    providerFreshness: providerFreshness(snapshots, input.range),
+    shopifyProvenance: topology.shopifyProvenance,
+  };
+}
+
+function snapshotFamilyResult<T>(family: AdminAnalyticsFamily<T>) {
+  if (family.state === "failed" || family.state === "not_synced") {
+    throw new Error("The provider family failed during refresh.");
+  }
+  if (family.state === "unavailable") {
+    return { state: "unavailable" as const, rows: [], message: family.message };
+  }
+  if (family.state === "empty") {
+    return { state: "empty" as const, rows: [], message: family.message ?? null };
+  }
+  if (!("data" in family)) {
+    throw new Error("The provider family returned an invalid ready state.");
+  }
+  return {
+    state: family.state === "partial" ? "partial" as const : "ready" as const,
+    rows: [family.data],
+    message: family.message ?? null,
+  };
+}
+
+/** Explicit sync path. The shared live promise prevents three provider fanouts. */
+export async function refreshAdminStoreAnalyticsSnapshots(
+  input: FetchAdminStoreAnalyticsInput,
+  options: { authenticate?: boolean } = {},
+) {
+  assertInput(input);
+  if (options.authenticate !== false) await requireClientOnboardingAdmin();
+  const topology = await loadTopology(input);
+  let livePromise: Promise<AdminStoreAnalytics> | null = null;
+  const live = () => {
+    livePromise ??= buildLiveAdminStoreAnalytics(input, topology);
+    return livePromise;
+  };
+  let verification: Promise<AdminReportingAuthority> | null = null;
+  const verifyAuthority = () => {
+    verification ??= loadTopology(input).then((current) => current.authority);
+    return verification;
+  };
+  const definitions = [
+    {
+      family: "shopify_funnel" as const,
+      load: async () => snapshotFamilyResult((await live()).funnel),
+    },
+    {
+      family: "store_campaign_performance" as const,
+      load: async () => snapshotFamilyResult((await live()).campaigns),
+    },
+    {
+      family: "shopify_collection_sales" as const,
+      load: async () => snapshotFamilyResult((await live()).collections),
+    },
+  ];
+  const results = await Promise.all(
+    definitions.map((definition) =>
+      refreshAdminReportingSnapshot<unknown>({
+        client: topology.service,
+        family: definition.family,
+        accountId: input.store.accountId,
+        from: input.range.from,
+        to: input.range.to,
+        authority: topology.authority,
+        verifyAuthority,
+        load: definition.load,
+      })),
+  );
+  return {
+    accountId: input.store.accountId,
+    from: input.range.from,
+    to: input.range.to,
+    refreshed: results.filter((result) => result.state === "refreshed").length,
+    partial: results.filter(
+      (result) => result.state === "refreshed" && result.snapshotState === "partial",
+    ).length,
+    busy: results.filter((result) => result.state === "busy").length,
+    failed: results.filter((result) => result.state === "failed").length,
   };
 }
 
@@ -1281,7 +1851,14 @@ export async function fetchAdminStoreAnalytics(
  */
 export async function ensureAdminAnalyticsRollupCoverage(
   input: EnsureAdminAnalyticsRollupCoverageInput,
-): Promise<AdminAnalyticsFamily<{ storeCount: number; dayCount: number; refreshed: boolean }>> {
+  options: { authenticate?: boolean } = {},
+): Promise<AdminAnalyticsFamily<{
+  storeCount: number;
+  dayCount: number;
+  refreshed: boolean;
+  materializedAccountDays: number;
+  expectedAccountDays: number;
+}>> {
   if (
     !UUID.test(input.clientId) ||
     !isDay(input.range.from) ||
@@ -1306,11 +1883,17 @@ export async function ensureAdminAnalyticsRollupCoverage(
     }
   }
 
-  await requireClientOnboardingAdmin();
+  if (options.authenticate !== false) await requireClientOnboardingAdmin();
   if (input.stores.length === 0) {
     return {
       state: "empty",
-      data: { storeCount: 0, dayCount: rangeDays(input.range).length, refreshed: false },
+      data: {
+        storeCount: 0,
+        dayCount: rangeDays(input.range).length,
+        refreshed: false,
+        materializedAccountDays: 0,
+        expectedAccountDays: 0,
+      },
       message: "This client has no stores to materialise.",
     };
   }
@@ -1342,12 +1925,39 @@ export async function ensureAdminAnalyticsRollupCoverage(
     (result) =>
       "data" in result.rollupCoverage && result.rollupCoverage.data.refreshed,
   );
+  const days = rangeDays(input.range);
+  const materializedAccountDays = results.reduce(
+    (sum, result) =>
+      sum + ("data" in result.rollupCoverage
+        ? result.rollupCoverage.data.materializedAccountDays ?? 0
+        : 0),
+    0,
+  );
+  const expectedAccountDays = physicalIds.size * days.length;
+  const partialCoverage = results.filter(
+    (result) => result.rollupCoverage.state === "partial",
+  );
+  if (partialCoverage.length > 0) {
+    return {
+      state: "partial",
+      data: {
+        storeCount: input.stores.length,
+        dayCount: days.length,
+        refreshed,
+        materializedAccountDays,
+        expectedAccountDays,
+      },
+      message: `${materializedAccountDays} of ${expectedAccountDays} account-days are materialised after the exact-range refresh.`,
+    };
+  }
   return {
     state: "ready",
     data: {
       storeCount: input.stores.length,
-      dayCount: rangeDays(input.range).length,
+      dayCount: days.length,
       refreshed,
+      materializedAccountDays,
+      expectedAccountDays,
     },
     message: refreshed
       ? "All store rollups were verified after an on-demand refresh."

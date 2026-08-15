@@ -38,7 +38,7 @@ export default async function AdminCampaignsPage({
     params.range === undefined && params.from === undefined && params.to === undefined
       ? presetSelection("d7")
       : parseRange(params);
-  const overviewPromise = fetchAdminCampaigns(range);
+  const overviewPromise = fetchAdminCampaigns(range, { campaignSource: "snapshot" });
   const dictionaryPromise = getServerDictionary();
   const overview = await overviewPromise;
   const [{ d, locale }, actionState] = await Promise.all([
@@ -54,7 +54,7 @@ export default async function AdminCampaignsPage({
       description={`Portfolio performance and active campaign controls · ${range.from} → ${range.to}`}
       actions={
         <>
-          <CampaignsToolbar />
+          <CampaignsToolbar range={range} />
           <RangePicker current={range} />
         </>
       }
@@ -111,8 +111,14 @@ export default async function AdminCampaignsPage({
           },
           {
             label: "Active campaigns",
-            value: String(overview.totals.activeCampaigns),
-            hint: "Enabled in Google Ads",
+            value:
+              overview.totals.activeCampaigns === null
+                ? "—"
+                : String(overview.totals.activeCampaigns),
+            hint:
+              overview.totals.activeCampaigns === null
+                ? "Not synced for this exact period"
+                : "Enabled in Google Ads",
           },
           {
             label: "Connected accounts",

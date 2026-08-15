@@ -16,6 +16,14 @@ vi.mock("@/lib/supabase/service", () => ({
   createServiceClient: mocks.createServiceClient,
 }));
 vi.mock("@/lib/portal/data", () => ({ ACCOUNT_COLUMNS: "columns" }));
+vi.mock("@/lib/portal/range", () => ({
+  rangeDays: (selection: { from: string; to: string }) =>
+    Math.round(
+      (Date.parse(`${selection.to}T00:00:00Z`) -
+        Date.parse(`${selection.from}T00:00:00Z`)) /
+        86_400_000,
+    ) + 1,
+}));
 vi.mock("@/lib/portal/currency", () => ({
   currencyScope: (accounts: AdAccount[]) => {
     const currencies = [...new Set(accounts.map((account) => account.currency))];
@@ -375,6 +383,8 @@ describe("admin client overview V2 projection", () => {
         profit: 70,
         commission: 5,
         storeDomain: "store.example",
+        reportingState: "partial",
+        reportingCoverage: { rows: 2, expectedRows: 28 },
         days: [
           { day: "2026-08-13", adSpend: 20, revenue: 0 },
           { day: "2026-08-14", adSpend: 10, revenue: 100 },
@@ -439,6 +449,57 @@ describe("admin client overview V2 projection", () => {
       range.from,
       range.to,
     );
+  });
+
+  it("marks Running only for an exact grid with valid timestamps and anchor attribution", async () => {
+    const store = account("anchor", {
+      status: "active",
+      shopify_connected: true,
+      shopify_url: "anchor.myshopify.com",
+      google_ads_connected: true,
+    });
+    mocks.createClient.mockResolvedValue(session([store]));
+    mocks.createServiceClient.mockReturnValue(
+      serviceWithRollout("legacy_only", null),
+    );
+    const ready = metric("anchor", {
+      ad_spend: 25,
+      attributed_revenue: 100,
+      attributed_orders: 2,
+    });
+    mocks.fetchDailyMetrics
+      .mockResolvedValueOnce([ready])
+      .mockResolvedValueOnce([{ ...ready, computed_at: "not-a-timestamp" }])
+      .mockResolvedValueOnce([{
+        ...ready,
+        attributed_revenue: null,
+        attributed_orders: null,
+      }]);
+    const oneDay = {
+      key: "custom",
+      from: "2026-08-14",
+      to: "2026-08-14",
+    } as const;
+
+    const complete = await fetchClientOverview("client-1", oneDay);
+    const invalidTimestamp = await fetchClientOverview("client-1", oneDay);
+    const missingAttribution = await fetchClientOverview("client-1", oneDay);
+
+    expect(complete?.stores[0]).toEqual(expect.objectContaining({
+      reportingState: "running",
+      reportingCoverage: { rows: 1, expectedRows: 1 },
+      adSpend: 25,
+    }));
+    expect(invalidTimestamp?.stores[0]).toEqual(expect.objectContaining({
+      reportingState: "partial",
+      reportingCoverage: { rows: 0, expectedRows: 1 },
+      adSpend: 25,
+    }));
+    expect(missingAttribution?.stores[0]).toEqual(expect.objectContaining({
+      reportingState: "partial",
+      reportingCoverage: { rows: 1, expectedRows: 1 },
+      adSpend: 25,
+    }));
   });
 
   it("does not fall back when the durable cutover topology is missing", async () => {

@@ -77,7 +77,12 @@ const worker = {
             }
           : {
               name: "hourly refresh",
-              paths: ["/api/admin/sync-metrics", "/api/admin/sync-ledgers"],
+              paths: [
+                "/api/admin/sync-metrics",
+                "/api/admin/sync-reporting?range=today",
+                "/api/admin/sync-reporting?range=d7",
+                "/api/admin/sync-ledgers",
+              ],
             };
 
     // Only the path is ever used for routing; the origin just has to be a valid
@@ -92,6 +97,10 @@ const worker = {
           new Request(`${origin}${path}`, {
             method: "POST",
             headers: { Authorization: `Bearer ${env.CRON_SECRET}` },
+            // Four sequential hourly legs must stay comfortably inside the
+            // platform's scheduled-event wall time. A timed-out leg is logged
+            // and the remaining legs still get their turn.
+            signal: AbortSignal.timeout(180_000),
           }),
           env,
           ctx,
