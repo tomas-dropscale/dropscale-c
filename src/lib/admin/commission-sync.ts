@@ -89,8 +89,8 @@ type BillingStartRow = {
   google_local_date: string;
   google_time_zone: string;
   currency: string;
-  baseline_cost_micros: string | number;
-  captured_at: string;
+  baseline_cost_micros: string | number | null;
+  captured_at: string | null;
 };
 
 type BillingEndRow = {
@@ -476,8 +476,12 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
           // PostgREST may represent an int8 as either string or number. Reject
           // an unsafe numeric value instead of stringifying an already-rounded
           // baseline and silently moving the commercial boundary.
+          // A reviewed full-day start deliberately has no observed opening
+          // counter: its complete Google-local entry day is billable, so its
+          // effective deduction is exactly zero. The database branch
+          // constraint guarantees that only this start kind may store NULL.
           const baselineCostMicros = parseGoogleMicros(
-            start.baseline_cost_micros,
+            start.baseline_cost_micros ?? "0",
           );
           const end = billingEndByAccount.get(account.id);
           let endCostMicros: bigint | null = null;
