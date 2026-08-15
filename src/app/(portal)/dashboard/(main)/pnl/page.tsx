@@ -5,7 +5,6 @@ import { fetchAccounts, reportingMetricScope } from "@/lib/portal/data";
 import { PnlSheetView } from "@/components/portal/pnl-sheet";
 import { StoreSelector } from "@/components/portal/store-selector";
 import { PageContainer } from "@/components/ui/page-container";
-import { ensureDailyCoverage, recomputeDailyMetrics } from "@/lib/metrics/recompute";
 import { fetchDailyMetrics, sumMetrics } from "@/lib/metrics/queries";
 import { buildPnlSheet, monthDays } from "@/lib/portal/pnl";
 import { fetchManualReferralRateSchedule } from "@/lib/billing/referral-rate-schedule";
@@ -55,13 +54,12 @@ export default async function PnlPage({
   const from = days[0];
   const to = days[days.length - 1];
 
-  // Older months need the backfill; the current one needs the rollup current.
+  // Provider refreshes are materialised by the hourly/admin sync. The P&L is
+  // deliberately a database-only read so changing month or store stays fast.
   const metricsScope = await reportingMetricScope(scope, {
     includeUnallocated: selected === null,
   });
   const physicalAccounts = [...metricsScope.metricAccountsById.values()];
-  await ensureDailyCoverage(physicalAccounts, from);
-  await recomputeDailyMetrics(physicalAccounts);
 
   // Only the physical sources this sheet covers. An all-store sheet includes
   // the explicit unallocated spend bucket; a store filter never does.

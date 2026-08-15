@@ -19,7 +19,6 @@ import { createClient } from "@/lib/supabase/server";
 import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
 import { GettingStartedGuide } from "@/components/portal/getting-started-guide";
 import { ManagedAssetsNotice } from "@/components/portal/managed-assets-notice";
-import { ensureDailyCoverage, recomputeDailyMetrics } from "@/lib/metrics/recompute";
 import {
   fetchDailyMetrics,
   freshness,
@@ -49,9 +48,8 @@ export async function generateMetadata(): Promise<Metadata> {
 
 /**
  * The client's home: RevFlow-style revenue/profit overview. Reads ONLY the
- * pre-aggregated daily_metrics — the sync paths (recompute + coverage
- * backfill) are the sole callers of Google/Shopify, and they run before the
- * read, throttled, riding this viewer's session.
+ * pre-aggregated daily_metrics. Provider refreshes belong to the hourly/admin
+ * sync paths, so opening the client portal is always a database-only read.
  */
 export default async function DashboardPage({
   searchParams,
@@ -78,11 +76,6 @@ export default async function DashboardPage({
     includeUnallocated: selectedStore === null,
   });
   const physicalAccounts = [...metricsScope.metricAccountsById.values()];
-  // Coverage first so recompute sees the rows it just filled and skips the
-  // overlap. The exact physical scope matters: all-store views also refresh
-  // standalone Google spend, while a store filter never pulls it in.
-  await ensureDailyCoverage(physicalAccounts, range.from);
-  await recomputeDailyMetrics(physicalAccounts);
 
   const [rows, referralRateSchedule] = await Promise.all([
     fetchDailyMetrics(

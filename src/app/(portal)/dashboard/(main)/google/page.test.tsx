@@ -113,7 +113,7 @@ describe("Google all-store physical reporting scope", () => {
     });
   });
 
-  it("refreshes standalone Google accounts in an all-store view", async () => {
+  it("reads the complete physical scope without refreshing providers on render", async () => {
     const anchor = {
       id: "anchor-1",
       client_id: "client-1",
@@ -142,10 +142,12 @@ describe("Google all-store physical reporting scope", () => {
     expect(mocks.reportingMetricScope).toHaveBeenCalledWith([anchor], {
       includeUnallocated: true,
     });
-    expect(mocks.ensureDailyCoverage).toHaveBeenCalledWith(
-      physicalAccounts,
-      expect.any(String),
+    expect(mocks.fetchDailyMetrics).toHaveBeenCalledWith(
+      ["anchor-1", "google-unallocated"],
+      "2026-08-01",
+      "2026-08-14",
     );
-    expect(mocks.recomputeDailyMetrics).toHaveBeenCalledWith(physicalAccounts);
+    expect(mocks.ensureDailyCoverage).not.toHaveBeenCalled();
+    expect(mocks.recomputeDailyMetrics).not.toHaveBeenCalled();
   });
 });

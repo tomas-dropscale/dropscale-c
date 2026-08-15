@@ -3,7 +3,6 @@ import type { Metadata } from "next";
 import { Info, PackageOpen } from "lucide-react";
 
 import { fetchAccounts, reportingMetricScope } from "@/lib/portal/data";
-import { ensureDailyCoverage, recomputeDailyMetrics } from "@/lib/metrics/recompute";
 import {
   fetchDailyMetrics,
   freshness,
@@ -34,7 +33,7 @@ export async function generateMetadata(): Promise<Metadata> {
 
 /**
  * Google section, all stores: the 10-metric grid plus the store-comparison
- * table. Reads only daily_metrics; the sync runs before the read.
+ * table. Reads only daily_metrics; the hourly/admin sync owns provider calls.
  */
 export default async function GoogleAllStoresPage({
   searchParams,
@@ -46,8 +45,6 @@ export default async function GoogleAllStoresPage({
 
   const metricsScope = await reportingMetricScope(accounts, { includeUnallocated: true });
   const physicalAccounts = [...metricsScope.metricAccountsById.values()];
-  await ensureDailyCoverage(physicalAccounts, range.from);
-  await recomputeDailyMetrics(physicalAccounts);
 
   const [physicalRows, referralRateSchedule] = await Promise.all([
     fetchDailyMetrics(

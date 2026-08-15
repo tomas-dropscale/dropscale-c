@@ -4,7 +4,6 @@ import { notFound } from "next/navigation";
 import { FileBarChart, Hourglass } from "lucide-react";
 
 import { fetchAccount, fetchCampaigns, reportingMetricAccountIds } from "@/lib/portal/data";
-import { ensureDailyCoverage, recomputeDailyMetrics } from "@/lib/metrics/recompute";
 import {
   fetchDailyMetrics,
   freshness,
@@ -49,9 +48,6 @@ export default async function AccountPage({
   // (or a junk id) comes back null and 404s without leaking that it exists.
   const account = await fetchAccount(accountId);
   if (!account) notFound();
-
-  await ensureDailyCoverage([account], range.from);
-  await recomputeDailyMetrics([account]);
 
   const metricAccountIds = await reportingMetricAccountIds(account.id);
   const [physicalRows, campaigns, referralRateSchedule, { d }] = await Promise.all([
