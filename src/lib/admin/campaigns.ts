@@ -152,6 +152,92 @@ function projectedShopDomain(source: CanonicalReportingSource): string {
   return source.shopify!.primaryDomain?.trim().toLowerCase() || source.shopify!.domain;
 }
 
+function canonicalShopifyDomain(value: string | null | undefined): string | null {
+  const domain = (value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/\/.*$/, "");
+  return /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(domain) ? domain : null;
+}
+
+function publicStoreDomain(value: string | null): string | null {
+  const domain = value?.trim().toLowerCase();
+  if (!domain || domain.length > 253) return null;
+  const labels = domain.split(".");
+  return labels.length >= 2 &&
+    labels.every(
+      (label) =>
+        label.length <= 63 &&
+        /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label),
+    )
+    ? domain
+    : null;
+}
+
+function storeIdentity(clientId: string, shopifyDomain: string) {
+  return `${clientId}\n${shopifyDomain}`;
+}
+
+async function verifiedPublicStoreDomains(
+  accounts: AdAccount[],
+  service: NonNullable<ReturnType<typeof createServiceClient>>,
+): Promise<Map<string, string>> {
+  const identities = new Set<string>();
+  const clientIds = new Set<string>();
+  for (const account of accounts) {
+    const shopifyDomain = canonicalShopifyDomain(account.shopify_url);
+    if (!shopifyDomain) continue;
+    identities.add(storeIdentity(account.client_id, shopifyDomain));
+    clientIds.add(account.client_id);
+  }
+  if (clientIds.size === 0) return new Map();
+
+  const { data, error } = await service
+    .from("client_shopify_connections")
+    .select(
+      "client_id, status, shopify_domain, primary_domain, last_verified_at, last_error_code",
+    )
+    .in("client_id", [...clientIds])
+    .eq("status", "connected");
+  if (error || !Array.isArray(data)) return new Map();
+
+  const domains = new Map<string, string>();
+  for (const row of data) {
+    const shopifyDomain = canonicalShopifyDomain(row.shopify_domain);
+    const primaryDomain = publicStoreDomain(row.primary_domain);
+    const identity = shopifyDomain
+      ? storeIdentity(row.client_id, shopifyDomain)
+      : null;
+    if (
+      row.status !== "connected" ||
+      !row.last_verified_at ||
+      row.last_error_code !== null ||
+      shopifyDomain !== row.shopify_domain ||
+      !primaryDomain ||
+      !identity ||
+      !identities.has(identity)
+    ) {
+      continue;
+    }
+    domains.set(identity, primaryDomain);
+  }
+  return domains;
+}
+
+function withPublicStoreDomain(
+  entry: AdminAccountCampaigns,
+  domains: Map<string, string>,
+): AdminAccountCampaigns {
+  const shopifyDomain = canonicalShopifyDomain(entry.account.shopify_url);
+  const primaryDomain = shopifyDomain
+    ? domains.get(storeIdentity(entry.account.client_id, shopifyDomain))
+    : null;
+  return primaryDomain
+    ? { ...entry, account: { ...entry.account, shopify_url: primaryDomain } }
+    : entry;
+}
+
 async function adminAccountInventory(
   allAccounts: AdAccount[],
   adminIds: Set<string>,
@@ -412,7 +498,10 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
 
   const allAccounts = (accountsRes.data as AdAccount[] | null) ?? [];
   const internalAccounts = allAccounts.filter((account) => adminIds.has(account.client_id));
-  const inventory = await adminAccountInventory(allAccounts, adminIds, service);
+  const [inventory, publicStoreDomains] = await Promise.all([
+    adminAccountInventory(allAccounts, adminIds, service),
+    verifiedPublicStoreDomains(allAccounts, service),
+  ]);
   const owners = new Map<string, Owner>(
     (clientsRes.data ?? []).map((client) => [
       client.id,
@@ -620,8 +709,14 @@ export async function fetchAdminCampaigns(range: RangeSelection): Promise<AdminC
   }) : null;
 
   return {
-    clients: groupByOwner(accountsWithRollups, owners),
-    internal: groupByOwner(internalEntries, owners),
+    clients: groupByOwner(
+      accountsWithRollups.map((entry) => withPublicStoreDomain(entry, publicStoreDomains)),
+      owners,
+    ),
+    internal: groupByOwner(
+      internalEntries.map((entry) => withPublicStoreDomain(entry, publicStoreDomains)),
+      owners,
+    ),
     configured,
     totals: {
       spend: financialReady ? spend : null,

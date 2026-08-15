@@ -398,6 +398,76 @@ describe("admin V2 campaign inventory", () => {
     expect(mocks.fetchGoogleReportingCampaigns).not.toHaveBeenCalled();
   });
 
+  it("uses an exact verified public domain only in the returned Campaigns display", async () => {
+    const legacy = account("legacy", "client-1", {
+      status: "active",
+      shopify_connected: true,
+      shopify_url: "https://STORE.myshopify.com/admin",
+    });
+    mocks.createClient.mockResolvedValue(supabaseFor([legacy]));
+    const serviceFrom = vi.fn((table: string) => {
+      if (table === "client_rollout_states") {
+        return query([
+          {
+            client_id: "client-1",
+            operational_surface: "v2_ready_for_cutover",
+            reporting_cutover_at: null,
+          },
+        ]);
+      }
+      if (table === "client_shopify_connections") {
+        return query([
+          {
+            client_id: "client-1",
+            status: "connected",
+            shopify_domain: "store.myshopify.com",
+            primary_domain: "Store.Example",
+            last_verified_at: "2026-08-15T10:00:00.000Z",
+            last_error_code: null,
+          },
+        ]);
+      }
+      throw new Error(`Unexpected service table: ${table}`);
+    });
+    mocks.createServiceClient.mockReturnValue({ from: serviceFrom });
+
+    const overview = await fetchAdminCampaigns({
+      key: "today",
+      from: "2026-08-15",
+      to: "2026-08-15",
+    });
+
+    expect(overview.clients[0].accounts[0].account.shopify_url).toBe("store.example");
+    expect(legacy.shopify_url).toBe("https://STORE.myshopify.com/admin");
+    expect(serviceFrom).toHaveBeenCalledWith("client_shopify_connections");
+  });
+
+  it("falls back to the technical Shopify domain when public-domain lookup fails", async () => {
+    const legacy = account("legacy", "client-1", {
+      status: "active",
+      shopify_connected: true,
+      shopify_url: "store.myshopify.com",
+    });
+    mocks.createClient.mockResolvedValue(supabaseFor([legacy]));
+    mocks.createServiceClient.mockReturnValue({
+      from: vi.fn((table: string) =>
+        table === "client_shopify_connections"
+          ? query(null, { code: "database_error" })
+          : query([]),
+      ),
+    });
+
+    const overview = await fetchAdminCampaigns({
+      key: "today",
+      from: "2026-08-15",
+      to: "2026-08-15",
+    });
+
+    expect(overview.clients[0].accounts[0].account.shopify_url).toBe(
+      "store.myshopify.com",
+    );
+  });
+
   it("keeps a historical V2-active lifecycle on legacy until reporting is cut over", async () => {
     const legacy = account("legacy", "client-1", {
       status: "active",
