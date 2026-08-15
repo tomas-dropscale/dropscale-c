@@ -27,6 +27,7 @@ import {
   filterCampaignClients,
   normalizeDailyBudgetInput,
   projectCampaignClients,
+  totalGoogleRoas,
   type CampaignActionHistory,
   type CampaignViewCampaign,
   type CampaignViewClient,
@@ -591,7 +592,7 @@ function CampaignRow({
         />
       </div>
 
-      <CampaignMetric label="ROAS">
+      <CampaignMetric label="Google ROAS">
         {campaign.googleRoas === null ? "—" : multiplier(campaign.googleRoas)}
       </CampaignMetric>
 
@@ -660,6 +661,8 @@ function StoreGroup({
     budgets.every((budget): budget is number => budget !== null)
     ? budgets.reduce((sum, budget) => sum + budget, 0)
     : null;
+  const googleRoas =
+    store.campaignState === "ready" ? totalGoogleRoas(store.campaigns) : null;
   const storeLabel = store.domain ? `https://${store.domain}` : store.name;
 
   return (
@@ -680,6 +683,20 @@ function StoreGroup({
               {storeLabel}
             </h3>
             <StoreProviderFreshness freshness={store.providerFreshness} />
+            <p
+              className="mt-1 flex items-center gap-1.5 text-[10.5px]"
+              title="Non-Meta Shopify revenue divided by reporting-rollup ad spend"
+            >
+              <span className="label-caps">Real ROAS</span>
+              <span
+                className={cn(
+                  "font-semibold tabular-nums text-[var(--text-primary)]",
+                  clientRoasTone(store.realRoas),
+                )}
+              >
+                {store.realRoas === null ? "—" : multiplier(store.realRoas)}
+              </span>
+            </p>
           </div>
         </div>
 
@@ -712,9 +729,9 @@ function StoreGroup({
         <span className="label-caps text-center">Daily budget</span>
         <span
           className="label-caps text-center"
-          title="Google-attributed ROAS per campaign; Real ROAS on the store total"
+          title="Google conversion value divided by campaign spend"
         >
-          ROAS
+          Google ROAS
         </span>
         <span className="label-caps text-center">Last Scaled at</span>
         <span className="label-caps text-center">Action</span>
@@ -742,8 +759,8 @@ function StoreGroup({
               </span>
             )}
           </CampaignMetric>
-          <CampaignMetric label="Real ROAS">
-            {store.realRoas === null ? "—" : multiplier(store.realRoas)}
+          <CampaignMetric label="Google ROAS">
+            {googleRoas === null ? "—" : multiplier(googleRoas)}
           </CampaignMetric>
           <CampaignMetric label="Last scaled at">—</CampaignMetric>
           <span className="hidden xl:block" aria-hidden />

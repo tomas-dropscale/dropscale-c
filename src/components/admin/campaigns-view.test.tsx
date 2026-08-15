@@ -164,7 +164,10 @@ describe("CampaignsView approved visual structure", () => {
     expect(html).toContain("TOTAL");
     expect(html).toContain("€2,800.00");
     expect(html).toContain("€200.00");
-    expect(html).toContain("Google-attributed ROAS per campaign");
+    expect(html).toContain("Google ROAS");
+    expect(html).toContain("Google conversion value divided by campaign spend");
+    expect(html).toContain("2.14x");
+    expect(html.indexOf("Real ROAS")).toBeLessThan(html.indexOf("Google ROAS"));
     expect(html).not.toContain(">real<");
     expect(html).toContain("PMAX (SF)");
     expect(html).toContain("Last Scaled at");
@@ -208,7 +211,7 @@ describe("CampaignsView approved visual structure", () => {
       "Status",
       "Spend",
       "Daily budget",
-      "ROAS",
+      "Google ROAS",
       "Last Scaled at",
       "Action",
     ]) {

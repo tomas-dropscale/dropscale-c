@@ -227,6 +227,30 @@ export function storeRealRoas(revenue: number | null, adSpend: number): number |
   return revenue / adSpend;
 }
 
+/** Google conversion value ÷ spend across campaign rows; never average ratios. */
+export function totalGoogleRoas(
+  campaigns: readonly Pick<CampaignViewCampaign, "spend" | "googleRoas">[],
+): number | null {
+  let spend = 0;
+  let conversionValue = 0;
+
+  for (const campaign of campaigns) {
+    if (!Number.isFinite(campaign.spend) || campaign.spend < 0) return null;
+    if (campaign.spend === 0) continue;
+    if (
+      campaign.googleRoas === null ||
+      !Number.isFinite(campaign.googleRoas) ||
+      campaign.googleRoas < 0
+    ) {
+      return null;
+    }
+    spend += campaign.spend;
+    conversionValue += campaign.spend * campaign.googleRoas;
+  }
+
+  return spend > 0 ? conversionValue / spend : null;
+}
+
 const CONTROLLED_ACTIONS: readonly CampaignActionHistory["action"][] = [
   "budget_changed",
   "campaign_paused",

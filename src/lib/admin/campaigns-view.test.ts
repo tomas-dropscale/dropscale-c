@@ -9,6 +9,7 @@ import {
   projectAdminCampaignsView,
   projectCampaignClients,
   storeRealRoas,
+  totalGoogleRoas,
   type CampaignActionHistory,
   type CampaignViewClient,
 } from "./campaigns-view";
@@ -185,6 +186,20 @@ describe("Campaigns view model", () => {
     expect(storeRealRoas(200, 80)).toBe(2.5);
     expect(storeRealRoas(null, 80)).toBeNull();
     expect(storeRealRoas(200, 0)).toBeNull();
+  });
+
+  it("keeps screenshot Google and Real ROAS totals separate", () => {
+    const campaigns = [
+      { spend: 40.65, googleRoas: 0.73 },
+      { spend: 32.39, googleRoas: 0 },
+      { spend: 14.35, googleRoas: 3.53 },
+      { spend: 11.08, googleRoas: 0 },
+    ];
+
+    expect(totalGoogleRoas(campaigns)).toBeCloseTo(0.8157814563, 9);
+    expect(storeRealRoas(658.45216, 98.47)).toBeCloseTo(6.6868301005, 9);
+    expect(totalGoogleRoas([{ spend: 10, googleRoas: null }])).toBeNull();
+    expect(totalGoogleRoas([])).toBeNull();
   });
 
   it("makes exact reporting-bound campaigns actionable without product policy setup", () => {
