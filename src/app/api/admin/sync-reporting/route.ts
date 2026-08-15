@@ -85,7 +85,17 @@ function exactRange(value: unknown): RangeSelection | null {
     typeof value.key !== "string" ||
     typeof value.from !== "string" ||
     typeof value.to !== "string" ||
-    !["today", "yesterday", "d7", "d30", "mtd", "ytd", "custom"].includes(value.key)
+    ![
+      "today",
+      "yesterday",
+      "d3",
+      "d7",
+      "d14",
+      "d30",
+      "mtd",
+      "ytd",
+      "custom",
+    ].includes(value.key)
   ) {
     return null;
   }
@@ -307,7 +317,7 @@ async function refreshMetricHistory(range: RangeSelection) {
   );
 }
 
-/** Exact-range manual sync, hourly today/d7 sync, or a bounded bootstrap. */
+/** Exact-range manual sync, an explicit machine preset, or a bounded bootstrap. */
 export async function POST(request: NextRequest) {
   const secret = process.env.CRON_SECRET;
   const bootstrapSecret = process.env.REPORTING_SYNC_SECRET;
@@ -329,8 +339,17 @@ export async function POST(request: NextRequest) {
       if (key === "d60") {
         return await refreshMetricHistory(rollingSelection(60));
       }
-      if (key !== "today" && key !== "d7" && key !== "d30") {
-        return response({ error: "Machine reporting range must be today, d7, d30 or d60." }, 422);
+      if (
+        key !== "today" &&
+        key !== "d3" &&
+        key !== "d7" &&
+        key !== "d14" &&
+        key !== "d30"
+      ) {
+        return response(
+          { error: "Machine reporting range must be today, d3, d7, d14, d30 or d60." },
+          422,
+        );
       }
       // d7 is the canonical rolling refresh: it upserts every individual
       // account/day, so a separate sync-metrics pass would repeat the same

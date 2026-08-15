@@ -984,7 +984,7 @@ async function calculateWeek(
                       capturedAt: start.captured_at,
                       timeZone: start.google_time_zone,
                       baselineAmount: Number(
-                        microsToDecimal(String(start.baseline_cost_micros)),
+                        microsToDecimal(String(start.baseline_cost_micros ?? 0)),
                       ),
                     },
                   }
@@ -1029,7 +1029,7 @@ async function calculateWeek(
               capturedAt: start.captured_at,
               timeZone: start.google_time_zone,
               baselineAmount: Number(
-                microsToDecimal(String(start.baseline_cost_micros)),
+                microsToDecimal(String(start.baseline_cost_micros ?? 0)),
               ),
             }
           : null,

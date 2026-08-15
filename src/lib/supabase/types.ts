@@ -550,8 +550,8 @@ export type AdAccountBillingStart = {
   google_local_date: string;
   google_time_zone: string;
   currency: string;
-  /** Integer micros. Read as a string whenever it participates in arithmetic. */
-  baseline_cost_micros: number | string;
+  /** Integer micros, or null for a reviewed full-day opening boundary. */
+  baseline_cost_micros: number | string | null;
   capture_started_at: string;
   captured_at: string;
   capture_id: string;

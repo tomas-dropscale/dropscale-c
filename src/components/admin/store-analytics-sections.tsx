@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   ChevronRight,
   CreditCard,
+  Image as ImageIcon,
   MousePointerClick,
   Users,
 } from "lucide-react";
@@ -405,13 +406,36 @@ export function CampaignPerformanceSection({
                       const realRoas = row.spend !== null && row.spend > 0 && row.shopifyRevenue !== null
                         ? row.shopifyRevenue / row.spend
                         : null;
+                      const thumbnailUrl = row.thumbnailUrl?.startsWith("https://")
+                        ? row.thumbnailUrl
+                        : null;
                       return (
                         <tr key={`${row.provider}:${row.kind}:${row.id}`} className="border-t border-[var(--border-subtle)] bg-[var(--bg-base)] hover:bg-[var(--bg-panel-hover)]">
                           <td className="px-5 py-2.5 pl-12">
-                            <p className="truncate font-medium text-[var(--text-secondary)]">{row.name}</p>
-                            <p className="mt-0.5 truncate text-[10px] text-[var(--text-muted)]">
-                              {row.detail || (row.shopifyUnits === null ? row.provider : `${integer(row.shopifyUnits)} Shopify units`)}
-                            </p>
+                            <div className="flex items-center gap-2.5">
+                              {row.kind === "creative" ? (
+                                <div className="flex size-11 shrink-0 items-center justify-center overflow-hidden rounded-md border border-[var(--border-subtle)] bg-[var(--bg-elevated)]">
+                                  {thumbnailUrl ? (
+                                    // eslint-disable-next-line @next/next/no-img-element -- exact provider asset URLs have unknown Google CDN hosts
+                                    <img
+                                      src={thumbnailUrl}
+                                      alt=""
+                                      loading="lazy"
+                                      referrerPolicy="no-referrer"
+                                      className="size-full object-cover"
+                                    />
+                                  ) : (
+                                    <ImageIcon className="size-4 text-[var(--text-muted)]" aria-hidden />
+                                  )}
+                                </div>
+                              ) : null}
+                              <div className="min-w-0">
+                                <p className="truncate font-medium text-[var(--text-secondary)]">{row.name}</p>
+                                <p className="mt-0.5 truncate text-[10px] text-[var(--text-muted)]">
+                                  {row.detail || (row.shopifyUnits === null ? row.provider : `${integer(row.shopifyUnits)} Shopify units`)}
+                                </p>
+                              </div>
+                            </div>
                           </td>
                           <td className="px-2.5 py-2.5 text-center"><Badge variant="neutral">{row.kind}</Badge></td>
                           <td className="px-2.5 py-2.5 text-center text-[10px] text-[var(--text-muted)]">{row.provider === "google_ads" ? "Google" : "Shopify"}</td>

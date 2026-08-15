@@ -138,11 +138,26 @@ function floatingPosition(anchor: DOMRect, preferredWidth: number) {
   };
 }
 
-function ClientMetric({ label, children }: { label: string; children: React.ReactNode }) {
+function clientRoasTone(value: number | null) {
+  if (value === null) return undefined;
+  if (value > 1.8) return "text-[var(--success-green)]";
+  if (value >= 1.6) return "text-[var(--warning-orange)]";
+  return "text-[var(--danger-red)]";
+}
+
+function ClientMetric({
+  label,
+  children,
+  tone,
+}: {
+  label: string;
+  children: React.ReactNode;
+  tone?: string;
+}) {
   return (
-    <span className="min-w-0">
+    <span className="min-w-0 md:text-center">
       <span className="label-caps mb-0.5 block md:hidden">{label}</span>
-      <span className="block truncate text-[13px] font-medium tabular-nums text-[var(--text-primary)]">
+      <span className={cn("block truncate text-[13px] font-medium tabular-nums text-[var(--text-primary)]", tone)}>
         {children}
       </span>
     </span>
@@ -837,17 +852,17 @@ function ClientSection({
           </span>
         </span>
 
-        <ClientMetric label="Revenue">
-          {client.revenue === null || client.currency === null
-            ? "—"
-            : money(client.revenue, client.currency)}
-        </ClientMetric>
         <ClientMetric label="Ad spend">
           {client.adSpend === null || client.currency === null
             ? "—"
             : money(client.adSpend, client.currency)}
         </ClientMetric>
-        <ClientMetric label="Real ROAS">
+        <ClientMetric label="Revenue">
+          {client.revenue === null || client.currency === null
+            ? "—"
+            : money(client.revenue, client.currency)}
+        </ClientMetric>
+        <ClientMetric label="Real ROAS" tone={clientRoasTone(client.realRoas)}>
           {client.realRoas === null ? "—" : multiplier(client.realRoas)}
         </ClientMetric>
       </button>
@@ -1053,9 +1068,9 @@ export function CampaignsView({
 
       <div className="hidden grid-cols-[minmax(260px,1.6fr)_repeat(3,minmax(100px,.65fr))] gap-4 border-b border-[var(--border-subtle)] px-5 py-2.5 md:grid">
         <span className="label-caps">Client</span>
-        <span className="label-caps">Revenue</span>
-        <span className="label-caps">Ad spend</span>
-        <span className="label-caps">Real ROAS</span>
+        <span className="label-caps text-center">Ad spend</span>
+        <span className="label-caps text-center">Revenue</span>
+        <span className="label-caps text-center">Real ROAS</span>
       </div>
 
       {visibleClients.length > 0 ? (

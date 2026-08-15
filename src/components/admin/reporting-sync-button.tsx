@@ -21,6 +21,33 @@ type ReportingSyncRequest =
       range: RangeSelection;
     };
 
+type MetricCoverage = { data?: { refreshed?: boolean } };
+type RefreshSummary = { refreshed?: number; metricCoverage?: MetricCoverage };
+type ReportingSyncResponse = {
+  error?: string;
+  result?: RefreshSummary;
+  campaigns?: RefreshSummary;
+  stores?: RefreshSummary[];
+  metricCoverage?: MetricCoverage;
+};
+
+const PARTIAL_REFRESH_ERRORS = new Set([
+  "Store reporting could not be fully refreshed.",
+  "Campaign reporting could not be fully refreshed.",
+  "Some reporting families could not be fully refreshed.",
+]);
+
+function hasPersistedSuccess(result: ReportingSyncResponse | null) {
+  return Boolean(
+    (result?.result?.refreshed ?? 0) > 0 ||
+      (result?.campaigns?.refreshed ?? 0) > 0 ||
+      result?.stores?.some((store) => (store.refreshed ?? 0) > 0) ||
+      result?.metricCoverage?.data?.refreshed ||
+      result?.result?.metricCoverage?.data?.refreshed ||
+      result?.campaigns?.metricCoverage?.data?.refreshed,
+  );
+}
+
 export async function requestReportingSync(
   request: ReportingSyncRequest,
   refresh: () => void,
@@ -31,13 +58,18 @@ export async function requestReportingSync(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request),
   });
-  const result = (await response.json().catch(() => null)) as
-    | { error?: string }
-    | null;
+  const result = (await response.json().catch(() => null)) as ReportingSyncResponse | null;
   // A classified server response may have persisted some families before
   // reporting an honest partial failure. Refresh those successes either way.
   refresh();
   if (!response.ok) {
+    if (
+      result?.error &&
+      PARTIAL_REFRESH_ERRORS.has(result.error) &&
+      hasPersistedSuccess(result)
+    ) {
+      return;
+    }
     throw new Error(result?.error || "Reporting sync failed.");
   }
 }

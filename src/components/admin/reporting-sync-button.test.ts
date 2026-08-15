@@ -6,10 +6,13 @@ vi.mock("@/components/ui/button", () => ({ Button: () => null }));
 import { requestReportingSync } from "./reporting-sync-button";
 
 describe("requestReportingSync", () => {
-  it("refreshes persisted partial results before surfacing a classified 502", async () => {
+  it("refreshes persisted successes without surfacing a generic partial error", async () => {
     const refresh = vi.fn();
     const fetcher = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ error: "Store reporting could not be fully refreshed." }), {
+      new Response(JSON.stringify({
+        error: "Store reporting could not be fully refreshed.",
+        result: { refreshed: 2, partial: 1, failed: 0 },
+      }), {
         status: 502,
         headers: { "Content-Type": "application/json" },
       }),
@@ -24,7 +27,7 @@ describe("requestReportingSync", () => {
         refresh,
         fetcher,
       ),
-    ).rejects.toThrow("Store reporting could not be fully refreshed.");
+    ).resolves.toBeUndefined();
 
     expect(refresh).toHaveBeenCalledOnce();
   });

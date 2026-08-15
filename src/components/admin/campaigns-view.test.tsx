@@ -154,6 +154,10 @@ describe("CampaignsView approved visual structure", () => {
     expect(html).toContain("Revenue");
     expect(html).toContain("Ad spend");
     expect(html).toContain("Real ROAS");
+    expect(html.indexOf(">Ad spend</span>")).toBeLessThan(
+      html.indexOf(">Revenue</span>"),
+    );
+    expect(html).toContain('text-[var(--success-green)]">3.00x');
     expect(html).toContain("€8,400.00");
     expect(html.match(/3\.00x/g)).toHaveLength(2);
     expect(html).toContain("https://northwind-home.com");

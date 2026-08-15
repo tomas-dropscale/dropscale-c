@@ -128,47 +128,6 @@ function RunningIndicator({
   return null;
 }
 
-function ProviderFreshnessNotice({
-  freshness,
-}: {
-  freshness: NonNullable<AdminStoreAnalytics["providerFreshness"]>;
-}) {
-  if (freshness.state === "live") return null;
-  const label = freshness.state === "not_synced"
-    ? "Not synced"
-    : freshness.stale
-      ? "Stale"
-      : freshness.lastErrorCode
-        ? "Refresh failed"
-        : freshness.state === "partial"
-          ? "Partial"
-          : "Ready";
-  const refreshed = validTimestamp(freshness.refreshedAt)
-    ? `Refreshed ${ACTIVITY_DATE.format(new Date(freshness.refreshedAt))}`
-    : "No successful provider refresh";
-  const attempted = validTimestamp(freshness.lastAttemptAt)
-    ? `Last attempt ${ACTIVITY_DATE.format(new Date(freshness.lastAttemptAt))}`
-    : "No provider refresh attempt";
-  const error = freshness.lastErrorCode
-    ? ` Last refresh error: ${freshness.lastErrorCode}. The last successful payload remains visible.`
-    : "";
-  const stale = freshness.stale
-    ? " This current-day snapshot is older than 90 minutes; sync this exact period."
-    : "";
-  return (
-    <p
-      role={freshness.state === "ready" ? "status" : "alert"}
-      className={cn(
-        "panel flex flex-wrap items-center gap-2 px-4 py-3 text-xs text-[var(--text-secondary)]",
-        freshness.state !== "ready" && "border-[var(--warning-orange)]/25 text-[var(--warning-orange)]",
-      )}
-    >
-      <Badge variant={freshness.state === "ready" ? "success" : "warning"}>{label}</Badge>
-      <span>{refreshed} · {attempted}.{error}{stale}</span>
-    </p>
-  );
-}
-
 export function AnalyticsScopeSelector({
   clients,
   overview,
@@ -582,14 +541,6 @@ export function AnalyticsView({
 
         {scope.selectedStore && storeAnalytics ? (
           <>
-            {storeAnalytics.providerFreshness && (
-              <ProviderFreshnessNotice freshness={storeAnalytics.providerFreshness} />
-            )}
-            {storeAnalytics.shopifyProvenance === "supplemental_v2_shopify" && (
-              <p role="status" className="panel border-[var(--accent-gold)]/25 px-4 py-3 text-xs text-[var(--text-secondary)]">
-                Shopify detail snapshots use this store&apos;s verified read-only onboarding connection. Revenue, spend and KPI totals remain on the internal legacy rollup until reporting cutover.
-              </p>
-            )}
             <StoreFunnelSections analytics={storeAnalytics} />
             <StoreSpendSection
               spend={storeAnalytics.spend}

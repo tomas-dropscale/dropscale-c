@@ -194,17 +194,18 @@ export type GoogleCampaignTimelinePoint = {
   googleRevenue: number;
 };
 
-/** One exact range-aggregated Demand Gen ad from a legacy Google connection. */
+/** One exact range-aggregated Demand Gen asset from a legacy Google connection. */
 export type LiveDemandGenAdPerformance = {
   adAccountId: string;
   customerId: string;
   currency: string;
   timeZone: string;
   providerCampaignId: string;
-  providerAdId: string;
+  providerAssetId: string;
   name: string | null;
-  type: string;
-  status: CampaignStatus;
+  fieldType: string;
+  assetKind: "image" | "video" | null;
+  thumbnailUrl: string | null;
   spend: number;
   impressions: number;
   clicks: number;
@@ -253,12 +254,15 @@ export type GoogleCampaignBreakdownRow = {
   clicks: number;
   conversions: number;
   googleRevenue: number;
+  /** Exact provider image URL. Null when the provider exposes no thumbnail. */
+  thumbnailUrl?: string | null;
+  assetKind?: "image" | "video" | null;
 };
 
 /**
- * Exact, bounded Demand Gen ad performance for every campaign in one account.
- * The date is deliberately absent from SELECT so each row covers the requested
- * inclusive range rather than multiplying the row count by day.
+ * Exact, bounded Demand Gen asset performance for every campaign in one account.
+ * Google exposes asset metrics and image metadata through separate resources;
+ * the stable asset id is the only join key.
  */
 export async function fetchLiveDemandGenAdPerformance(
   customerId: string,
@@ -275,63 +279,165 @@ export async function fetchLiveDemandGenAdPerformance(
       customer.time_zone,
       campaign.id,
       campaign.advertising_channel_type,
-      ad_group_ad.ad.id,
-      ad_group_ad.ad.name,
-      ad_group_ad.ad.type,
-      ad_group_ad.status,
+      asset.id,
+      ad_group_ad_asset_view.field_type,
       metrics.cost_micros,
       metrics.impressions,
       metrics.clicks,
       metrics.conversions,
       metrics.conversions_value
-    FROM ad_group_ad
+    FROM ad_group_ad_asset_view
     WHERE campaign.advertising_channel_type = 'DEMAND_GEN'
       AND ${dateClause(range)}
-    ORDER BY metrics.cost_micros DESC, campaign.id, ad_group_ad.ad.id
+      AND ad_group_ad_asset_view.field_type IN
+        ('SQUARE_MARKETING_IMAGE', 'MARKETING_IMAGE', 'PORTRAIT_MARKETING_IMAGE', 'VIDEO')
+    ORDER BY metrics.cost_micros DESC, campaign.id, asset.id
     LIMIT ${MAX_CREATIVE_ROWS}`,
   );
-  assertBounded(rows, "Demand Gen ad", MAX_CREATIVE_ROWS);
+  assertBounded(rows, "Demand Gen asset", MAX_CREATIVE_ROWS);
 
-  const seen = new Set<string>();
-  return rows.map((row) => {
+  const aggregated = new Map<string, Omit<LiveDemandGenAdPerformance,
+    "name" | "assetKind" | "thumbnailUrl"
+  >>();
+  for (const row of rows) {
     const identity = exactCustomer(row, customerId);
     const campaign = row.campaign ?? {};
-    const adGroupAd = row.adGroupAd ?? {};
-    const ad = adGroupAd.ad && typeof adGroupAd.ad === "object" && !Array.isArray(adGroupAd.ad)
-      ? adGroupAd.ad as Record<string, unknown>
-      : {};
+    const asset = row.asset ?? {};
+    const view = row.adGroupAdAssetView ?? {};
     const providerCampaignId = integerText(campaign.id, "campaign identity");
-    const providerAdId = integerText(ad.id, "ad identity");
+    const providerAssetId = integerText(asset.id, "asset identity");
     const channel = cleanText(
       campaign.advertisingChannelType,
       "campaign channel",
       80,
     ).toUpperCase();
-    const type = cleanText(ad.type, "Demand Gen ad type", 100).toUpperCase();
-    const providerStatus = cleanText(adGroupAd.status, "ad status", 40).toUpperCase();
-    if (
-      channel !== "DEMAND_GEN" ||
-      !/^DEMAND_GEN_[A-Z0-9_]{1,80}$/.test(type) ||
-      !(providerStatus in STATUS)
-    ) {
-      throw new Error("Google Ads returned an invalid Demand Gen ad row.");
+    const fieldType = cleanText(view.fieldType, "Demand Gen asset field type", 100)
+      .toUpperCase();
+    if (channel !== "DEMAND_GEN" || ![
+      "SQUARE_MARKETING_IMAGE",
+      "MARKETING_IMAGE",
+      "PORTRAIT_MARKETING_IMAGE",
+      "VIDEO",
+    ].includes(fieldType)) {
+      throw new Error("Google Ads returned an invalid Demand Gen asset row.");
     }
-    const key = `${providerCampaignId}\u0000${providerAdId}`;
-    if (seen.has(key)) {
-      throw new Error("Google Ads returned duplicate Demand Gen ad identity.");
+    const metrics = detailMetrics(row);
+    const key = `${providerCampaignId}\u0000${providerAssetId}`;
+    const current = aggregated.get(key);
+    if (current) {
+      if (
+        current.customerId !== identity.customerId ||
+        current.currency !== identity.currency ||
+        current.timeZone !== identity.timeZone
+      ) {
+        throw new Error("Google Ads returned inconsistent Demand Gen asset identity.");
+      }
+      current.spend += metrics.spend;
+      current.impressions += metrics.impressions;
+      current.clicks += metrics.clicks;
+      current.conversions += metrics.conversions;
+      current.conversionValue += metrics.conversionValue;
+      if (!current.fieldType.split(" · ").includes(fieldType)) {
+        current.fieldType = `${current.fieldType} · ${fieldType}`;
+      }
+      continue;
     }
-    seen.add(key);
-    return {
+    aggregated.set(key, {
       adAccountId: accountId,
       ...identity,
       providerCampaignId,
-      providerAdId,
-      name: optionalText(ad.name, "Demand Gen ad name"),
-      type,
-      status: STATUS[providerStatus],
-      ...detailMetrics(row),
-    };
-  });
+      providerAssetId,
+      fieldType,
+      ...metrics,
+    });
+  }
+  if (aggregated.size === 0) return [];
+
+  const assetIds = [...new Set([...aggregated.values()].map((row) => row.providerAssetId))];
+  const metadataRows = await searchGoogleAds(
+    customerId,
+    refreshToken,
+    `SELECT
+      customer.id,
+      customer.currency_code,
+      customer.time_zone,
+      asset.id,
+      asset.name,
+      asset.type,
+      asset.image_asset.full_size.url,
+      asset.youtube_video_asset.youtube_video_title
+    FROM asset
+    WHERE asset.id IN (${assetIds.join(", ")})
+      AND asset.type IN ('IMAGE', 'YOUTUBE_VIDEO')
+    LIMIT ${MAX_CREATIVE_ROWS}`,
+  );
+  assertBounded(metadataRows, "Demand Gen asset metadata", MAX_CREATIVE_ROWS);
+  const metadata = new Map<string, {
+    name: string | null;
+    assetKind: "image" | "video";
+    thumbnailUrl: string | null;
+  }>();
+  for (const row of metadataRows) {
+    const identity = exactCustomer(row, customerId);
+    const asset = row.asset ?? {};
+    const id = integerText(asset.id, "asset identity");
+    if (!assetIds.includes(id) || metadata.has(id)) {
+      throw new Error("Google Ads returned invalid Demand Gen asset metadata.");
+    }
+    const expected = [...aggregated.values()].find((item) => item.providerAssetId === id);
+    if (
+      !expected ||
+      expected.currency !== identity.currency ||
+      expected.timeZone !== identity.timeZone
+    ) {
+      throw new Error("Google Ads returned inconsistent Demand Gen asset metadata.");
+    }
+    const type = cleanText(asset.type, "asset type", 40).toUpperCase();
+    if (type !== "IMAGE" && type !== "YOUTUBE_VIDEO") {
+      throw new Error("Google Ads returned invalid Demand Gen asset metadata.");
+    }
+    const image = asset.imageAsset && typeof asset.imageAsset === "object" &&
+      !Array.isArray(asset.imageAsset)
+      ? asset.imageAsset as Record<string, unknown>
+      : {};
+    const fullSize = image.fullSize && typeof image.fullSize === "object" &&
+      !Array.isArray(image.fullSize)
+      ? image.fullSize as Record<string, unknown>
+      : {};
+    const rawUrl = fullSize.url;
+    let thumbnailUrl: string | null = null;
+    if (rawUrl != null && rawUrl !== "") {
+      const parsed = new URL(cleanText(rawUrl, "asset image URL", 4_096));
+      if (parsed.protocol !== "https:" || parsed.username || parsed.password) {
+        throw new Error("Google Ads returned an invalid asset image URL.");
+      }
+      thumbnailUrl = parsed.toString();
+    }
+    const video = asset.youtubeVideoAsset && typeof asset.youtubeVideoAsset === "object" &&
+      !Array.isArray(asset.youtubeVideoAsset)
+      ? asset.youtubeVideoAsset as Record<string, unknown>
+      : {};
+    metadata.set(id, {
+      name: optionalText(
+        type === "YOUTUBE_VIDEO" ? video.youtubeVideoTitle ?? asset.name : asset.name,
+        "asset name",
+      ),
+      assetKind: type === "IMAGE" ? "image" : "video",
+      thumbnailUrl: type === "IMAGE" ? thumbnailUrl : null,
+    });
+  }
+
+  return [...aggregated.values()]
+    .map((row) => ({
+      ...row,
+      name: metadata.get(row.providerAssetId)?.name ?? null,
+      assetKind: metadata.get(row.providerAssetId)?.assetKind ?? null,
+      thumbnailUrl: metadata.get(row.providerAssetId)?.thumbnailUrl ?? null,
+    }))
+    .sort((left, right) =>
+      right.spend - left.spend ||
+      left.providerCampaignId.localeCompare(right.providerCampaignId) ||
+      left.providerAssetId.localeCompare(right.providerAssetId));
 }
 
 /** Exact, bounded product performance for all PMax retail campaigns in one account. */
@@ -455,14 +561,16 @@ export async function fetchLiveGoogleDemandGenBreakdowns(
     campaignId: creative.providerCampaignId,
     provider: "google_ads",
     kind: "creative",
-    id: creative.providerAdId,
+    id: creative.providerAssetId,
     name: creative.name,
-    detail: creative.type,
+    detail: creative.fieldType,
     spend: creative.spend,
     impressions: creative.impressions,
     clicks: creative.clicks,
     conversions: creative.conversions,
     googleRevenue: creative.conversionValue,
+    thumbnailUrl: creative.thumbnailUrl,
+    assetKind: creative.assetKind,
   }));
 }
 

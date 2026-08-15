@@ -338,31 +338,59 @@ function dailyMetricRow(overrides: Record<string, unknown> = {}) {
 describe("exact Google campaign breakdowns", () => {
   beforeEach(() => mocks.searchGoogleAds.mockReset());
 
-  it("reads bounded range-aggregated Demand Gen ads for the exact customer", async () => {
-    mocks.searchGoogleAds.mockResolvedValue([
-      {
-        ...providerIdentity(),
-        campaign: { id: "42", advertisingChannelType: "DEMAND_GEN" },
-        adGroupAd: {
-          status: "ENABLED",
-          ad: {
-            id: "9001",
-            name: "Summer creative",
-            type: "DEMAND_GEN_MULTI_ASSET_AD",
+  it("maps every Demand Gen image asset to its own provider metrics", async () => {
+    mocks.searchGoogleAds
+      .mockResolvedValueOnce([
+        {
+          ...providerIdentity(),
+          campaign: { id: "42", advertisingChannelType: "DEMAND_GEN" },
+          asset: { id: "9001" },
+          adGroupAdAssetView: { fieldType: "MARKETING_IMAGE" },
+          metrics: {
+            costMicros: "125500000",
+            impressions: "10000",
+            clicks: "250",
+            conversions: "12",
+            conversionsValue: "490",
           },
         },
-        metrics: {
-          costMicros: "125500000",
-          impressions: "10000",
-          clicks: "250",
-          conversions: "12",
-          conversionsValue: "490",
+        {
+          ...providerIdentity(),
+          campaign: { id: "42", advertisingChannelType: "DEMAND_GEN" },
+          asset: { id: "9002" },
+          adGroupAdAssetView: { fieldType: "SQUARE_MARKETING_IMAGE" },
+          metrics: {
+            costMicros: "25000000",
+            impressions: "2000",
+            clicks: "50",
+            conversions: "3",
+            conversionsValue: "100",
+          },
         },
-      },
-    ]);
+      ])
+      .mockResolvedValueOnce([
+        {
+          ...providerIdentity(),
+          asset: {
+            id: "9001",
+            name: "Landscape",
+            type: "IMAGE",
+            imageAsset: { fullSize: { url: "https://google.example/landscape.jpg" } },
+          },
+        },
+        {
+          ...providerIdentity(),
+          asset: {
+            id: "9002",
+            name: "Square",
+            type: "IMAGE",
+            imageAsset: { fullSize: { url: "https://google.example/square.jpg" } },
+          },
+        },
+      ]);
 
     await expect(
-      fetchLiveDemandGenAdPerformance(
+      fetchLiveGoogleDemandGenBreakdowns(
         "123-456-7890",
         "refresh",
         "70000000-0000-4000-8000-000000000003",
@@ -370,29 +398,48 @@ describe("exact Google campaign breakdowns", () => {
       ),
     ).resolves.toEqual([
       {
-        adAccountId: "70000000-0000-4000-8000-000000000003",
-        customerId: "1234567890",
-        currency: "EUR",
-        timeZone: "Europe/Lisbon",
-        providerCampaignId: "42",
-        providerAdId: "9001",
-        name: "Summer creative",
-        type: "DEMAND_GEN_MULTI_ASSET_AD",
-        status: "active",
+        accountId: "70000000-0000-4000-8000-000000000003",
+        campaignId: "42",
+        provider: "google_ads",
+        kind: "creative",
+        id: "9001",
+        name: "Landscape",
+        detail: "MARKETING_IMAGE",
         spend: 125.5,
         impressions: 10000,
         clicks: 250,
         conversions: 12,
-        conversionValue: 490,
+        googleRevenue: 490,
+        thumbnailUrl: "https://google.example/landscape.jpg",
+        assetKind: "image",
+      },
+      {
+        accountId: "70000000-0000-4000-8000-000000000003",
+        campaignId: "42",
+        provider: "google_ads",
+        kind: "creative",
+        id: "9002",
+        name: "Square",
+        detail: "SQUARE_MARKETING_IMAGE",
+        spend: 25,
+        impressions: 2000,
+        clicks: 50,
+        conversions: 3,
+        googleRevenue: 100,
+        thumbnailUrl: "https://google.example/square.jpg",
+        assetKind: "image",
       },
     ]);
 
     const query = mocks.searchGoogleAds.mock.calls[0]?.[2] as string;
-    expect(query).toContain("FROM ad_group_ad");
+    expect(query).toContain("FROM ad_group_ad_asset_view");
     expect(query).toContain("campaign.advertising_channel_type = 'DEMAND_GEN'");
     expect(query).toContain("segments.date BETWEEN '2026-08-08' AND '2026-08-14'");
     expect(query).toContain("LIMIT 1001");
     expect(query).not.toContain("segments.date,");
+    expect(mocks.searchGoogleAds.mock.calls[1]?.[2]).toContain(
+      "asset.id IN (9001, 9002)",
+    );
   });
 
   it("reads only PMax products with spend and preserves the full Merchant tuple", async () => {

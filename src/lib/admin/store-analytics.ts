@@ -109,6 +109,9 @@ export type AdminAnalyticsCampaignBreakdownRow = {
   shopifyUnits: number | null;
   /** campaign_products exposes net units, not product-level revenue. */
   shopifyRevenue: number | null;
+  /** Exact provider thumbnail; null/absent is rendered as a neutral asset tile. */
+  thumbnailUrl?: string | null;
+  assetKind?: "image" | "video" | null;
 };
 
 export type AdminAnalyticsCampaignBreakdownSource = {
@@ -1246,6 +1249,8 @@ function campaignBreakdown(
         shopifyProductId: null,
         shopifyUnits: null,
         shopifyRevenue: null,
+        thumbnailUrl: row.thumbnailUrl ?? null,
+        assetKind: row.assetKind ?? null,
       }));
     googleSource = {
       provider: "google_ads",

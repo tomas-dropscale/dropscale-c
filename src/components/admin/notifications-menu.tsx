@@ -12,6 +12,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { useNotificationReadState } from "@/components/ui/use-notification-read-state";
 import type { PendingCounts } from "@/lib/admin/approvals";
 import { createClient } from "@/lib/supabase/client";
 import { fmt } from "@/lib/i18n";
@@ -20,50 +21,63 @@ import { useI18n } from "@/lib/i18n/provider";
 /**
  * Approval inbox in the admin chrome — LIVE.
  *
- * The badge is driven by client-side counts, not by the server render: the
- * server value is only the first paint. Realtime events trigger a re-count
- * immediately, and a 60-second poll backstops environments where Realtime
- * isn't enabled on these tables — so a new registration shows up on its own,
- * never waiting for a manual refresh.
+ * The rows use server counts on first paint. A small client-side ID read then
+ * drives the badge, so opening it marks those exact items as read and only a
+ * new fingerprint can light it again. Realtime events and a 60-second poll
+ * keep both counts and fingerprints current.
  */
 export function NotificationsMenu({ counts }: { counts: PendingCounts }) {
   const router = useRouter();
   const { d } = useI18n();
 
   // null until the first client-side count lands; the server value covers the gap.
-  const [live, setLive] = React.useState<PendingCounts | null>(null);
-  const current = live ?? counts;
+  const [live, setLive] = React.useState<{
+    counts: PendingCounts;
+    fingerprints: string[];
+  } | null>(null);
+  const current = live?.counts ?? counts;
+  const { unread, markRead } = useNotificationReadState(
+    "dropscale:admin-notifications:v1",
+    live?.fingerprints ?? [],
+  );
 
   const recount = React.useCallback(async () => {
     const supabase = createClient();
     const [clients, accounts, requests, creatives] = await Promise.all([
       supabase
         .from("portal_clients")
-        .select("id", { count: "exact", head: true })
+        .select("id")
         .eq("approval_status", "pending"),
       supabase
         .from("ad_accounts")
-        .select("id", { count: "exact", head: true })
+        .select("id")
         .eq("status", "pending"),
       supabase
         .from("account_requests")
-        .select("id", { count: "exact", head: true })
+        .select("id")
         .eq("status", "pending"),
       supabase
         .from("creative_submissions")
-        .select("id", { count: "exact", head: true })
+        .select("id")
         .eq("status", "new"),
     ]);
 
+    const clientIds = (clients.data ?? []).map((row) => `client:${row.id}`);
+    const accountIds = (accounts.data ?? []).map((row) => `account:${row.id}`);
+    const requestIds = (requests.data ?? []).map((row) => `request:${row.id}`);
+    const creativeIds = (creatives.data ?? []).map((row) => `creative:${row.id}`);
     const next = {
-      clients: clients.count ?? 0,
-      accounts: accounts.count ?? 0,
-      requests: requests.count ?? 0,
-      creatives: creatives.count ?? 0,
+      clients: clientIds.length,
+      accounts: accountIds.length,
+      requests: requestIds.length,
+      creatives: creativeIds.length,
     };
     setLive({
-      ...next,
-      total: next.clients + next.accounts + next.requests + next.creatives,
+      counts: {
+        ...next,
+        total: next.clients + next.accounts + next.requests + next.creatives,
+      },
+      fingerprints: [...clientIds, ...accountIds, ...requestIds, ...creativeIds],
     });
   }, []);
 
@@ -79,6 +93,7 @@ export function NotificationsMenu({ counts }: { counts: PendingCounts }) {
     };
 
     const supabase = createClient();
+    queueMicrotask(() => void recount());
     const channel = supabase
       .channel("admin-approvals")
       .on("postgres_changes", { event: "*", schema: "public", table: "portal_clients" }, onEvent)
@@ -91,7 +106,7 @@ export function NotificationsMenu({ counts }: { counts: PendingCounts }) {
       )
       .subscribe();
 
-    // Poll fallback: badge only (no page refresh), cheap head-count queries.
+    // Poll fallback: badge only (no page refresh), small ID-only queries.
     const interval = setInterval(() => void recount(), 60_000);
 
     return () => {
@@ -141,13 +156,13 @@ export function NotificationsMenu({ counts }: { counts: PendingCounts }) {
   ].filter((row) => row.count > 0);
 
   return (
-    <DropdownMenu>
+    <DropdownMenu onOpenChange={(open) => open && markRead()}>
       <DropdownMenuTrigger
         aria-label={d.notifications.open}
         className="transition-smooth relative rounded-md p-1.5 text-[var(--text-secondary)] outline-none hover:bg-[var(--bg-panel)] hover:text-[var(--text-primary)] focus-visible:ring-2 focus-visible:ring-[var(--accent-gold)]/30 data-[state=open]:bg-[var(--bg-panel)]"
       >
         <Bell className="size-4" aria-hidden />
-        {current.total > 0 && (
+        {unread && current.total > 0 && (
           <span
             className="absolute -top-0.5 -right-0.5 flex min-w-[15px] items-center justify-center rounded-full bg-[var(--accent-gold)] px-1 text-[9px] font-semibold text-[var(--bg-base)]"
             aria-label={fmt(d.notifications.awaitingApproval, { count: current.total })}

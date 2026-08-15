@@ -405,7 +405,7 @@ describe("AnalyticsView", () => {
     );
   });
 
-  it("shows stale provider freshness and the last failed attempt without hiding ready payload", () => {
+  it("keeps family errors without rendering redundant top-level freshness banners", () => {
     const analytics = storeAnalytics();
     analytics.providerFreshness = {
       state: "partial",
@@ -418,6 +418,7 @@ describe("AnalyticsView", () => {
       ...analytics.funnel,
       message: "The last refresh failed (provider_failed); showing the last successful snapshot.",
     };
+    analytics.shopifyProvenance = "supplemental_v2_shopify";
     const html = renderToStaticMarkup(
       <AnalyticsView
         clients={clients}
@@ -428,11 +429,10 @@ describe("AnalyticsView", () => {
       />,
     );
 
-    expect(html).toContain("Stale");
-    expect(html).toContain("Refreshed");
-    expect(html).toContain("Last attempt");
-    expect(html).toContain("Last refresh error: provider_failed");
-    expect(html).toContain("older than 90 minutes");
+    expect(html).not.toContain("Last attempt");
+    expect(html).not.toContain("Last refresh error: provider_failed");
+    expect(html).not.toContain("older than 90 minutes");
+    expect(html).not.toContain("internal legacy rollup until reporting cutover");
     expect(html).toContain("last refresh failed (provider_failed)");
     expect(html).toContain("200");
   });

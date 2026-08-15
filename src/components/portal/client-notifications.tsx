@@ -12,12 +12,13 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { useNotificationReadState } from "@/components/ui/use-notification-read-state";
 import { fmt } from "@/lib/i18n";
 import { useI18n } from "@/lib/i18n/provider";
 
 /**
- * The client's own notification bell, next to their profile. State-free (no
- * notifications table): it reflects two things until they're resolved —
+ * The client's own notification bell, next to their profile. Without a
+ * notifications table, it reflects two things until they're resolved —
  *   1. store SETUP steps still open (connect Google/Shopify, set costs);
  *   2. accounts still PENDING team approval.
  * A soft chime plays when the count rises (e.g. a new pending account), never
@@ -113,6 +114,17 @@ export function ClientNotifications({
   }, [accounts, setup]);
 
   const count = setupTasks.length + pending.length;
+  const fingerprints = React.useMemo(
+    () => [
+      ...setupTasks.map((task) => `setup:${task.key}`),
+      ...pending.map((account) => `pending:${account.id}`),
+    ],
+    [pending, setupTasks],
+  );
+  const { unread, markRead } = useNotificationReadState(
+    "dropscale:client-notifications:v1",
+    fingerprints,
+  );
 
   // Chime only when the count RISES. Seeded on mount so a first load with open
   // items stays silent.
@@ -123,13 +135,13 @@ export function ClientNotifications({
   }, [count]);
 
   return (
-    <DropdownMenu>
+    <DropdownMenu onOpenChange={(open) => open && markRead()}>
       <DropdownMenuTrigger
         aria-label={d.notifications.open}
         className="transition-smooth relative rounded-md p-1.5 text-[var(--text-secondary)] outline-none hover:bg-[var(--bg-panel)] hover:text-[var(--text-primary)] focus-visible:ring-2 focus-visible:ring-[var(--accent-gold)]/30 data-[state=open]:bg-[var(--bg-panel)]"
       >
         <Bell className="size-4" aria-hidden />
-        {count > 0 && (
+        {unread && count > 0 && (
           <span className="absolute -top-0.5 -right-0.5 flex min-w-[15px] items-center justify-center rounded-full bg-[var(--warning-orange)] px-1 text-[9px] font-semibold text-[var(--bg-base)]">
             {count > 9 ? "9+" : count}
           </span>

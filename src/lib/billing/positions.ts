@@ -78,7 +78,7 @@ export type BillingPositionStart = {
   id: string;
   accountId: string;
   googleLocalDate: string;
-  baselineCostMicros: string | number;
+  baselineCostMicros: string | number | null;
 };
 
 export type BillingPositionEnd = {

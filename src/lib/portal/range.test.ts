@@ -34,6 +34,16 @@ describe("rangeQuery", () => {
       from: "2026-08-09",
       to: "2026-08-15",
     });
+    expect(presetSelection("d3", new Date("2026-08-14T23:30:00.000Z"))).toEqual({
+      key: "d3",
+      from: "2026-08-13",
+      to: "2026-08-15",
+    });
+    expect(presetSelection("d14", new Date("2026-08-14T23:30:00.000Z"))).toEqual({
+      key: "d14",
+      from: "2026-08-02",
+      to: "2026-08-15",
+    });
   });
 
   it("rejects forged preset spans and unbounded custom reads", () => {

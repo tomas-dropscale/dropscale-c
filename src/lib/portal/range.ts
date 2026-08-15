@@ -6,7 +6,16 @@
  * gets `BETWEEN from AND to`, the mock always gets a day count.
  */
 
-export const RANGE_PRESETS = ["today", "yesterday", "d7", "d30", "mtd", "ytd"] as const;
+export const RANGE_PRESETS = [
+  "today",
+  "yesterday",
+  "d3",
+  "d7",
+  "d14",
+  "d30",
+  "mtd",
+  "ytd",
+] as const;
 export type RangePreset = (typeof RANGE_PRESETS)[number];
 export type RangeKey = RangePreset | "custom";
 
@@ -58,8 +67,12 @@ export function presetSelection(key: RangePreset, now = new Date()): RangeSelect
       return { key, from: today, to: today };
     case "yesterday":
       return { key, from: shifted(today, -1), to: shifted(today, -1) };
+    case "d3":
+      return { key, from: shifted(today, -2), to: today };
     case "d7":
       return { key, from: shifted(today, -6), to: today };
+    case "d14":
+      return { key, from: shifted(today, -13), to: today };
     case "d30":
       return { key, from: shifted(today, -29), to: today };
     case "mtd":
@@ -96,8 +109,12 @@ function validExplicitRange(
     case "today":
     case "yesterday":
       return days === 1;
+    case "d3":
+      return days === 3;
     case "d7":
       return days === 7;
+    case "d14":
+      return days === 14;
     case "d30":
       return days === 30;
     case "mtd":

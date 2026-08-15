@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
+import type { RangeSelection } from "@/lib/portal/range";
 
 const mocks = vi.hoisted(() => {
   class ClientOnboardingError extends Error {
@@ -92,7 +93,7 @@ function cronRequest(range: string, secret = CRON_SECRET, origin?: string) {
   });
 }
 
-function campaignRequest(range = RANGE) {
+function campaignRequest(range: RangeSelection = RANGE) {
   return { scope: "campaigns", range };
 }
 
@@ -225,6 +226,29 @@ describe("admin exact-range reporting sync route", () => {
       scope: "campaigns",
       result: campaignReady,
     });
+  });
+
+  it("accepts the exact d3 and d14 manual and machine presets", async () => {
+    for (const range of [
+      { key: "d3" as const, from: "2026-08-13", to: "2026-08-15" },
+      { key: "d14" as const, from: "2026-08-02", to: "2026-08-15" },
+    ]) {
+      const response = await POST(adminRequest(campaignRequest(range)));
+
+      expect(response.status).toBe(200);
+      expect(mocks.refreshAdminCampaignSnapshots).toHaveBeenLastCalledWith(range, {
+        authenticate: false,
+        client: serviceClient,
+        refreshMetrics: true,
+      });
+
+      const machineResponse = await POST(cronRequest(range.key));
+      expect(machineResponse.status).toBe(200);
+      expect(mocks.refreshAdminCampaignSnapshots).toHaveBeenLastCalledWith(range, {
+        authenticate: false,
+        client: serviceClient,
+      });
+    }
   });
 
   it("syncs every store and the portfolio together for the manual all request", async () => {

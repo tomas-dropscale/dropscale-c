@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { LoaderCircle } from "lucide-react";
 
 import { DateRangePicker } from "@/components/ui/date-range-picker";
 import {
@@ -45,7 +46,7 @@ export function RangePicker({
   const searchParams = useSearchParams();
   const currentQuery = searchParams.toString();
   const [optimistic, setOptimistic] = React.useOptimistic(current);
-  const [, startTransition] = React.useTransition();
+  const [pending, startTransition] = React.useTransition();
 
   const hrefFor = React.useCallback(
     (selection: RangeSelection) => rangeHref(pathname, currentQuery, selection),
@@ -67,5 +68,21 @@ export function RangePicker({
     });
   }
 
-  return <DateRangePicker value={optimistic} onApply={apply} footer={footer} />;
+  return (
+    <>
+      <DateRangePicker value={optimistic} onApply={apply} footer={footer} />
+      {pending && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="pointer-events-none fixed inset-0 z-[70] bg-black/10"
+        >
+          <span className="absolute top-4 right-4 flex items-center gap-2 rounded-[10px] border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-3 py-2 text-xs font-medium text-[var(--text-primary)] shadow-xl shadow-black/35">
+            <LoaderCircle className="size-3.5 animate-spin text-[var(--accent-gold)]" aria-hidden />
+            Updating timeframe…
+          </span>
+        </div>
+      )}
+    </>
+  );
 }

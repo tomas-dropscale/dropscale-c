@@ -40,7 +40,9 @@ vi.mock("@/lib/i18n/provider", () => ({
       ranges: {
         today: "Today",
         yesterday: "Yesterday",
+        d3: "Last 3 days",
         d7: "Last 7 days",
+        d14: "Last 14 days",
         d30: "Last 30 days",
         mtd: "This month",
         ytd: "This year",

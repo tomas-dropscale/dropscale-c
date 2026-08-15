@@ -20,7 +20,9 @@ export const en = {
   ranges: {
     today: "Today",
     yesterday: "Yesterday",
+    d3: "Last 3 days",
     d7: "Last 7 days",
+    d14: "Last 14 days",
     d30: "Last 30 days",
     mtd: "This month",
     ytd: "This year",
@@ -1279,7 +1281,9 @@ export const pt: Dictionary = {
   ranges: {
     today: "Hoje",
     yesterday: "Ontem",
+    d3: "Últimos 3 dias",
     d7: "Últimos 7 dias",
+    d14: "Últimos 14 dias",
     d30: "Últimos 30 dias",
     mtd: "Este mês",
     ytd: "Este ano",
@@ -2520,7 +2524,9 @@ export const ptBR: Dictionary = {
   ranges: {
     today: "Hoje",
     yesterday: "Ontem",
+    d3: "Últimos 3 dias",
     d7: "Últimos 7 dias",
+    d14: "Últimos 14 dias",
     d30: "Últimos 30 dias",
     mtd: "Este mês",
     ytd: "Este ano",
@@ -3758,7 +3764,9 @@ export const es: Dictionary = {
   ranges: {
     today: "Hoy",
     yesterday: "Ayer",
+    d3: "Últimos 3 días",
     d7: "Últimos 7 días",
+    d14: "Últimos 14 días",
     d30: "Últimos 30 días",
     mtd: "Este mes",
     ytd: "Este año",
@@ -4998,7 +5006,9 @@ export const fr: Dictionary = {
   ranges: {
     today: "Aujourd'hui",
     yesterday: "Hier",
+    d3: "3 derniers jours",
     d7: "7 derniers jours",
+    d14: "14 derniers jours",
     d30: "30 derniers jours",
     mtd: "Ce mois-ci",
     ytd: "Cette année",

@@ -259,6 +259,8 @@ export async function fetchGoogleReportingDemandGenAds(
       clicks: row.clicks,
       conversions: row.conversions,
       googleRevenue: row.conversionValue,
+      thumbnailUrl: row.thumbnailUrl ?? null,
+      assetKind: row.assetKind ?? null,
     };
   });
 }

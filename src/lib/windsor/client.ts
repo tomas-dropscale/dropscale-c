@@ -127,7 +127,7 @@ export type WindsorGoogleAdsCampaignTimelineRow = {
   conversionValue: number;
 };
 
-/** One range-aggregated Demand Gen ad for an exact Windsor account. */
+/** One range-aggregated Demand Gen asset for an exact Windsor account. */
 export type WindsorGoogleAdsDemandGenAdRow = {
   accountId: string;
   customerId: string;
@@ -137,7 +137,9 @@ export type WindsorGoogleAdsDemandGenAdRow = {
   adId: string;
   name: string | null;
   type: string;
-  status: "ENABLED" | "PAUSED" | "REMOVED";
+  status?: "ENABLED" | "PAUSED" | "REMOVED";
+  thumbnailUrl?: string | null;
+  assetKind?: "image" | "video" | null;
   spend: number;
   impressions: number;
   clicks: number;
@@ -1218,8 +1220,8 @@ export async function fetchGoogleAdsCampaignTimeline(
 }
 
 /**
- * Reads one aggregate row per Demand Gen ad. The account/channel filters and
- * omitted date dimension keep the response exact and bounded for the range.
+ * Reads one aggregate row per Demand Gen asset. Windsor exposes the asset-view
+ * metrics and asset metadata separately, joined here only by Google's asset id.
  */
 export async function fetchGoogleAdsDemandGenAdBreakdown(
   accountId: string,
@@ -1229,17 +1231,17 @@ export async function fetchGoogleAdsDemandGenAdBreakdown(
 ): Promise<WindsorGoogleAdsDemandGenAdRow[]> {
   const ids = normalizeGoogleAdsCustomerId(accountId);
   reportingRange(from, to);
-  const maxRows = 1_001;
-  const url = new URL(`/${WINDSOR_DATASOURCE}`, CONNECTORS_ORIGIN);
-  url.searchParams.set(
+  const maxRows = 10_001;
+  const metricsUrl = new URL(`/${WINDSOR_DATASOURCE}`, CONNECTORS_ORIGIN);
+  metricsUrl.searchParams.set(
     "fields",
     "account_id,account_currency_code,account_time_zone,campaign_id," +
-      "advertising_channel_type,ad_id,ad_group_ad_ad_name,ad_type," +
-      "ad_group_ad_status,spend,impressions,clicks,conversions,conversion_value",
+      "advertising_channel_type,asset_id,ad_group_ad_asset_view_field_type," +
+      "spend,impressions,clicks,conversions,conversion_value",
   );
-  url.searchParams.set("date_from", from);
-  url.searchParams.set("date_to", to);
-  url.searchParams.set(
+  metricsUrl.searchParams.set("date_from", from);
+  metricsUrl.searchParams.set("date_to", to);
+  metricsUrl.searchParams.set(
     "filter",
     JSON.stringify([
       ["account_id", "eq", ids.accountId],
@@ -1247,11 +1249,11 @@ export async function fetchGoogleAdsDemandGenAdBreakdown(
       ["advertising_channel_type", "eq", "DEMAND_GEN"],
     ]),
   );
-  url.searchParams.set("_max_rows", String(maxRows));
-  url.searchParams.set("_renderer", "json");
+  metricsUrl.searchParams.set("_max_rows", String(maxRows));
+  metricsUrl.searchParams.set("_renderer", "json");
 
   const rawRows = arrayPayload(
-    await requestJson(url, options),
+    await requestJson(metricsUrl, { ...options, maxJsonChars: MAX_PRODUCT_JSON_CHARS }),
     ["data", "results", "rows"],
   );
   if (rawRows.length >= maxRows) throw invalidDemandGenResponse();
@@ -1263,24 +1265,14 @@ export async function fetchGoogleAdsDemandGenAdBreakdown(
     const invalid = invalidDemandGenResponse;
     const identity = exactReportingIdentity(raw, ids.customerId, invalid);
     const campaignId = breakdownIntegerId(raw.campaign_id, invalid);
-    const adId = breakdownIntegerId(raw.ad_id, invalid);
+    const adId = breakdownIntegerId(raw.asset_id, invalid);
     const channel = breakdownText(raw.advertising_channel_type, invalid, 80).toUpperCase();
-    const type = breakdownText(raw.ad_type, invalid, 100).toUpperCase();
-    const status = breakdownText(raw.ad_group_ad_status, invalid, 40).toUpperCase();
-    if (
-      channel !== "DEMAND_GEN" ||
-      !/^DEMAND_GEN_[A-Z0-9_]{1,80}$/.test(type) ||
-      !["ENABLED", "PAUSED", "REMOVED"].includes(status)
-    ) {
-      throw invalid();
-    }
-    const row: WindsorGoogleAdsDemandGenAdRow = {
-      ...identity,
-      campaignId,
-      adId,
-      name: optionalBreakdownText(raw.ad_group_ad_ad_name, invalid, 500),
-      type,
-      status: status as WindsorGoogleAdsDemandGenAdRow["status"],
+    const type = breakdownText(raw.ad_group_ad_asset_view_field_type, invalid, 100)
+      .toUpperCase();
+    if (channel !== "DEMAND_GEN") throw invalid();
+    if (!["SQUARE_MARKETING_IMAGE", "MARKETING_IMAGE", "PORTRAIT_MARKETING_IMAGE", "VIDEO"]
+      .includes(type)) continue;
+    const metrics = {
       spend: breakdownNumber(raw.spend, invalid),
       impressions: breakdownNumber(raw.impressions, invalid, true),
       clicks: breakdownNumber(raw.clicks, invalid, true),
@@ -1288,8 +1280,111 @@ export async function fetchGoogleAdsDemandGenAdBreakdown(
       conversionValue: breakdownNumber(raw.conversion_value, invalid),
     };
     const key = `${campaignId}\u0000${adId}`;
-    if (rows.has(key)) throw invalid();
+    const current = rows.get(key);
+    if (current) {
+      if (
+        current.accountId !== identity.accountId ||
+        current.customerId !== identity.customerId ||
+        current.currency !== identity.currency ||
+        current.timeZone !== identity.timeZone
+      ) throw invalid();
+      current.spend += metrics.spend;
+      current.impressions += metrics.impressions;
+      current.clicks += metrics.clicks;
+      current.conversions += metrics.conversions;
+      current.conversionValue += metrics.conversionValue;
+      if (!current.type.split(" · ").includes(type)) current.type += ` · ${type}`;
+      continue;
+    }
+    const row: WindsorGoogleAdsDemandGenAdRow = {
+      ...identity,
+      campaignId,
+      adId,
+      name: null,
+      type,
+      thumbnailUrl: null,
+      assetKind: null,
+      ...metrics,
+    };
     rows.set(key, row);
+  }
+  if (rows.size === 0) return [];
+
+  const metadataUrl = new URL(`/${WINDSOR_DATASOURCE}`, CONNECTORS_ORIGIN);
+  metadataUrl.searchParams.set(
+    "fields",
+    "account_id,account_currency_code,account_time_zone,asset_id,asset_name," +
+      "asset_type,asset_image_asset_full_size_url," +
+      "asset_youtube_video_asset_youtube_video_title",
+  );
+  metadataUrl.searchParams.set("date_from", from);
+  metadataUrl.searchParams.set("date_to", to);
+  metadataUrl.searchParams.set(
+    "filter",
+    JSON.stringify([["account_id", "eq", ids.accountId]]),
+  );
+  metadataUrl.searchParams.set("_max_rows", String(maxRows));
+  metadataUrl.searchParams.set("_renderer", "json");
+  const rawMetadata = arrayPayload(
+    await requestJson(metadataUrl, { ...options, maxJsonChars: MAX_PRODUCT_JSON_CHARS }),
+    ["data", "results", "rows"],
+  );
+  if (rawMetadata.length >= maxRows) throw invalidDemandGenResponse();
+  const byAsset = new Map<string, {
+    name: string | null;
+    thumbnailUrl: string | null;
+    assetKind: "image" | "video";
+  }>();
+  for (const value of rawMetadata) {
+    const raw = asRecord(value);
+    if (!raw) throw invalidDemandGenResponse();
+    const invalid = invalidDemandGenResponse;
+    const identity = exactReportingIdentity(raw, ids.customerId, invalid);
+    const assetId = breakdownIntegerId(raw.asset_id, invalid);
+    const relevant = [...rows.values()].find((row) => row.adId === assetId);
+    if (!relevant) continue;
+    if (
+      relevant.accountId !== identity.accountId ||
+      relevant.currency !== identity.currency ||
+      relevant.timeZone !== identity.timeZone ||
+      byAsset.has(assetId)
+    ) throw invalid();
+    const assetType = breakdownText(raw.asset_type, invalid, 40).toUpperCase();
+    if (assetType !== "IMAGE" && assetType !== "YOUTUBE_VIDEO") continue;
+    const rawUrl = optionalBreakdownText(
+      raw.asset_image_asset_full_size_url,
+      invalid,
+      4_096,
+    );
+    let thumbnailUrl: string | null = null;
+    if (rawUrl) {
+      let parsed: URL;
+      try {
+        parsed = new URL(rawUrl);
+      } catch {
+        throw invalid();
+      }
+      if (parsed.protocol !== "https:" || parsed.username || parsed.password) throw invalid();
+      thumbnailUrl = parsed.toString();
+    }
+    byAsset.set(assetId, {
+      name: optionalBreakdownText(
+        assetType === "YOUTUBE_VIDEO"
+          ? raw.asset_youtube_video_asset_youtube_video_title ?? raw.asset_name
+          : raw.asset_name,
+        invalid,
+        500,
+      ),
+      thumbnailUrl: assetType === "IMAGE" ? thumbnailUrl : null,
+      assetKind: assetType === "IMAGE" ? "image" : "video",
+    });
+  }
+  for (const row of rows.values()) {
+    const meta = byAsset.get(row.adId);
+    if (!meta) continue;
+    row.name = meta.name;
+    row.thumbnailUrl = meta.thumbnailUrl;
+    row.assetKind = meta.assetKind;
   }
   return [...rows.values()].sort(
     (left, right) =>
