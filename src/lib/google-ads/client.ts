@@ -198,7 +198,22 @@ export async function searchGoogleAds(
   const token = await accessToken(refreshToken);
   try {
     return await gaqlSearch(customerId, token, query, null);
-  } catch (error) {
+  } catch (directError) {
+    let error = directError;
+    // Some clients authorise Google Ads through their manager account rather
+    // than directly on the child customer. Retry a permission failure through
+    // the configured MCC; Google still validates the same OAuth grant and the
+    // exact requested customer identity.
+    if (directError instanceof GoogleAdsQueryError && directError.status === 403) {
+      const loginCustomerId = googleAdsEnv().loginCustomerId;
+      if (loginCustomerId) {
+        try {
+          return await gaqlSearch(customerId, token, query, loginCustomerId);
+        } catch (managerError) {
+          error = managerError;
+        }
+      }
+    }
     /**
      * 401 UNAUTHENTICATED here means the refresh SUCCEEDED but the Ads API
      * refuses the access token it produced. In practice that is a grant made
