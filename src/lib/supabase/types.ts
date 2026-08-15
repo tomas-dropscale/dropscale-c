@@ -3863,6 +3863,22 @@ export type Database = {
         };
         Returns: AdAccount[];
       };
+      /** Service-only commit of the reviewed pre-v3 full-entry-day boundary. */
+      commit_reviewed_full_day_billing_start: {
+        Args: {
+          p_account_id: string;
+          p_metadata_capture_id: string;
+          p_google_ads_customer_id: string;
+          p_google_local_date: string;
+          p_google_time_zone: string;
+          p_currency: string;
+          p_metadata_capture_started_at: string;
+          p_metadata_captured_at: string;
+          p_metadata_authority: string;
+          p_metadata_contract: string;
+        };
+        Returns: AdAccountBillingStart[];
+      };
       /** Service-only commit of an authoritative Google closing counter. */
       commit_google_ads_billing_end: {
         Args: {
