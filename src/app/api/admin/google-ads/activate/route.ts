@@ -1,6 +1,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { captureGoogleBillingStartAsAgency } from "@/lib/google-ads/billing-start";
+import { searchGoogleAds } from "@/lib/google-ads/client";
+import { decryptToken } from "@/lib/google-ads/crypto";
 import { createServiceClient } from "@/lib/supabase/service";
 import { createClient } from "@/lib/supabase/server";
 
@@ -191,7 +193,25 @@ export async function POST(request: NextRequest) {
 
   let captured;
   try {
-    captured = await captureGoogleBillingStartAsAgency(googleAdsCustomerId);
+    let search;
+    if (target.kind === "account") {
+      const { data: secret, error: secretError } = await service
+        .from("ad_accounts")
+        .select("google_ads_refresh_token")
+        .eq("id", target.id)
+        .maybeSingle();
+      if (secretError) throw secretError;
+      if (!secret?.google_ads_refresh_token) {
+        throw new Error("Google Ads must be reconnected before tracking can start.");
+      }
+      const refreshToken = await decryptToken(secret.google_ads_refresh_token);
+      search = (customerId: string, query: string) =>
+        searchGoogleAds(customerId, refreshToken, query);
+    }
+    captured = await captureGoogleBillingStartAsAgency(
+      googleAdsCustomerId,
+      search ? { search } : {},
+    );
   } catch (error) {
     console.error("Google billing-start capture failed:", {
       targetKind: target.kind,

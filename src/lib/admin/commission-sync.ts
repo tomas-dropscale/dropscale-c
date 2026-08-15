@@ -1,5 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
-import { hasAgencyServiceAccount } from "@/lib/google-ads/env";
+import { decryptToken } from "@/lib/google-ads/crypto";
+import { searchGoogleAds } from "@/lib/google-ads/client";
 import {
   addIsoDays,
   decimalToMicros,
@@ -289,11 +290,6 @@ export async function purgeAdminAccountRevenue(opts?: SyncOpts): Promise<void> {
 let lastRunAt = 0;
 
 export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
-  if (!hasAgencyServiceAccount()) {
-    if (opts?.force)
-      throw new Error("Agency Google Ads is not configured on this server.");
-    return;
-  }
   if (!opts?.force && Date.now() - lastRunAt < THROTTLE_MS) return;
 
   try {
@@ -337,7 +333,9 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
 
     const { data: accountRows, error: accountRowsError } = await supabase
       .from("ad_accounts")
-      .select("id, client_id, store_name, google_ads_customer_id, currency")
+      .select(
+        "id, client_id, store_name, google_ads_customer_id, google_ads_refresh_token, currency",
+      )
       // Pending rows are unapproved requests. Suspended rows remain eligible:
       // a client can still owe the final closed week from before suspension.
       .in("status", ["active", "suspended"])
@@ -348,7 +346,12 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
     // the rows as an error sentinel; the columns above match this Pick exactly.
     const accounts = (accountRows ?? []) as unknown as Pick<
       AdAccount,
-      "id" | "client_id" | "store_name" | "google_ads_customer_id" | "currency"
+      | "id"
+      | "client_id"
+      | "store_name"
+      | "google_ads_customer_id"
+      | "google_ads_refresh_token"
+      | "currency"
     >[];
     if (accounts.length === 0) {
       lastRunAt = Date.now();
@@ -473,6 +476,16 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
               "Agency billing supports EUR Google Ads accounts only.",
             );
           }
+          if (!account.google_ads_refresh_token) {
+            throw new Error(
+              "Google Ads must be reconnected before its billing ledger can be refreshed.",
+            );
+          }
+          const refreshToken = await decryptToken(
+            account.google_ads_refresh_token,
+          );
+          const searchAsClient = (customerId: string, query: string) =>
+            searchGoogleAds(customerId, refreshToken, query);
           // PostgREST may represent an int8 as either string or number. Reject
           // an unsafe numeric value instead of stringifying an already-rounded
           // baseline and silently moving the commercial boundary.
@@ -563,7 +576,10 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
           }
 
           const metadata =
-            await fetchGoogleBillingMetadataAsAgency(accountCustomerId);
+            await fetchGoogleBillingMetadataAsAgency(
+              accountCustomerId,
+              searchAsClient,
+            );
           if (
             metadata.customerId !== start.google_ads_customer_id ||
             metadata.currency !== start.currency.toUpperCase() ||
@@ -587,6 +603,7 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
                   accountCustomerId,
                   queryFrom,
                   queryTo,
+                  searchAsClient,
                 )
               : [];
           const days = billableGoogleSpendWindow(
