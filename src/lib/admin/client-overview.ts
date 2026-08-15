@@ -20,12 +20,9 @@
  * Built on `daily_metrics`, the pre-aggregated join of Google spend and Shopify
  * revenue.
  *
- * It REFRESHES that rollup before reading, and has to: the recompute otherwise
- * runs only from the client's own portal pages, so a client who rarely logs in
- * has a stale — or empty — table, and this popup would report their revenue as
- * zero while their shop is plainly selling. The recompute is throttled per
- * account, so reopening the popup costs nothing; only a genuinely cold client
- * pays the round trip, which is the case that would otherwise be wrong.
+ * Provider refreshes are deliberately outside this read path. The hourly cron
+ * and the explicit Sync action materialize `daily_metrics`; navigation only
+ * reads that internal snapshot so one slow store cannot block the page.
  *
  * Like lib/admin/campaigns, the client/account read is UNSCOPED and lets admin
  * RLS decide. Normalized binding authority is read separately with the
@@ -36,7 +33,6 @@ import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/service";
 import { ACCOUNT_COLUMNS } from "@/lib/portal/data";
 import { currencyScope, displayCurrency } from "@/lib/portal/currency";
-import { ensureDailyCoverage, recomputeDailyMetrics } from "@/lib/metrics/recompute";
 import {
   googleProfit,
   googleRoas,
@@ -438,21 +434,6 @@ export async function fetchClientOverview(
   const accounts = (accountsRes.data as AdAccount[] | null) ?? [];
   const scope = await reportingScope(clientId, accounts);
   const currencies = currencyScope(scope.recomputeAccounts);
-
-  // Bring this client's rollup current before reading it — see the note at the
-  // top. Never let a sync failure take the popup down: a partial view of a
-  // client is far better than an error where their numbers should be.
-  try {
-    // A normalized store anchor is the safe public recompute scope: the
-    // runtime expands its exact Google children from binding authority.
-    await ensureDailyCoverage(scope.recomputeAccounts, range.from);
-    await recomputeDailyMetrics(scope.recomputeAccounts, {
-      client: scope.service,
-      reportingClient: scope.service,
-    });
-  } catch (error) {
-    console.error(`Client overview refresh failed for ${clientId}:`, error);
-  }
 
   const rows = await fetchDailyMetrics(
     scope.allMetricIds,

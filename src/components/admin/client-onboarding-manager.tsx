@@ -23,6 +23,7 @@ import {
   X,
 } from "lucide-react";
 
+import { ClientCommercialTerms } from "@/components/admin/client-commercial-terms";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -61,6 +62,7 @@ import {
 } from "@/components/admin/client-onboarding-card-model";
 import type { ExistingClientRosterDTO } from "@/lib/client-onboarding/legacy-roster";
 import type { ClientOnboardingSessionDTO } from "@/lib/client-onboarding/sessions";
+import type { AdminCommissionClient } from "@/lib/admin/client-commissions";
 import { createClient } from "@/lib/supabase/client";
 import type { ClientOnboardingAsset, ClientOnboardingMode } from "@/lib/supabase/types";
 
@@ -467,6 +469,8 @@ export function ClientOnboardingManager({
   initialRoster,
   backendLoadFailed,
   rosterLoadFailed,
+  initialCommissionClients = [],
+  commissionLoadFailed = false,
   adminId = "",
   readOnlyPreview = false,
 }: {
@@ -474,6 +478,8 @@ export function ClientOnboardingManager({
   initialRoster: ExistingClientRosterDTO[];
   backendLoadFailed: boolean;
   rosterLoadFailed: boolean;
+  initialCommissionClients?: AdminCommissionClient[];
+  commissionLoadFailed?: boolean;
   adminId?: string;
   readOnlyPreview?: boolean;
 }) {
@@ -511,6 +517,10 @@ export function ClientOnboardingManager({
   );
 
   const cards = React.useMemo(() => buildClientCards(sessions, roster), [sessions, roster]);
+  const commissionClientById = React.useMemo(
+    () => new Map(initialCommissionClients.map((client) => [client.id, client])),
+    [initialCommissionClients],
+  );
   const hasVisibleIssue = React.useCallback(
     (card: ClientCard) =>
       cardHasIssue(card) ||
@@ -1096,6 +1106,11 @@ export function ClientOnboardingManager({
           The client list could not be loaded. Actions are temporarily unavailable.
         </div>
       )}
+      {commissionLoadFailed && (
+        <div role="alert" className="rounded-[var(--radius-card)] border border-[var(--warning-orange)]/30 bg-[var(--warning-orange)]/8 px-4 py-3 text-[12px] text-[var(--text-secondary)]">
+          Client management is available, but commercial terms could not be loaded.
+        </div>
+      )}
       {notice && <NoticeBanner key={notice.id} notice={notice} dismiss={() => setNotice(null)} />}
 
       <div className="space-y-3">
@@ -1341,6 +1356,12 @@ export function ClientOnboardingManager({
                       )}
                     </section>
                   </div>
+
+                  <ClientCommercialTerms
+                    client={
+                      card.clientId ? commissionClientById.get(card.clientId) ?? null : null
+                    }
+                  />
 
                 </article>
               );

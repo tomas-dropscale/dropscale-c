@@ -7,8 +7,6 @@ import type { AdAccount } from "@/lib/supabase/types";
 const mocks = vi.hoisted(() => ({
   createClient: vi.fn(),
   createServiceClient: vi.fn(),
-  ensureDailyCoverage: vi.fn(),
-  recomputeDailyMetrics: vi.fn(),
   fetchDailyMetrics: vi.fn(),
   resolveReportingSources: vi.fn(),
 }));
@@ -51,11 +49,6 @@ vi.mock("@/lib/admin/google-attribution", () => ({
         costs.paymentFees -
         costs.shippingCost -
         costs.adSpend,
-}));
-vi.mock("@/lib/metrics/recompute", () => ({
-  RECOMPUTE_INTERVAL_MS: 15 * 60 * 1000,
-  ensureDailyCoverage: mocks.ensureDailyCoverage,
-  recomputeDailyMetrics: mocks.recomputeDailyMetrics,
 }));
 vi.mock("@/lib/metrics/queries", () => ({
   fetchDailyMetrics: mocks.fetchDailyMetrics,
@@ -307,8 +300,6 @@ const range = {
 describe("admin client overview V2 projection", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.ensureDailyCoverage.mockResolvedValue(undefined);
-    mocks.recomputeDailyMetrics.mockResolvedValue(undefined);
     mocks.fetchDailyMetrics.mockResolvedValue([]);
   });
 
@@ -371,22 +362,6 @@ describe("admin client overview V2 projection", () => {
       expect.arrayContaining(["anchor", "child", "standalone"]),
       range.from,
       range.to,
-    );
-    expect(mocks.ensureDailyCoverage).toHaveBeenCalledWith(
-      expect.arrayContaining([
-        expect.objectContaining({ id: "anchor" }),
-        expect.objectContaining({ id: "child" }),
-        expect.objectContaining({ id: "standalone" }),
-      ]),
-      range.from,
-    );
-    expect(mocks.recomputeDailyMetrics).toHaveBeenCalledWith(
-      expect.arrayContaining([
-        expect.objectContaining({ id: "anchor" }),
-        expect.objectContaining({ id: "child" }),
-        expect.objectContaining({ id: "standalone" }),
-      ]),
-      { client: service, reportingClient: service },
     );
     expect(overview?.stores).toEqual([
       expect.objectContaining({
@@ -459,18 +434,10 @@ describe("admin client overview V2 projection", () => {
       "first.example",
       "second.example",
     ]);
-    expect(mocks.recomputeDailyMetrics).toHaveBeenCalledWith(
-      [
-        expect.objectContaining({
-          id: "first",
-          shopify_url: "first.myshopify.com",
-        }),
-        expect.objectContaining({
-          id: "second",
-          shopify_url: "second.myshopify.com",
-        }),
-      ],
-      expect.anything(),
+    expect(mocks.fetchDailyMetrics).toHaveBeenCalledWith(
+      ["first", "second"],
+      range.from,
+      range.to,
     );
   });
 

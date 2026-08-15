@@ -2,31 +2,46 @@ import type { ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ listClients: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  listSessions: vi.fn(),
+  listRoster: vi.fn(),
+  listCommissions: vi.fn(),
+  getSessionProfile: vi.fn(),
+  manager: vi.fn(),
+}));
 
+vi.mock("@/lib/client-onboarding/sessions", () => ({
+  listClientOnboardingSessions: mocks.listSessions,
+}));
+vi.mock("@/lib/client-onboarding/legacy-roster", () => ({
+  listExistingClientRoster: mocks.listRoster,
+}));
 vi.mock("@/lib/admin/client-commissions", () => ({
-  listAdminCommissionClients: mocks.listClients,
+  listAdminCommissionClients: mocks.listCommissions,
 }));
-vi.mock("@/components/admin/commission-rate", () => ({
-  CommissionRate: ({
-    accountId,
-    rate,
-    listRate,
-    scheduledListRate,
-  }: {
-    accountId: string;
-    rate: number;
-    listRate: number;
-    scheduledListRate: number | null;
-  }) => (
-    <span>{`${accountId}: ${listRate}% list → ${rate}% effective${scheduledListRate === null ? "" : ` → ${scheduledListRate}% scheduled`}`}</span>
-  ),
+vi.mock("@/lib/supabase/server", () => ({
+  getSessionProfile: mocks.getSessionProfile,
 }));
-vi.mock("@/components/ui/avatar", () => ({
-  Avatar: ({ name }: { name: string }) => <span>{name.slice(0, 1)}</span>,
-}));
-vi.mock("@/components/ui/badge", () => ({
-  Badge: ({ children }: { children: ReactNode }) => <span>{children}</span>,
+vi.mock("@/components/admin/client-onboarding-manager", () => ({
+  ClientOnboardingManager: (props: {
+    initialSessions: Array<{ id: string }>;
+    initialRoster: Array<{ clientId: string; fullName: string }>;
+    initialCommissionClients: Array<{ id: string; name: string }>;
+    backendLoadFailed: boolean;
+    rosterLoadFailed: boolean;
+    commissionLoadFailed: boolean;
+    adminId: string;
+  }) => {
+    mocks.manager(props);
+    return (
+      <section>
+        <h2>Client onboarding</h2>
+        {props.initialRoster.map((client) => (
+          <p key={client.clientId}>{client.fullName}</p>
+        ))}
+      </section>
+    );
+  },
 }));
 vi.mock("@/components/ui/button", () => ({
   Button: ({ children }: { children: ReactNode }) => <>{children}</>,
@@ -46,7 +61,7 @@ vi.mock("@/components/ui/page-container", () => ({
     <main>
       <h1>{title}</h1>
       <p>{description}</p>
-      <div>{actions}</div>
+      <nav>{actions}</nav>
       {children}
     </main>
   ),
@@ -54,107 +69,56 @@ vi.mock("@/components/ui/page-container", () => ({
 
 import AdminClientsPage from "./page";
 
-describe("Clients commission page", () => {
+describe("Clients page", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.listClients.mockResolvedValue([
-      {
-        id: "client-1",
-        name: "Northwind Commerce",
-        email: "owner@northwind.example",
-        approvalStatus: "approved",
-        stores: [
-          {
-            id: "anchor-1",
-            name: "Northwind Home",
-            domain: "northwind-home.com",
-            status: "active",
-            currency: "EUR",
-            billingAccounts: [
-              {
-                id: "google-eu",
-                kind: "google_ads",
-                name: "Northwind Google EU",
-                googleAdsCustomerId: "1234567890",
-                status: "active",
-                currency: "EUR",
-                commissionRate: 9.5,
-                listCommissionRate: 10,
-                expectedTermId: "term-2",
-                scheduledListCommissionRate: 12.5,
-                scheduledEffectiveFrom: "2026-08-17",
-                revenueShareEnabled: false,
-              },
-              {
-                id: "google-us",
-                kind: "google_ads",
-                name: "Northwind Google US",
-                googleAdsCustomerId: "9876543210",
-                status: "active",
-                currency: "EUR",
-                commissionRate: 10,
-                listCommissionRate: 10,
-                expectedTermId: null,
-                scheduledListCommissionRate: null,
-                scheduledEffectiveFrom: null,
-                revenueShareEnabled: false,
-              },
-            ],
-          },
-        ],
-        unallocatedBillingAccounts: [
-          {
-            id: "google-unallocated",
-            kind: "google_ads",
-            name: "Northwind Google Unallocated",
-            googleAdsCustomerId: "2222222222",
-            status: "active",
-            currency: "EUR",
-            commissionRate: 10,
-            listCommissionRate: 10,
-            expectedTermId: null,
-            scheduledListCommissionRate: null,
-            scheduledEffectiveFrom: null,
-            revenueShareEnabled: false,
-          },
-        ],
-      },
+    mocks.listSessions.mockResolvedValue([{ id: "session-1" }]);
+    mocks.listRoster.mockResolvedValue([
+      { clientId: "client-1", fullName: "Northwind Commerce" },
     ]);
+    mocks.listCommissions.mockResolvedValue([
+      { id: "client-1", name: "Northwind Commerce" },
+    ]);
+    mocks.getSessionProfile.mockResolvedValue({ profile: { id: "admin-1" } });
   });
 
-  it("renders one logical store with its exact physical Google billing accounts", async () => {
-    const page = await AdminClientsPage();
-    const html = renderToStaticMarkup(page);
+  it("restores the approved roster and onboarding manager as the primary Clients surface", async () => {
+    const html = renderToStaticMarkup(await AdminClientsPage());
 
     expect(html).toContain("Clients");
-    expect(html).toContain("Commission by client");
+    expect(html).toContain("Client onboarding");
     expect(html).toContain("Northwind Commerce");
-    expect(html).toContain("Northwind Home");
-    expect(html).toContain("northwind-home.com");
-    expect(html).toContain("Northwind Google EU");
-    expect(html).toContain("Northwind Google US");
-    expect(html).toContain("Google billing account");
-    expect(html).toContain("google-eu: 10% list → 9.5% effective → 12.5% scheduled");
-    expect(html).toContain("google-us: 10% list → 10% effective");
-    expect(html).toContain("Unallocated Google billing");
-    expect(html).toContain("Northwind Google Unallocated");
-    expect(html).toContain("google-unallocated: 10% list → 10% effective");
-    expect(html).toContain("Not counted as stores");
-    expect(html).toContain("1 store");
-    expect(html).toContain("3 billing accounts");
-    expect(html).toContain("Mixed store rates stay explicit");
-    expect(html).toContain("V2 Google children stay inside their Shopify store");
+    expect(html).not.toContain("Commission by client");
     expect(html).toContain('href="/admin/client-onboarding"');
     expect(html).toContain('href="/admin/referrals"');
+    expect(mocks.manager).toHaveBeenCalledWith(
+      expect.objectContaining({
+        initialSessions: [{ id: "session-1" }],
+        initialRoster: [{ clientId: "client-1", fullName: "Northwind Commerce" }],
+        initialCommissionClients: [{ id: "client-1", name: "Northwind Commerce" }],
+        backendLoadFailed: false,
+        rosterLoadFailed: false,
+        commissionLoadFailed: false,
+        adminId: "admin-1",
+      }),
+    );
   });
 
-  it("shows an explicit empty state when no client owns a store", async () => {
-    mocks.listClients.mockResolvedValueOnce([]);
+  it("keeps client management available when only commercial terms fail", async () => {
+    mocks.listCommissions.mockRejectedValueOnce(new Error("commission catalogue unavailable"));
 
-    const page = await AdminClientsPage();
-    const html = renderToStaticMarkup(page);
+    const html = renderToStaticMarkup(await AdminClientsPage());
 
-    expect(html).toContain("No client stores yet");
-    expect(html).toContain("0 clients");
+    expect(html).toContain("Client onboarding");
+    expect(html).toContain("Northwind Commerce");
+    expect(mocks.manager).toHaveBeenCalledWith(
+      expect.objectContaining({
+        initialRoster: [{ clientId: "client-1", fullName: "Northwind Commerce" }],
+        initialCommissionClients: [],
+        backendLoadFailed: false,
+        rosterLoadFailed: false,
+        commissionLoadFailed: true,
+      }),
+    );
   });
 });
