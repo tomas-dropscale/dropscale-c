@@ -62,6 +62,7 @@ describe("AnalyticsScopeControls", () => {
             email: "team@northwind.example",
             storeCount: 3,
             stores: [],
+            hasRunningActivity: false,
           },
         ]}
         clientId="client-1"
@@ -107,5 +108,40 @@ describe("AnalyticsScopeControls", () => {
     expect(html).toContain("onboarding.example");
     expect(html).toContain("Not activated");
     expect(html).toContain('aria-disabled="true"');
+  });
+
+  it("marks only clients with an active campaign in a valid snapshot as Running", () => {
+    const html = renderToStaticMarkup(
+      <AnalyticsScopeControls
+        clients={[
+          {
+            id: "client-running",
+            name: "Active client",
+            email: "running@example.com",
+            storeCount: 1,
+            stores: [],
+            hasRunningActivity: true,
+          },
+          {
+            id: "client-paused",
+            name: "Paused client",
+            email: "paused@example.com",
+            storeCount: 1,
+            stores: [],
+            hasRunningActivity: false,
+          },
+        ]}
+        clientId="client-running"
+        stores={[]}
+        storeId={null}
+        range={{ key: "d7", from: "2026-08-09", to: "2026-08-15" }}
+      />,
+    );
+
+    expect(
+      html.match(/At least one active campaign is present in a valid snapshot\./g),
+    ).toHaveLength(2);
+    expect(html.match(/Running/g)).toHaveLength(2);
+    expect(html).toContain("Paused client");
   });
 });

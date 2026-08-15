@@ -223,7 +223,7 @@ export default async function AnalyticsPage({
   const range = parseRange(params);
   // This is deliberately first: it reauthenticates the admin before any
   // service-role or cross-client reporting read can be constructed.
-  const clients = await listAdminAnalyticsClients();
+  const clients = await listAdminAnalyticsClients(range);
   const requestedClientId = singleParam(params.client);
   const selectedClient = clients.find((client) => client.id === requestedClientId);
   const query = singleParam(params.q) ?? "";

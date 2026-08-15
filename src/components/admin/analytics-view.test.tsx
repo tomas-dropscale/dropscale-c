@@ -20,8 +20,24 @@ vi.mock("./reporting-sync-button", () => ({
 }));
 
 vi.mock("@/components/admin/performance-charts", () => ({
-  SpendDevelopmentChart: () => <div>Store spend development chart</div>,
-  FunnelDevelopmentChart: () => <div>Funnel Development chart</div>,
+  SpendDevelopmentChart: ({
+    points,
+    granularity,
+  }: {
+    points: Array<{ date: string }>;
+    granularity: string;
+  }) => (
+    <div>Store spend development chart · {granularity} · {points.map((point) => point.date).join(",")}</div>
+  ),
+  FunnelDevelopmentChart: ({
+    points,
+    granularity,
+  }: {
+    points: Array<{ date: string }>;
+    granularity: string;
+  }) => (
+    <div>Funnel Development chart · {granularity} · {points.map((point) => point.date).join(",")}</div>
+  ),
 }));
 
 vi.mock("@/components/admin/store-analytics-sections", async () =>
@@ -60,6 +76,7 @@ const clients: AdminAnalyticsClient[] = [
     name: "Northwind Commerce",
     email: "team@northwind.example",
     storeCount: 1,
+    hasRunningActivity: false,
     stores: [
       {
         id: "store-gbp",
@@ -168,9 +185,11 @@ function storeAnalytics(rows: CampaignActionHistory[] = []): AdminStoreAnalytics
     funnel: {
       state: "ready",
       data: {
+        granularity: "day",
         daily: [
           {
             day: "2026-08-07",
+            bucket: "2026-08-07",
             sessions: 200,
             addedToCart: 44,
             reachedCheckout: 19,
@@ -187,7 +206,9 @@ function storeAnalytics(rows: CampaignActionHistory[] = []): AdminStoreAnalytics
     },
     campaigns: {
       state: "ready",
+      message: "Shopify attribution unavailable for one provider.",
       data: {
+        granularity: "day",
         rows: [
           {
             accountId: "google-child",
@@ -212,6 +233,7 @@ function storeAnalytics(rows: CampaignActionHistory[] = []): AdminStoreAnalytics
             googleRoas: 3.2,
             realRoas: 2.5,
             attributionState: "matched",
+            timeline: [],
             breakdown: {
               state: "unavailable",
               reason: "Asset detail is not available for this reporting source.",
@@ -238,24 +260,35 @@ function storeAnalytics(rows: CampaignActionHistory[] = []): AdminStoreAnalytics
     collections: {
       state: "ready",
       data: {
+        granularity: "day",
         rows: [
           {
             collectionId: "collection-1",
             title: "Best sellers",
             products: [
-              { productId: "product-1", title: "Lamp", revenue: 300, units: 3 },
+              {
+                productId: "product-1",
+                title: "Lamp",
+                revenue: 300,
+                units: 3,
+                timeline: [],
+              },
             ],
             revenue: 625,
             units: 8,
             spend: null,
             roas: null,
+            timeline: [],
           },
         ],
       },
     },
     spend: {
       state: "ready",
-      data: { daily: [{ day: "2026-08-07", spend: 250 }] },
+      data: {
+        granularity: "day",
+        daily: [{ day: "2026-08-07", bucket: "2026-08-07", spend: 250 }],
+      },
     },
     rollupCoverage: {
       state: "ready",
@@ -309,6 +342,11 @@ describe("AnalyticsView", () => {
     expect(html).toContain("PMax · Best sellers");
     expect(html).toContain("PMAX (SF)");
     expect(html).toContain("Best sellers");
+    expect(html).toContain(">REV.</th>");
+    expect(html).not.toContain("Provider + Shopify");
+    expect(html).not.toContain("Shopify attribution unavailable for one provider.");
+    expect(html).toContain('text-center font-medium">Spend</th>');
+    expect(html).toContain('text-center font-medium">Source</th>');
     expect(html).toContain("200");
     expect(html).not.toContain("not materialised");
     expect(html).not.toContain("Campaign launched");
@@ -337,6 +375,34 @@ describe("AnalyticsView", () => {
     expect(html).toContain("Spend could not be loaded for the complete selected period.");
     expect(html).toContain("GBP 2000.00");
     expect(html).not.toContain("Shopify revenue and Google spend coverage could not be proved");
+  });
+
+  it("passes real bucket timestamps and granularity through to the charts", () => {
+    const analytics = storeAnalytics();
+    if (!("data" in analytics.funnel) || !("data" in analytics.spend)) {
+      throw new Error("Expected ready chart fixtures.");
+    }
+    analytics.funnel.data.granularity = "hour";
+    analytics.funnel.data.daily[0].bucket = "2026-08-07T10:00:00.000Z";
+    analytics.spend.data.granularity = "hour";
+    analytics.spend.data.daily[0].bucket = "2026-08-07T10:00:00.000Z";
+
+    const html = renderToStaticMarkup(
+      <AnalyticsView
+        clients={clients}
+        overview={overview()}
+        selectedStoreId="store-gbp"
+        range={{ key: "today", from: "2026-08-07", to: "2026-08-07" }}
+        storeAnalytics={analytics}
+      />,
+    );
+
+    expect(html).toContain(
+      "Funnel Development chart · hour · 2026-08-07T10:00:00.000Z",
+    );
+    expect(html).toContain(
+      "Store spend development chart · hour · 2026-08-07T10:00:00.000Z",
+    );
   });
 
   it("shows stale provider freshness and the last failed attempt without hiding ready payload", () => {

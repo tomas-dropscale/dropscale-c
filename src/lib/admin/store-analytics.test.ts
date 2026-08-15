@@ -9,9 +9,11 @@ const mocks = vi.hoisted(() => ({
   hasGoogleAdsEnv: vi.fn(),
   hasWindsorEnv: vi.fn(),
   fetchLiveCampaignsDetailed: vi.fn(),
+  fetchLiveCampaignTimeline: vi.fn(),
   fetchLiveGoogleDemandGenBreakdowns: vi.fn(),
   fetchLiveGooglePmaxProductBreakdowns: vi.fn(),
   fetchGoogleReportingCampaigns: vi.fn(),
+  fetchGoogleReportingCampaignTimeline: vi.fn(),
   fetchGoogleReportingDemandGenAds: vi.fn(),
   fetchGoogleReportingPmaxProducts: vi.fn(),
   createLegacyShopifyReportingAdapter: vi.fn(),
@@ -36,11 +38,13 @@ vi.mock("@/lib/google-ads/env", () => ({ hasGoogleAdsEnv: mocks.hasGoogleAdsEnv 
 vi.mock("@/lib/windsor/client", () => ({ hasWindsorEnv: mocks.hasWindsorEnv }));
 vi.mock("@/lib/google-ads/portal", () => ({
   fetchLiveCampaignsDetailed: mocks.fetchLiveCampaignsDetailed,
+  fetchLiveCampaignTimeline: mocks.fetchLiveCampaignTimeline,
   fetchLiveGoogleDemandGenBreakdowns: mocks.fetchLiveGoogleDemandGenBreakdowns,
   fetchLiveGooglePmaxProductBreakdowns: mocks.fetchLiveGooglePmaxProductBreakdowns,
 }));
 vi.mock("@/lib/reporting/google", () => ({
   fetchGoogleReportingCampaigns: mocks.fetchGoogleReportingCampaigns,
+  fetchGoogleReportingCampaignTimeline: mocks.fetchGoogleReportingCampaignTimeline,
   fetchGoogleReportingDemandGenAds: mocks.fetchGoogleReportingDemandGenAds,
   fetchGoogleReportingPmaxProducts: mocks.fetchGoogleReportingPmaxProducts,
 }));
@@ -52,6 +56,10 @@ vi.mock("@/lib/reporting/shopify", () => ({
   },
   createLegacyShopifyReportingAdapter: mocks.createLegacyShopifyReportingAdapter,
   createShopifyReportingAdapter: mocks.createShopifyReportingAdapter,
+}));
+vi.mock("@/lib/finance/rev-share", () => ({
+  collectionHandleFromUrl: (url: string | null | undefined) =>
+    url?.match(/\/collections\/([^/?#]+)/i)?.[1] ?? null,
 }));
 vi.mock("@/lib/reporting/sources", () => ({
   resolveReportingSources: mocks.resolveReportingSources,
@@ -70,6 +78,7 @@ vi.mock("@/lib/admin/reporting-snapshots", () => ({
 }));
 
 import {
+  attributeCollectionSpend,
   ensureAdminAnalyticsRollupCoverage,
   fetchAdminStoreAnalytics,
   fetchCachedAdminStoreAnalytics,
@@ -1243,5 +1252,81 @@ describe("admin store analytics DAL", () => {
       message: expect.stringContaining("could not be proved"),
     });
     expect(mocks.refreshAccountsNow).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("collection spend allocation", () => {
+  it("splits an exact collection URL campaign by product revenue and preserves bucket ROAS", () => {
+    const family = {
+      state: "ready" as const,
+      data: {
+        granularity: "day" as const,
+        rows: [{
+          collectionId: "gid://shopify/Collection/20",
+          handle: "best-sellers",
+          title: "Best sellers",
+          revenue: 100,
+          units: 4,
+          spend: null,
+          roas: null,
+          timeline: [{ bucket: "2026-08-14", revenue: 100, units: 4, spend: 0, roas: null }],
+          products: [
+            {
+              productId: "gid://shopify/Product/10",
+              title: "Lamp",
+              revenue: 75,
+              units: 3,
+              spend: null,
+              roas: null,
+              timeline: [{ bucket: "2026-08-14", revenue: 75, units: 3, spend: 0, roas: null }],
+            },
+            {
+              productId: "gid://shopify/Product/11",
+              title: "Shade",
+              revenue: 25,
+              units: 1,
+              spend: null,
+              roas: null,
+              timeline: [{ bucket: "2026-08-14", revenue: 25, units: 1, spend: 0, roas: null }],
+            },
+          ],
+        }],
+      },
+    };
+    const campaign = {
+      ...googleCampaign(),
+      name: "https://northwind.example/collections/best-sellers",
+      status: "active" as const,
+    };
+    const result = attributeCollectionSpend(
+      family,
+      {
+        ok: true,
+        value: {
+          rows: [campaign],
+          granularity: "day",
+          timeline: [{
+            accountId: STORE_ID,
+            campaignId: campaign.providerCampaignId,
+            bucket: "2026-08-14",
+            granularity: "day",
+            spend: 40,
+            impressions: 100,
+            clicks: 10,
+            conversions: 2,
+            googleRevenue: 120,
+          }],
+        },
+      },
+      { ok: true, value: [] },
+    );
+
+    if (!("data" in result)) throw new Error("Expected allocated collection data");
+    expect(result.data.rows[0]).toMatchObject({ spend: 40, roas: 2.5 });
+    expect(result.data.rows[0].products[0]).toMatchObject({ spend: 30, roas: 2.5 });
+    expect(result.data.rows[0].products[1]).toMatchObject({ spend: 10, roas: 2.5 });
+    expect(result.data.rows[0].timeline).toEqual([
+      { bucket: "2026-08-14", revenue: 100, units: 4, spend: 40, roas: 2.5 },
+    ]);
   });
 });

@@ -5,9 +5,11 @@ import { decryptToken } from "@/lib/google-ads/crypto";
 import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
 import {
   fetchLiveCampaignsDetailed,
+  fetchLiveCampaignTimeline,
   fetchLiveGoogleDemandGenBreakdowns,
   fetchLiveGooglePmaxProductBreakdowns,
   type GoogleCampaignBreakdownRow,
+  type GoogleCampaignTimelinePoint,
   type LiveCampaign,
 } from "@/lib/google-ads/portal";
 import type { AdminStoreOverview } from "@/lib/admin/client-overview";
@@ -19,6 +21,7 @@ import type { RangeSelection } from "@/lib/portal/range";
 import { refreshAccountsNow } from "@/lib/metrics/recompute";
 import {
   fetchGoogleReportingCampaigns,
+  fetchGoogleReportingCampaignTimeline,
   fetchGoogleReportingDemandGenAds,
   fetchGoogleReportingPmaxProducts,
 } from "@/lib/reporting/google";
@@ -26,10 +29,12 @@ import {
   createLegacyShopifyReportingAdapter,
   createShopifyReportingAdapter,
   ShopifyReportingAdapterError,
-  type ShopifyCampaignAttribution,
+  type ShopifyCampaignAttributionSeriesRow,
   type ShopifyCampaignProductAttribution,
+  type ShopifyCampaignProductSeriesRow,
   type ShopifyReportingAdapter,
 } from "@/lib/reporting/shopify";
+import { collectionHandleFromUrl } from "@/lib/finance/rev-share";
 import {
   resolveReportingSources,
   type CanonicalReportingSource,
@@ -63,10 +68,30 @@ export type AdminAnalyticsFamily<T> =
 
 export type AdminAnalyticsFunnelDay = {
   day: string;
+  bucket: string;
   sessions: number;
   addedToCart: number;
   reachedCheckout: number;
   completedCheckout: number;
+};
+
+export type AdminAnalyticsGranularity = "hour" | "day";
+
+export type AdminAnalyticsCampaignTimelinePoint = {
+  bucket: string;
+  spend: number;
+  shopifyRevenue: number | null;
+  googleRevenue: number;
+  realRoas: number | null;
+  googleRoas: number | null;
+};
+
+export type AdminAnalyticsReturnTimelinePoint = {
+  bucket: string;
+  revenue: number;
+  units: number;
+  spend: number;
+  roas: number | null;
 };
 
 export type AdminAnalyticsCampaignBreakdownRow = {
@@ -134,6 +159,7 @@ export type AdminAnalyticsCampaign = {
   googleRoas: number | null;
   realRoas: number | null;
   attributionState: "matched" | "unmatched" | "unavailable";
+  timeline: AdminAnalyticsCampaignTimelinePoint[];
   breakdown: AdminAnalyticsCampaignBreakdown;
 };
 
@@ -144,6 +170,7 @@ export type AdminAnalyticsCollectionProduct = {
   units: number;
   spend?: number | null;
   roas?: number | null;
+  timeline: AdminAnalyticsReturnTimelinePoint[];
 };
 
 export type AdminAnalyticsCollection = {
@@ -154,6 +181,8 @@ export type AdminAnalyticsCollection = {
   units: number;
   spend: number | null;
   roas: number | null;
+  handle?: string | null;
+  timeline: AdminAnalyticsReturnTimelinePoint[];
 };
 
 export type AdminStoreAnalytics = {
@@ -162,6 +191,7 @@ export type AdminStoreAnalytics = {
   currency: string;
   range: { from: string; to: string };
   funnel: AdminAnalyticsFamily<{
+    granularity: AdminAnalyticsGranularity;
     daily: AdminAnalyticsFunnelDay[];
     totals: {
       sessions: number;
@@ -170,9 +200,18 @@ export type AdminStoreAnalytics = {
       completedCheckout: number;
     };
   }>;
-  campaigns: AdminAnalyticsFamily<{ rows: AdminAnalyticsCampaign[] }>;
-  collections: AdminAnalyticsFamily<{ rows: AdminAnalyticsCollection[] }>;
-  spend: AdminAnalyticsFamily<{ daily: Array<{ day: string; spend: number }> }>;
+  campaigns: AdminAnalyticsFamily<{
+    granularity: AdminAnalyticsGranularity;
+    rows: AdminAnalyticsCampaign[];
+  }>;
+  collections: AdminAnalyticsFamily<{
+    granularity: AdminAnalyticsGranularity;
+    rows: AdminAnalyticsCollection[];
+  }>;
+  spend: AdminAnalyticsFamily<{
+    granularity: AdminAnalyticsGranularity;
+    daily: Array<{ day: string; bucket: string; spend: number }>;
+  }>;
   rollupCoverage: AdminAnalyticsFamily<{
     dayCount: number;
     refreshed: boolean;
@@ -701,10 +740,16 @@ async function openShopify(topology: StoreTopology): Promise<Attempt<ShopifyRepo
   }
 }
 
+type GoogleCampaignLoad = {
+  rows: LiveCampaign[];
+  timeline: GoogleCampaignTimelinePoint[];
+  granularity: AdminAnalyticsGranularity;
+};
+
 async function loadGoogleCampaigns(
   topology: StoreTopology,
   range: Pick<RangeSelection, "from" | "to">,
-): Promise<Attempt<LiveCampaign[]>> {
+): Promise<Attempt<GoogleCampaignLoad>> {
   if (topology.kind === "v2") {
     if (!hasWindsorEnv() || topology.googleSources.length === 0) {
       return {
@@ -715,9 +760,13 @@ async function loadGoogleCampaigns(
     }
     try {
       const results = await Promise.allSettled(
-        topology.googleSources.map((source) =>
-          fetchGoogleReportingCampaigns(source, range.from, range.to),
-        ),
+        topology.googleSources.map(async (source) => {
+          const [rows, timeline] = await Promise.all([
+            fetchGoogleReportingCampaigns(source, range.from, range.to),
+            fetchGoogleReportingCampaignTimeline(source, range.from, range.to),
+          ]);
+          return { rows, timeline };
+        }),
       );
       const succeeded = results.flatMap((result) =>
         result.status === "fulfilled" ? [result.value] : []);
@@ -730,9 +779,18 @@ async function loadGoogleCampaigns(
       }
       return {
         ok: true,
-        value: succeeded
-          .flat()
+        value: {
+          rows: succeeded
+          .flatMap((result) => result.rows)
           .sort((left, right) => right.spend - left.spend || left.id.localeCompare(right.id)),
+          timeline: succeeded
+            .flatMap((result) => result.timeline)
+            .sort((left, right) =>
+              left.bucket.localeCompare(right.bucket) ||
+              left.accountId.localeCompare(right.accountId) ||
+              left.campaignId.localeCompare(right.campaignId)),
+          granularity: "day",
+        },
         message: succeeded.length === results.length
           ? null
           : "Some Google Ads accounts could not load campaigns for the selected period.",
@@ -761,15 +819,29 @@ async function loadGoogleCampaigns(
   }
   try {
     const refreshToken = await decryptToken(account.google_ads_refresh_token);
-    return {
-      ok: true,
-      value: await fetchLiveCampaignsDetailed(
+    const [rows, timeline] = await Promise.all([
+      fetchLiveCampaignsDetailed(
         account.google_ads_customer_id,
         refreshToken,
         account.id,
         range as RangeSelection,
         account.currency,
       ),
+      fetchLiveCampaignTimeline(
+        account.google_ads_customer_id,
+        refreshToken,
+        account.id,
+        range,
+        account.currency,
+      ),
+    ]);
+    return {
+      ok: true,
+      value: {
+        rows,
+        timeline,
+        granularity: range.from === range.to ? "hour" : "day",
+      },
     };
   } catch {
     return {
@@ -1010,8 +1082,9 @@ function projectRollup(
   const missing = expected.size - seen.size;
   const partialMessage = `${missing} of ${expected.size} account-days are not materialised; showing available spend only.`;
   const spendData = {
+    granularity: "day" as const,
     daily: [...byDay]
-      .map(([day, spend]) => ({ day, spend }))
+      .map(([day, spend]) => ({ day, bucket: day, spend }))
       .sort((left, right) => left.day.localeCompare(right.day)),
   };
   const coverageData = {
@@ -1252,10 +1325,10 @@ function campaignBreakdown(
 }
 
 function campaignFamily(
-  google: Attempt<LiveCampaign[]>,
+  google: Attempt<GoogleCampaignLoad>,
   breakdowns: GoogleBreakdownAttempts,
-  attribution: Attempt<ShopifyCampaignAttribution[]>,
-  shopifyProducts: Attempt<ShopifyCampaignProductAttribution[]>,
+  attribution: Attempt<ShopifyCampaignAttributionSeriesRow[]>,
+  shopifyProducts: Attempt<ShopifyCampaignProductSeriesRow[]>,
 ): AdminStoreAnalytics["campaigns"] {
   if (!google.ok) {
     return google.state === "unavailable"
@@ -1264,21 +1337,31 @@ function campaignFamily(
   }
   const attributionById = attribution.ok
     ? new Map(attribution.value.map((row) => [row.campaignId, row]))
-    : new Map<string, ShopifyCampaignAttribution>();
-  const campaignIdCounts = google.value.reduce((counts, campaign) => {
+    : new Map<string, ShopifyCampaignAttributionSeriesRow>();
+  const campaignIdCounts = google.value.rows.reduce((counts, campaign) => {
     counts.set(
       campaign.providerCampaignId,
       (counts.get(campaign.providerCampaignId) ?? 0) + 1,
     );
     return counts;
   }, new Map<string, number>());
-  const rows: AdminAnalyticsCampaign[] = google.value.map((campaign) => {
+  const rows: AdminAnalyticsCampaign[] = google.value.rows.map((campaign) => {
     const ambiguousCampaignId =
       (campaignIdCounts.get(campaign.providerCampaignId) ?? 0) > 1;
     const matched = ambiguousCampaignId
       ? null
       : attributionById.get(campaign.providerCampaignId) ?? null;
     const spend = campaign.spend;
+    const googleTimeline = google.value.timeline.filter(
+      (point) =>
+        point.accountId === campaign.ad_account_id &&
+        point.campaignId === campaign.providerCampaignId,
+    );
+    const shopifyTimeline = matched?.timeline ?? [];
+    const buckets = [...new Set([
+      ...googleTimeline.map((point) => point.bucket),
+      ...shopifyTimeline.map((point) => point.bucket),
+    ])].sort();
     return {
       accountId: campaign.ad_account_id,
       campaignId: campaign.providerCampaignId,
@@ -1309,6 +1392,25 @@ function campaignFamily(
         : matched
           ? "matched"
           : "unmatched",
+      timeline: buckets.map((bucket) => {
+        const googlePoint = googleTimeline.find((point) => point.bucket === bucket);
+        const shopifyPoint = shopifyTimeline.find((point) => point.bucket === bucket);
+        const pointSpend = googlePoint?.spend ?? 0;
+        const shopifyRevenue = attribution.ok
+          ? shopifyPoint?.revenue ?? 0
+          : null;
+        const googleRevenue = googlePoint?.googleRevenue ?? 0;
+        return {
+          bucket,
+          spend: pointSpend,
+          shopifyRevenue,
+          googleRevenue,
+          realRoas: pointSpend > 0 && shopifyRevenue !== null
+            ? shopifyRevenue / pointSpend
+            : null,
+          googleRoas: pointSpend > 0 ? googleRevenue / pointSpend : null,
+        };
+      }),
       breakdown: campaignBreakdown(
         campaign,
         breakdowns.get(campaign.ad_account_id),
@@ -1337,13 +1439,13 @@ function campaignFamily(
   if (partial) {
     return {
       state: "partial",
-      data: { rows },
+      data: { rows, granularity: google.value.granularity },
       message: messages.join(" ") || "Some campaign detail sources are partial.",
     };
   }
   return {
     state: rows.length === 0 ? "empty" : "ready",
-    data: { rows },
+    data: { rows, granularity: google.value.granularity },
     message: messages.length > 0 ? messages.join(" ") : null,
   };
 }
@@ -1354,8 +1456,8 @@ async function shopifyFamilies(
   targetCurrency: string,
 ): Promise<{
   funnel: AdminStoreAnalytics["funnel"];
-  attribution: Attempt<ShopifyCampaignAttribution[]>;
-  products: Attempt<ShopifyCampaignProductAttribution[]>;
+  attribution: Attempt<ShopifyCampaignAttributionSeriesRow[]>;
+  products: Attempt<ShopifyCampaignProductSeriesRow[]>;
   collections: AdminStoreAnalytics["collections"];
 }> {
   if (!adapterAttempt.ok) {
@@ -1374,16 +1476,16 @@ async function shopifyFamilies(
     Promise.resolve().then(operation);
   const [funnelResult, attributionResult, productResult, collectionsResult] =
     await Promise.allSettled([
-      invoke(() => adapterAttempt.value.fetchFunnel(range.from, range.to)),
+      invoke(() => adapterAttempt.value.fetchFunnelSeries(range.from, range.to)),
       invoke(() =>
-        adapterAttempt.value.fetchCampaignAttribution(
+        adapterAttempt.value.fetchCampaignAttributionSeries(
           range.from,
           range.to,
           targetCurrency,
         )),
-      invoke(() => adapterAttempt.value.fetchCampaignProducts(range.from, range.to)),
+      invoke(() => adapterAttempt.value.fetchCampaignProductSeries(range.from, range.to)),
       invoke(() =>
-        adapterAttempt.value.fetchCollectionSales(
+        adapterAttempt.value.fetchCollectionSalesSeries(
           range.from,
           range.to,
           targetCurrency,
@@ -1394,7 +1496,7 @@ async function shopifyFamilies(
   if (funnelResult.status === "rejected") {
     funnel = shopifyFailure(funnelResult.reason, "the store funnel");
   } else {
-    const daily = funnelResult.value;
+    const daily = funnelResult.value.points;
     const totals = daily.reduce(
       (sum, day) => ({
         sessions: sum.sessions + day.sessions,
@@ -1405,7 +1507,7 @@ async function shopifyFamilies(
       { sessions: 0, addedToCart: 0, reachedCheckout: 0, completedCheckout: 0 },
     );
     funnel = readyOrEmpty(
-      { daily, totals },
+      { daily, totals, granularity: funnelResult.value.granularity },
       totals.sessions === 0 &&
         totals.addedToCart === 0 &&
         totals.reachedCheckout === 0 &&
@@ -1413,7 +1515,7 @@ async function shopifyFamilies(
     );
   }
 
-  const attribution: Attempt<ShopifyCampaignAttribution[]> =
+  const attribution: Attempt<ShopifyCampaignAttributionSeriesRow[]> =
     attributionResult.status === "fulfilled"
       ? { ok: true, value: attributionResult.value }
       : attributionResult.reason instanceof ShopifyReportingAdapterError &&
@@ -1429,7 +1531,7 @@ async function shopifyFamilies(
             message: "Shopify campaign attribution could not be loaded.",
           };
 
-  const products: Attempt<ShopifyCampaignProductAttribution[]> =
+  const products: Attempt<ShopifyCampaignProductSeriesRow[]> =
     productResult.status === "fulfilled"
       ? { ok: true, value: productResult.value }
       : productResult.reason instanceof ShopifyReportingAdapterError &&
@@ -1451,25 +1553,210 @@ async function shopifyFamilies(
   } else {
     const rows = collectionsResult.value.map((collection) => ({
       collectionId: collection.collectionId,
+      handle: collection.handle,
       title: collection.title,
       revenue: collection.revenue,
       units: collection.units,
       spend: null,
       roas: null,
+      timeline: collection.timeline.map((point) => ({
+        ...point,
+        spend: 0,
+        roas: null,
+      })),
       products: collection.products.map((product) => ({
-        ...product,
+        productId: product.productId,
+        title: product.title,
+        revenue: product.revenue,
+        units: product.units,
         spend: null,
         roas: null,
+        timeline: product.timeline.map((point) => ({
+          ...point,
+          spend: 0,
+          roas: null,
+        })),
       })),
     }));
     collections = {
       state: rows.length === 0 ? "empty" : "ready",
-      data: { rows },
+      data: {
+        rows,
+        granularity: range.from === range.to ? "hour" : "day",
+      },
       message:
         "Shopify net sales and net units use the selected reporting days and current official collection membership. A product can belong to more than one collection, so collection rows are not additive. Spend and ROAS require a verified Google offer-to-Shopify product mapping that is not configured.",
     };
   }
   return { funnel, attribution, products, collections };
+}
+
+const COLLECTION_NAME_STOP_WORDS = new Set([
+  "a", "de", "del", "des", "du", "el", "en", "et", "la", "las", "le", "les",
+  "los", "para", "y",
+]);
+
+function collectionWords(value: string): string[] {
+  return value
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter((word) => word.length >= 3 && !COLLECTION_NAME_STOP_WORDS.has(word))
+    .map((word) => word.replace(/(?:es|s)$/, ""));
+}
+
+/** DropHub-compatible fallback: accept a campaign-name match only when unique. */
+function uniqueNamedCollection(
+  collections: AdminAnalyticsCollection[],
+  campaignName: string,
+): AdminAnalyticsCollection | null {
+  const campaignTokens = new Set(collectionWords(campaignName).filter((word) => word.length >= 4));
+  if (campaignTokens.size === 0) return null;
+  const matches = collections.filter((collection) => {
+    const title = collectionWords(collection.title);
+    const handle = collection.handle
+      ? collectionWords(collection.handle).join("")
+      : "";
+    return (title.length > 0 && title.every((word) => campaignTokens.has(word))) ||
+      (handle.length >= 4 && campaignTokens.has(handle));
+  });
+  return matches.length === 1 ? matches[0] : null;
+}
+
+/** Exact URL/product mapping first; unique campaign-name mapping is the declared fallback. */
+export function attributeCollectionSpend(
+  family: AdminStoreAnalytics["collections"],
+  google: Attempt<GoogleCampaignLoad>,
+  campaignProducts: Attempt<ShopifyCampaignProductSeriesRow[]>,
+): AdminStoreAnalytics["collections"] {
+  if (!("data" in family) || !google.ok) return family;
+  const rows = family.data.rows;
+  const collectionByHandle = new Map(
+    rows.flatMap((row) => row.handle ? [[row.handle, row] as const] : []),
+  );
+  const productsById = new Map<string, AdminAnalyticsCollectionProduct>();
+  for (const collection of rows) {
+    for (const product of collection.products) productsById.set(product.productId, product);
+  }
+  const mappedByCampaign = new Map<string, ShopifyCampaignProductSeriesRow[]>();
+  if (campaignProducts.ok) {
+    for (const product of campaignProducts.value) {
+      const list = mappedByCampaign.get(product.campaignId) ?? [];
+      list.push(product);
+      mappedByCampaign.set(product.campaignId, list);
+    }
+  }
+  const spendByProductBucket = new Map<string, number>();
+  for (const campaign of google.value.rows) {
+    const target = collectionByHandle.get(collectionHandleFromUrl(campaign.name) ?? "") ??
+      uniqueNamedCollection(rows, campaign.name);
+    const mapped = mappedByCampaign.get(campaign.providerCampaignId) ?? [];
+    let candidates = mapped
+      .map((row) => productsById.get(row.productId))
+      .filter((row): row is AdminAnalyticsCollectionProduct => Boolean(row));
+    if (target) {
+      const allowed = new Set(target.products.map((product) => product.productId));
+      candidates = candidates.filter((product) => allowed.has(product.productId));
+      if (candidates.length === 0) candidates = target.products;
+    }
+    candidates = [...new Map(candidates.map((product) => [product.productId, product])).values()]
+      .sort((left, right) => left.productId.localeCompare(right.productId));
+    if (candidates.length === 0) continue;
+    const mappedById = new Map(mapped.map((product) => [product.productId, product]));
+    for (const point of google.value.timeline) {
+      if (
+        point.accountId !== campaign.ad_account_id ||
+        point.campaignId !== campaign.providerCampaignId ||
+        point.spend <= 0
+      ) continue;
+      const weights = candidates.map((product) => {
+        const mappedProduct = mappedById.get(product.productId);
+        const mappedPoint = mappedProduct?.timeline.find((entry) => entry.bucket === point.bucket);
+        const salesPoint = product.timeline.find((entry) => entry.bucket === point.bucket);
+        return Math.max(0,
+          mappedPoint?.units ?? 0,
+          mappedProduct?.units ?? 0,
+          salesPoint?.revenue ?? 0,
+          salesPoint?.units ?? 0,
+          product.revenue,
+          product.units,
+        );
+      });
+      const totalWeight = weights.reduce((sum, value) => sum + value, 0);
+      candidates.forEach((product, index) => {
+        const share = totalWeight > 0
+          ? point.spend * weights[index] / totalWeight
+          : point.spend / candidates.length;
+        const key = `${product.productId}\u0000${point.bucket}`;
+        spendByProductBucket.set(key, (spendByProductBucket.get(key) ?? 0) + share);
+      });
+    }
+  }
+
+  const enriched = rows.map((collection) => {
+    const products = collection.products.map((product) => {
+      const buckets = [...new Set([
+        ...product.timeline.map((point) => point.bucket),
+        ...[...spendByProductBucket.keys()]
+          .filter((key) => key.startsWith(`${product.productId}\u0000`))
+          .map((key) => key.slice(product.productId.length + 1)),
+      ])].sort();
+      const timeline = buckets.map((bucket) => {
+        const sales = product.timeline.find((point) => point.bucket === bucket);
+        const spend = spendByProductBucket.get(`${product.productId}\u0000${bucket}`) ?? 0;
+        const revenue = sales?.revenue ?? 0;
+        return {
+          bucket,
+          revenue,
+          units: sales?.units ?? 0,
+          spend,
+          roas: spend > 0 ? revenue / spend : null,
+        };
+      });
+      const attributed = timeline.some((point) => point.spend > 0);
+      const spend = attributed
+        ? timeline.reduce((sum, point) => sum + point.spend, 0)
+        : null;
+      return {
+        ...product,
+        timeline,
+        spend,
+        roas: spend && spend > 0 ? product.revenue / spend : null,
+      };
+    });
+    const buckets = [...new Set(products.flatMap((product) =>
+      product.timeline.map((point) => point.bucket)))].sort();
+    const timeline = buckets.map((bucket) => {
+      const points = products.flatMap((product) => {
+        const point = product.timeline.find((entry) => entry.bucket === bucket);
+        return point ? [point] : [];
+      });
+      const revenue = points.reduce((sum, point) => sum + point.revenue, 0);
+      const units = points.reduce((sum, point) => sum + point.units, 0);
+      const spend = points.reduce((sum, point) => sum + point.spend, 0);
+      return { bucket, revenue, units, spend, roas: spend > 0 ? revenue / spend : null };
+    });
+    const attributed = products.some((product) => product.spend !== null);
+    const spend = attributed
+      ? products.reduce((sum, product) => sum + (product.spend ?? 0), 0)
+      : null;
+    return {
+      ...collection,
+      products,
+      timeline,
+      spend,
+      roas: spend && spend > 0 ? collection.revenue / spend : null,
+    };
+  });
+  return {
+    ...family,
+    data: { ...family.data, rows: enriched },
+    message:
+      "Shopify sales use official collection membership. Ad spend is attributed only by an exact /collections/<handle> campaign URL or exact Google campaign UTM → Shopify product mapping, then deterministically split by attributed units, revenue, or stable product ID. Collection rows remain non-additive when a product belongs to more than one collection.",
+  };
 }
 
 type ShopifyFamilies = Awaited<ReturnType<typeof shopifyFamilies>>;
@@ -1562,6 +1849,24 @@ async function buildLiveAdminStoreAnalytics(
     console.error("Admin store campaign analytics composition failed:", error);
     campaigns = failed("Campaign performance could not be loaded for this store.");
   }
+  const collections = attributeCollectionSpend(
+    shopify.collections,
+    google,
+    shopify.products,
+  );
+  let spend = rollup.spend;
+  if (google.ok && google.value.granularity === "hour") {
+    const byBucket = new Map<string, number>();
+    for (const point of google.value.timeline) {
+      byBucket.set(point.bucket, (byBucket.get(point.bucket) ?? 0) + point.spend);
+    }
+    const daily = [...byBucket.entries()]
+      .map(([bucket, value]) => ({ day: bucket.slice(0, 10), bucket, spend: value }))
+      .sort((left, right) => left.bucket.localeCompare(right.bucket));
+    spend = google.message
+      ? { state: "partial", data: { granularity: "hour", daily }, message: google.message }
+      : readyOrEmpty({ granularity: "hour", daily }, daily.length === 0);
+  }
 
   let activity: AdminStoreAnalytics["activity"];
   try {
@@ -1583,8 +1888,8 @@ async function buildLiveAdminStoreAnalytics(
     range: { from: input.range.from, to: input.range.to },
     funnel: shopify.funnel,
     campaigns,
-    collections: shopify.collections,
-    spend: rollup.spend,
+    collections,
+    spend,
     rollupCoverage: rollup.rollupCoverage,
     activity,
     providerFreshness: {
@@ -1748,18 +2053,59 @@ export async function fetchCachedAdminStoreAnalytics(
     (family) => stored.get(family) ?? missingStoredSnapshot(),
   );
   const [funnelSnapshot, campaignsSnapshot, collectionsSnapshot] = snapshots;
+  const funnel = storedFamily<{
+    granularity: AdminAnalyticsGranularity;
+    daily: AdminAnalyticsFunnelDay[];
+    totals: {
+      sessions: number;
+      addedToCart: number;
+      reachedCheckout: number;
+      completedCheckout: number;
+    };
+  }>(funnelSnapshot, {
+    granularity: "day" as const,
+    daily: [],
+    totals: { sessions: 0, addedToCart: 0, reachedCheckout: 0, completedCheckout: 0 },
+  });
+  const campaigns = storedFamily<{
+    granularity: AdminAnalyticsGranularity;
+    rows: AdminAnalyticsCampaign[];
+  }>(campaignsSnapshot, {
+    granularity: "day" as const,
+    rows: [],
+  });
+  const collections = storedFamily<{
+    granularity: AdminAnalyticsGranularity;
+    rows: AdminAnalyticsCollection[];
+  }>(collectionsSnapshot, {
+    granularity: "day" as const,
+    rows: [],
+  });
+  let spend = rollup.spend;
+  if (
+    "data" in campaigns &&
+    campaigns.data.granularity === "hour"
+  ) {
+    const byBucket = new Map<string, number>();
+    for (const campaign of campaigns.data.rows) {
+      for (const point of campaign.timeline ?? []) {
+        byBucket.set(point.bucket, (byBucket.get(point.bucket) ?? 0) + point.spend);
+      }
+    }
+    const daily = [...byBucket.entries()]
+      .map(([bucket, value]) => ({ day: bucket.slice(0, 10), bucket, spend: value }))
+      .sort((left, right) => left.bucket.localeCompare(right.bucket));
+    spend = readyOrEmpty({ granularity: "hour", daily }, daily.length === 0);
+  }
   return {
     clientId: input.clientId,
     storeAccountId: input.store.accountId,
     currency: input.store.currency,
     range: { from: input.range.from, to: input.range.to },
-    funnel: storedFamily(funnelSnapshot, {
-      daily: [],
-      totals: { sessions: 0, addedToCart: 0, reachedCheckout: 0, completedCheckout: 0 },
-    }),
-    campaigns: storedFamily(campaignsSnapshot, { rows: [] }),
-    collections: storedFamily(collectionsSnapshot, { rows: [] }),
-    spend: rollup.spend,
+    funnel,
+    campaigns,
+    collections,
+    spend,
     rollupCoverage: rollup.rollupCoverage,
     activity,
     providerFreshness: providerFreshness(snapshots, input.range),

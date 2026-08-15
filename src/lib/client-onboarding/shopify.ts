@@ -37,6 +37,8 @@ export type VerifiedReportingShop = {
   myshopifyDomain: string;
   primaryDomain: string | null;
   currencyCode: string;
+  /** Optional for backwards-compatible test fixtures; fresh verification always returns it. */
+  ianaTimezone?: string;
   scopes: ReportingScopeCheck;
 };
 
@@ -79,6 +81,7 @@ type VerifyResponse = {
     name?: unknown;
     myshopifyDomain?: unknown;
     currencyCode?: unknown;
+    ianaTimezone?: unknown;
     primaryDomain?: { host?: unknown } | null;
   };
   currentAppInstallation?: {
@@ -93,6 +96,7 @@ const VERIFY_QUERY = `#graphql
       name
       myshopifyDomain
       currencyCode
+      ianaTimezone
       primaryDomain { host }
     }
     currentAppInstallation {
@@ -472,6 +476,9 @@ export async function verifyReportingShop({
         ? shop.primaryDomain.host.trim().toLowerCase()
         : null,
     currencyCode: shop.currencyCode.trim().toUpperCase(),
+    ...(typeof shop.ianaTimezone === "string" && shop.ianaTimezone.trim()
+      ? { ianaTimezone: shop.ianaTimezone.trim() }
+      : {}),
     scopes: checkReportingShopifyScopes(
       installation.accessScopes.flatMap((scope) =>
         typeof scope.handle === "string" ? [scope.handle] : [],

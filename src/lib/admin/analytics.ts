@@ -1,6 +1,8 @@
 import "server-only";
 
+import { adminReportingSnapshotIsStale } from "@/lib/admin/reporting-snapshots";
 import { requireClientOnboardingAdmin } from "@/lib/client-onboarding/sessions";
+import type { RangeSelection } from "@/lib/portal/range";
 import { createServiceClient } from "@/lib/supabase/service";
 
 const ROLLOUT_SURFACES = new Set([
@@ -17,6 +19,7 @@ export type AdminAnalyticsClient = {
   email: string;
   storeCount: number;
   stores: AdminAnalyticsStore[];
+  hasRunningActivity: boolean;
 };
 
 export type AdminAnalyticsStore = {
@@ -71,8 +74,46 @@ function storeIdentity(clientId: string, shopifyDomain: string) {
   return `${clientId}\n${shopifyDomain}`;
 }
 
+function validCampaignSnapshotHasActive(
+  snapshot: {
+    state: string | null;
+    payload: unknown;
+    last_success_at: string | null;
+    last_error_code: string | null;
+    revision: number;
+  },
+  range: RangeSelection,
+) {
+  if (
+    (snapshot.state !== "ready" && snapshot.state !== "partial") ||
+    !Number.isSafeInteger(snapshot.revision) ||
+    snapshot.revision < 1 ||
+    !snapshot.last_success_at ||
+    !Number.isFinite(Date.parse(snapshot.last_success_at)) ||
+    snapshot.last_error_code !== null ||
+    adminReportingSnapshotIsStale({
+      to: range.to,
+      refreshedAt: snapshot.last_success_at,
+    }) ||
+    !Array.isArray(snapshot.payload)
+  ) {
+    return false;
+  }
+
+  const statuses = snapshot.payload.map((row) =>
+    row && typeof row === "object" && "status" in row ? row.status : null,
+  );
+  return (
+    statuses.every(
+      (status) => status === "active" || status === "paused" || status === "ended",
+    ) && statuses.includes("active")
+  );
+}
+
 /** Minimal read-only catalogue used before an Analytics client is selected. */
-export async function listAdminAnalyticsClients(): Promise<AdminAnalyticsClient[]> {
+export async function listAdminAnalyticsClients(
+  range: RangeSelection,
+): Promise<AdminAnalyticsClient[]> {
   await requireClientOnboardingAdmin();
   const service = createServiceClient();
   if (!service) throw new Error("The admin analytics catalogue is unavailable.");
@@ -83,6 +124,7 @@ export async function listAdminAnalyticsClients(): Promise<AdminAnalyticsClient[
     accountsResult,
     rolloutsResult,
     shopifyConnectionsResult,
+    campaignSnapshotsResult,
   ] =
     await Promise.all([
       service
@@ -102,6 +144,14 @@ export async function listAdminAnalyticsClients(): Promise<AdminAnalyticsClient[
           "client_id, status, shopify_domain, primary_domain, last_verified_at, last_error_code",
         )
         .eq("status", "connected"),
+      service
+        .from("admin_reporting_range_snapshots")
+        .select(
+          "scope_account_id, family, from_day, to_day, state, payload, last_success_at, last_error_code, revision",
+        )
+        .eq("family", "google_campaigns")
+        .eq("from_day", range.from)
+        .eq("to_day", range.to),
     ]);
 
   const clients = clientsResult.data;
@@ -111,6 +161,10 @@ export async function listAdminAnalyticsClients(): Promise<AdminAnalyticsClient[
   const shopifyConnections =
     !shopifyConnectionsResult.error && Array.isArray(shopifyConnectionsResult.data)
       ? shopifyConnectionsResult.data
+      : [];
+  const campaignSnapshots =
+    !campaignSnapshotsResult.error && Array.isArray(campaignSnapshotsResult.data)
+      ? campaignSnapshotsResult.data
       : [];
   if (
     clientsResult.error ||
@@ -176,8 +230,10 @@ export async function listAdminAnalyticsClients(): Promise<AdminAnalyticsClient[
 
   const storesByClient = new Map<string, Map<string, AdminAnalyticsStore>>();
   const clientsWithAccounts = new Set<string>();
+  const clientByAccount = new Map<string, string>();
   for (const account of accounts) {
     clientsWithAccounts.add(account.client_id);
+    clientByAccount.set(account.id, account.client_id);
     const shopifyDomain = canonicalShopifyDomain(account.shopify_url);
     if (!shopifyDomain) continue;
     const stores = storesByClient.get(account.client_id) ?? new Map<string, AdminAnalyticsStore>();
@@ -193,6 +249,14 @@ export async function listAdminAnalyticsClients(): Promise<AdminAnalyticsClient[
       stores.set(shopifyDomain, candidate);
     }
     storesByClient.set(account.client_id, stores);
+  }
+
+  const clientsWithRunningActivity = new Set<string>();
+  for (const snapshot of campaignSnapshots) {
+    const clientId = clientByAccount.get(snapshot.scope_account_id);
+    if (clientId && validCampaignSnapshotHasActive(snapshot, range)) {
+      clientsWithRunningActivity.add(clientId);
+    }
   }
 
   // A verified Shopify connection is onboarding evidence, but without an
@@ -233,6 +297,7 @@ export async function listAdminAnalyticsClients(): Promise<AdminAnalyticsClient[
         email: client.email,
         storeCount: stores.length,
         stores,
+        hasRunningActivity: clientsWithRunningActivity.has(client.id),
       };
     })
     .sort(

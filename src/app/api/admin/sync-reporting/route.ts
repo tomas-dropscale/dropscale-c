@@ -332,7 +332,13 @@ export async function POST(request: NextRequest) {
       if (key !== "today" && key !== "d7" && key !== "d30") {
         return response({ error: "Machine reporting range must be today, d7, d30 or d60." }, 422);
       }
-      return await refreshAll(presetSelection(key), key === "d30");
+      // d7 is the canonical rolling refresh: it upserts every individual
+      // account/day, so a separate sync-metrics pass would repeat the same
+      // daily provider window. Today remains a separate hourly-detail pass.
+      return await refreshAll(
+        presetSelection(key),
+        key === "d7" || key === "d30",
+      );
     }
 
     const body = parseManualRequest(await readSmallJson(request, 2_048));

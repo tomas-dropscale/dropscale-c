@@ -46,20 +46,38 @@ export type ShopifyReportingAdapter = {
     from: string,
     to: string,
   ) => Promise<ShopifyFunnelDay[]>;
+  fetchFunnelSeries: (
+    from: string,
+    to: string,
+  ) => Promise<ShopifyFunnelSeries>;
   fetchCampaignAttribution: (
     from: string,
     to: string,
     targetCurrency?: string,
   ) => Promise<ShopifyCampaignAttribution[]>;
+  fetchCampaignAttributionSeries: (
+    from: string,
+    to: string,
+    targetCurrency?: string,
+  ) => Promise<ShopifyCampaignAttributionSeriesRow[]>;
   fetchCampaignProducts: (
     from: string,
     to: string,
   ) => Promise<ShopifyCampaignProductAttribution[]>;
+  fetchCampaignProductSeries: (
+    from: string,
+    to: string,
+  ) => Promise<ShopifyCampaignProductSeriesRow[]>;
   fetchCollectionSales: (
     from: string,
     to: string,
     targetCurrency?: string,
   ) => Promise<ShopifyCollectionSales[]>;
+  fetchCollectionSalesSeries: (
+    from: string,
+    to: string,
+    targetCurrency?: string,
+  ) => Promise<ShopifyCollectionSalesSeriesRow[]>;
 };
 
 export type LegacyShopifyReportingSource = {
@@ -79,6 +97,15 @@ export type ShopifyFunnelDay = {
   completedCheckout: number;
 };
 
+export type ShopifyGranularity = "hour" | "day";
+
+export type ShopifyFunnelPoint = ShopifyFunnelDay & { bucket: string };
+
+export type ShopifyFunnelSeries = {
+  granularity: ShopifyGranularity;
+  points: ShopifyFunnelPoint[];
+};
+
 export type ShopifyCampaignAttribution = {
   /** Exact numeric utm_campaign value, not Shopify's unrelated campaign_id. */
   campaignId: string;
@@ -86,6 +113,17 @@ export type ShopifyCampaignAttribution = {
   sessions: number | null;
   orders: number | null;
   revenue: number | null;
+};
+
+export type ShopifyCampaignAttributionPoint = {
+  bucket: string;
+  sessions: number | null;
+  orders: number | null;
+  revenue: number | null;
+};
+
+export type ShopifyCampaignAttributionSeriesRow = ShopifyCampaignAttribution & {
+  timeline: ShopifyCampaignAttributionPoint[];
 };
 
 export type ShopifyCampaignProductAttribution = {
@@ -98,11 +136,19 @@ export type ShopifyCampaignProductAttribution = {
   units: number;
 };
 
+export type ShopifyCampaignProductSeriesRow = ShopifyCampaignProductAttribution & {
+  timeline: Array<{ bucket: string; units: number }>;
+};
+
 export type ShopifyCollectionProductSales = {
   productId: string;
   title: string;
   revenue: number;
   units: number;
+};
+
+export type ShopifyCollectionProductSalesSeriesRow = ShopifyCollectionProductSales & {
+  timeline: Array<{ bucket: string; revenue: number; units: number }>;
 };
 
 export type ShopifyCollectionSales = {
@@ -111,6 +157,12 @@ export type ShopifyCollectionSales = {
   revenue: number;
   units: number;
   products: ShopifyCollectionProductSales[];
+};
+
+export type ShopifyCollectionSalesSeriesRow = Omit<ShopifyCollectionSales, "products"> & {
+  handle: string | null;
+  timeline: Array<{ bucket: string; revenue: number; units: number }>;
+  products: ShopifyCollectionProductSalesSeriesRow[];
 };
 
 type ShopifyQlColumn = {
@@ -262,6 +314,56 @@ function rowDay(value: unknown, from: string, to: string): string {
   return day;
 }
 
+function reportingGranularity(from: string, to: string): ShopifyGranularity {
+  return from === to ? "hour" : "day";
+}
+
+function reportingBucket(
+  row: Record<string, unknown>,
+  from: string,
+  to: string,
+  timeZone: string,
+): { bucket: string; day: string } {
+  if (from !== to) {
+    const day = rowDay(row.day, from, to);
+    return { bucket: day, day };
+  }
+  const value = typeof row.hour === "string" ? row.hour.trim() : "";
+  const timestamp = Date.parse(value);
+  if (!value || !Number.isFinite(timestamp)) {
+    invalidResponse("Shopify returned an invalid reporting hour.");
+  }
+  let parts: Intl.DateTimeFormatPart[];
+  try {
+    parts = new Intl.DateTimeFormat("en-GB", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      hourCycle: "h23",
+    }).formatToParts(timestamp);
+  } catch {
+    invalidResponse("Shopify returned an invalid reporting time zone.");
+  }
+  const part = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((entry) => entry.type === type)?.value ?? "";
+  const day = `${part("year")}-${part("month")}-${part("day")}`;
+  const hour = part("hour");
+  if (day !== from || !/^\d{2}$/.test(hour)) {
+    invalidResponse("Shopify returned a reporting hour outside the selected range.");
+  }
+  return { bucket: `${day}T${hour}:00:00`, day };
+}
+
+function timelineClause(from: string, to: string): string {
+  return from === to ? "GROUP BY hour" : "TIMESERIES day";
+}
+
+function timelineOrder(from: string, to: string): string {
+  return from === to ? "hour" : "day";
+}
+
 function productGid(value: unknown): string | null {
   if (value == null || value === "") return null;
   const text = typeof value === "number"
@@ -396,15 +498,16 @@ async function fetchBoundedShopifyQlRows(
   return [...left, ...right];
 }
 
-async function fetchCollectionSales(
+async function fetchCollectionSalesSeries(
   shopDomain: string,
   accessToken: string,
   expectedCurrency: string,
   targetCurrency: string,
+  timeZone: string,
   from: string,
   to: string,
   graphql: ShopifyGraphqlExecutor,
-): Promise<ShopifyCollectionSales[]> {
+): Promise<ShopifyCollectionSalesSeriesRow[]> {
   type CollectionProductsResponse = {
     nodes: Array<
       | {
@@ -413,7 +516,7 @@ async function fetchCollectionSales(
           title: string;
           collections: {
             pageInfo: { hasNextPage: boolean };
-            nodes: Array<{ id: string; title: string }>;
+            nodes: Array<{ id: string; title: string; handle?: string }>;
           };
         }
       | { __typename: string }
@@ -428,11 +531,11 @@ async function fetchCollectionSales(
     to,
     (chunkFrom, chunkTo) => `FROM sales
 SHOW net_sales, net_items_sold
-GROUP BY product_id
-TIMESERIES day
+GROUP BY product_id${from === to ? ", hour" : ""}
+${from === to ? "" : "TIMESERIES day"}
 SINCE ${chunkFrom}
 UNTIL ${chunkTo}
-ORDER BY day ASC
+ORDER BY ${timelineOrder(from, to)} ASC
 LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
     "A single reporting day has too many product sales rows for an exact report.",
     graphql,
@@ -443,10 +546,14 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
     : await fxDailyRates(expectedCurrency, targetCurrency, from, to);
   const productSales = new Map<
     string,
-    { revenue: number; units: number }
+    {
+      revenue: number;
+      units: number;
+      timeline: Map<string, { bucket: string; revenue: number; units: number }>;
+    }
   >();
   for (const row of rows) {
-    const day = rowDay(row.day, from, to);
+    const { bucket, day } = reportingBucket(row, from, to, timeZone);
     const productId = productGid(row.product_id);
     if (row.product_id != null && row.product_id !== "" && !productId) {
       invalidResponse("Shopify returned an invalid product identity in its sales report.");
@@ -457,9 +564,17 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
     const nativeRevenue = finiteMoney(row.net_sales, "product net sales");
     const units = integer(row.net_items_sold, "product net items sold");
     const revenue = nativeRevenue * (rates ? rateOn(rates, day) : 1);
-    const current = productSales.get(productId) ?? { revenue: 0, units: 0 };
+    const current = productSales.get(productId) ?? {
+      revenue: 0,
+      units: 0,
+      timeline: new Map(),
+    };
     current.revenue += revenue;
     current.units += units;
+    const point = current.timeline.get(bucket) ?? { bucket, revenue: 0, units: 0 };
+    point.revenue += revenue;
+    point.units += units;
+    current.timeline.set(bucket, point);
     if (!Number.isFinite(current.revenue) || !Number.isSafeInteger(current.units)) {
       invalidResponse("Shopify returned invalid product sales totals.");
     }
@@ -470,7 +585,7 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
     string,
     {
       title: string;
-      collections: Array<{ id: string; title: string }>;
+      collections: Array<{ id: string; title: string; handle: string | null }>;
     }
   >();
   const productIds = [...productSales.keys()];
@@ -488,7 +603,7 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
               title
               collections(first: 100) {
                 pageInfo { hasNextPage }
-                nodes { id title }
+                nodes { id title handle }
               }
             }
           }
@@ -516,16 +631,20 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
       const seenCollections = new Set<string>();
       const memberships = node.collections.nodes.map((collection) => {
         const title = collection.title.trim();
+        const handle = typeof collection.handle === "string"
+          ? collection.handle.trim().toLowerCase()
+          : null;
         if (
           !/^gid:\/\/shopify\/Collection\/\d+$/.test(collection.id) ||
           !title ||
           title.length > 500 ||
+          (handle !== null && !/^[a-z0-9][a-z0-9-]*$/.test(handle)) ||
           seenCollections.has(collection.id)
         ) {
           invalidResponse("Shopify returned invalid collection identity.");
         }
         seenCollections.add(collection.id);
-        return { id: collection.id, title };
+        return { id: collection.id, title, handle };
       });
       productMembership.set(node.id, {
         title: node.title.trim(),
@@ -541,9 +660,11 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
     string,
     {
       title: string;
+      handle: string | null;
       revenue: number;
       units: number;
-      products: Map<string, ShopifyCollectionProductSales>;
+      timeline: Map<string, { bucket: string; revenue: number; units: number }>;
+      products: Map<string, ShopifyCollectionProductSalesSeriesRow>;
     }
   >();
   for (const [productId, sales] of productSales) {
@@ -552,11 +673,13 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
     for (const collection of product.collections) {
       const current = collections.get(collection.id) ?? {
         title: collection.title,
+        handle: collection.handle,
         revenue: 0,
         units: 0,
-        products: new Map<string, ShopifyCollectionProductSales>(),
+        timeline: new Map(),
+        products: new Map<string, ShopifyCollectionProductSalesSeriesRow>(),
       };
-      if (current.title !== collection.title) {
+      if (current.title !== collection.title || current.handle !== collection.handle) {
         invalidResponse("Shopify returned conflicting collection identity.");
       }
       current.products.set(productId, {
@@ -564,9 +687,21 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
         title: product.title,
         revenue: sales.revenue,
         units: sales.units,
+        timeline: [...sales.timeline.values()].sort((left, right) =>
+          left.bucket.localeCompare(right.bucket)),
       });
       current.revenue += sales.revenue;
       current.units += sales.units;
+      for (const productPoint of sales.timeline.values()) {
+        const point = current.timeline.get(productPoint.bucket) ?? {
+          bucket: productPoint.bucket,
+          revenue: 0,
+          units: 0,
+        };
+        point.revenue += productPoint.revenue;
+        point.units += productPoint.units;
+        current.timeline.set(point.bucket, point);
+      }
       if (!Number.isFinite(current.revenue) || !Number.isSafeInteger(current.units)) {
         invalidResponse("Shopify returned invalid collection sales totals.");
       }
@@ -578,8 +713,11 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
     .map(([collectionId, value]) => ({
       collectionId,
       title: value.title,
+      handle: value.handle,
       revenue: value.revenue,
       units: value.units,
+      timeline: [...value.timeline.values()].sort((left, right) =>
+        left.bucket.localeCompare(right.bucket)),
       products: [...value.products.values()].sort(
         (left, right) => right.revenue - left.revenue || left.title.localeCompare(right.title),
       ),
@@ -591,11 +729,13 @@ function boundAdapter({
   shopDomain,
   accessToken,
   verifiedCurrency,
+  verifiedTimeZone,
   grantedScopes,
 }: {
   shopDomain: string;
   accessToken: string;
   verifiedCurrency: string;
+  verifiedTimeZone: string;
   grantedScopes: string[];
 }): ShopifyReportingAdapter {
   const granted = new Set(grantedScopes);
@@ -684,6 +824,54 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
         completedCheckout: 0,
       });
     },
+    async fetchFunnelSeries(from, to) {
+      validateRange(from, to);
+      requireScopes(granted, ["read_reports"]);
+      const granularity = reportingGranularity(from, to);
+      const rows = await fetchBoundedShopifyQlRows(
+        shopDomain,
+        accessToken,
+        from,
+        to,
+        (chunkFrom, chunkTo) => `FROM sessions
+SHOW sessions, sessions_with_cart_additions, sessions_that_reached_checkout, sessions_that_completed_checkout
+WHERE human_or_bot_session = 'human'
+${timelineClause(from, to)}
+SINCE ${chunkFrom}
+UNTIL ${chunkTo}
+ORDER BY ${timelineOrder(from, to)} ASC
+LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
+        "A single reporting day has too many funnel rows for an exact report.",
+        graphql,
+      );
+      const byBucket = new Map<string, ShopifyFunnelPoint>();
+      for (const row of rows) {
+        const { bucket, day } = reportingBucket(row, from, to, verifiedTimeZone);
+        if (byBucket.has(bucket)) invalidResponse("Shopify returned duplicate funnel buckets.");
+        byBucket.set(bucket, {
+          bucket,
+          day,
+          sessions: nonNegativeInteger(row.sessions, "sessions"),
+          addedToCart: nonNegativeInteger(row.sessions_with_cart_additions, "sessions with cart additions"),
+          reachedCheckout: nonNegativeInteger(row.sessions_that_reached_checkout, "sessions that reached checkout"),
+          completedCheckout: nonNegativeInteger(row.sessions_that_completed_checkout, "sessions that completed checkout"),
+        });
+      }
+      const buckets = granularity === "hour"
+        ? Array.from({ length: 24 }, (_, hour) => `${from}T${String(hour).padStart(2, "0")}:00:00`)
+        : inclusiveDays(from, to);
+      return {
+        granularity,
+        points: buckets.map((bucket) => byBucket.get(bucket) ?? {
+          bucket,
+          day: bucket.slice(0, 10),
+          sessions: 0,
+          addedToCart: 0,
+          reachedCheckout: 0,
+          completedCheckout: 0,
+        }),
+      };
+    },
     async fetchCampaignAttribution(from, to, targetCurrency = verifiedCurrency) {
       validateRange(from, to);
       requireScopes(granted, ["read_reports"]);
@@ -770,6 +958,91 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
         (right.revenue ?? -Infinity) - (left.revenue ?? -Infinity) ||
         left.campaignId.localeCompare(right.campaignId));
     },
+    async fetchCampaignAttributionSeries(from, to, targetCurrency = verifiedCurrency) {
+      validateRange(from, to);
+      requireScopes(granted, ["read_reports"]);
+      const q = (dataset: string, fields: string, a: string, b: string) => `FROM ${dataset}
+SHOW ${fields}
+GROUP BY utm_campaign, referring_platform${from === to ? ", hour" : ""}
+${from === to ? "" : "TIMESERIES day"}
+SINCE ${a}
+UNTIL ${b}
+ORDER BY ${timelineOrder(from, to)} ASC
+LIMIT ${SHOPIFYQL_ROW_LIMIT}`;
+      const [salesRows, sessionRows] = await Promise.all([
+        fetchBoundedShopifyQlRows(
+          shopDomain, accessToken, from, to,
+          (a, b) => q("campaign_sales", "campaign_last_non_direct_click_total_sales, campaign_last_non_direct_click_order_count", a, b),
+          "A single reporting day has too many campaign sales rows for an exact report.", graphql,
+        ),
+        fetchBoundedShopifyQlRows(
+          shopDomain, accessToken, from, to,
+          (a, b) => q("campaign_sessions", "sessions", a, b),
+          "A single reporting day has too many campaign session rows for an exact report.", graphql,
+        ),
+      ]);
+      const reportingCurrency = currency(targetCurrency);
+      const rates = verifiedCurrency === reportingCurrency || salesRows.length === 0
+        ? null
+        : await fxDailyRates(verifiedCurrency, reportingCurrency, from, to);
+      type Mutable = ShopifyCampaignAttributionSeriesRow & {
+        pointByBucket: Map<string, ShopifyCampaignAttributionPoint>;
+      };
+      const campaigns = new Map<string, Mutable>();
+      const currentFor = (campaignId: string) => {
+        const current = campaigns.get(campaignId) ?? {
+          campaignId,
+          attributionModel: "last_non_direct_click" as const,
+          sessions: null,
+          orders: null,
+          revenue: null,
+          timeline: [],
+          pointByBucket: new Map(),
+        };
+        campaigns.set(campaignId, current);
+        return current;
+      };
+      const pointFor = (current: Mutable, bucket: string) => {
+        const point = current.pointByBucket.get(bucket) ?? {
+          bucket,
+          sessions: null,
+          orders: null,
+          revenue: null,
+        };
+        current.pointByBucket.set(bucket, point);
+        return point;
+      };
+      for (const row of salesRows) {
+        const campaignId = exactGoogleCampaign(row);
+        if (!campaignId) continue;
+        const { bucket, day } = reportingBucket(row, from, to, verifiedTimeZone);
+        const current = currentFor(campaignId);
+        const point = pointFor(current, bucket);
+        const revenue = finiteMoney(row.campaign_last_non_direct_click_total_sales, "campaign revenue") *
+          (rates ? rateOn(rates, day) : 1);
+        const orders = nonNegativeInteger(row.campaign_last_non_direct_click_order_count, "campaign orders");
+        current.revenue = (current.revenue ?? 0) + revenue;
+        current.orders = (current.orders ?? 0) + orders;
+        point.revenue = (point.revenue ?? 0) + revenue;
+        point.orders = (point.orders ?? 0) + orders;
+      }
+      for (const row of sessionRows) {
+        const campaignId = exactGoogleCampaign(row);
+        if (!campaignId) continue;
+        const { bucket } = reportingBucket(row, from, to, verifiedTimeZone);
+        const current = currentFor(campaignId);
+        const point = pointFor(current, bucket);
+        const sessions = nonNegativeInteger(row.sessions, "campaign sessions");
+        current.sessions = (current.sessions ?? 0) + sessions;
+        point.sessions = (point.sessions ?? 0) + sessions;
+      }
+      return [...campaigns.values()].map(({ pointByBucket, ...row }) => ({
+        ...row,
+        timeline: [...pointByBucket.values()].sort((a, b) => a.bucket.localeCompare(b.bucket)),
+      })).sort((a, b) =>
+        (b.revenue ?? -Infinity) - (a.revenue ?? -Infinity) ||
+        a.campaignId.localeCompare(b.campaignId));
+    },
     async fetchCampaignProducts(from, to) {
       validateRange(from, to);
       requireScopes(granted, ["read_reports"]);
@@ -835,15 +1108,84 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
           left.title.localeCompare(right.title),
       );
     },
+    async fetchCampaignProductSeries(from, to) {
+      validateRange(from, to);
+      requireScopes(granted, ["read_reports"]);
+      const rows = await fetchBoundedShopifyQlRows(
+        shopDomain, accessToken, from, to,
+        (a, b) => `FROM campaign_products
+SHOW campaign_last_non_direct_click_net_items_sold
+GROUP BY utm_campaign, referring_platform, product_id, product_title${from === to ? ", hour" : ""}
+${from === to ? "" : "TIMESERIES day"}
+SINCE ${a}
+UNTIL ${b}
+ORDER BY ${timelineOrder(from, to)} ASC
+LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
+        "A single reporting day has too many campaign product rows for an exact report.",
+        graphql,
+      );
+      const products = new Map<string, ShopifyCampaignProductSeriesRow>();
+      for (const row of rows) {
+        const campaignId = exactGoogleCampaign(row);
+        if (!campaignId) continue;
+        const productId = productGid(row.product_id);
+        const title = typeof row.product_title === "string" ? row.product_title.trim() : "";
+        if (!productId || !title || title.length > 500) {
+          invalidResponse("Shopify returned an invalid attributed product identity.");
+        }
+        const { bucket } = reportingBucket(row, from, to, verifiedTimeZone);
+        const key = `${campaignId}\u0000${productId}`;
+        const current = products.get(key) ?? {
+          campaignId,
+          productId,
+          title,
+          attributionModel: "last_non_direct_click" as const,
+          units: 0,
+          timeline: [],
+        };
+        if (current.title !== title) invalidResponse("Shopify returned conflicting attributed product identity.");
+        const units = integer(row.campaign_last_non_direct_click_net_items_sold, "campaign product units");
+        current.units += units;
+        const point = current.timeline.find((entry) => entry.bucket === bucket);
+        if (point) point.units += units;
+        else current.timeline.push({ bucket, units });
+        if (!Number.isSafeInteger(current.units)) invalidResponse("Shopify returned invalid campaign product totals.");
+        products.set(key, current);
+      }
+      return [...products.values()].map((row) => ({
+        ...row,
+        timeline: row.timeline.sort((a, b) => a.bucket.localeCompare(b.bucket)),
+      })).sort((a, b) =>
+        a.campaignId.localeCompare(b.campaignId) || b.units - a.units || a.title.localeCompare(b.title));
+    },
     async fetchCollectionSales(from, to, targetCurrency = verifiedCurrency) {
       validateRange(from, to);
       requireScopes(granted, ["read_reports", "read_products"]);
       const reportingCurrency = currency(targetCurrency);
-      return fetchCollectionSales(
+      const rows = await fetchCollectionSalesSeries(
         shopDomain,
         accessToken,
         verifiedCurrency,
         reportingCurrency,
+        verifiedTimeZone,
+        from,
+        to,
+        graphql,
+      );
+      return rows.map(({ handle: _handle, timeline: _timeline, products, ...row }) => ({
+        ...row,
+        products: products.map(({ timeline: _productTimeline, ...product }) => product),
+      }));
+    },
+    async fetchCollectionSalesSeries(from, to, targetCurrency = verifiedCurrency) {
+      validateRange(from, to);
+      requireScopes(granted, ["read_reports", "read_products"]);
+      return fetchCollectionSalesSeries(
+        shopDomain,
+        accessToken,
+        verifiedCurrency,
+        currency(targetCurrency),
+        verifiedTimeZone,
         from,
         to,
         graphql,
@@ -902,6 +1244,7 @@ export async function createShopifyReportingAdapter(
     shopDomain: shopify.domain,
     accessToken,
     verifiedCurrency,
+    verifiedTimeZone: verified.ianaTimezone ?? "UTC",
     grantedScopes: verified.scopes.granted,
   });
 }
@@ -968,6 +1311,7 @@ export async function createLegacyShopifyReportingAdapter(
     shopDomain,
     accessToken,
     verifiedCurrency,
+    verifiedTimeZone: verified.ianaTimezone ?? "UTC",
     grantedScopes: verified.scopes.granted,
   });
 }

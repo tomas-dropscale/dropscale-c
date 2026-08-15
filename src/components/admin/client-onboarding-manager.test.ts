@@ -1,9 +1,10 @@
+import { readFileSync } from "node:fs";
+
 import { describe, expect, it } from "vitest";
 
 import type { ExistingClientRosterDTO } from "@/lib/client-onboarding/legacy-roster";
 import type { ClientOnboardingSessionDTO } from "@/lib/client-onboarding/sessions";
 import {
-  actionableReviewSession,
   availableOnboardingAssetKinds,
   buildClientCards,
   clientCardStatus,
@@ -18,6 +19,10 @@ import {
 
 const CLIENT_ID = "10000000-0000-4000-8000-000000000001";
 const SESSION_ID = "20000000-0000-4000-8000-000000000001";
+const MANAGER_SOURCE = readFileSync(
+  "src/components/admin/client-onboarding-manager.tsx",
+  "utf8",
+);
 
 function roster(): ExistingClientRosterDTO {
   return {
@@ -156,17 +161,30 @@ describe("client card status", () => {
     expect(clientCardStatus(card)).toBe("waiting_for_assets");
   });
 
-  it("waits for approval after the client submits", () => {
+  it("treats a submitted client with a connected asset as approved", () => {
     const submitted = onboardingSession({
       status: "submitted",
       rawStatus: "submitted",
+      googleAds: [
+        {
+          id: "50000000-0000-4000-8000-000000000001",
+          sessionId: SESSION_ID,
+          customerId: "123-456-7890",
+          accountName: "Main Ads",
+          currency: "EUR",
+          timeZone: "Europe/Lisbon",
+          connectedAt: "2026-02-02T00:00:00.000Z",
+          lastVerifiedAt: null,
+          lastErrorCode: null,
+        },
+      ],
     });
     const [card] = buildClientCards([submitted], [roster()]);
 
-    expect(clientCardStatus(card)).toBe("waiting_for_approval");
+    expect(clientCardStatus(card)).toBe("approved");
   });
 
-  it("keeps a reviewed account-only setup waiting for activation", () => {
+  it("keeps a reviewed account-only setup empty", () => {
     const reviewed = onboardingSession({
       mode: "new_client",
       requestedAssets: [],
@@ -175,16 +193,16 @@ describe("client card status", () => {
     });
     const [card] = buildClientCards([reviewed], []);
 
-    expect(clientCardStatus(card)).toBe("waiting_for_approval");
+    expect(clientCardStatus(card)).toBe("no_assets");
   });
 
-  it("keeps a pending legacy client waiting for approval", () => {
+  it("keeps a pending legacy client without connections empty", () => {
     const [card] = buildClientCards(
       [],
       [{ ...roster(), approvalStatus: "pending", shopify: [] }],
     );
 
-    expect(clientCardStatus(card)).toBe("waiting_for_approval");
+    expect(clientCardStatus(card)).toBe("no_assets");
   });
 
   it("marks an approved legacy client without assets as having no assets", () => {
@@ -209,6 +227,19 @@ describe("client card status", () => {
     const [card] = buildClientCards([], [roster()]);
 
     expect(clientCardStatus(card)).toBe("approved");
+  });
+});
+
+describe("client approval controls", () => {
+  it("has no manual approval state while preserving connection management", () => {
+    expect(MANAGER_SOURCE).not.toContain("Waiting for approval");
+    expect(MANAGER_SOURCE).not.toContain("Approve client");
+    expect(MANAGER_SOURCE).not.toContain('action: "approve"');
+    expect(MANAGER_SOURCE).not.toContain("reviewRosterClient");
+    expect(MANAGER_SOURCE).toContain("Test all connections");
+    expect(MANAGER_SOURCE).toContain("Add assets");
+    expect(MANAGER_SOURCE).toContain("Reconnect");
+    expect(MANAGER_SOURCE).toContain("Remove asset");
   });
 });
 
@@ -301,26 +332,6 @@ describe("client onboarding card actions", () => {
       "google_ads",
     ]);
     expect(availableOnboardingAssetKinds([combined])).toEqual([]);
-  });
-
-  it("prioritises a submitted setup over a reviewed account-only setup", () => {
-    const reviewedAccount = onboardingSession({
-      id: "20000000-0000-4000-8000-000000000004",
-      requestedAssets: [],
-      status: "reviewed",
-      rawStatus: "reviewed",
-    });
-    const submittedAssets = onboardingSession({
-      id: "20000000-0000-4000-8000-000000000005",
-      status: "submitted",
-      rawStatus: "submitted",
-      needsReview: true,
-    });
-
-    expect(actionableReviewSession([reviewedAccount, submittedAssets])).toBe(
-      submittedAssets,
-    );
-    expect(actionableReviewSession([reviewedAccount])).toBe(reviewedAccount);
   });
 });
 

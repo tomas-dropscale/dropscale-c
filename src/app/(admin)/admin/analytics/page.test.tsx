@@ -69,6 +69,7 @@ describe("Analytics page timeframe integration", () => {
         name: "Northwind",
         email: "team@example.test",
         storeCount: 1,
+        hasRunningActivity: false,
         stores: [{ id: "store-1", name: "Store", domain: "store.example" }],
       },
     ]);
@@ -105,6 +106,11 @@ describe("Analytics page timeframe integration", () => {
 
     expect(renderToStaticMarkup(page)).toContain("Analytics for store-1");
     expect(mocks.parseRange).toHaveBeenCalledWith(params);
+    expect(mocks.listClients).toHaveBeenCalledWith({
+      key: "custom",
+      from: "2026-07-15",
+      to: "2026-08-14",
+    });
     expect(mocks.fetchOverview).toHaveBeenCalledWith("client-1", {
       key: "custom",
       from: "2026-07-15",

@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   requireAdmin: vi.fn(),
   createServiceClient: vi.fn(),
+  snapshotIsStale: vi.fn(),
   callOrder: [] as string[],
 }));
 
@@ -12,6 +13,9 @@ vi.mock("@/lib/client-onboarding/sessions", () => ({
 }));
 vi.mock("@/lib/supabase/service", () => ({
   createServiceClient: mocks.createServiceClient,
+}));
+vi.mock("@/lib/admin/reporting-snapshots", () => ({
+  adminReportingSnapshotIsStale: mocks.snapshotIsStale,
 }));
 
 import { listAdminAnalyticsClients } from "./analytics";
@@ -35,6 +39,7 @@ function service({
   accounts = [],
   rollouts = [],
   shopifyConnections = [],
+  campaignSnapshots = [],
   errors = {},
 }: {
   clients?: unknown[];
@@ -42,6 +47,7 @@ function service({
   accounts?: unknown[];
   rollouts?: unknown[];
   shopifyConnections?: unknown[];
+  campaignSnapshots?: unknown[];
   errors?: Partial<Record<string, unknown>>;
 }) {
   const queries = {
@@ -52,6 +58,10 @@ function service({
     client_shopify_connections: query(
       shopifyConnections,
       errors.client_shopify_connections,
+    ),
+    admin_reporting_range_snapshots: query(
+      campaignSnapshots,
+      errors.admin_reporting_range_snapshots,
     ),
   };
   return {
@@ -68,11 +78,13 @@ const completeMarker = {
   reporting_cutover_by: "admin-1",
   reporting_cutover_reason: "Reporting cutover",
 };
+const range = { key: "custom", from: "2026-08-01", to: "2026-08-07" } as const;
 
 describe("admin analytics client catalogue", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.callOrder.length = 0;
+    mocks.snapshotIsStale.mockReturnValue(false);
     mocks.requireAdmin.mockImplementation(async () => {
       mocks.callOrder.push("auth");
       return { id: "admin-1", role: "admin" };
@@ -183,19 +195,30 @@ describe("admin analytics client catalogue", () => {
           last_error_code: null,
         },
       ],
+      campaignSnapshots: [
+        {
+          scope_account_id: "account-1",
+          state: "ready",
+          payload: [{ status: "active" }, { status: "paused" }],
+          last_success_at: "2026-08-07T09:00:00Z",
+          last_error_code: null,
+          revision: 1,
+        },
+      ],
     });
     mocks.createServiceClient.mockImplementation(() => {
       mocks.callOrder.push("service");
       return setup.client;
     });
 
-    await expect(listAdminAnalyticsClients()).resolves.toEqual([
+    await expect(listAdminAnalyticsClients(range)).resolves.toEqual([
       {
         id: "alpha",
         name: "Alpha Studio",
         email: "alpha@example.com",
         storeCount: 0,
         stores: [],
+        hasRunningActivity: false,
       },
       {
         id: "zeta",
@@ -214,6 +237,7 @@ describe("admin analytics client catalogue", () => {
             domain: "store.alpha.example",
           },
         ],
+        hasRunningActivity: true,
       },
     ]);
     expect(mocks.callOrder).toEqual(["auth", "service"]);
@@ -223,6 +247,7 @@ describe("admin analytics client catalogue", () => {
       "ad_accounts",
       "client_rollout_states",
       "client_shopify_connections",
+      "admin_reporting_range_snapshots",
     ]);
     expect(setup.queries.portal_clients.eq).toHaveBeenCalledWith(
       "approval_status",
@@ -233,6 +258,85 @@ describe("admin analytics client catalogue", () => {
       "status",
       "connected",
     );
+    expect(setup.queries.admin_reporting_range_snapshots.eq.mock.calls).toEqual([
+      ["family", "google_campaigns"],
+      ["from_day", range.from],
+      ["to_day", range.to],
+    ]);
+  });
+
+  it("does not infer Running from an active account or an invalid campaign snapshot", async () => {
+    const setup = service({
+      clients: [
+        {
+          id: "client-1",
+          full_name: "Northwind",
+          email: "northwind@example.com",
+          approval_status: "approved",
+        },
+      ],
+      accounts: [
+        {
+          id: "account-1",
+          client_id: "client-1",
+          store_name: "Northwind Store",
+          shopify_url: "northwind.myshopify.com",
+          status: "active",
+        },
+      ],
+      campaignSnapshots: [
+        {
+          scope_account_id: "account-1",
+          state: "ready",
+          payload: [{ status: "active" }],
+          last_success_at: "2026-08-07T09:00:00Z",
+          last_error_code: "provider_failed",
+          revision: 1,
+        },
+      ],
+    });
+    mocks.createServiceClient.mockReturnValue(setup.client);
+
+    const clients = await listAdminAnalyticsClients(range);
+
+    expect(clients[0]?.hasRunningActivity).toBe(false);
+  });
+
+  it("does not show Running when the exact-range campaign snapshot is stale", async () => {
+    mocks.snapshotIsStale.mockReturnValue(true);
+    const setup = service({
+      clients: [
+        {
+          id: "client-1",
+          full_name: "Northwind",
+          email: "northwind@example.com",
+          approval_status: "approved",
+        },
+      ],
+      accounts: [
+        {
+          id: "account-1",
+          client_id: "client-1",
+          store_name: "Northwind Store",
+          shopify_url: "northwind.myshopify.com",
+        },
+      ],
+      campaignSnapshots: [
+        {
+          scope_account_id: "account-1",
+          state: "partial",
+          payload: [{ status: "active" }],
+          last_success_at: "2026-08-07T09:00:00Z",
+          last_error_code: null,
+          revision: 2,
+        },
+      ],
+    });
+    mocks.createServiceClient.mockReturnValue(setup.client);
+
+    const clients = await listAdminAnalyticsClients(range);
+
+    expect(clients[0]?.hasRunningActivity).toBe(false);
   });
 
   it("falls back to the canonical Shopify domain when a public domain is not verified", async () => {
@@ -266,7 +370,7 @@ describe("admin analytics client catalogue", () => {
     });
     mocks.createServiceClient.mockReturnValue(setup.client);
 
-    await expect(listAdminAnalyticsClients()).resolves.toEqual([
+    await expect(listAdminAnalyticsClients(range)).resolves.toEqual([
       {
         id: "client-1",
         name: "Northwind",
@@ -279,6 +383,7 @@ describe("admin analytics client catalogue", () => {
             domain: "northwind.myshopify.com",
           },
         ],
+        hasRunningActivity: false,
       },
     ]);
   });
@@ -328,13 +433,14 @@ describe("admin analytics client catalogue", () => {
     });
     mocks.createServiceClient.mockReturnValue(setup.client);
 
-    await expect(listAdminAnalyticsClients()).resolves.toEqual([
+    await expect(listAdminAnalyticsClients(range)).resolves.toEqual([
       {
         id: "client-2",
         name: "Connection Only",
         email: "connection@example.com",
         storeCount: 1,
         stores: [{ id: null, name: "only.example", domain: "only.example" }],
+        hasRunningActivity: false,
       },
       {
         id: "client-1",
@@ -349,6 +455,7 @@ describe("admin analytics client catalogue", () => {
           },
           { id: null, name: "other.example", domain: "other.example" },
         ],
+        hasRunningActivity: false,
       },
     ]);
   });
@@ -356,7 +463,7 @@ describe("admin analytics client catalogue", () => {
   it("does not construct the service client when admin reauthentication fails", async () => {
     mocks.requireAdmin.mockRejectedValue(new Error("Forbidden"));
 
-    await expect(listAdminAnalyticsClients()).rejects.toThrow("Forbidden");
+    await expect(listAdminAnalyticsClients(range)).rejects.toThrow("Forbidden");
     expect(mocks.createServiceClient).not.toHaveBeenCalled();
   });
 
@@ -374,7 +481,7 @@ describe("admin analytics client catalogue", () => {
     });
     mocks.createServiceClient.mockReturnValue(setup.client);
 
-    await expect(listAdminAnalyticsClients()).rejects.toThrow("inconsistent");
+    await expect(listAdminAnalyticsClients(range)).rejects.toThrow("inconsistent");
   });
 
   it.each([
@@ -393,13 +500,13 @@ describe("admin analytics client catalogue", () => {
     });
     mocks.createServiceClient.mockReturnValue(setup.client);
 
-    await expect(listAdminAnalyticsClients()).rejects.toThrow("inconsistent");
+    await expect(listAdminAnalyticsClients(range)).rejects.toThrow("inconsistent");
   });
 
   it("fails closed when a catalogue read fails", async () => {
     const setup = service({ errors: { ad_accounts: { code: "42501" } } });
     mocks.createServiceClient.mockReturnValue(setup.client);
 
-    await expect(listAdminAnalyticsClients()).rejects.toThrow("unavailable");
+    await expect(listAdminAnalyticsClients(range)).rejects.toThrow("unavailable");
   });
 });

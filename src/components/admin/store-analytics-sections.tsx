@@ -36,6 +36,10 @@ function familyMessage<T>(family: AdminAnalyticsFamily<T>): string | null {
   return "message" in family ? family.message ?? null : null;
 }
 
+function seriesBucket(point: { day?: string; bucket?: string }) {
+  return point.bucket ?? point.day ?? "";
+}
+
 function campaignTypeLabel(
   campaign: { type: string | null; shoppingFeed: boolean },
 ): string {
@@ -171,10 +175,11 @@ export function StoreFunnelSections({
   analytics: AdminStoreAnalytics;
 }) {
   const funnel = analytics.funnel;
+  const daily = "data" in funnel ? funnel.data.daily : [];
   const points: FunnelChartPoint[] =
     "data" in funnel
-      ? funnel.data.daily.map((row) => ({
-          date: row.day,
+      ? daily.map((row) => ({
+          date: seriesBucket(row),
           sessions: row.sessions,
           addToCarts: row.addedToCart,
           checkouts: row.reachedCheckout,
@@ -186,7 +191,10 @@ export function StoreFunnelSections({
     <>
       {"data" in funnel && funnel.state !== "empty" ? (
         <>
-          <FunnelDevelopmentChart points={points} granularity="day" />
+          <FunnelDevelopmentChart
+            points={points}
+            granularity={funnel.data.granularity ?? "day"}
+          />
           {funnel.state === "partial" && (
             <div role="status" className="panel flex items-center gap-2 px-4 py-3 text-xs text-[var(--warning-orange)]">
               <AlertTriangle className="size-4 shrink-0" aria-hidden />
@@ -224,15 +232,16 @@ export function StoreSpendSection({
   currency: string;
 }) {
   if ("data" in spend && spend.state !== "empty") {
+    const daily = spend.data.daily;
     return (
       <>
         <SpendDevelopmentChart
-          points={spend.data.daily.map((row) => ({
-            date: row.day,
+          points={daily.map((row) => ({
+            date: seriesBucket(row),
             googleSpend: row.spend,
           }))}
           currency={currency}
-          granularity="day"
+          granularity={spend.data.granularity ?? "day"}
         />
         {spend.state === "partial" && (
           <div role="status" className="panel flex items-center gap-2 px-4 py-3 text-xs text-[var(--warning-orange)]">
@@ -285,27 +294,14 @@ export function CampaignPerformanceSection({
 
   return (
     <section className="panel overflow-hidden" aria-labelledby="campaign-performance-title">
-      <header className="flex flex-wrap items-start justify-between gap-3 border-b border-[var(--border-subtle)] px-4 py-3.5 sm:px-5">
-        <div>
-          <h2 id="campaign-performance-title" className="text-[14px] font-semibold text-[var(--text-primary)]">
-            Campaign Performance
-          </h2>
-          <p className="mt-0.5 text-[11px] text-[var(--text-muted)]">
-            Google delivery and Shopify last-non-direct-click UTM attribution for the selected period.
-          </p>
-        </div>
-        <Badge variant="neutral">Provider + Shopify</Badge>
+      <header className="border-b border-[var(--border-subtle)] px-4 py-3.5 sm:px-5">
+        <h2 id="campaign-performance-title" className="text-[14px] font-semibold text-[var(--text-primary)]">
+          Campaign Performance
+        </h2>
+        <p className="mt-0.5 text-[11px] text-[var(--text-muted)]">
+          Google delivery and Shopify last-non-direct-click UTM attribution for the selected period.
+        </p>
       </header>
-
-      {hasData && familyMessage(campaigns) ? (
-        <div
-          role="status"
-          className="flex items-center gap-2 border-b border-[var(--border-subtle)] bg-[var(--warning-orange)]/5 px-5 py-2 text-[11px] text-[var(--warning-orange)]"
-        >
-          <AlertTriangle className="size-3.5 shrink-0" aria-hidden />
-          <span>{familyMessage(campaigns)}</span>
-        </div>
-      ) : null}
 
       {!hasData ? (
         <FamilyNotice
@@ -325,17 +321,17 @@ export function CampaignPerformanceSection({
             <thead>
               <tr className="label-caps border-b border-[var(--border-subtle)] text-left">
                 <th className="px-5 py-2.5 font-medium">Campaign / asset</th>
-                <th className="px-2.5 py-2.5 font-medium">Type</th>
-                <th className="px-2.5 py-2.5 font-medium">Status</th>
-                <th className="px-2.5 py-2.5 text-right font-medium">Spend</th>
-                <th className="px-2.5 py-2.5 text-right font-medium">CPC</th>
-                <th className="px-2.5 py-2.5 text-right font-medium">CTR</th>
-                <th className="px-2.5 py-2.5 text-right font-medium">CPM</th>
-                <th className="px-2.5 py-2.5 text-right font-medium">CPA</th>
-                <th className="px-2.5 py-2.5 text-right font-medium">Conv.</th>
-                <th className="px-2.5 py-2.5 text-right font-medium">Google ROAS</th>
-                <th className="px-2.5 py-2.5 text-right font-medium">Shopify revenue</th>
-                <th className="px-5 py-2.5 text-right font-medium">Real ROAS</th>
+                <th className="px-2.5 py-2.5 text-center font-medium">Type</th>
+                <th className="px-2.5 py-2.5 text-center font-medium">Status</th>
+                <th className="px-2.5 py-2.5 text-center font-medium">Spend</th>
+                <th className="px-2.5 py-2.5 text-center font-medium">CPC</th>
+                <th className="px-2.5 py-2.5 text-center font-medium">CTR</th>
+                <th className="px-2.5 py-2.5 text-center font-medium">CPM</th>
+                <th className="px-2.5 py-2.5 text-center font-medium">CPA</th>
+                <th className="px-2.5 py-2.5 text-center font-medium">Conv.</th>
+                <th className="px-2.5 py-2.5 text-center font-medium">Google ROAS</th>
+                <th className="px-2.5 py-2.5 text-center font-medium">REV.</th>
+                <th className="px-5 py-2.5 text-center font-medium">Real ROAS</th>
               </tr>
             </thead>
             <tbody>
@@ -377,17 +373,17 @@ export function CampaignPerformanceSection({
                           </span>
                         </button>
                       </td>
-                      <td className="px-2.5 py-3"><Badge variant={campaign.type === "DEMAND_GEN" ? "gold" : "neutral"}>{campaignTypeLabel(campaign)}</Badge></td>
-                      <td className="px-2.5 py-3"><Badge variant={campaign.status === "active" ? "success" : "neutral"}>{campaign.status || "—"}</Badge></td>
-                      <td className="px-2.5 py-3 text-right tabular-nums">{money(campaign.spend, currency)}</td>
-                      <td className="px-2.5 py-3 text-right tabular-nums">{campaign.cpc === null ? "—" : money(campaign.cpc, currency)}</td>
-                      <td className="px-2.5 py-3 text-right tabular-nums">{percent(campaign.ctr)}</td>
-                      <td className="px-2.5 py-3 text-right tabular-nums">{campaign.cpm === null ? "—" : money(campaign.cpm, currency)}</td>
-                      <td className="px-2.5 py-3 text-right tabular-nums">{campaign.cpa === null ? "—" : money(campaign.cpa, currency)}</td>
-                      <td className="px-2.5 py-3 text-right tabular-nums">{integer(campaign.conversions)}</td>
-                      <td className="px-2.5 py-3 text-right tabular-nums">{campaign.googleRoas === null ? "—" : multiplier(campaign.googleRoas)}</td>
-                      <td className="px-2.5 py-3 text-right tabular-nums">{campaign.shopifyRevenue === null ? "—" : money(campaign.shopifyRevenue, currency)}</td>
-                      <td className="px-5 py-3 text-right font-medium tabular-nums text-[var(--accent-gold-strong)]">{campaign.realRoas === null ? "—" : multiplier(campaign.realRoas)}</td>
+                      <td className="px-2.5 py-3 text-center"><Badge variant={campaign.type === "DEMAND_GEN" ? "gold" : "neutral"}>{campaignTypeLabel(campaign)}</Badge></td>
+                      <td className="px-2.5 py-3 text-center"><Badge variant={campaign.status === "active" ? "success" : "neutral"}>{campaign.status || "—"}</Badge></td>
+                      <td className="px-2.5 py-3 text-center tabular-nums">{money(campaign.spend, currency)}</td>
+                      <td className="px-2.5 py-3 text-center tabular-nums">{campaign.cpc === null ? "—" : money(campaign.cpc, currency)}</td>
+                      <td className="px-2.5 py-3 text-center tabular-nums">{percent(campaign.ctr)}</td>
+                      <td className="px-2.5 py-3 text-center tabular-nums">{campaign.cpm === null ? "—" : money(campaign.cpm, currency)}</td>
+                      <td className="px-2.5 py-3 text-center tabular-nums">{campaign.cpa === null ? "—" : money(campaign.cpa, currency)}</td>
+                      <td className="px-2.5 py-3 text-center tabular-nums">{integer(campaign.conversions)}</td>
+                      <td className="px-2.5 py-3 text-center tabular-nums">{campaign.googleRoas === null ? "—" : multiplier(campaign.googleRoas)}</td>
+                      <td className="px-2.5 py-3 text-center tabular-nums">{campaign.shopifyRevenue === null ? "—" : money(campaign.shopifyRevenue, currency)}</td>
+                      <td className="px-5 py-3 text-center font-medium tabular-nums text-[var(--accent-gold-strong)]">{campaign.realRoas === null ? "—" : multiplier(campaign.realRoas)}</td>
                     </tr>
 
                     {open && campaign.breakdown.rows.map((row) => {
@@ -417,17 +413,17 @@ export function CampaignPerformanceSection({
                               {row.detail || (row.shopifyUnits === null ? row.provider : `${integer(row.shopifyUnits)} Shopify units`)}
                             </p>
                           </td>
-                          <td className="px-2.5 py-2.5"><Badge variant="neutral">{row.kind}</Badge></td>
-                          <td className="px-2.5 py-2.5 text-[10px] text-[var(--text-muted)]">{row.provider === "google_ads" ? "Google" : "Shopify"}</td>
-                          <td className="px-2.5 py-2.5 text-right tabular-nums">{row.spend === null ? "—" : money(row.spend, currency)}</td>
-                          <td className="px-2.5 py-2.5 text-right tabular-nums">{cpc === null ? "—" : money(cpc, currency)}</td>
-                          <td className="px-2.5 py-2.5 text-right tabular-nums">{percent(ctr)}</td>
-                          <td className="px-2.5 py-2.5 text-right tabular-nums">{cpm === null ? "—" : money(cpm, currency)}</td>
-                          <td className="px-2.5 py-2.5 text-right tabular-nums">{cpa === null ? "—" : money(cpa, currency)}</td>
-                          <td className="px-2.5 py-2.5 text-right tabular-nums">{row.conversions === null ? "—" : integer(row.conversions)}</td>
-                          <td className="px-2.5 py-2.5 text-right tabular-nums">{googleRoas === null ? "—" : multiplier(googleRoas)}</td>
-                          <td className="px-2.5 py-2.5 text-right tabular-nums">{row.shopifyRevenue === null ? "—" : money(row.shopifyRevenue, currency)}</td>
-                          <td className="px-5 py-2.5 text-right tabular-nums text-[var(--accent-gold-strong)]">{realRoas === null ? "—" : multiplier(realRoas)}</td>
+                          <td className="px-2.5 py-2.5 text-center"><Badge variant="neutral">{row.kind}</Badge></td>
+                          <td className="px-2.5 py-2.5 text-center text-[10px] text-[var(--text-muted)]">{row.provider === "google_ads" ? "Google" : "Shopify"}</td>
+                          <td className="px-2.5 py-2.5 text-center tabular-nums">{row.spend === null ? "—" : money(row.spend, currency)}</td>
+                          <td className="px-2.5 py-2.5 text-center tabular-nums">{cpc === null ? "—" : money(cpc, currency)}</td>
+                          <td className="px-2.5 py-2.5 text-center tabular-nums">{percent(ctr)}</td>
+                          <td className="px-2.5 py-2.5 text-center tabular-nums">{cpm === null ? "—" : money(cpm, currency)}</td>
+                          <td className="px-2.5 py-2.5 text-center tabular-nums">{cpa === null ? "—" : money(cpa, currency)}</td>
+                          <td className="px-2.5 py-2.5 text-center tabular-nums">{row.conversions === null ? "—" : integer(row.conversions)}</td>
+                          <td className="px-2.5 py-2.5 text-center tabular-nums">{googleRoas === null ? "—" : multiplier(googleRoas)}</td>
+                          <td className="px-2.5 py-2.5 text-center tabular-nums">{row.shopifyRevenue === null ? "—" : money(row.shopifyRevenue, currency)}</td>
+                          <td className="px-5 py-2.5 text-center tabular-nums text-[var(--accent-gold-strong)]">{realRoas === null ? "—" : multiplier(realRoas)}</td>
                         </tr>
                       );
                     })}
@@ -521,11 +517,11 @@ export function CollectionReturnSection({
             <thead>
               <tr className="label-caps border-b border-[var(--border-subtle)] text-left">
                 <th className="px-5 py-2.5 font-medium">Collection / product</th>
-                <th className="px-3 py-2.5 font-medium">Source</th>
-                <th className="px-3 py-2.5 text-right font-medium">Units</th>
-                <th className="px-3 py-2.5 text-right font-medium">Ad spend</th>
-                <th className="px-3 py-2.5 text-right font-medium">Revenue</th>
-                <th className="px-5 py-2.5 text-right font-medium">Real ROAS</th>
+                <th className="px-3 py-2.5 text-center font-medium">Source</th>
+                <th className="px-3 py-2.5 text-center font-medium">Units</th>
+                <th className="px-3 py-2.5 text-center font-medium">Ad spend</th>
+                <th className="px-3 py-2.5 text-center font-medium">Revenue</th>
+                <th className="px-5 py-2.5 text-center font-medium">Real ROAS</th>
               </tr>
             </thead>
             <tbody>
@@ -545,20 +541,20 @@ export function CollectionReturnSection({
                           <span className="truncate">{collection.title}</span>
                         </button>
                       </td>
-                      <td className="px-3 py-3"><Badge variant="neutral">Shopify</Badge></td>
-                      <td className="px-3 py-3 text-right tabular-nums">{integer(collection.units)}</td>
-                      <td className="px-3 py-3 text-right tabular-nums">{collection.spend === null ? "—" : money(collection.spend, currency)}</td>
-                      <td className="px-3 py-3 text-right tabular-nums">{money(collection.revenue, currency)}</td>
-                      <td className="px-5 py-3 text-right font-medium tabular-nums text-[var(--accent-gold-strong)]">{collection.roas === null ? "—" : multiplier(collection.roas)}</td>
+                      <td className="px-3 py-3 text-center"><Badge variant="neutral">Shopify</Badge></td>
+                      <td className="px-3 py-3 text-center tabular-nums">{integer(collection.units)}</td>
+                      <td className="px-3 py-3 text-center tabular-nums">{collection.spend === null ? "—" : money(collection.spend, currency)}</td>
+                      <td className="px-3 py-3 text-center tabular-nums">{money(collection.revenue, currency)}</td>
+                      <td className="px-5 py-3 text-center font-medium tabular-nums text-[var(--accent-gold-strong)]">{collection.roas === null ? "—" : multiplier(collection.roas)}</td>
                     </tr>
                     {expanded && collection.products.map((product) => (
                       <tr key={product.productId} className="border-t border-[var(--border-subtle)] bg-[var(--bg-base)] hover:bg-[var(--bg-panel-hover)]">
                         <td className="px-5 py-2.5 pl-12 font-medium text-[var(--text-secondary)]">{product.title}</td>
-                        <td className="px-3 py-2.5 text-[var(--text-muted)]">Product</td>
-                        <td className="px-3 py-2.5 text-right tabular-nums">{integer(product.units)}</td>
-                        <td className="px-3 py-2.5 text-right text-[var(--text-muted)]">—</td>
-                        <td className="px-3 py-2.5 text-right tabular-nums">{money(product.revenue, currency)}</td>
-                        <td className="px-5 py-2.5 text-right text-[var(--text-muted)]">—</td>
+                        <td className="px-3 py-2.5 text-center text-[var(--text-muted)]">Product</td>
+                        <td className="px-3 py-2.5 text-center tabular-nums">{integer(product.units)}</td>
+                        <td className="px-3 py-2.5 text-center tabular-nums text-[var(--text-muted)]">{product.spend === null || product.spend === undefined ? "—" : money(product.spend, currency)}</td>
+                        <td className="px-3 py-2.5 text-center tabular-nums">{money(product.revenue, currency)}</td>
+                        <td className="px-5 py-2.5 text-center tabular-nums text-[var(--text-muted)]">{product.roas === null || product.roas === undefined ? "—" : multiplier(product.roas)}</td>
                       </tr>
                     ))}
                   </React.Fragment>

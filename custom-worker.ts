@@ -55,11 +55,9 @@ const worker = {
      * Which schedule fired decides the work. Every route is idempotent, so a
      * retried or double-fired trigger costs nothing but a round trip.
      *
-     * The hourly tick runs BOTH syncs, in order: the metrics rollup is what
-     * the client reports read, and the ledger is what the finance pages read.
-     * Refreshing only the ledger — as this used to — left the reports showing
-     * whatever the last page view happened to capture, which is exactly the
-     * staleness the countdown in the report now promises is bounded.
+     * d7 is the one rolling daily refresh and upserts every account/day. The
+     * Today leg exists only for hourly chart buckets; it is not another daily
+     * metrics pass. The ledger remains independent finance evidence.
      */
     const job: { name: string; paths: string[] } =
       event.cron === "5 14 * * 1"
@@ -78,9 +76,8 @@ const worker = {
           : {
               name: "hourly refresh",
               paths: [
-                "/api/admin/sync-metrics",
-                "/api/admin/sync-reporting?range=today",
                 "/api/admin/sync-reporting?range=d7",
+                "/api/admin/sync-reporting?range=today",
                 "/api/admin/sync-ledgers",
               ],
             };

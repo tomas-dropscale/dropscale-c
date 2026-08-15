@@ -10,6 +10,7 @@ import type { RangeSelection } from "@/lib/portal/range";
  */
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 const MAX_CAMPAIGN_ROWS = 1_001;
+const MAX_CAMPAIGN_TIMELINE_ROWS = 25_001;
 const MAX_CREATIVE_ROWS = 1_001;
 const MAX_PRODUCT_ROWS = 10_001;
 
@@ -179,6 +180,18 @@ export type LiveCampaign = Campaign & {
   shoppingFeed: boolean;
   /** Google conversion value divided by Google spend. */
   googleRoas: number | null;
+};
+
+export type GoogleCampaignTimelinePoint = {
+  accountId: string;
+  campaignId: string;
+  bucket: string;
+  granularity: "hour" | "day";
+  spend: number;
+  impressions: number;
+  clicks: number;
+  conversions: number;
+  googleRevenue: number;
 };
 
 /** One exact range-aggregated Demand Gen ad from a legacy Google connection. */
@@ -601,6 +614,75 @@ export async function fetchLiveCampaignsDetailed(
       advertisingChannelType,
       shoppingFeed: hasShoppingFeed(campaign),
       googleRoas: spend > 0 ? conversionValue / spend : null,
+    };
+  });
+}
+
+/** One provider read for the chart buckets; hourly for one day, daily otherwise. */
+export async function fetchLiveCampaignTimeline(
+  customerId: string,
+  refreshToken: string,
+  accountId: string,
+  range: Pick<RangeSelection, "from" | "to">,
+  expectedCurrency?: string,
+): Promise<GoogleCampaignTimelinePoint[]> {
+  const hourly = range.from === range.to;
+  const rows = await searchGoogleAds(
+    customerId,
+    refreshToken,
+    `SELECT
+      customer.id,
+      customer.currency_code,
+      customer.time_zone,
+      campaign.id,
+      segments.date,
+      ${hourly ? "segments.hour," : ""}
+      metrics.cost_micros,
+      metrics.impressions,
+      metrics.clicks,
+      metrics.conversions,
+      metrics.conversions_value
+    FROM campaign
+    WHERE ${dateClause(range)}
+    ORDER BY segments.date, ${hourly ? "segments.hour," : ""} campaign.id
+    LIMIT ${MAX_CAMPAIGN_TIMELINE_ROWS}`,
+  );
+  assertBounded(rows, "campaign timeline", MAX_CAMPAIGN_TIMELINE_ROWS);
+  const seen = new Set<string>();
+  return rows.map((row): GoogleCampaignTimelinePoint => {
+    const identity = exactCustomer(row, customerId);
+    if (expectedCurrency && identity.currency !== expectedCurrency) {
+      throw new Error("Google Ads returned a different campaign currency.");
+    }
+    const campaignId = integerText(row.campaign?.id, "campaign identity");
+    const date = cleanText(row.segments?.date, "campaign reporting day", 10);
+    if (!isDay(date) || date < range.from || date > range.to) {
+      throw new Error("Google Ads returned an invalid campaign reporting day.");
+    }
+    let bucket = date;
+    if (hourly) {
+      const hour = Number(row.segments?.hour);
+      if (!Number.isSafeInteger(hour) || hour < 0 || hour > 23) {
+        throw new Error("Google Ads returned an invalid campaign reporting hour.");
+      }
+      bucket = `${date}T${String(hour).padStart(2, "0")}:00:00`;
+    }
+    const key = `${campaignId}\u0000${bucket}`;
+    if (seen.has(key)) {
+      throw new Error("Google Ads returned duplicate campaign timeline identity.");
+    }
+    seen.add(key);
+    const metrics = detailMetrics(row);
+    return {
+      accountId,
+      campaignId,
+      bucket,
+      granularity: hourly ? "hour" : "day",
+      spend: metrics.spend,
+      impressions: metrics.impressions,
+      clicks: metrics.clicks,
+      conversions: metrics.conversions,
+      googleRevenue: metrics.conversionValue,
     };
   });
 }

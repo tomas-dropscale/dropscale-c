@@ -8,10 +8,12 @@ import type { GoogleDailyMetric } from "@/lib/reporting/daily-metrics";
 import type { CanonicalReportingSource } from "@/lib/reporting/sources";
 import {
   fetchGoogleAdsCampaignBreakdown,
+  fetchGoogleAdsCampaignTimeline,
   fetchGoogleAdsDailyBreakdown,
   fetchGoogleAdsDemandGenAdBreakdown,
   fetchGoogleAdsPmaxProductBreakdown,
   type WindsorGoogleAdsCampaignRow,
+  type WindsorGoogleAdsCampaignTimelineRow,
   type WindsorGoogleAdsDailyRow,
   type WindsorGoogleAdsDemandGenAdRow,
   type WindsorGoogleAdsPmaxProductRow,
@@ -36,6 +38,12 @@ type CampaignFetcher = (
   to: string,
 ) => Promise<WindsorGoogleAdsCampaignRow[]>;
 
+type CampaignTimelineFetcher = (
+  accountId: string,
+  from: string,
+  to: string,
+) => Promise<WindsorGoogleAdsCampaignTimelineRow[]>;
+
 type DemandGenAdFetcher = (
   accountId: string,
   from: string,
@@ -50,6 +58,18 @@ type PmaxProductFetcher = (
 
 export type ReportingCampaign = LiveCampaign & {
   biddingStrategyType: string | null;
+};
+
+export type ReportingCampaignTimelinePoint = {
+  accountId: string;
+  campaignId: string;
+  bucket: string;
+  granularity: "day";
+  spend: number;
+  impressions: number;
+  clicks: number;
+  conversions: number;
+  googleRevenue: number;
 };
 
 export type { GoogleCampaignBreakdownRow };
@@ -187,6 +207,30 @@ export async function fetchGoogleReportingCampaigns(
       biddingStrategyType: row.biddingStrategyType,
       conversionValue: row.conversionValue,
       googleRoas: row.spend > 0 ? row.conversionValue / row.spend : null,
+    };
+  });
+}
+
+export async function fetchGoogleReportingCampaignTimeline(
+  source: CanonicalReportingSource,
+  from: string,
+  to: string,
+  fetcher: CampaignTimelineFetcher = fetchGoogleAdsCampaignTimeline,
+): Promise<ReportingCampaignTimelinePoint[]> {
+  const google = verifiedGoogleIdentity(source);
+  const rows = await fetcher(google.accountId, from, to);
+  return rows.map((row) => {
+    assertBreakdownIdentity(row, google);
+    return {
+      accountId: source.adAccountId,
+      campaignId: row.campaignId,
+      bucket: row.date,
+      granularity: "day" as const,
+      spend: row.spend,
+      impressions: row.impressions,
+      clicks: row.clicks,
+      conversions: row.conversions,
+      googleRevenue: row.conversionValue,
     };
   });
 }

@@ -151,8 +151,19 @@ function ClientCombobox({
           }
         }}
       >
-        <span id={valueId} className="truncate">
-          {selectedClient?.name ?? "All clients"}
+        <span className="flex min-w-0 flex-1 items-center gap-2">
+          <span id={valueId} className="truncate">
+            {selectedClient?.name ?? "All clients"}
+          </span>
+          {selectedClient?.hasRunningActivity && (
+            <Badge
+              variant="success"
+              title="At least one active campaign is present in a valid snapshot."
+            >
+              <span className="size-1.5 rounded-full bg-current" aria-hidden />
+              Running
+            </Badge>
+          )}
         </span>
         <ChevronDown className="size-4 shrink-0 text-[var(--text-secondary)]" aria-hidden />
       </button>
@@ -210,7 +221,18 @@ function ClientCombobox({
                 onMouseDown={(event) => event.preventDefault()}
                 onClick={() => selectClient(client)}
               >
-                <span className="truncate">{client?.name ?? "All clients"}</span>
+                <span className="flex min-w-0 flex-1 items-center gap-2">
+                  <span className="truncate">{client?.name ?? "All clients"}</span>
+                  {client?.hasRunningActivity && (
+                    <Badge
+                      variant="success"
+                      title="At least one active campaign is present in a valid snapshot."
+                    >
+                      <span className="size-1.5 rounded-full bg-current" aria-hidden />
+                      Running
+                    </Badge>
+                  )}
+                </span>
                 {selected && (
                   <Check className="absolute right-2.5 size-3.5 text-[var(--accent-gold)]" aria-hidden />
                 )}

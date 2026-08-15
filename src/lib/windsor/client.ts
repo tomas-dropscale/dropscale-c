@@ -113,6 +113,20 @@ export type WindsorGoogleAdsCampaignRow = {
   conversionValue: number;
 };
 
+export type WindsorGoogleAdsCampaignTimelineRow = {
+  date: string;
+  accountId: string;
+  customerId: string;
+  currency: string;
+  timeZone: string;
+  campaignId: string;
+  spend: number;
+  impressions: number;
+  clicks: number;
+  conversions: number;
+  conversionValue: number;
+};
+
 /** One range-aggregated Demand Gen ad for an exact Windsor account. */
 export type WindsorGoogleAdsDemandGenAdRow = {
   accountId: string;
@@ -1138,6 +1152,68 @@ export async function fetchGoogleAdsCampaignBreakdown(
 
   return [...campaigns.values()].sort(
     (left, right) => right.spend - left.spend || left.campaignId.localeCompare(right.campaignId),
+  );
+}
+
+/** Daily campaign facts in one bounded Windsor read (no N-requests-per-day fanout). */
+export async function fetchGoogleAdsCampaignTimeline(
+  accountId: string,
+  from: string,
+  to: string,
+  options: WindsorRequestOptions = {},
+): Promise<WindsorGoogleAdsCampaignTimelineRow[]> {
+  const ids = normalizeGoogleAdsCustomerId(accountId);
+  const range = reportingRange(from, to);
+  const maxRows = Math.min(range.days * 1_000 + 1, 25_001);
+  const url = new URL(`/${WINDSOR_DATASOURCE}`, CONNECTORS_ORIGIN);
+  url.searchParams.set(
+    "fields",
+    "date,account_id,account_currency_code,account_time_zone,campaign_id," +
+      "spend,impressions,clicks,conversions,conversion_value",
+  );
+  url.searchParams.set("date_from", from);
+  url.searchParams.set("date_to", to);
+  url.searchParams.set("filter", JSON.stringify([["account_id", "eq", ids.accountId]]));
+  url.searchParams.set("_max_rows", String(maxRows));
+  url.searchParams.set("_renderer", "json");
+
+  const rawRows = arrayPayload(
+    await requestJson(url, options),
+    ["data", "results", "rows"],
+  );
+  if (rawRows.length >= maxRows) throw invalidCampaignResponse();
+
+  const rows = new Map<string, WindsorGoogleAdsCampaignTimelineRow>();
+  for (const value of rawRows) {
+    const raw = asRecord(value);
+    if (!raw) throw invalidCampaignResponse();
+    const identity = exactReportingIdentity(raw, ids.customerId, invalidCampaignResponse);
+    const date = typeof raw.date === "string" ? raw.date.trim() : "";
+    const timestamp = isoDayTimestamp(date);
+    if (
+      timestamp === null ||
+      timestamp < range.fromTimestamp ||
+      timestamp > range.toTimestamp
+    ) {
+      throw invalidCampaignResponse();
+    }
+    const campaignId = breakdownIntegerId(raw.campaign_id, invalidCampaignResponse);
+    const key = `${campaignId}\u0000${date}`;
+    if (rows.has(key)) throw invalidCampaignResponse();
+    rows.set(key, {
+      date,
+      ...identity,
+      campaignId,
+      spend: breakdownNumber(raw.spend, invalidCampaignResponse),
+      impressions: breakdownNumber(raw.impressions, invalidCampaignResponse, true),
+      clicks: breakdownNumber(raw.clicks, invalidCampaignResponse, true),
+      conversions: breakdownNumber(raw.conversions, invalidCampaignResponse),
+      conversionValue: breakdownNumber(raw.conversion_value, invalidCampaignResponse),
+    });
+  }
+  return [...rows.values()].sort(
+    (left, right) =>
+      left.date.localeCompare(right.date) || left.campaignId.localeCompare(right.campaignId),
   );
 }
 

@@ -361,6 +361,7 @@ describe("admin exact-range reporting sync route", () => {
     expect(mocks.refreshAdminCampaignSnapshots).toHaveBeenCalledWith(range, {
       authenticate: false,
       client: serviceClient,
+      ...(key === "d7" ? { refreshMetrics: true } : {}),
     });
     expect(mocks.listAdminReportingStoreScopes).toHaveBeenCalledWith(serviceClient);
     expect(mocks.refreshAdminStoreAnalyticsSnapshots).toHaveBeenCalledWith(

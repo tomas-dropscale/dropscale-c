@@ -15,12 +15,10 @@ import {
   Plus,
   RefreshCw,
   Search,
-  ShieldCheck,
   Store,
   Unplug,
   UserPlus,
   Users,
-  X,
 } from "lucide-react";
 
 import { ClientCommercialTerms } from "@/components/admin/client-commercial-terms";
@@ -43,7 +41,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
-  actionableReviewSession,
   assetConnectionKey,
   availableOnboardingAssetKinds,
   buildClientCards,
@@ -63,12 +60,11 @@ import {
 import type { ExistingClientRosterDTO } from "@/lib/client-onboarding/legacy-roster";
 import type { ClientOnboardingSessionDTO } from "@/lib/client-onboarding/sessions";
 import type { AdminCommissionClient } from "@/lib/admin/client-commissions";
-import { createClient } from "@/lib/supabase/client";
 import type { ClientOnboardingAsset, ClientOnboardingMode } from "@/lib/supabase/types";
 
 type AssetChoice = "account" | "shopify" | "google_ads" | "both";
 type DialogMode = "new_client" | "reconnect" | "add_assets";
-type SessionAction = "rotate" | "approve" | "revoke";
+type SessionAction = "rotate" | "revoke";
 type ActionTarget = { session: ClientOnboardingSessionDTO; action: SessionAction };
 type DisconnectTarget =
   | {
@@ -134,12 +130,6 @@ function choiceForAvailableAssets(
   return assets.length === 2 ? "both" : assets[0] ?? "both";
 }
 
-function approvalLabel(session: ClientOnboardingSessionDTO) {
-  return session.requestedAssets.length
-    ? `Approve ${onboardingAssetLabel(session.requestedAssets)}`
-    : "Approve client";
-}
-
 function clientName(session: ClientOnboardingSessionDTO) {
   if (session.targetClientName) return session.targetClientName;
   const identity = [session.firstName, session.lastName].filter(Boolean).join(" ").trim();
@@ -193,10 +183,6 @@ function cardHasIssue(card: ClientCard) {
       ) ||
       card.googleAds.some((account) => account.lastErrorCode),
   );
-}
-
-function cardIsActive(card: ClientCard) {
-  return card.roster?.approvalStatus === "approved" || cardHasStatus(card, ["active"]);
 }
 
 function cardHasStatus(card: ClientCard, statuses: readonly string[]) {
@@ -263,9 +249,6 @@ function linkStatusBadge(session: ClientOnboardingSessionDTO) {
 
 function clientStatusBadge(status: ClientCardStatus) {
   if (status === "approved") return <Badge variant="success">Approved</Badge>;
-  if (status === "waiting_for_approval") {
-    return <Badge variant="warning">Waiting for approval</Badge>;
-  }
   if (status === "waiting_for_assets") {
     return <Badge variant="gold">Waiting for assets</Badge>;
   }
@@ -471,7 +454,6 @@ export function ClientOnboardingManager({
   rosterLoadFailed,
   initialCommissionClients = [],
   commissionLoadFailed = false,
-  adminId = "",
   readOnlyPreview = false,
 }: {
   initialSessions: ClientOnboardingSessionDTO[];
@@ -532,9 +514,6 @@ export function ClientOnboardingManager({
   const counts = React.useMemo(
     () => ({
       approved: cards.filter((card) => clientCardStatus(card) === "approved").length,
-      review: cards.filter(
-        (card) => clientCardStatus(card) === "waiting_for_approval",
-      ).length,
       onboarding: cards.filter(
         (card) => clientCardStatus(card) === "waiting_for_assets",
       ).length,
@@ -690,16 +669,10 @@ export function ClientOnboardingManager({
     setBusy(`${action}:${session.id}`);
     setDialogError("");
     try {
-      const requestAction =
-        action === "approve"
-          ? session.requestedAssets.length === 0
-            ? "activate"
-            : "review"
-          : action;
       const response = await fetch(`/api/admin/client-onboarding/${session.id}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ action: requestAction }),
+        body: JSON.stringify({ action }),
       });
       const body = await readJson(response);
       if (!response.ok) throw new Error(errorMessage(body, `The ${action} action could not be completed.`));
@@ -732,9 +705,6 @@ export function ClientOnboardingManager({
           "Link replaced",
           `The previous link for ${purpose} no longer works. Send only the new one; other open links are unchanged.`,
         ],
-        approve: session.requestedAssets.length
-          ? ["Connections approved", "The connected stores and ad accounts are ready for reporting setup."]
-          : ["Client activated", "The client can now access their dashboard."],
         revoke: [
           "Link cancelled",
           `The link for ${purpose} and any connections added through it have been removed. Other open links and the client’s dashboard access are unchanged.`,
@@ -1035,55 +1005,6 @@ export function ClientOnboardingManager({
     }
   }
 
-  async function reviewRosterClient(
-    card: ClientCard,
-    approvalStatus: "approved" | "rejected",
-  ) {
-    if (
-      readOnlyPreview ||
-      !adminId ||
-      !card.clientId ||
-      card.roster?.approvalStatus !== "pending" ||
-      card.sessions.length > 0
-    ) {
-      return;
-    }
-    const busyKey = `${approvalStatus}-client:${card.clientId}`;
-    setBusy(busyKey);
-    setNotice(null);
-    try {
-      const { data, error } = await createClient()
-        .from("portal_clients")
-        .update({
-          approval_status: approvalStatus,
-          approved_at: new Date().toISOString(),
-          approved_by: adminId,
-        })
-        .eq("id", card.clientId)
-        .eq("approval_status", "pending")
-        .select("id")
-        .maybeSingle();
-      if (error) throw error;
-      if (!data) {
-        throw new Error("This client was already reviewed. Refresh and try again.");
-      }
-      await refreshClients();
-      showNotice(
-        "success",
-        approvalStatus === "approved" ? "Client approved" : "Client rejected",
-        `${cardClientName(card)} was ${approvalStatus}.`,
-      );
-    } catch (error) {
-      showNotice(
-        "error",
-        "Client review failed",
-        error instanceof Error ? error.message : "The client could not be reviewed.",
-      );
-    } finally {
-      setBusy(null);
-    }
-  }
-
   const selectedActionSession = actionTarget?.session;
   const selectedAction = actionTarget?.action;
   const selectedActionPurpose = selectedActionSession
@@ -1114,9 +1035,8 @@ export function ClientOnboardingManager({
       {notice && <NoticeBanner key={notice.id} notice={notice} dismiss={() => setNotice(null)} />}
 
       <div className="space-y-3">
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <CountCard label="Approved" value={counts.approved} help="Client setup approved" icon={CheckCircle2} tone="success" />
-          <CountCard label="In review" value={counts.review} help="Waiting for your approval" icon={ShieldCheck} tone="warning" />
           <CountCard label="Onboarding" value={counts.onboarding} help="Waiting for client assets" icon={Clock3} />
           <CountCard label="No assets" value={counts.noAssets} help="No stores or ad accounts connected" icon={Unplug} />
           <CountCard label="Needs attention" value={counts.issues} help="Expired links or reported errors" icon={CircleAlert} tone="danger" />
@@ -1145,7 +1065,6 @@ export function ClientOnboardingManager({
                 <SelectContent>
                   <SelectItem value="all">All statuses</SelectItem>
                   <SelectItem value="approved">Approved</SelectItem>
-                  <SelectItem value="waiting_for_approval">Waiting for approval</SelectItem>
                   <SelectItem value="waiting_for_assets">Waiting for assets</SelectItem>
                   <SelectItem value="no_assets">No assets</SelectItem>
                 </SelectContent>
@@ -1172,11 +1091,7 @@ export function ClientOnboardingManager({
               const status = clientCardStatus(card);
               const openSessions = openOnboardingSessions(card.sessions);
               const availableAssets = availableOnboardingAssetKinds(card.sessions);
-              const reviewSession = actionableReviewSession(card.sessions);
-              const pendingRosterOnly =
-                card.roster?.approvalStatus === "pending" && card.sessions.length === 0;
-              const hasActiveWorkspace = cardIsActive(card);
-              const canTargetAssets = Boolean(card.clientId && hasActiveWorkspace);
+              const canTargetAssets = Boolean(card.clientId);
               const disabled = readOnlyPreview || backendLoadFailed || rosterLoadFailed;
               const testTargets = connectionTestTargets(card);
               const targetsByKey = new Map(testTargets.map((target) => [target.key, target]));
@@ -1193,46 +1108,15 @@ export function ClientOnboardingManager({
                         {hasVisibleIssue(card) && <Badge variant="danger">Connection needs attention</Badge>}
                       </div>
                       <p className="mt-1 break-all text-[12px] text-[var(--text-secondary)]">{cardEmail(card) ?? "Waiting for client details"}</p>
-                      {pendingRosterOnly && (card.roster?.partnerOf?.length ?? 0) > 0 && (
-                        <p className="mt-1 text-[12px] text-[var(--accent-gold-strong)]">
-                          Partner of {card.roster?.partnerOf?.join(", ")} — rejecting also removes
-                          that access.
-                        </p>
-                      )}
                       <p className="mt-1 text-[11px] text-[var(--text-muted)]">Updated {formatDate(cardUpdatedAt(card))}</p>
                     </div>
                     <div className="flex flex-wrap justify-start gap-2">
-                      {pendingRosterOnly && (
-                        <>
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="primary"
-                            loading={busy === `approved-client:${card.clientId}`}
-                            disabled={disabled || !adminId || Boolean(busy)}
-                            onClick={() => void reviewRosterClient(card, "approved")}
-                          >
-                            <Check aria-hidden /> Approve
-                          </Button>
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="danger"
-                            loading={busy === `rejected-client:${card.clientId}`}
-                            disabled={disabled || !adminId || Boolean(busy)}
-                            onClick={() => void reviewRosterClient(card, "rejected")}
-                          >
-                            <X aria-hidden /> Reject
-                          </Button>
-                        </>
-                      )}
                       <Button type="button" size="sm" loading={testingAll} disabled={disabled} onClick={() => void testConnections(card)}>
                         <CheckCircle2 aria-hidden /> Test all connections
                       </Button>
                       <Button type="button" size="sm" disabled={disabled || availableAssets.length === 0 || !canTargetAssets} onClick={() => { setAssetTarget(card); setReconnectTarget(null); setCreateMode("add_assets"); setAssetChoice(choiceForAvailableAssets(availableAssets)); setInvitation(null); setDialogError(""); }}>
                         <Plus aria-hidden /> Add assets
                       </Button>
-                      {reviewSession && <Button type="button" size="sm" variant={reviewSession.requestedAssets.length === 0 ? "primary" : "secondary"} disabled={disabled} onClick={() => setActionTarget({ session: reviewSession, action: "approve" })}><ShieldCheck aria-hidden /> {approvalLabel(reviewSession)}</Button>}
                       {card.clientId && card.roster && (
                         <>
                           <Button type="button" size="sm" disabled={disabled} onClick={() => openEditClient(card)}>
@@ -1414,16 +1298,16 @@ export function ClientOnboardingManager({
       <Dialog open={Boolean(actionTarget)} onOpenChange={(open) => { if (!open) { setActionTarget(null); setDialogError(""); } }}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{selectedAction === "rotate" ? "Replace this open link?" : selectedAction === "approve" ? selectedActionSession ? `${approvalLabel(selectedActionSession)}?` : "Approve this setup?" : "Cancel this open link?"}</DialogTitle>
+            <DialogTitle>{selectedAction === "rotate" ? "Replace this open link?" : "Cancel this open link?"}</DialogTitle>
             <DialogDescription>
-              {selectedAction === "rotate" ? `Only this link (${selectedActionPurpose}) will stop working immediately. The replacement will be shown once; other open links and client access are unchanged.` : selectedAction === "approve" ? selectedActionSession?.requestedAssets.length === 0 ? "This confirms the review and gives the client access to their dashboard." : "This approves the connected stores and ad accounts. Billing remains unchanged." : `Only this link (${selectedActionPurpose}) and connections added through it will be removed. Other open links and the client’s dashboard access are unchanged.`}
+              {selectedAction === "rotate" ? `Only this link (${selectedActionPurpose}) will stop working immediately. The replacement will be shown once; other open links and client access are unchanged.` : `Only this link (${selectedActionPurpose}) and connections added through it will be removed. Other open links and the client’s dashboard access are unchanged.`}
             </DialogDescription>
           </DialogHeader>
-          {selectedActionSession && <div className="rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3 text-[12px] text-[var(--text-secondary)]"><strong className="font-medium text-[var(--text-primary)]">{clientName(selectedActionSession)}</strong>{selectedAction !== "approve" && <><br />{selectedActionPurpose}{selectedActionSession.reconnectTarget?.domain && <><br /><span className="break-all">{selectedActionSession.reconnectTarget.domain}</span></>}</>}</div>}
+          {selectedActionSession && <div className="rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3 text-[12px] text-[var(--text-secondary)]"><strong className="font-medium text-[var(--text-primary)]">{clientName(selectedActionSession)}</strong><br />{selectedActionPurpose}{selectedActionSession.reconnectTarget?.domain && <><br /><span className="break-all">{selectedActionSession.reconnectTarget.domain}</span></>}</div>}
           {dialogError && <p role="alert" className="text-[12px] text-[var(--danger-red)]">{dialogError}</p>}
           <DialogFooter>
             <Button type="button" onClick={() => { setActionTarget(null); setDialogError(""); }}>Cancel</Button>
-            {selectedActionSession && selectedAction && <Button type="button" variant={selectedAction === "revoke" ? "danger" : selectedAction === "approve" && selectedActionSession.requestedAssets.length === 0 ? "primary" : "secondary"} loading={busy === `${selectedAction}:${selectedActionSession.id}`} onClick={() => void patchSession(selectedActionSession, selectedAction)}>{selectedAction === "revoke" ? <Unplug aria-hidden /> : selectedAction === "rotate" ? <RefreshCw aria-hidden /> : <Check aria-hidden />}{selectedAction === "rotate" ? "Replace link" : selectedAction === "approve" ? approvalLabel(selectedActionSession) : "Cancel link"}</Button>}
+            {selectedActionSession && selectedAction && <Button type="button" variant={selectedAction === "revoke" ? "danger" : "secondary"} loading={busy === `${selectedAction}:${selectedActionSession.id}`} onClick={() => void patchSession(selectedActionSession, selectedAction)}>{selectedAction === "revoke" ? <Unplug aria-hidden /> : <RefreshCw aria-hidden />}{selectedAction === "rotate" ? "Replace link" : "Cancel link"}</Button>}
           </DialogFooter>
         </DialogContent>
       </Dialog>
