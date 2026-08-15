@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import type { RangeSelection } from "@/lib/portal/range";
 
 type ReportingSyncRequest =
+  | { scope: "all"; range: RangeSelection }
   | { scope: "campaigns"; range: RangeSelection }
   | {
       scope: "store";

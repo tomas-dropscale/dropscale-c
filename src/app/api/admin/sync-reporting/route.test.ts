@@ -96,6 +96,10 @@ function campaignRequest(range = RANGE) {
   return { scope: "campaigns", range };
 }
 
+function allRequest(range = RANGE) {
+  return { scope: "all", range };
+}
+
 function storeRequest(overrides: Record<string, unknown> = {}) {
   return {
     scope: "store",
@@ -123,9 +127,7 @@ function reportingScope(index: number) {
 }
 
 async function flushMicrotasks() {
-  await Promise.resolve();
-  await Promise.resolve();
-  await Promise.resolve();
+  for (let step = 0; step < 10; step += 1) await Promise.resolve();
 }
 
 const metricReady = {
@@ -225,10 +227,32 @@ describe("admin exact-range reporting sync route", () => {
     });
   });
 
-  it("materialises one exact store metric grid before refreshing provider snapshots", async () => {
-    const response = await POST(adminRequest(storeRequest()));
+  it("syncs every store and the portfolio together for the manual all request", async () => {
+    const response = await POST(adminRequest(allRequest()));
 
     expect(response.status).toBe(200);
+    expect(mocks.refreshAdminCampaignSnapshots).toHaveBeenCalledWith(RANGE, {
+      authenticate: false,
+      client: serviceClient,
+      refreshMetrics: true,
+    });
+    expect(mocks.refreshAdminStoreAnalyticsSnapshots).toHaveBeenCalledOnce();
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      scope: "all",
+    });
+  });
+
+  it("materialises the store grid and provider snapshots in parallel", async () => {
+    let releaseMetrics!: (value: typeof metricReady) => void;
+    mocks.ensureAdminAnalyticsRollupCoverage.mockImplementationOnce(
+      () => new Promise((resolve) => {
+        releaseMetrics = resolve;
+      }),
+    );
+    const responsePromise = POST(adminRequest(storeRequest()));
+    await flushMicrotasks();
+
     expect(mocks.ensureAdminAnalyticsRollupCoverage).toHaveBeenCalledWith(
       {
         clientId: CLIENT_ID,
@@ -254,11 +278,12 @@ describe("admin exact-range reporting sync route", () => {
       },
       { authenticate: false },
     );
-    expect(
-      mocks.ensureAdminAnalyticsRollupCoverage.mock.invocationCallOrder[0],
-    ).toBeLessThan(
-      mocks.refreshAdminStoreAnalyticsSnapshots.mock.invocationCallOrder[0],
-    );
+    // Provider snapshots started while metric coverage was deliberately still
+    // pending; a sequential implementation would not have called it yet.
+    expect(mocks.refreshAdminStoreAnalyticsSnapshots).toHaveBeenCalledOnce();
+    releaseMetrics(metricReady);
+    const response = await responsePromise;
+    expect(response.status).toBe(200);
   });
 
   it("rejects invalid store ids without creating a service client or running sync", async () => {
@@ -381,8 +406,8 @@ describe("admin exact-range reporting sync route", () => {
     expect(mocks.refreshAdminStoreAnalyticsSnapshots).not.toHaveBeenCalled();
   });
 
-  it("caps hourly store provider work at three concurrent refreshes", async () => {
-    const scopes = Array.from({ length: 7 }, (_, index) => reportingScope(index));
+  it("refreshes independent stores concurrently", async () => {
+    const scopes = Array.from({ length: 17 }, (_, index) => reportingScope(index));
     mocks.listAdminReportingStoreScopes.mockResolvedValueOnce(scopes);
     let active = 0;
     let maximum = 0;
@@ -406,14 +431,18 @@ describe("admin exact-range reporting sync route", () => {
 
     const responsePromise = POST(cronRequest("today"));
     await flushMicrotasks();
-    expect(mocks.refreshAdminStoreAnalyticsSnapshots).toHaveBeenCalledTimes(3);
-    expect(maximum).toBe(3);
+    expect(mocks.refreshAdminStoreAnalyticsSnapshots).toHaveBeenCalledTimes(15);
+    expect(maximum).toBe(15);
 
-    for (let completed = 0; completed < scopes.length; completed += 1) {
+    for (let completed = 0; completed < 15; completed += 1) {
       releases[completed]();
       await flushMicrotasks();
-      expect(maximum).toBeLessThanOrEqual(3);
+      expect(maximum).toBeLessThanOrEqual(15);
     }
+    expect(mocks.refreshAdminStoreAnalyticsSnapshots).toHaveBeenCalledTimes(17);
+    releases[15]();
+    releases[16]();
+    await flushMicrotasks();
 
     const response = await responsePromise;
     expect(response.status).toBe(200);
@@ -421,14 +450,14 @@ describe("admin exact-range reporting sync route", () => {
       ok: true,
       budget: {
         exhausted: false,
-        launchedStores: 7,
+        launchedStores: 17,
         skippedStores: 0,
       },
     });
   });
 
   it("stops launching hourly store batches at the 120-second route budget", async () => {
-    const scopes = Array.from({ length: 5 }, (_, index) => reportingScope(index));
+    const scopes = Array.from({ length: 17 }, (_, index) => reportingScope(index));
     mocks.listAdminReportingStoreScopes.mockResolvedValueOnce(scopes);
     const releases: Array<() => void> = [];
     mocks.refreshAdminStoreAnalyticsSnapshots.mockImplementation(
@@ -445,7 +474,7 @@ describe("admin exact-range reporting sync route", () => {
 
     const responsePromise = POST(cronRequest("today"));
     await flushMicrotasks();
-    expect(mocks.refreshAdminStoreAnalyticsSnapshots).toHaveBeenCalledTimes(3);
+    expect(mocks.refreshAdminStoreAnalyticsSnapshots).toHaveBeenCalledTimes(15);
 
     vi.setSystemTime(new Date(Date.now() + 120_001));
     releases.forEach((release) => release());
@@ -453,7 +482,7 @@ describe("admin exact-range reporting sync route", () => {
 
     const response = await responsePromise;
     expect(response.status).toBe(502);
-    expect(mocks.refreshAdminStoreAnalyticsSnapshots).toHaveBeenCalledTimes(3);
+    expect(mocks.refreshAdminStoreAnalyticsSnapshots).toHaveBeenCalledTimes(15);
     await expect(response.json()).resolves.toMatchObject({
       ok: false,
       error: expect.stringContaining("route budget"),
@@ -463,7 +492,7 @@ describe("admin exact-range reporting sync route", () => {
       budget: {
         limitMs: 120_000,
         exhausted: true,
-        launchedStores: 3,
+        launchedStores: 15,
         skippedStores: 2,
       },
     });

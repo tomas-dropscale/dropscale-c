@@ -546,20 +546,7 @@ export function AnalyticsView({
       description={`Store-first performance · ${range.from} → ${range.to}`}
       actions={
         <>
-          {scope.selectedStore && (
-            <ReportingSyncButton
-              request={{
-                scope: "store",
-                clientId: overview.clientId,
-                store: {
-                  accountId: scope.selectedStore.accountId,
-                  activityAccountIds: scope.selectedStore.activityAccountIds,
-                  currency: scope.selectedStore.currency,
-                },
-                range,
-              }}
-            />
-          )}
+          <ReportingSyncButton request={{ scope: "all", range }} />
           <RangePicker current={range} />
         </>
       }

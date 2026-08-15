@@ -21,7 +21,9 @@ export const dynamic = "force-dynamic";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const NO_STORE_HEADERS = { "Cache-Control": "private, no-store, max-age=0" };
-const STORE_REFRESH_CONCURRENCY = 3;
+// Shopify limits are per shop. Refresh one portfolio batch together, wait for
+// it to settle, then launch the next batch instead of building a serial queue.
+const STORE_REFRESH_BATCH_SIZE = 15;
 const REPORTING_ROUTE_BUDGET_MS = 120_000;
 const PROVIDER_REFRESH_TIMEOUT_MS = 45_000;
 
@@ -38,6 +40,11 @@ type StoreRequest = {
 
 type CampaignsRequest = {
   scope: "campaigns";
+  range: RangeSelection;
+};
+
+type AllRequest = {
+  scope: "all";
   range: RangeSelection;
 };
 
@@ -92,10 +99,10 @@ function exactRange(value: unknown): RangeSelection | null {
     : null;
 }
 
-function parseManualRequest(value: unknown): CampaignsRequest | StoreRequest | null {
+function parseManualRequest(value: unknown): AllRequest | CampaignsRequest | StoreRequest | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const scope = (value as Record<string, unknown>).scope;
-  if (scope === "campaigns" && isExactRecord(value, ["scope", "range"])) {
+  if ((scope === "all" || scope === "campaigns") && isExactRecord(value, ["scope", "range"])) {
     const range = exactRange(value.range);
     return range ? { scope, range } : null;
   }
@@ -134,22 +141,27 @@ function parseManualRequest(value: unknown): CampaignsRequest | StoreRequest | n
 }
 
 async function refreshStore(request: StoreRequest) {
-  const metricCoverage = await ensureAdminAnalyticsRollupCoverage(
-    {
-      clientId: request.clientId,
-      stores: [request.store],
-      range: request.range,
-    },
-    { authenticate: false },
-  );
-  const result = await refreshAdminStoreAnalyticsSnapshots(
-    {
-      clientId: request.clientId,
-      store: { ...request.store, days: [] },
-      range: request.range,
-    },
-    { authenticate: false },
-  );
+  // The selected store's rollup and provider details are independent. Starting
+  // both now makes Sync cost the slower upstream phase, not Shopify + Google
+  // one after the other (the same pattern used by the local DropHub).
+  const [metricCoverage, result] = await Promise.all([
+    ensureAdminAnalyticsRollupCoverage(
+      {
+        clientId: request.clientId,
+        stores: [request.store],
+        range: request.range,
+      },
+      { authenticate: false },
+    ),
+    refreshAdminStoreAnalyticsSnapshots(
+      {
+        clientId: request.clientId,
+        store: { ...request.store, days: [] },
+        range: request.range,
+      },
+      { authenticate: false },
+    ),
+  ]);
   return {
     ok: result.failed === 0 && result.partial === 0 && metricCoverage.state === "ready",
     scope: "store" as const,
@@ -158,22 +170,26 @@ async function refreshStore(request: StoreRequest) {
   };
 }
 
-async function refreshAll(range: RangeSelection, refreshMetrics = false) {
+async function refreshAll(
+  range: RangeSelection,
+  refreshMetrics = false,
+  responseScope: "all" | "hourly" = "hourly",
+) {
   const startedAt = Date.now();
   const deadline = startedAt + REPORTING_ROUTE_BUDGET_MS;
   const service = createServiceClient();
   if (!service) return response({ error: "Reporting sync is not configured." }, 503);
 
   type CampaignRefresh = Awaited<ReturnType<typeof refreshAdminCampaignSnapshots>>;
-  let campaigns: CampaignRefresh;
-  try {
-    campaigns = await withinProviderDeadline(refreshAdminCampaignSnapshots(range, {
+  // Portfolio Google, metric materialisation and every store are independent.
+  // Start the portfolio phase now and let it overlap with the store fan-out.
+  const campaignsPromise: Promise<CampaignRefresh> = withinProviderDeadline(
+    refreshAdminCampaignSnapshots(range, {
       authenticate: false,
       client: service,
       ...(refreshMetrics ? { refreshMetrics: true } : {}),
-    }));
-  } catch {
-    campaigns = {
+    }),
+  ).catch(() => ({
       from: range.from,
       to: range.to,
       accounts: 0,
@@ -182,8 +198,7 @@ async function refreshAll(range: RangeSelection, refreshMetrics = false) {
       partial: 0,
       busy: 0,
       failed: 1,
-    };
-  }
+    }));
   const scopes = await listAdminReportingStoreScopes(service);
   // Rotate the first store every hour. If an outage exhausts the budget, the
   // same tail cannot be starved forever by always restarting at index zero.
@@ -197,23 +212,21 @@ async function refreshAll(range: RangeSelection, refreshMetrics = false) {
   type StoreRefresh = Awaited<ReturnType<typeof refreshAdminStoreAnalyticsSnapshots>>;
   const stores: StoreRefresh[] = [];
   let nextScope = 0;
-  const worker = async () => {
-    while (nextScope < orderedScopes.length) {
-      // The scheduled handler still has metrics, the second reporting range and
-      // ledgers to run. Do not launch more provider work after this leg's budget.
-      if (Date.now() >= deadline) return;
-      const scope = orderedScopes[nextScope++];
+  while (nextScope < orderedScopes.length && Date.now() < deadline) {
+    const batch = orderedScopes.slice(nextScope, nextScope + STORE_REFRESH_BATCH_SIZE);
+    nextScope += batch.length;
+    const results = await Promise.all(batch.map(async (scope): Promise<StoreRefresh> => {
       try {
-        stores.push(await withinProviderDeadline(refreshAdminStoreAnalyticsSnapshots(
+        return await withinProviderDeadline(refreshAdminStoreAnalyticsSnapshots(
           {
             clientId: scope.clientId,
             store: { ...scope.store, days: [] },
             range,
           },
           { authenticate: false },
-        )));
+        ));
       } catch {
-        stores.push({
+        return {
           accountId: scope.store.accountId,
           from: range.from,
           to: range.to,
@@ -221,16 +234,12 @@ async function refreshAll(range: RangeSelection, refreshMetrics = false) {
           partial: 0,
           busy: 0,
           failed: 1,
-        });
+        };
       }
-    }
-  };
-  await Promise.all(
-    Array.from(
-      { length: Math.min(STORE_REFRESH_CONCURRENCY, scopes.length) },
-      () => worker(),
-    ),
-  );
+    }));
+    stores.push(...results);
+  }
+  const campaigns = await campaignsPromise;
   const skippedStores = orderedScopes.length - nextScope;
   const failed = campaigns.failed + stores.reduce((sum, store) => sum + store.failed, 0);
   const partial = campaigns.partial + stores.reduce((sum, store) => sum + store.partial, 0);
@@ -238,7 +247,7 @@ async function refreshAll(range: RangeSelection, refreshMetrics = false) {
   return response(
     {
       ok: degraded === 0,
-      scope: "hourly",
+      scope: responseScope,
       range,
       campaigns,
       stores,
@@ -338,6 +347,10 @@ export async function POST(request: NextRequest) {
         },
         refreshed.ok ? 200 : 502,
       );
+    }
+
+    if (body.scope === "all") {
+      return await refreshAll(body.range, true, "all");
     }
 
     const service = createServiceClient();
