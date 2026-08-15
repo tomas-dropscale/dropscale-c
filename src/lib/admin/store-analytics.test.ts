@@ -288,6 +288,32 @@ describe("admin store analytics DAL", () => {
     });
   });
 
+  it("returns failed detail families instead of crashing the analytics page", async () => {
+    mocks.createServiceClient.mockReturnValue(null);
+
+    await expect(
+      fetchAdminStoreAnalytics({
+        clientId: CLIENT_ID,
+        store: {
+          accountId: STORE_ID,
+          activityAccountIds: [STORE_ID],
+          currency: "EUR",
+          days: [],
+        },
+        range: RANGE,
+      }),
+    ).resolves.toMatchObject({
+      storeAccountId: STORE_ID,
+      funnel: { state: "failed" },
+      campaigns: { state: "failed" },
+      collections: { state: "failed" },
+      spend: { state: "failed" },
+      activity: { state: "failed" },
+    });
+
+    expect(mocks.requireAdmin).toHaveBeenCalledTimes(1);
+  });
+
   it("uses the exact inclusive range for every legacy source and only exact campaign IDs", async () => {
     mocks.createServiceClient.mockReturnValue(service([account()], null));
     const adapter = shopifyAdapter();
@@ -622,7 +648,7 @@ describe("admin store analytics DAL", () => {
     });
   });
 
-  it("materialises an exact missing spend window before marking it ready", async () => {
+  it("uses an exact materialized spend window without refreshing during page render", async () => {
     const days = Array.from({ length: 7 }, (_, index) =>
       `2026-08-${String(index + 8).padStart(2, "0")}`,
     );
@@ -634,7 +660,7 @@ describe("admin store analytics DAL", () => {
       attributed_orders: day === "2026-08-14" ? 8 : 0,
       computed_at: "2026-08-14T19:00:00.000Z",
     }));
-    const scopedService = service([account()], null, [[], complete]);
+    const scopedService = service([account()], null, [complete]);
     mocks.createServiceClient.mockReturnValue(scopedService);
     mocks.createLegacyShopifyReportingAdapter.mockResolvedValue(shopifyAdapter());
     mocks.fetchLiveCampaignsDetailed.mockResolvedValue([]);
@@ -650,19 +676,14 @@ describe("admin store analytics DAL", () => {
       range: RANGE,
     });
 
-    expect(mocks.refreshAccountsNow).toHaveBeenCalledWith([STORE_ID], {
-      client: scopedService,
-      reportingClient: scopedService,
-      from: RANGE.from,
-      to: RANGE.to,
-    });
+    expect(mocks.refreshAccountsNow).not.toHaveBeenCalled();
     expect(result.spend).toMatchObject({
       state: "ready",
       data: { daily: expect.arrayContaining([{ day: "2026-08-14", spend: 250 }]) },
     });
     expect(result.rollupCoverage).toMatchObject({
       state: "ready",
-      data: { dayCount: 7, refreshed: true },
+      data: { dayCount: 7, refreshed: false },
     });
   });
 

@@ -20,7 +20,6 @@ const mocks = vi.hoisted(() => ({
   sumMetrics: vi.fn(),
   resolveReportingSources: vi.fn(),
   fetchGoogleReportingCampaigns: vi.fn(),
-  ensureAdminCampaignRollups: vi.fn(),
 }));
 
 vi.mock("@/lib/supabase/server", () => ({ createClient: mocks.createClient }));
@@ -56,10 +55,6 @@ vi.mock("@/lib/reporting/sources", () => ({
 vi.mock("@/lib/reporting/google", () => ({
   fetchGoogleReportingCampaigns: mocks.fetchGoogleReportingCampaigns,
 }));
-vi.mock("./campaign-rollup", () => ({
-  ensureAdminCampaignRollups: mocks.ensureAdminCampaignRollups,
-}));
-
 import { fetchAdminCampaigns } from "./campaigns";
 
 function account(id: string, clientId: string, overrides: Partial<AdAccount> = {}): AdAccount {
@@ -193,21 +188,6 @@ describe("admin V2 campaign inventory", () => {
     mocks.hasWindsorEnv.mockReturnValue(true);
     mocks.fetchHstClientKeys.mockResolvedValue({ crmIds: new Set(), names: new Set() });
     mocks.fetchDailyMetrics.mockResolvedValue([]);
-    mocks.ensureAdminCampaignRollups.mockImplementation(
-      async (_service, scopes, range) => {
-        const accountIds = scopes.flatMap((scope: { accountIds: string[] }) => scope.accountIds);
-        const rows = await mocks.fetchDailyMetrics(accountIds, range.from, range.to);
-        return {
-          rows,
-          completeScopeIds: new Set(
-            scopes
-              .filter((scope: { accountIds: string[] }) => scope.accountIds.length > 0)
-              .map((scope: { id: string }) => scope.id),
-          ),
-          refreshed: false,
-        };
-      },
-    );
     mocks.groupByAccount.mockImplementation((rows: Array<{ ad_account_id: string }>) => {
       const grouped = new Map<string, Array<{ ad_account_id: string }>>();
       for (const row of rows) {
@@ -541,7 +521,7 @@ describe("admin V2 campaign inventory", () => {
     );
   });
 
-  it("keeps campaign rows but hides partial selected-period rollups", async () => {
+  it("uses already-materialised rows from the exact range without render-time coverage refresh", async () => {
     const legacy = account("legacy", "client-1", {
       status: "active",
       google_ads_connected: true,
@@ -560,11 +540,12 @@ describe("admin V2 campaign inventory", () => {
         spend: 20,
       },
     ]);
-    mocks.ensureAdminCampaignRollups.mockResolvedValueOnce({
-      rows: [{ ad_account_id: "legacy" }],
-      completeScopeIds: new Set(),
-      refreshed: true,
-    });
+    mocks.fetchDailyMetrics.mockResolvedValue([{ ad_account_id: "legacy" }]);
+    mocks.sumMetrics.mockImplementation((rows: unknown[]) =>
+      rows.length > 0
+        ? { ...emptyRollup, attributedRevenue: 60, revenue: 60, adSpend: 20 }
+        : emptyRollup,
+    );
 
     const overview = await fetchAdminCampaigns({
       key: "today",
@@ -574,15 +555,22 @@ describe("admin V2 campaign inventory", () => {
 
     expect(overview.clients[0].accounts[0]).toEqual(
       expect.objectContaining({
-        rollupComplete: false,
+        rollupComplete: true,
+        spend: 20,
         campaigns: [expect.objectContaining({ name: "Still visible" })],
       }),
     );
     expect(overview.clients[0]).toEqual(
-      expect.objectContaining({ revenue: null, spend: null, rollupSpend: null }),
+      expect.objectContaining({ revenue: 60, spend: 20, rollupSpend: 20 }),
     );
     expect(overview.totals).toEqual(
-      expect.objectContaining({ rollupComplete: false, revenue: null, spend: null }),
+      expect.objectContaining({ rollupComplete: true, revenue: 60, spend: 20 }),
+    );
+    expect(mocks.fetchDailyMetrics).toHaveBeenCalledTimes(1);
+    expect(mocks.fetchDailyMetrics).toHaveBeenCalledWith(
+      ["legacy"],
+      "2026-08-14",
+      "2026-08-14",
     );
   });
 

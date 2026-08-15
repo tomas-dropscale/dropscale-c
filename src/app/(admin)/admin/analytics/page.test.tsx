@@ -6,7 +6,6 @@ const mocks = vi.hoisted(() => ({
   listClients: vi.fn(),
   fetchOverview: vi.fn(),
   fetchStoreAnalytics: vi.fn(),
-  ensureCoverage: vi.fn(),
   parseRange: vi.fn(),
 }));
 
@@ -44,7 +43,6 @@ vi.mock("@/lib/admin/client-overview", () => ({
 
 vi.mock("@/lib/admin/store-analytics", () => ({
   fetchAdminStoreAnalytics: mocks.fetchStoreAnalytics,
-  ensureAdminAnalyticsRollupCoverage: mocks.ensureCoverage,
 }));
 
 vi.mock("@/lib/i18n/server", () => ({
@@ -93,10 +91,6 @@ describe("Analytics page timeframe integration", () => {
         data: { dayCount: 31, refreshed: false },
       },
     });
-    mocks.ensureCoverage.mockResolvedValue({
-      state: "ready",
-      data: { storeCount: 1, dayCount: 31, refreshed: false },
-    });
   });
 
   it("passes the exact selected dates to the overview and every store analytics family", async () => {
@@ -116,7 +110,7 @@ describe("Analytics page timeframe integration", () => {
       from: "2026-07-15",
       to: "2026-08-14",
     });
-    expect(mocks.fetchOverview).toHaveBeenCalledTimes(2);
+    expect(mocks.fetchOverview).toHaveBeenCalledTimes(1);
     expect(mocks.fetchStoreAnalytics).toHaveBeenCalledWith({
       clientId: "client-1",
       store: expect.objectContaining({
@@ -131,7 +125,7 @@ describe("Analytics page timeframe integration", () => {
     });
   });
 
-  it("proves and re-reads the exact rollup for all stores without loading detail families", async () => {
+  it("uses the materialized overview for all stores without blocking on detail families", async () => {
     const params = {
       client: "client-1",
       range: "custom",
@@ -142,20 +136,18 @@ describe("Analytics page timeframe integration", () => {
 
     expect(renderToStaticMarkup(page)).toContain("All-store analytics");
     expect(mocks.fetchStoreAnalytics).not.toHaveBeenCalled();
-    expect(mocks.ensureCoverage).toHaveBeenCalledWith({
-      clientId: "client-1",
-      stores: [
-        expect.objectContaining({
-          accountId: "store-1",
-          activityAccountIds: ["store-1", "google-1"],
-        }),
-      ],
-      range: {
-        key: "custom",
-        from: "2026-07-15",
-        to: "2026-08-14",
-      },
+    expect(mocks.fetchOverview).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns the chooser instead of crashing when the overview loader fails", async () => {
+    mocks.fetchOverview.mockRejectedValueOnce(new Error("database unavailable"));
+
+    const page = await AnalyticsPage({
+      searchParams: Promise.resolve({ client: "client-1", range: "custom" }),
     });
-    expect(mocks.fetchOverview).toHaveBeenCalledTimes(2);
+    const html = renderToStaticMarkup(page);
+
+    expect(html).toContain("reporting overview is unavailable");
+    expect(mocks.fetchStoreAnalytics).not.toHaveBeenCalled();
   });
 });

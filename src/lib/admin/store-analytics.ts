@@ -742,6 +742,7 @@ async function rollupFamilies(
   topology: StoreTopology,
   accountIds: string[],
   range: Pick<RangeSelection, "from" | "to">,
+  refreshMissing = false,
 ): Promise<Pick<AdminStoreAnalytics, "spend" | "rollupCoverage">> {
   const days = rangeDays(range);
   const revenueAccountId = topology.kind === "v2"
@@ -757,6 +758,12 @@ async function rollupFamilies(
       false,
     );
     if (current) return current;
+    if (!refreshMissing) {
+      return {
+        spend: failed("Spend is not yet available for every day in the selected period."),
+        rollupCoverage: failed("The selected-period reporting rollup is still being materialised."),
+      };
+    }
 
     await refreshAccountsNow(accountIds, {
       client: topology.service,
@@ -1145,63 +1152,79 @@ export async function fetchAdminStoreAnalytics(
 ): Promise<AdminStoreAnalytics> {
   assertInput(input);
   await requireClientOnboardingAdmin();
-  const topology = await loadTopology(input);
+  try {
+    const topology = await loadTopology(input);
 
-  const googlePromise = loadGoogleCampaigns(topology, input.range);
-  const breakdownPromise = loadGoogleBreakdowns(topology, input.range);
-  const shopifyPromise = openShopify(topology);
-  const accountIds = [...new Set(input.store.activityAccountIds)];
-  const rollupPromise = rollupFamilies(topology, accountIds, input.range);
-  const activityPromise = listCampaignActionActivity(
-    input.clientId,
-    accountIds,
-    input.range,
-  );
+    const googlePromise = loadGoogleCampaigns(topology, input.range);
+    const breakdownPromise = loadGoogleBreakdowns(topology, input.range);
+    const shopifyPromise = openShopify(topology);
+    const accountIds = [...new Set(input.store.activityAccountIds)];
+    const rollupPromise = rollupFamilies(topology, accountIds, input.range);
+    const activityPromise = listCampaignActionActivity(
+      input.clientId,
+      accountIds,
+      input.range,
+    );
 
-  const [google, breakdowns, adapterAttempt, activityResult, rollup] = await Promise.all([
-    googlePromise,
-    breakdownPromise,
-    shopifyPromise,
-    activityPromise.then(
-      (value): Attempt<typeof value> => ({ ok: true, value }),
-      (): Attempt<never> => ({
-        ok: false,
-        state: "failed",
-        message: "Campaign activity could not be loaded for the selected period.",
-      }),
-    ),
-    rollupPromise,
-  ]);
-  const shopify = await shopifyFamilies(
-    adapterAttempt,
-    input.range,
-    input.store.currency,
-  );
+    const [google, breakdowns, adapterAttempt, activityResult, rollup] = await Promise.all([
+      googlePromise,
+      breakdownPromise,
+      shopifyPromise,
+      activityPromise.then(
+        (value): Attempt<typeof value> => ({ ok: true, value }),
+        (): Attempt<never> => ({
+          ok: false,
+          state: "failed",
+          message: "Campaign activity could not be loaded for the selected period.",
+        }),
+      ),
+      rollupPromise,
+    ]);
+    const shopify = await shopifyFamilies(
+      adapterAttempt,
+      input.range,
+      input.store.currency,
+    );
 
-  const activity: AdminStoreAnalytics["activity"] = activityResult.ok
-    ? readyOrEmpty(
-        { rows: activityResult.value.history, truncated: activityResult.value.truncated },
-        activityResult.value.history.length === 0,
-      )
-    : failed(activityResult.message);
+    const activity: AdminStoreAnalytics["activity"] = activityResult.ok
+      ? readyOrEmpty(
+          { rows: activityResult.value.history, truncated: activityResult.value.truncated },
+          activityResult.value.history.length === 0,
+        )
+      : failed(activityResult.message);
 
-  return {
-    clientId: input.clientId,
-    storeAccountId: input.store.accountId,
-    currency: input.store.currency,
-    range: { from: input.range.from, to: input.range.to },
-    funnel: shopify.funnel,
-    campaigns: campaignFamily(
-      google,
-      breakdowns,
-      shopify.attribution,
-      shopify.products,
-    ),
-    collections: shopify.collections,
-    spend: rollup.spend,
-    rollupCoverage: rollup.rollupCoverage,
-    activity,
-  };
+    return {
+      clientId: input.clientId,
+      storeAccountId: input.store.accountId,
+      currency: input.store.currency,
+      range: { from: input.range.from, to: input.range.to },
+      funnel: shopify.funnel,
+      campaigns: campaignFamily(
+        google,
+        breakdowns,
+        shopify.attribution,
+        shopify.products,
+      ),
+      collections: shopify.collections,
+      spend: rollup.spend,
+      rollupCoverage: rollup.rollupCoverage,
+      activity,
+    };
+  } catch (error) {
+    console.error("Admin store analytics load failed:", error);
+    return {
+      clientId: input.clientId,
+      storeAccountId: input.store.accountId,
+      currency: input.store.currency,
+      range: { from: input.range.from, to: input.range.to },
+      funnel: failed("Shopify funnel data could not be loaded for this store."),
+      campaigns: failed("Campaign performance could not be loaded for this store."),
+      collections: failed("Collection performance could not be loaded for this store."),
+      spend: failed("Spend could not be loaded for this store."),
+      rollupCoverage: failed("The reporting rollup could not be loaded for this store."),
+      activity: failed("Campaign activity could not be loaded for this store."),
+    };
+  }
 }
 
 /**
@@ -1251,7 +1274,12 @@ export async function ensureAdminAnalyticsRollupCoverage(
         store: { ...store, days: [] },
         range: input.range,
       });
-      return rollupFamilies(topology, [...new Set(store.activityAccountIds)], input.range);
+      return rollupFamilies(
+        topology,
+        [...new Set(store.activityAccountIds)],
+        input.range,
+        true,
+      );
     }),
   );
   const failedCoverage = results.find(

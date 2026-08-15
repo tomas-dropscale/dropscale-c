@@ -262,11 +262,6 @@ function storeAnalytics(rows: CampaignActionHistory[] = []): AdminStoreAnalytics
   };
 }
 
-const verifiedRollup = {
-  state: "ready" as const,
-  data: { dayCount: 7, refreshed: false },
-};
-
 describe("AnalyticsView", () => {
   it("renders store-scoped real metrics, daily spend and newest-first activity", () => {
     const html = renderToStaticMarkup(
@@ -279,7 +274,6 @@ describe("AnalyticsView", () => {
           activity("older", "2026-08-02T10:00:00Z", "campaign_paused"),
           activity("newest", "2026-08-07T10:00:00Z", "budget_changed"),
         ])}
-        rollupCoverage={verifiedRollup}
       />,
     );
 
@@ -314,7 +308,7 @@ describe("AnalyticsView", () => {
     expect(html).not.toContain("Campaign launched");
   });
 
-  it("does not present KPI values as complete when exact daily coverage fails", () => {
+  it("keeps materialized KPI values when a live detail family fails", () => {
     const analytics = storeAnalytics();
     analytics.spend = {
       state: "failed",
@@ -331,13 +325,12 @@ describe("AnalyticsView", () => {
         selectedStoreId="store-gbp"
         range={{ key: "custom", from: "2026-08-01", to: "2026-08-07" }}
         storeAnalytics={analytics}
-        rollupCoverage={analytics.rollupCoverage}
       />,
     );
 
-    expect(html).toContain("The complete selected-period rollup could not be verified.");
     expect(html).toContain("Spend could not be loaded for the complete selected period.");
-    expect(html).not.toContain("GBP 2000.00");
+    expect(html).toContain("GBP 2000.00");
+    expect(html).not.toContain("Shopify revenue and Google spend coverage could not be proved");
   });
 
   it("renders immediate scope controls and the approved all-stores table", () => {
@@ -348,7 +341,6 @@ describe("AnalyticsView", () => {
         selectedStoreId={null}
         range={{ key: "d7", from: "2026-08-01", to: "2026-08-07" }}
         storeAnalytics={null}
-        rollupCoverage={verifiedRollup}
       />,
     );
 
@@ -368,26 +360,6 @@ describe("AnalyticsView", () => {
     expect(html).not.toContain("Campaign Performance");
   });
 
-  it("does not publish all-store totals when exact coverage cannot be proved", () => {
-    const html = renderToStaticMarkup(
-      <AnalyticsView
-        clients={clients}
-        overview={overview()}
-        selectedStoreId={null}
-        range={{ key: "d7", from: "2026-08-01", to: "2026-08-07" }}
-        storeAnalytics={null}
-        rollupCoverage={{
-          state: "failed",
-          message: "All-store coverage could not be verified.",
-        }}
-      />,
-    );
-
-    expect(html).toContain("All-store coverage could not be verified.");
-    expect(html).not.toContain("GBP 5000.00");
-    expect(html).not.toContain("GBP 2000.00");
-  });
-
   it("shows a dash instead of 0.00x for a fresh spend-only scope", () => {
     const spendOnly = overview();
     spendOnly.mixedCurrency = false;
@@ -405,7 +377,6 @@ describe("AnalyticsView", () => {
         selectedStoreId="store-gbp"
         range={{ key: "d7", from: "2026-08-01", to: "2026-08-07" }}
         storeAnalytics={storeAnalytics()}
-        rollupCoverage={verifiedRollup}
       />,
     );
 
@@ -425,11 +396,10 @@ describe("AnalyticsView", () => {
         selectedStoreId="store-gbp"
         range={{ key: "d7", from: "2026-08-01", to: "2026-08-07" }}
         storeAnalytics={storeAnalytics()}
-        rollupCoverage={verifiedRollup}
       />,
     );
 
-    expect(html).toContain("Reporting data is unavailable for this scope");
+    expect(html).not.toContain("Reporting data is unavailable for this scope");
     expect(html).toContain("No verified rollup rows are available for this scope");
   });
 });

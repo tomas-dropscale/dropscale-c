@@ -19,6 +19,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/service";
+import { presetSelection } from "../portal/range";
 import { decryptToken } from "@/lib/google-ads/crypto";
 import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
 import { markIfAuthRevoked } from "@/lib/google-ads/revoked";
@@ -105,8 +106,7 @@ type DailyMetricAdColumns = {
 const lastRunByAccount = new Map<string, number>();
 
 function isoDay(offsetDays: number): string {
-  const date = new Date(Date.now() + offsetDays * 86400000);
-  return date.toISOString().slice(0, 10);
+  return addDays(presetSelection("today").to, offsetDays);
 }
 
 function dayBefore(iso: string): string {
@@ -724,6 +724,7 @@ async function syncAccountWindow(
   }
 
   let sales: DailySales[] = [];
+  let shopifySynced = false;
   // Per-day cost chain (reporting currency): COGS, payment fees, shipping.
   const costByDay = new Map<string, { product: number; fees: number; shipping: number }>();
   // Per-day revenue share (reporting currency): base revenue + billed amount.
@@ -740,6 +741,7 @@ async function syncAccountWindow(
     );
     const result = await fetchDailySales(account.shopify_url, token, from, to);
     sales = result.days;
+    shopifySynced = true;
 
     // Order amounts arrive in the STORE's base currency; daily_metrics is
     // kept in the account's reporting currency. Convert with the day's ECB
@@ -853,11 +855,21 @@ async function syncAccountWindow(
     }
   }
 
-  if (google.length === 0 && sales.length === 0) return;
+  // A successful empty response proves a real zero only for that family.
+  // Never let Shopify activity manufacture Google zeroes (or vice versa)
+  // while a connected provider is unavailable.
+  if (
+    (account.google_ads_connected && !googleSynced) ||
+    (account.shopify_connected && !shopifySynced) ||
+    (!googleSynced && !shopifySynced)
+  ) {
+    return;
+  }
 
   const salesByDay = new Map(sales.map((day) => [day.date, day]));
   const googleByDay = new Map(google.map((day) => [day.date, day]));
-  const days = [...new Set([...salesByDay.keys(), ...googleByDay.keys()])];
+  const days: string[] = [];
+  for (let day = from; day <= to; day = addDays(day, 1)) days.push(day);
 
   /**
    * Ad figures already stored for this window, read ONLY when Google didn't

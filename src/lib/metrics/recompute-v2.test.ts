@@ -967,6 +967,129 @@ describe("V2 daily-metrics recompute", () => {
     expect(db.receipts).toEqual([]);
   });
 
+  it("materialises every selected legacy day when Shopify answers with no rows", async () => {
+    const legacy = account(ANCHOR, {
+      status: "active",
+      reporting_role: "legacy_hybrid",
+      shopify_url: "store.myshopify.com",
+      shopify_connected: true,
+      shopify_admin_token: "encrypted-shopify-token",
+    });
+    const db = fakeDatabase([legacy], [], {}, {
+      [CLIENT]: "v2_ready_for_cutover",
+    });
+    mocks.fetchDailySales.mockResolvedValue({ currency: "EUR", days: [], orders: [] });
+
+    await refreshAccountsNow([ANCHOR], {
+      client: db.client as never,
+      reportingClient: db.client as never,
+      from: "2026-08-12",
+      to: DAY,
+    });
+
+    expect(db.upserts.flat()).toEqual([
+      expect.objectContaining({
+        ad_account_id: ANCHOR,
+        day: "2026-08-12",
+        ad_spend: 0,
+        revenue: 0,
+        attributed_orders: 0,
+        attributed_revenue: 0,
+      }),
+      expect.objectContaining({
+        ad_account_id: ANCHOR,
+        day: DAY,
+        ad_spend: 0,
+        revenue: 0,
+        attributed_orders: 0,
+        attributed_revenue: 0,
+      }),
+    ]);
+  });
+
+  it("uses the Lisbon reporting day for the default incremental window", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-14T23:30:00.000Z"));
+    try {
+      const legacy = account(ANCHOR, {
+        status: "active",
+        reporting_role: "legacy_hybrid",
+        shopify_url: "store.myshopify.com",
+        shopify_connected: true,
+        shopify_admin_token: "encrypted-shopify-token",
+      });
+      const db = fakeDatabase([legacy], [], {}, {
+        [CLIENT]: "v2_ready_for_cutover",
+      });
+      mocks.fetchDailySales.mockResolvedValue({ currency: "EUR", days: [], orders: [] });
+
+      await refreshAccountsNow([ANCHOR], {
+        client: db.client as never,
+        reportingClient: db.client as never,
+      });
+
+      expect(mocks.fetchDailySales).toHaveBeenCalledWith(
+        "store.myshopify.com",
+        undefined,
+        "2026-08-09",
+        "2026-08-15",
+      );
+      expect(db.upserts.flat().at(-1)).toMatchObject({ day: "2026-08-15" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not materialise zero days when no legacy provider answered", async () => {
+    const legacy = account(ANCHOR, {
+      status: "active",
+      reporting_role: "legacy_hybrid",
+      google_ads_customer_id: "1112223333",
+      google_ads_connected: true,
+      google_ads_refresh_token: "encrypted-token",
+    });
+    const db = fakeDatabase([legacy], [], {}, {});
+    mocks.hasGoogleAdsEnv.mockReturnValue(false);
+
+    await refreshAccountsNow([ANCHOR], {
+      client: db.client as never,
+      reportingClient: db.client as never,
+      from: DAY,
+      to: DAY,
+    });
+
+    expect(mocks.fetchLiveDailyBreakdown).not.toHaveBeenCalled();
+    expect(db.upserts).toEqual([]);
+  });
+
+  it("does not turn an unavailable connected Google family into zero spend", async () => {
+    const legacy = account(ANCHOR, {
+      status: "active",
+      reporting_role: "legacy_hybrid",
+      google_ads_customer_id: "1112223333",
+      google_ads_connected: true,
+      google_ads_refresh_token: "encrypted-token",
+      shopify_url: "store.myshopify.com",
+      shopify_connected: true,
+      shopify_admin_token: "encrypted-shopify-token",
+    });
+    const db = fakeDatabase([legacy], [], {}, {
+      [CLIENT]: "v2_ready_for_cutover",
+    });
+    mocks.hasGoogleAdsEnv.mockReturnValue(false);
+    mocks.fetchDailySales.mockResolvedValue({ currency: "EUR", days: [], orders: [] });
+
+    await refreshAccountsNow([ANCHOR], {
+      client: db.client as never,
+      reportingClient: db.client as never,
+      from: DAY,
+      to: DAY,
+    });
+
+    expect(mocks.fetchDailySales).toHaveBeenCalledTimes(1);
+    expect(db.upserts).toEqual([]);
+  });
+
   it("performs no sync when rollout authority cannot be established", async () => {
     const legacy = account(ANCHOR, {
       status: "active",

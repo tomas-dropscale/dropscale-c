@@ -136,12 +136,10 @@ export default async function AdminCampaignsPage({
         </div>
       )}
 
-      {(!overview.totals.rollupComplete || overview.totals.currency === null) && (
+      {overview.totals.currencies.length > 1 && (
         <div className="panel mb-4 flex items-center gap-2 border-[var(--warning-orange)]/25 px-5 py-3 text-[12.5px] text-[var(--warning-orange)]">
           <AlertTriangle className="size-4 shrink-0" aria-hidden />
-          {overview.totals.currencies.length > 1
-            ? `Portfolio totals are unavailable because reporting currencies are mixed (${overview.totals.currencies.join(", ")}).`
-            : "Portfolio totals are unavailable because every mapped account and selected day could not be verified."}
+          {`Portfolio totals are unavailable because reporting currencies are mixed (${overview.totals.currencies.join(", ")}).`}
         </div>
       )}
 

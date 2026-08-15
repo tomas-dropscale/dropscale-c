@@ -188,4 +188,31 @@ describe("Campaigns page approved summary", () => {
     expect(html).toContain("reporting currencies are mixed (EUR, USD)");
     expect(html).not.toContain("€0.00");
   });
+
+  it("does not render a selected-day coverage warning for an empty materialised range", async () => {
+    mocks.fetchAdminCampaigns.mockResolvedValueOnce({
+      configured: true,
+      clients: [],
+      internal: [],
+      totals: {
+        revenue: null,
+        profit: null,
+        roas: null,
+        rollupSpend: null,
+        spend: null,
+        commission: null,
+        activeCampaigns: 0,
+        connectedAccounts: 1,
+        currency: null,
+        currencies: ["EUR"],
+        rollupComplete: false,
+      },
+    });
+
+    const page = await AdminCampaignsPage({ searchParams: Promise.resolve({}) });
+    const html = renderToStaticMarkup(page);
+
+    expect(html).not.toContain("every mapped account and selected day");
+    expect(html).not.toContain("could not be verified");
+  });
 });

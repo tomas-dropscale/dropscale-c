@@ -29,10 +29,7 @@ import {
 import type { AdminAnalyticsClient } from "@/lib/admin/analytics";
 import type { AdminClientOverview } from "@/lib/admin/client-overview";
 import type { CampaignActionHistory } from "@/lib/admin/campaigns-view";
-import type {
-  AdminAnalyticsFamily,
-  AdminStoreAnalytics,
-} from "@/lib/admin/store-analytics";
+import type { AdminStoreAnalytics } from "@/lib/admin/store-analytics";
 import { integer, money, multiplier } from "@/lib/format";
 import type { RangeSelection } from "@/lib/portal/range";
 import { cn } from "@/lib/utils";
@@ -43,8 +40,6 @@ export type AnalyticsViewProps = {
   selectedStoreId: string | null;
   /** Server-only upstream families, revalidated for this exact client/store/range. */
   storeAnalytics: AdminStoreAnalytics | null;
-  /** Exact daily Shopify/Google rollup proof for the selected scope. */
-  rollupCoverage: AdminAnalyticsFamily<unknown>;
   range: RangeSelection;
 };
 
@@ -161,11 +156,9 @@ export function AnalyticsScopeSelector({
 function AllStoresTable({
   overview,
   range,
-  rollupVerified,
 }: {
   overview: AdminClientOverview;
   range: RangeSelection;
-  rollupVerified: boolean;
 }) {
   return (
     <section className="panel overflow-hidden" aria-labelledby="all-stores-title">
@@ -198,7 +191,7 @@ function AllStoresTable({
             </thead>
             <tbody>
               {overview.stores.map((store) => {
-                const verified = rollupVerified && validTimestamp(store.updatedAt);
+                const verified = validTimestamp(store.updatedAt);
                 const revenue = verified && store.googleRevenue !== null
                   ? money(store.googleRevenue, store.currency)
                   : "—";
@@ -446,18 +439,9 @@ export function AnalyticsView({
   overview,
   selectedStoreId,
   storeAnalytics,
-  rollupCoverage,
   range,
 }: AnalyticsViewProps) {
   const scope = projectAnalyticsScope(overview, selectedStoreId);
-  const exactStoreRollup = rollupCoverage.state === "ready";
-  const displayedMetrics = exactStoreRollup
-    ? scope.metrics
-    : scope.metrics.map((metric) => ({
-        ...metric,
-        value: null,
-        hint: "The complete selected-period rollup could not be verified.",
-      }));
 
   return (
     <PageContainer
@@ -486,31 +470,9 @@ export function AnalyticsView({
           </p>
         )}
 
-        {scope.updatedAt === null && (
-          <p
-            role="status"
-            className="panel flex items-center gap-2 border-[var(--warning-orange)]/25 px-4 py-3 text-sm text-[var(--warning-orange)]"
-          >
-            <AlertTriangle className="size-4 shrink-0" aria-hidden />
-            Reporting data is unavailable for this scope. Zero values are not shown as verified results.
-          </p>
-        )}
-
-        {rollupCoverage.state !== "ready" && (
-          <p
-            role="status"
-            className="panel flex items-center gap-2 border-[var(--warning-orange)]/25 px-4 py-3 text-sm text-[var(--warning-orange)]"
-          >
-            <AlertTriangle className="size-4 shrink-0" aria-hidden />
-            {"message" in rollupCoverage
-              ? rollupCoverage.message
-              : "The complete selected-period rollup could not be verified."}
-          </p>
-        )}
-
         <section aria-label={`${scope.label} key performance indicators`}>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
-            {displayedMetrics.map((metric) => (
+            {scope.metrics.map((metric) => (
               <KpiCard key={metric.key} metric={metric} currency={scope.currency} />
             ))}
           </div>
@@ -540,7 +502,6 @@ export function AnalyticsView({
           <AllStoresTable
             overview={overview}
             range={range}
-            rollupVerified={exactStoreRollup}
           />
         )}
       </div>

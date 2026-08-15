@@ -51,7 +51,7 @@ export type RoasEvolutionWindows = {
 };
 
 function dateLabel(value: string, granularity: PerformanceChartGranularity, long = false) {
-  const parsed = new Date(value.includes("T") ? value : `${value}T00:00:00`);
+  const parsed = new Date(value.includes("T") ? value : `${value}T00:00:00Z`);
   if (!Number.isFinite(parsed.getTime())) return value;
 
   return parsed.toLocaleString("en-GB", {
