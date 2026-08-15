@@ -158,7 +158,7 @@ async function refreshStore(request: StoreRequest) {
   };
 }
 
-async function refreshAll(range: RangeSelection) {
+async function refreshAll(range: RangeSelection, refreshMetrics = false) {
   const startedAt = Date.now();
   const deadline = startedAt + REPORTING_ROUTE_BUDGET_MS;
   const service = createServiceClient();
@@ -170,6 +170,7 @@ async function refreshAll(range: RangeSelection) {
     campaigns = await withinProviderDeadline(refreshAdminCampaignSnapshots(range, {
       authenticate: false,
       client: service,
+      ...(refreshMetrics ? { refreshMetrics: true } : {}),
     }));
   } catch {
     campaigns = {
@@ -261,11 +262,50 @@ async function refreshAll(range: RangeSelection) {
   );
 }
 
-/** Exact-range manual sync, or the CRON_SECRET-protected hourly today/d7 sync. */
+function rollingSelection(days: number): RangeSelection {
+  const to = presetSelection("today").to;
+  const date = new Date(`${to}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() - (days - 1));
+  return {
+    key: "custom",
+    from: date.toISOString().slice(0, 10),
+    to,
+  };
+}
+
+async function refreshMetricHistory(range: RangeSelection) {
+  const service = createServiceClient();
+  if (!service) return response({ error: "Reporting sync is not configured." }, 503);
+  const result = await refreshAdminCampaignSnapshots(range, {
+    authenticate: false,
+    client: service,
+    refreshMetrics: true,
+  });
+  const metricsReady = result.metricCoverage?.state === "ready";
+  const snapshotsReady = result.failed === 0 && result.partial === 0;
+  return response(
+    {
+      ok: metricsReady && snapshotsReady,
+      scope: "history",
+      range,
+      result,
+      syncedAt: new Date().toISOString(),
+      ...(!metricsReady || !snapshotsReady
+        ? { error: "Historical reporting could not be fully refreshed." }
+        : {}),
+    },
+    metricsReady && snapshotsReady ? 200 : 502,
+  );
+}
+
+/** Exact-range manual sync, hourly today/d7 sync, or a bounded bootstrap. */
 export async function POST(request: NextRequest) {
   const secret = process.env.CRON_SECRET;
+  const bootstrapSecret = process.env.REPORTING_SYNC_SECRET;
+  const authorization = request.headers.get("authorization");
   const machineAuthorised = Boolean(
-    secret && request.headers.get("authorization") === `Bearer ${secret}`,
+    (secret && authorization === `Bearer ${secret}`) ||
+    (bootstrapSecret && authorization === `Bearer ${bootstrapSecret}`),
   );
 
   if (!machineAuthorised) {
@@ -277,10 +317,13 @@ export async function POST(request: NextRequest) {
   try {
     if (machineAuthorised) {
       const key = request.nextUrl.searchParams.get("range");
-      if (key !== "today" && key !== "d7") {
-        return response({ error: "Cron reporting range must be today or d7." }, 422);
+      if (key === "d60") {
+        return await refreshMetricHistory(rollingSelection(60));
       }
-      return await refreshAll(presetSelection(key));
+      if (key !== "today" && key !== "d7" && key !== "d30") {
+        return response({ error: "Machine reporting range must be today, d7, d30 or d60." }, 422);
+      }
+      return await refreshAll(presetSelection(key), key === "d30");
     }
 
     const body = parseManualRequest(await readSmallJson(request, 2_048));

@@ -61,6 +61,7 @@ import { POST } from "./route";
 
 const URL = "http://localhost/api/admin/sync-reporting";
 const CRON_SECRET = "test-cron-secret";
+const REPORTING_SYNC_SECRET = "test-reporting-sync-secret";
 const CLIENT_ID = "10000000-0000-4000-8000-000000000001";
 const STORE_ID = "20000000-0000-4000-8000-000000000001";
 const RANGE = {
@@ -148,6 +149,7 @@ describe("admin exact-range reporting sync route", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-15T12:00:00.000Z"));
     vi.stubEnv("CRON_SECRET", CRON_SECRET);
+    vi.stubEnv("REPORTING_SYNC_SECRET", REPORTING_SYNC_SECRET);
     mocks.getSessionProfile.mockImplementation(async () => {
       mocks.callOrder.push("auth");
       return { profile: { id: "admin-1", role: "admin" } };
@@ -351,6 +353,34 @@ describe("admin exact-range reporting sync route", () => {
     );
   });
 
+  it("refreshes exact 30-day metrics and provider snapshots for the bootstrap secret", async () => {
+    const range = { key: "d30", from: "2026-07-17", to: "2026-08-15" };
+    const response = await POST(cronRequest("d30", REPORTING_SYNC_SECRET));
+
+    expect(response.status).toBe(200);
+    expect(mocks.getSessionProfile).not.toHaveBeenCalled();
+    expect(mocks.refreshAdminCampaignSnapshots).toHaveBeenCalledWith(range, {
+      authenticate: false,
+      client: serviceClient,
+      refreshMetrics: true,
+    });
+    expect(mocks.refreshAdminStoreAnalyticsSnapshots).toHaveBeenCalled();
+  });
+
+  it("backfills 60 daily metric days without duplicating store detail snapshots", async () => {
+    const range = { key: "custom", from: "2026-06-17", to: "2026-08-15" };
+    const response = await POST(cronRequest("d60", REPORTING_SYNC_SECRET));
+
+    expect(response.status).toBe(200);
+    expect(mocks.refreshAdminCampaignSnapshots).toHaveBeenCalledWith(range, {
+      authenticate: false,
+      client: serviceClient,
+      refreshMetrics: true,
+    });
+    expect(mocks.listAdminReportingStoreScopes).not.toHaveBeenCalled();
+    expect(mocks.refreshAdminStoreAnalyticsSnapshots).not.toHaveBeenCalled();
+  });
+
   it("caps hourly store provider work at three concurrent refreshes", async () => {
     const scopes = Array.from({ length: 7 }, (_, index) => reportingScope(index));
     mocks.listAdminReportingStoreScopes.mockResolvedValueOnce(scopes);
@@ -439,8 +469,8 @@ describe("admin exact-range reporting sync route", () => {
     });
   });
 
-  it("rejects non-hourly cron ranges before creating a service client", async () => {
-    const response = await POST(cronRequest("d30"));
+  it("rejects unsupported machine ranges before creating a service client", async () => {
+    const response = await POST(cronRequest("d90"));
 
     expect(response.status).toBe(422);
     expect(mocks.getSessionProfile).not.toHaveBeenCalled();
