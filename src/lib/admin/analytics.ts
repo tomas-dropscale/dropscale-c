@@ -25,10 +25,49 @@ export type AdminAnalyticsStore = {
   domain: string;
 };
 
+type ShopifyConnectionRow = {
+  client_id: string;
+  status: string;
+  shopify_domain: string;
+  primary_domain: string | null;
+  last_verified_at: string | null;
+  last_error_code: string | null;
+};
+
 function textOrder(left: string, right: string) {
   const a = left.trim().toLowerCase();
   const b = right.trim().toLowerCase();
   return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function canonicalShopifyDomain(value: string | null | undefined): string | null {
+  const domain = (value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/\/.*$/, "");
+  return /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(domain) ? domain : null;
+}
+
+function publicStoreDomain(value: string | null): string | null {
+  const domain = value?.trim().toLowerCase();
+  if (!domain || domain.length > 253) return null;
+  const labels = domain.split(".");
+  if (
+    labels.length < 2 ||
+    labels.some(
+      (label) =>
+        label.length > 63 ||
+        !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label),
+    )
+  ) {
+    return null;
+  }
+  return domain;
+}
+
+function storeIdentity(clientId: string, shopifyDomain: string) {
+  return `${clientId}\n${shopifyDomain}`;
 }
 
 /** Minimal read-only catalogue used before an Analytics client is selected. */
@@ -37,7 +76,13 @@ export async function listAdminAnalyticsClients(): Promise<AdminAnalyticsClient[
   const service = createServiceClient();
   if (!service) throw new Error("The admin analytics catalogue is unavailable.");
 
-  const [clientsResult, adminsResult, accountsResult, rolloutsResult] =
+  const [
+    clientsResult,
+    adminsResult,
+    accountsResult,
+    rolloutsResult,
+    shopifyConnectionsResult,
+  ] =
     await Promise.all([
       service
         .from("portal_clients")
@@ -50,12 +95,22 @@ export async function listAdminAnalyticsClients(): Promise<AdminAnalyticsClient[
         .select(
           "client_id, operational_surface, reporting_cutover_at, reporting_cutover_by, reporting_cutover_reason",
         ),
+      service
+        .from("client_shopify_connections")
+        .select(
+          "client_id, status, shopify_domain, primary_domain, last_verified_at, last_error_code",
+        )
+        .eq("status", "connected"),
     ]);
 
   const clients = clientsResult.data;
   const admins = adminsResult.data;
   const accounts = accountsResult.data;
   const rollouts = rolloutsResult.data;
+  const shopifyConnections =
+    !shopifyConnectionsResult.error && Array.isArray(shopifyConnectionsResult.data)
+      ? shopifyConnectionsResult.data
+      : [];
   if (
     clientsResult.error ||
     adminsResult.error ||
@@ -67,6 +122,25 @@ export async function listAdminAnalyticsClients(): Promise<AdminAnalyticsClient[
     !Array.isArray(rollouts)
   ) {
     throw new Error("The admin analytics catalogue is unavailable.");
+  }
+
+  const publicDomainByStore = new Map<string, string>();
+  for (const row of shopifyConnections as ShopifyConnectionRow[]) {
+    const shopifyDomain = canonicalShopifyDomain(row.shopify_domain);
+    const primaryDomain = publicStoreDomain(row.primary_domain);
+    if (
+      row.status !== "connected" ||
+      !row.last_verified_at ||
+      row.last_error_code !== null ||
+      shopifyDomain !== row.shopify_domain ||
+      !primaryDomain
+    ) {
+      continue;
+    }
+    publicDomainByStore.set(
+      storeIdentity(row.client_id, shopifyDomain),
+      primaryDomain,
+    );
   }
 
   const completeReportingMarkers = new Set<string>();
@@ -104,20 +178,20 @@ export async function listAdminAnalyticsClients(): Promise<AdminAnalyticsClient[
   const clientsWithAccounts = new Set<string>();
   for (const account of accounts) {
     clientsWithAccounts.add(account.client_id);
-    const domain = account.shopify_url
-      ?.trim()
-      .toLowerCase()
-      .replace(/^https?:\/\//, "")
-      .replace(/\/.*$/, "");
-    if (!domain) continue;
+    const shopifyDomain = canonicalShopifyDomain(account.shopify_url);
+    if (!shopifyDomain) continue;
     const stores = storesByClient.get(account.client_id) ?? new Map<string, AdminAnalyticsStore>();
     const candidate = {
       id: account.id,
       name: account.store_name,
-      domain,
+      domain:
+        publicDomainByStore.get(storeIdentity(account.client_id, shopifyDomain)) ??
+        shopifyDomain,
     };
-    const current = stores.get(domain);
-    if (!current || textOrder(candidate.id, current.id) < 0) stores.set(domain, candidate);
+    const current = stores.get(shopifyDomain);
+    if (!current || textOrder(candidate.id, current.id) < 0) {
+      stores.set(shopifyDomain, candidate);
+    }
     storesByClient.set(account.client_id, stores);
   }
 

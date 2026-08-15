@@ -1053,12 +1053,24 @@ async function shopifyFamilies(
       collections: family("Collection sales"),
     };
   }
+  const invoke = <T>(operation: () => Promise<T>) =>
+    Promise.resolve().then(operation);
   const [funnelResult, attributionResult, productResult, collectionsResult] =
     await Promise.allSettled([
-      adapterAttempt.value.fetchFunnel(range.from, range.to),
-      adapterAttempt.value.fetchCampaignAttribution(range.from, range.to, targetCurrency),
-      adapterAttempt.value.fetchCampaignProducts(range.from, range.to),
-      adapterAttempt.value.fetchCollectionSales(range.from, range.to, targetCurrency),
+      invoke(() => adapterAttempt.value.fetchFunnel(range.from, range.to)),
+      invoke(() =>
+        adapterAttempt.value.fetchCampaignAttribution(
+          range.from,
+          range.to,
+          targetCurrency,
+        )),
+      invoke(() => adapterAttempt.value.fetchCampaignProducts(range.from, range.to)),
+      invoke(() =>
+        adapterAttempt.value.fetchCollectionSales(
+          range.from,
+          range.to,
+          targetCurrency,
+        )),
     ]);
 
   let funnel: AdminStoreAnalytics["funnel"];
@@ -1143,6 +1155,25 @@ async function shopifyFamilies(
   return { funnel, attribution, products, collections };
 }
 
+type ShopifyFamilies = Awaited<ReturnType<typeof shopifyFamilies>>;
+
+function failedShopifyFamilies(): ShopifyFamilies {
+  return {
+    funnel: failed("Shopify funnel data could not be loaded for this store."),
+    attribution: {
+      ok: false,
+      state: "failed",
+      message: "Shopify campaign attribution could not be loaded.",
+    },
+    products: {
+      ok: false,
+      state: "failed",
+      message: "Shopify campaign products could not be loaded.",
+    },
+    collections: failed("Collection performance could not be loaded for this store."),
+  };
+}
+
 /**
  * Purpose-bound analytics DAL. Authentication and exact ownership are proved
  * before service-role topology or encrypted credentials are read.
@@ -1152,64 +1183,9 @@ export async function fetchAdminStoreAnalytics(
 ): Promise<AdminStoreAnalytics> {
   assertInput(input);
   await requireClientOnboardingAdmin();
+  let topology: StoreTopology;
   try {
-    const topology = await loadTopology(input);
-
-    const googlePromise = loadGoogleCampaigns(topology, input.range);
-    const breakdownPromise = loadGoogleBreakdowns(topology, input.range);
-    const shopifyPromise = openShopify(topology);
-    const accountIds = [...new Set(input.store.activityAccountIds)];
-    const rollupPromise = rollupFamilies(topology, accountIds, input.range);
-    const activityPromise = listCampaignActionActivity(
-      input.clientId,
-      accountIds,
-      input.range,
-    );
-
-    const [google, breakdowns, adapterAttempt, activityResult, rollup] = await Promise.all([
-      googlePromise,
-      breakdownPromise,
-      shopifyPromise,
-      activityPromise.then(
-        (value): Attempt<typeof value> => ({ ok: true, value }),
-        (): Attempt<never> => ({
-          ok: false,
-          state: "failed",
-          message: "Campaign activity could not be loaded for the selected period.",
-        }),
-      ),
-      rollupPromise,
-    ]);
-    const shopify = await shopifyFamilies(
-      adapterAttempt,
-      input.range,
-      input.store.currency,
-    );
-
-    const activity: AdminStoreAnalytics["activity"] = activityResult.ok
-      ? readyOrEmpty(
-          { rows: activityResult.value.history, truncated: activityResult.value.truncated },
-          activityResult.value.history.length === 0,
-        )
-      : failed(activityResult.message);
-
-    return {
-      clientId: input.clientId,
-      storeAccountId: input.store.accountId,
-      currency: input.store.currency,
-      range: { from: input.range.from, to: input.range.to },
-      funnel: shopify.funnel,
-      campaigns: campaignFamily(
-        google,
-        breakdowns,
-        shopify.attribution,
-        shopify.products,
-      ),
-      collections: shopify.collections,
-      spend: rollup.spend,
-      rollupCoverage: rollup.rollupCoverage,
-      activity,
-    };
+    topology = await loadTopology(input);
   } catch (error) {
     console.error("Admin store analytics load failed:", error);
     return {
@@ -1225,6 +1201,78 @@ export async function fetchAdminStoreAnalytics(
       activity: failed("Campaign activity could not be loaded for this store."),
     };
   }
+
+  const accountIds = [...new Set(input.store.activityAccountIds)];
+  const googlePromise = loadGoogleCampaigns(topology, input.range);
+  const breakdownPromise = loadGoogleBreakdowns(topology, input.range);
+  // Shopify used to start only after Google, breakdown, activity and rollup
+  // completed. Keep every independent provider in the same request phase.
+  const shopifyPromise = openShopify(topology)
+    .then((adapter) => shopifyFamilies(adapter, input.range, input.store.currency))
+    .catch((error): ShopifyFamilies => {
+      console.error("Admin store Shopify analytics composition failed:", error);
+      return failedShopifyFamilies();
+    });
+  const rollupPromise = rollupFamilies(topology, accountIds, input.range);
+  const activityPromise = listCampaignActionActivity(
+    input.clientId,
+    accountIds,
+    input.range,
+  ).then(
+    (value): Attempt<typeof value> => ({ ok: true, value }),
+    (): Attempt<never> => ({
+      ok: false,
+      state: "failed",
+      message: "Campaign activity could not be loaded for the selected period.",
+    }),
+  );
+
+  const [google, breakdowns, shopify, activityResult, rollup] = await Promise.all([
+    googlePromise,
+    breakdownPromise,
+    shopifyPromise,
+    activityPromise,
+    rollupPromise,
+  ]);
+
+  let campaigns: AdminStoreAnalytics["campaigns"];
+  try {
+    campaigns = campaignFamily(
+      google,
+      breakdowns,
+      shopify.attribution,
+      shopify.products,
+    );
+  } catch (error) {
+    console.error("Admin store campaign analytics composition failed:", error);
+    campaigns = failed("Campaign performance could not be loaded for this store.");
+  }
+
+  let activity: AdminStoreAnalytics["activity"];
+  try {
+    activity = activityResult.ok
+      ? readyOrEmpty(
+          { rows: activityResult.value.history, truncated: activityResult.value.truncated },
+          activityResult.value.history.length === 0,
+        )
+      : failed(activityResult.message);
+  } catch (error) {
+    console.error("Admin store campaign activity composition failed:", error);
+    activity = failed("Campaign activity could not be loaded for this store.");
+  }
+
+  return {
+    clientId: input.clientId,
+    storeAccountId: input.store.accountId,
+    currency: input.store.currency,
+    range: { from: input.range.from, to: input.range.to },
+    funnel: shopify.funnel,
+    campaigns,
+    collections: shopify.collections,
+    spend: rollup.spend,
+    rollupCoverage: rollup.rollupCoverage,
+    activity,
+  };
 }
 
 /**

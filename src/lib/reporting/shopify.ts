@@ -835,7 +835,7 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
           left.title.localeCompare(right.title),
       );
     },
-    fetchCollectionSales(from, to, targetCurrency = verifiedCurrency) {
+    async fetchCollectionSales(from, to, targetCurrency = verifiedCurrency) {
       validateRange(from, to);
       requireScopes(granted, ["read_reports", "read_products"]);
       const reportingCurrency = currency(targetCurrency);

@@ -86,6 +86,69 @@ function normalizedStoreDomain(value: string | null): string {
     .replace(/\/.*$/, "");
 }
 
+function canonicalShopifyDomain(value: string | null | undefined): string | null {
+  const domain = (value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/\/.*$/, "");
+  return /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(domain) ? domain : null;
+}
+
+function publicStoreDomain(value: string | null): string | null {
+  const domain = value?.trim().toLowerCase();
+  if (!domain || domain.length > 253) return null;
+  const labels = domain.split(".");
+  return labels.length >= 2 &&
+    labels.every(
+      (label) =>
+        label.length <= 63 &&
+        /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label),
+    )
+    ? domain
+    : null;
+}
+
+async function storesWithPublicDomains(
+  service: OverviewScope["service"],
+  clientId: string,
+  accounts: AdAccount[],
+): Promise<AdAccount[]> {
+  const { data, error } = await service
+    .from("client_shopify_connections")
+    .select(
+      "client_id, status, shopify_domain, primary_domain, last_verified_at, last_error_code",
+    )
+    .eq("client_id", clientId)
+    .eq("status", "connected");
+  if (error || !Array.isArray(data)) return accounts;
+
+  const publicDomainByShopify = new Map<string, string>();
+  for (const row of data) {
+    const shopifyDomain = canonicalShopifyDomain(row.shopify_domain);
+    const primaryDomain = publicStoreDomain(row.primary_domain);
+    if (
+      row.client_id !== clientId ||
+      row.status !== "connected" ||
+      !row.last_verified_at ||
+      row.last_error_code !== null ||
+      shopifyDomain !== row.shopify_domain ||
+      !primaryDomain
+    ) {
+      continue;
+    }
+    publicDomainByShopify.set(shopifyDomain, primaryDomain);
+  }
+
+  return accounts.map((account) => {
+    const shopifyDomain = canonicalShopifyDomain(account.shopify_url);
+    const primaryDomain = shopifyDomain
+      ? publicDomainByShopify.get(shopifyDomain)
+      : null;
+    return primaryDomain ? { ...account, shopify_url: primaryDomain } : account;
+  });
+}
+
 function estimatedGoogleCog(
   googleRevenue: number | null,
   grossRevenue: number,
@@ -132,7 +195,7 @@ async function reportingScope(
   if (!rollout || rollout.operational_surface !== "v2_active" || !markerComplete) {
     const ids = accounts.map((account) => account.id);
     return {
-      stores: accounts,
+      stores: await storesWithPublicDomains(service, clientId, accounts),
       recomputeAccounts: accounts,
       metricIdsByStore: new Map(accounts.map((account) => [account.id, [account.id]])),
       allMetricIds: [...new Set(ids)],

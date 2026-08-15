@@ -1,5 +1,6 @@
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
+import { cache } from "react";
 import type { Database } from "@/lib/supabase/types";
 import { supabaseEnv } from "@/lib/supabase/env";
 
@@ -36,7 +37,7 @@ export async function createClient() {
  * `profile` comes from the database on every request, never from the JWT or
  * anything the client can set — see admin migration 0004.
  */
-export async function getSessionProfile() {
+const readSessionProfile = cache(async () => {
   const supabase = await createClient();
 
   const {
@@ -52,6 +53,14 @@ export async function getSessionProfile() {
     .maybeSingle();
 
   return { user, profile };
+});
+
+export async function getSessionProfile() {
+  // React cache is scoped to the server render. Admin pages call this through
+  // their layout and several purpose-bound DALs; all of them can share one
+  // authoritative auth/profile read without sharing a Supabase client across
+  // requests.
+  return readSessionProfile();
 }
 
 /**

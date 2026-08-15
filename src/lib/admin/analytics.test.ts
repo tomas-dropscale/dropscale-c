@@ -34,12 +34,14 @@ function service({
   admins = [],
   accounts = [],
   rollouts = [],
+  shopifyConnections = [],
   errors = {},
 }: {
   clients?: unknown[];
   admins?: unknown[];
   accounts?: unknown[];
   rollouts?: unknown[];
+  shopifyConnections?: unknown[];
   errors?: Partial<Record<string, unknown>>;
 }) {
   const queries = {
@@ -47,6 +49,10 @@ function service({
     profiles: query(admins, errors.profiles),
     ad_accounts: query(accounts, errors.ad_accounts),
     client_rollout_states: query(rollouts, errors.client_rollout_states),
+    client_shopify_connections: query(
+      shopifyConnections,
+      errors.client_shopify_connections,
+    ),
   };
   return {
     queries,
@@ -167,6 +173,16 @@ describe("admin analytics client catalogue", () => {
           operational_surface: "rollback_legacy",
         },
       ],
+      shopifyConnections: [
+        {
+          client_id: "zeta",
+          status: "connected",
+          shopify_domain: "alpha.myshopify.com",
+          primary_domain: "store.alpha.example",
+          last_verified_at: "2026-08-14T09:00:00Z",
+          last_error_code: null,
+        },
+      ],
     });
     mocks.createServiceClient.mockImplementation(() => {
       mocks.callOrder.push("service");
@@ -188,14 +204,14 @@ describe("admin analytics client catalogue", () => {
         storeCount: 2,
         stores: [
           {
-            id: "account-1",
-            name: "Alpha Store",
-            domain: "alpha.myshopify.com",
-          },
-          {
             id: "account-2",
             name: "Beta Store",
             domain: "beta.myshopify.com",
+          },
+          {
+            id: "account-1",
+            name: "Alpha Store",
+            domain: "store.alpha.example",
           },
         ],
       },
@@ -206,12 +222,65 @@ describe("admin analytics client catalogue", () => {
       "profiles",
       "ad_accounts",
       "client_rollout_states",
+      "client_shopify_connections",
     ]);
     expect(setup.queries.portal_clients.eq).toHaveBeenCalledWith(
       "approval_status",
       "approved",
     );
     expect(setup.queries.profiles.eq).toHaveBeenCalledWith("role", "admin");
+    expect(setup.queries.client_shopify_connections.eq).toHaveBeenCalledWith(
+      "status",
+      "connected",
+    );
+  });
+
+  it("falls back to the canonical Shopify domain when a public domain is not verified", async () => {
+    const setup = service({
+      clients: [
+        {
+          id: "client-1",
+          full_name: "Northwind",
+          email: "northwind@example.com",
+          approval_status: "approved",
+        },
+      ],
+      accounts: [
+        {
+          id: "account-1",
+          client_id: "client-1",
+          store_name: "Northwind Store",
+          shopify_url: "northwind.myshopify.com",
+        },
+      ],
+      shopifyConnections: [
+        {
+          client_id: "client-1",
+          status: "connected",
+          shopify_domain: "northwind.myshopify.com",
+          primary_domain: "unverified.example",
+          last_verified_at: null,
+          last_error_code: null,
+        },
+      ],
+    });
+    mocks.createServiceClient.mockReturnValue(setup.client);
+
+    await expect(listAdminAnalyticsClients()).resolves.toEqual([
+      {
+        id: "client-1",
+        name: "Northwind",
+        email: "northwind@example.com",
+        storeCount: 1,
+        stores: [
+          {
+            id: "account-1",
+            name: "Northwind Store",
+            domain: "northwind.myshopify.com",
+          },
+        ],
+      },
+    ]);
   });
 
   it("does not construct the service client when admin reauthentication fails", async () => {

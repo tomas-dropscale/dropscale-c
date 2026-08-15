@@ -63,6 +63,7 @@ import {
   ensureAdminAnalyticsRollupCoverage,
   fetchAdminStoreAnalytics,
 } from "./store-analytics";
+import { ShopifyReportingAdapterError } from "@/lib/reporting/shopify";
 
 const CLIENT_ID = "10000000-0000-4000-8000-000000000001";
 const STORE_ID = "20000000-0000-4000-8000-000000000001";
@@ -312,6 +313,65 @@ describe("admin store analytics DAL", () => {
     });
 
     expect(mocks.requireAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not let one malformed provider projection erase independent families", async () => {
+    mocks.createServiceClient.mockReturnValue(service([account()], null));
+    const adapter = shopifyAdapter();
+    adapter.fetchCampaignProducts.mockResolvedValue([null]);
+    mocks.createLegacyShopifyReportingAdapter.mockResolvedValue(adapter);
+    mocks.fetchLiveCampaignsDetailed.mockResolvedValue([googleCampaign()]);
+
+    const result = await fetchAdminStoreAnalytics({
+      clientId: CLIENT_ID,
+      store: {
+        accountId: STORE_ID,
+        activityAccountIds: [STORE_ID],
+        currency: "EUR",
+        days: [],
+      },
+      range: RANGE,
+    });
+
+    expect(result.campaigns).toMatchObject({ state: "failed" });
+    expect(result.funnel).toMatchObject({ state: "ready" });
+    expect(result.collections).toMatchObject({ state: "ready" });
+    expect(result.spend).toMatchObject({ state: "ready" });
+    expect(result.rollupCoverage).toMatchObject({ state: "ready" });
+    expect(result.activity).toMatchObject({ state: "empty" });
+  });
+
+  it("contains a synchronous missing collection scope to that Shopify family", async () => {
+    mocks.createServiceClient.mockReturnValue(service([account()], null));
+    const adapter = shopifyAdapter();
+    adapter.fetchCollectionSales.mockImplementation(() => {
+      throw new ShopifyReportingAdapterError(
+        "missing_scope",
+        "read_reports is missing",
+      );
+    });
+    mocks.createLegacyShopifyReportingAdapter.mockResolvedValue(adapter);
+    mocks.fetchLiveCampaignsDetailed.mockResolvedValue([googleCampaign()]);
+
+    const result = await fetchAdminStoreAnalytics({
+      clientId: CLIENT_ID,
+      store: {
+        accountId: STORE_ID,
+        activityAccountIds: [STORE_ID],
+        currency: "EUR",
+        days: [],
+      },
+      range: RANGE,
+    });
+
+    expect(result.collections).toMatchObject({
+      state: "unavailable",
+      message: expect.stringContaining("read-only scope"),
+    });
+    expect(result.funnel).toMatchObject({ state: "ready" });
+    expect(result.campaigns).toMatchObject({ state: "ready" });
+    expect(result.spend).toMatchObject({ state: "ready" });
+    expect(result.activity).toMatchObject({ state: "empty" });
   });
 
   it("uses the exact inclusive range for every legacy source and only exact campaign IDs", async () => {

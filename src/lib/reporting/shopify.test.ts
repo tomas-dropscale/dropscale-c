@@ -1113,6 +1113,16 @@ describe("V2 Shopify reporting adapter", () => {
     });
   });
 
+  it("returns a rejected promise when collection scopes are missing", async () => {
+    const adapter = await createShopifyReportingAdapter(source());
+    let request: ReturnType<typeof adapter.fetchCollectionSales> | undefined;
+
+    expect(() => {
+      request = adapter.fetchCollectionSales("2026-08-13", "2026-08-13");
+    }).not.toThrow();
+    await expect(request).rejects.toMatchObject({ code: "missing_scope" });
+  });
+
   it("converts JPY campaign and collection revenue to the account currency by day", async () => {
     mocks.verifyReportingShop.mockResolvedValue(
       verifiedShop({

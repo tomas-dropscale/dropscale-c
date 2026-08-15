@@ -280,6 +280,7 @@ function serviceWithRollout(
   operational_surface: string,
   reporting_cutover_at: string | null,
   complete = true,
+  shopifyConnections: unknown[] = [],
 ) {
   const rolloutQuery = query([], null, {
     operational_surface,
@@ -289,7 +290,12 @@ function serviceWithRollout(
     reporting_cutover_reason:
       reporting_cutover_at && complete ? "Reporting cutover" : null,
   });
-  return { from: vi.fn(() => rolloutQuery) };
+  const shopifyQuery = query(shopifyConnections);
+  return {
+    from: vi.fn((table: string) =>
+      table === "client_shopify_connections" ? shopifyQuery : rolloutQuery,
+    ),
+  };
 }
 
 const range = {
@@ -412,11 +418,34 @@ describe("admin client overview V2 projection", () => {
   });
 
   it("keeps an old v2_active row without the durable marker on legacy topology", async () => {
-    const first = account("first", { status: "active" });
-    const second = account("second", { status: "active" });
+    const first = account("first", {
+      status: "active",
+      shopify_url: "first.myshopify.com",
+    });
+    const second = account("second", {
+      status: "active",
+      shopify_url: "second.myshopify.com",
+    });
     mocks.createClient.mockResolvedValue(session([first, second]));
     mocks.createServiceClient.mockReturnValue(
-      serviceWithRollout("v2_active", null),
+      serviceWithRollout("v2_active", null, true, [
+        {
+          client_id: "client-1",
+          status: "connected",
+          shopify_domain: "first.myshopify.com",
+          primary_domain: "first.example",
+          last_verified_at: "2026-08-14T09:00:00Z",
+          last_error_code: null,
+        },
+        {
+          client_id: "client-1",
+          status: "connected",
+          shopify_domain: "second.myshopify.com",
+          primary_domain: "second.example",
+          last_verified_at: "2026-08-14T09:00:00Z",
+          last_error_code: null,
+        },
+      ]),
     );
 
     const overview = await fetchClientOverview("client-1", range);
@@ -426,6 +455,23 @@ describe("admin client overview V2 projection", () => {
       "first",
       "second",
     ]);
+    expect(overview?.stores.map((store) => store.storeDomain)).toEqual([
+      "first.example",
+      "second.example",
+    ]);
+    expect(mocks.recomputeDailyMetrics).toHaveBeenCalledWith(
+      [
+        expect.objectContaining({
+          id: "first",
+          shopify_url: "first.myshopify.com",
+        }),
+        expect.objectContaining({
+          id: "second",
+          shopify_url: "second.myshopify.com",
+        }),
+      ],
+      expect.anything(),
+    );
   });
 
   it("does not fall back when the durable cutover topology is missing", async () => {
