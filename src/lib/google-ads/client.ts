@@ -63,6 +63,7 @@ export class GoogleAdsMutationError extends Error {
 // tokens live ~1h; refreshing on every query would add a round-trip and burn
 // OAuth quota. A cold isolate just mints new ones.
 const tokenCache = new Map<string, { value: string; expiresAt: number }>();
+const accessibleCustomerCache = new Map<string, string[]>();
 
 async function accessToken(refreshToken: string): Promise<string> {
   const now = Date.now();
@@ -184,11 +185,46 @@ async function gaqlSearch(
   return rows;
 }
 
+async function accessibleCustomerIds(
+  token: string,
+  refreshToken: string,
+): Promise<string[]> {
+  const cached = accessibleCustomerCache.get(refreshToken);
+  if (cached) return cached;
+
+  const { developerToken, apiVersion } = googleAdsApiBasics();
+  const res = await fetch(
+    `https://googleads.googleapis.com/${apiVersion}/customers:listAccessibleCustomers`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "developer-token": developerToken,
+      },
+      signal: AbortSignal.timeout(20_000),
+    },
+  );
+  if (!res.ok) {
+    throw new GoogleAdsQueryError(
+      `Google Ads accessible-customer lookup failed (${res.status}).`,
+      res.status,
+    );
+  }
+  const json = (await res.json()) as { resourceNames?: unknown };
+  const ids = Array.isArray(json.resourceNames)
+    ? json.resourceNames
+        .map((name) => /^customers\/(\d{10})$/.exec(String(name))?.[1] ?? null)
+        .filter((id): id is string => Boolean(id))
+        .slice(0, 25)
+    : [];
+  accessibleCustomerCache.set(refreshToken, ids);
+  return ids;
+}
+
 /**
- * GAQL as one CLIENT, with that client's own refresh token. No
- * login-customer-id: the token authorises the client's account directly, and
- * the env MCC is the agency's — Google rejects it for accounts outside that
- * manager tree.
+ * GAQL as one CLIENT, with that client's own refresh token. Direct account
+ * grants need no login-customer-id. Manager grants are retried only through
+ * customer ids that Google itself reports as directly accessible to the same
+ * OAuth token.
  */
 export async function searchGoogleAds(
   customerId: string,
@@ -205,8 +241,12 @@ export async function searchGoogleAds(
     // the configured MCC; Google still validates the same OAuth grant and the
     // exact requested customer identity.
     if (directError instanceof GoogleAdsQueryError && directError.status === 403) {
-      const loginCustomerId = googleAdsEnv().loginCustomerId;
-      if (loginCustomerId) {
+      const configured = googleAdsEnv().loginCustomerId;
+      const discovered = await accessibleCustomerIds(token, refreshToken).catch(
+        () => [],
+      );
+      const candidates = [...new Set([configured, ...discovered].filter(Boolean))] as string[];
+      for (const loginCustomerId of candidates) {
         try {
           return await gaqlSearch(customerId, token, query, loginCustomerId);
         } catch (managerError) {
