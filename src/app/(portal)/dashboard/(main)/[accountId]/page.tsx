@@ -1,7 +1,7 @@
 import { UpdatedAt } from "@/components/portal/updated-at";
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
-import { FileBarChart, Hourglass } from "lucide-react";
+import { CircleCheck, FileBarChart, Hourglass } from "lucide-react";
 
 import { fetchAccount, fetchCampaigns, reportingMetricAccountIds } from "@/lib/portal/data";
 import {
@@ -109,6 +109,20 @@ export default async function AccountPage({
     >
       <div className="space-y-6">
         {account.status === "suspended" && <SuspendedBanner />}
+        {account.reporting_data_pending && (
+          <div className="flex items-start gap-3 rounded-[var(--radius-card)] border border-[var(--success-green)]/30 bg-[var(--success-green)]/5 px-4 py-3.5">
+            <CircleCheck className="mt-0.5 size-4 shrink-0 text-[var(--success-green)]" />
+            <div>
+              <p className="text-[13.5px] font-semibold text-[var(--text-primary)]">
+                Connected; reporting data not available yet
+              </p>
+              <p className="text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
+                Shopify and Google Ads are verified. Metrics will appear after the first
+                reporting sync is available.
+              </p>
+            </div>
+          </div>
+        )}
         {account.status === "pending" && (
           <div className="flex items-start gap-3 rounded-[var(--radius-card)] border border-[var(--accent-gold)]/30 bg-[var(--accent-gold-dim)] px-4 py-3.5">
             <Hourglass className="mt-0.5 size-4 shrink-0 text-[var(--accent-gold)]" />

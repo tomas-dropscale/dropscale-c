@@ -50,12 +50,26 @@ import { cache } from "react";
 export const ACCOUNT_COLUMNS =
   "id, client_id, store_name, google_ads_customer_id, status, reporting_role, currency, breakeven_roas, lifetime_ads_budget_usd, shopify_url, shopify_connected, shopify_client_id, shopify_scopes, color_dot, created_at, google_ads_connected_email, google_ads_connected, commission_rate, list_commission_rate, shopify_token_last4, shopify_connected_at, default_product_cost_pct, payment_fee_pct, payment_fee_fixed, shipping_cost_per_order, revenue_share_enabled" as const;
 
+export type PortalAccount = AdAccount & {
+  /** Verified V2 connections exist, but legacy metrics remain authoritative until cutover. */
+  reporting_data_pending?: boolean;
+};
+
 type PortalAccountProjection = {
-  accounts: AdAccount[];
+  accounts: PortalAccount[];
   metricIdsByStore: Map<string, string[]>;
   metricAccountsById: Map<string, AdAccount>;
   unallocatedGoogleAccountIds: string[];
   googleSourcesByStore: Map<string, CanonicalReportingSource[]>;
+};
+
+type PreCutoverConnectionProjection = {
+  customerId: string;
+  shopify: {
+    name: string;
+    domain: string;
+    primaryDomain: string | null;
+  } | null;
 };
 
 export type PortalMetricScope = {
@@ -76,6 +90,131 @@ class PortalProjectionError extends Error {
 function projectedShopDomain(source: CanonicalReportingSource): string {
   const primary = source.shopify?.primaryDomain?.trim().toLowerCase();
   return primary || source.shopify!.domain;
+}
+
+function exactGoogleCustomerId(value: string | null): string | null {
+  const digits = value?.replace(/\D/g, "") ?? "";
+  return /^\d{10}$/.test(digits) ? digits : null;
+}
+
+export function projectVerifiedPreCutoverConnection(
+  account: AdAccount,
+  setup: PreCutoverConnectionProjection,
+): PortalAccount {
+  const shopifyDomain = setup.shopify?.primaryDomain?.trim().toLowerCase();
+  return {
+    ...account,
+    // Presentation only: approval is already complete. The DB row remains
+    // pending until the immutable billing/reporting cutover is performed.
+    status: account.status === "pending" ? "active" : account.status,
+    store_name: setup.shopify?.name.trim() || account.store_name,
+    shopify_url: shopifyDomain || setup.shopify?.domain || account.shopify_url,
+    shopify_connected: Boolean(setup.shopify) || account.shopify_connected,
+    google_ads_connected: true,
+    reporting_data_pending: true,
+  };
+}
+
+const verifiedPreCutoverConnections = cache(async function verifiedPreCutoverConnections(
+  clientId: string,
+): Promise<Map<string, PreCutoverConnectionProjection>> {
+  const service = createServiceClient();
+  if (!service) return new Map();
+
+  const [clientResult, googleResult, shopifyResult] = await Promise.all([
+    service.from("portal_clients").select("approval_status").eq("id", clientId).maybeSingle(),
+    service
+      .from("client_google_ads_connections")
+      .select("id, client_id, status, windsor_account_id, last_verified_at, last_error_code")
+      .eq("client_id", clientId)
+      .eq("status", "connected"),
+    service
+      .from("client_shopify_connections")
+      .select(
+        "id, client_id, status, shopify_name, shopify_domain, primary_domain, last_verified_at, last_error_code",
+      )
+      .eq("client_id", clientId)
+      .eq("status", "connected"),
+  ]);
+  if (
+    clientResult.error ||
+    googleResult.error ||
+    shopifyResult.error ||
+    clientResult.data?.approval_status !== "approved"
+  ) {
+    return new Map();
+  }
+
+  const google = (googleResult.data ?? []).filter(
+    (connection) => connection.last_verified_at && !connection.last_error_code,
+  );
+  const shopify = new Map(
+    (shopifyResult.data ?? [])
+      .filter((connection) => connection.last_verified_at && !connection.last_error_code)
+      .map((connection) => [connection.id, connection]),
+  );
+  if (google.length === 0) return new Map();
+
+  const { data: mappings, error } = await service
+    .from("client_asset_mappings")
+    .select("shopify_connection_id, google_ads_connection_id")
+    .in(
+      "google_ads_connection_id",
+      google.map((connection) => connection.id),
+    );
+  if (error) return new Map();
+
+  const result = new Map<string, PreCutoverConnectionProjection>();
+  for (const connection of google) {
+    const customerId = exactGoogleCustomerId(connection.windsor_account_id);
+    if (!customerId || result.has(customerId)) {
+      // Ambiguous identities fail closed instead of decorating the wrong store.
+      if (customerId) result.delete(customerId);
+      continue;
+    }
+    const matchedMappings = (mappings ?? []).filter(
+      (mapping) => mapping.google_ads_connection_id === connection.id,
+    );
+    const matchedShopify =
+      matchedMappings.length === 1
+        ? shopify.get(matchedMappings[0].shopify_connection_id) ?? null
+        : null;
+    result.set(customerId, {
+      customerId,
+      shopify: matchedShopify
+        ? {
+            name: matchedShopify.shopify_name,
+            domain: matchedShopify.shopify_domain,
+            primaryDomain: matchedShopify.primary_domain,
+          }
+        : null,
+    });
+  }
+  return result;
+});
+
+async function projectLegacyConnectionState(
+  clientId: string,
+  accounts: AdAccount[],
+): Promise<PortalAccount[]> {
+  if (
+    !accounts.some(
+      (account) =>
+        account.status === "pending" &&
+        !account.google_ads_connected &&
+        exactGoogleCustomerId(account.google_ads_customer_id),
+    )
+  ) {
+    return accounts;
+  }
+
+  const connected = await verifiedPreCutoverConnections(clientId);
+  return accounts.map((account) => {
+    if (account.status !== "pending" || account.google_ads_connected) return account;
+    const customerId = exactGoogleCustomerId(account.google_ads_customer_id);
+    const setup = customerId ? connected.get(customerId) : null;
+    return setup ? projectVerifiedPreCutoverConnection(account, setup) : account;
+  });
 }
 
 /**
@@ -237,7 +376,7 @@ async function v2ProjectionOrNull(clientId: string): Promise<PortalAccountProjec
  * workspace you picked, never by your role.
  */
 
-export async function fetchAccounts(): Promise<AdAccount[]> {
+export async function fetchAccounts(): Promise<PortalAccount[]> {
   const clientId = await activeWorkspaceId();
   if (!clientId) return [];
 
@@ -253,14 +392,14 @@ export async function fetchAccounts(): Promise<AdAccount[]> {
     .select(ACCOUNT_COLUMNS)
     .eq("client_id", clientId)
     .order("created_at", { ascending: true });
-  return (data as AdAccount[] | null) ?? [];
+  return projectLegacyConnectionState(clientId, (data as AdAccount[] | null) ?? []);
 }
 
 /**
  * One account of the ACTIVE workspace; an id from another workspace (even one
  * the viewer could switch to, and even for an admin) comes back null → 404.
  */
-export async function fetchAccount(accountId: string): Promise<AdAccount | null> {
+export async function fetchAccount(accountId: string): Promise<PortalAccount | null> {
   const clientId = await activeWorkspaceId();
   if (!clientId) return null;
 
@@ -278,7 +417,8 @@ export async function fetchAccount(accountId: string): Promise<AdAccount | null>
     .eq("id", accountId)
     .eq("client_id", clientId)
     .maybeSingle();
-  return (data as AdAccount | null) ?? null;
+  const account = (data as AdAccount | null) ?? null;
+  return account ? (await projectLegacyConnectionState(clientId, [account]))[0] ?? null : null;
 }
 
 /**
@@ -376,9 +516,12 @@ export async function reportingMetricScope(
 }
 
 /** Connected = the client authorised Google Ads and the API is configured. */
-export function isGoogleAdsConnected(account: AdAccount): boolean {
+export function isGoogleAdsConnected(account: PortalAccount): boolean {
   return (
-    hasGoogleAdsEnv() && account.google_ads_connected && Boolean(account.google_ads_customer_id)
+    !account.reporting_data_pending &&
+    hasGoogleAdsEnv() &&
+    account.google_ads_connected &&
+    Boolean(account.google_ads_customer_id)
   );
 }
 

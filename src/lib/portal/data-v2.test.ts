@@ -50,6 +50,8 @@ import {
   fetchAccount,
   fetchAccounts,
   fetchCampaigns,
+  isGoogleAdsConnected,
+  projectVerifiedPreCutoverConnection,
   reportingMetricAccountIds,
   reportingMetricScope,
 } from "./data";
@@ -183,6 +185,35 @@ describe("portal V2 store projection", () => {
     mocks.activeWorkspaceId.mockResolvedValue("client-1");
     mocks.clientReportingAuthority.mockResolvedValue("v2");
     mocks.resolveReportingSources.mockResolvedValue([]);
+  });
+
+  it("presents an approved verified pre-cutover connection without enabling reporting", () => {
+    mocks.hasGoogleAdsEnv.mockReturnValue(true);
+    const projected = projectVerifiedPreCutoverConnection(
+      account({
+        google_ads_customer_id: "4701064403",
+        reporting_role: "legacy_hybrid",
+        shopify_url: null,
+      }),
+      {
+        customerId: "4701064403",
+        shopify: {
+          name: "Connected store",
+          domain: "connected.myshopify.com",
+          primaryDomain: "connected.example",
+        },
+      },
+    );
+
+    expect(projected).toEqual(
+      expect.objectContaining({
+        status: "active",
+        shopify_connected: true,
+        google_ads_connected: true,
+        reporting_data_pending: true,
+      }),
+    );
+    expect(isGoogleAdsConnected(projected)).toBe(false);
   });
 
   it.each([
