@@ -13,6 +13,7 @@ import {
   ensureAdminAnalyticsRollupCoverage,
   refreshAdminStoreAnalyticsSnapshots,
 } from "@/lib/admin/store-analytics";
+import { refreshReportingSourcesNow } from "@/lib/metrics/recompute";
 import { parseRange, presetSelection, type RangeSelection } from "@/lib/portal/range";
 import { getSessionProfile } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/service";
@@ -292,6 +293,29 @@ function rollingSelection(days: number): RangeSelection {
   };
 }
 
+async function bootstrapReportingAccount(accountId: string) {
+  const service = createServiceClient();
+  if (!service) return response({ error: "Reporting sync is not configured." }, 503);
+  const today = new Date(`${presetSelection("today").to}T00:00:00.000Z`);
+  const to = new Date(today);
+  to.setUTCDate(to.getUTCDate() - 1);
+  const from = new Date(to);
+  from.setUTCDate(from.getUTCDate() - 89);
+  await refreshReportingSourcesNow([accountId], {
+    client: service,
+    from: from.toISOString().slice(0, 10),
+    to: to.toISOString().slice(0, 10),
+  });
+  return response({
+    ok: true,
+    scope: "reporting_bootstrap",
+    accountId,
+    from: from.toISOString().slice(0, 10),
+    to: to.toISOString().slice(0, 10),
+    syncedAt: new Date().toISOString(),
+  });
+}
+
 async function refreshMetricHistory(range: RangeSelection) {
   const service = createServiceClient();
   if (!service) return response({ error: "Reporting sync is not configured." }, 503);
@@ -335,6 +359,17 @@ export async function POST(request: NextRequest) {
 
   try {
     if (machineAuthorised) {
+      const bootstrapAccountId = request.nextUrl.searchParams.get("bootstrapAccount");
+      if (
+        bootstrapSecret &&
+        authorization === `Bearer ${bootstrapSecret}` &&
+        bootstrapAccountId
+      ) {
+        if (!UUID.test(bootstrapAccountId)) {
+          return response({ error: "A valid reporting account is required." }, 422);
+        }
+        return await bootstrapReportingAccount(bootstrapAccountId);
+      }
       const key = request.nextUrl.searchParams.get("range");
       if (key === "d60") {
         return await refreshMetricHistory(rollingSelection(60));
