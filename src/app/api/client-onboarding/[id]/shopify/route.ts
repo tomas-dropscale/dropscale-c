@@ -2,8 +2,9 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { isClientOnboardingId } from "@/lib/client-onboarding/invitations";
 import {
-  ClientOnboardingError,
   authorizeClientOnboardingRequest,
+  ClientOnboardingError,
+  submitClientOnboardingSessionIfReady,
 } from "@/lib/client-onboarding/sessions";
 import {
   ClientShopifyConnectionError,
@@ -210,7 +211,8 @@ export async function POST(request: NextRequest, { params }: Context) {
       clientSecret: body.clientSecret,
       repository: createReportingShopifyRepository(),
     });
-    return response({ ok: true, connection: connected }, 201);
+    const completed = await submitClientOnboardingSessionIfReady(authorization);
+    return response({ ok: true, connection: connected, completed }, 201);
   } catch (error) {
     return publicError(error);
   }

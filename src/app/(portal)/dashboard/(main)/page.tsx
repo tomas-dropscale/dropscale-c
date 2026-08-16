@@ -16,7 +16,6 @@ import {
 
 import { fetchAccounts, reportingMetricScope } from "@/lib/portal/data";
 import { createClient } from "@/lib/supabase/server";
-import { ManagedAssetsNotice } from "@/components/portal/managed-assets-notice";
 import {
   fetchDailyMetrics,
   freshness,
@@ -37,7 +36,6 @@ import { RangePicker } from "@/components/portal/range-picker";
 import { StoreSelector } from "@/components/portal/store-selector";
 import { fmt } from "@/lib/i18n";
 import { getServerDictionary } from "@/lib/i18n/server";
-import { legacyAssetActionsBlocked } from "@/lib/portal/client-rollout";
 
 export async function generateMetadata(): Promise<Metadata> {
   const { d } = await getServerDictionary();
@@ -56,10 +54,9 @@ export default async function DashboardPage({
 }) {
   const params = await searchParams;
   const range = parseRange(params);
-  const [accounts, { d }, blockLegacyAssetActions] = await Promise.all([
+  const [accounts, { d }] = await Promise.all([
     fetchAccounts(),
     getServerDictionary(),
-    legacyAssetActionsBlocked(),
   ]);
 
   const selectedStore =
@@ -201,22 +198,15 @@ export default async function DashboardPage({
       }
     >
       {accounts.length === 0 ? (
-        blockLegacyAssetActions ? (
-          <ManagedAssetsNotice />
-        ) : (
-          <div className="panel flex flex-col items-center gap-3 px-6 py-10 text-center">
-            <PackageOpen className="size-7 text-[var(--text-muted)]" />
-            <p className="text-[14px] font-medium text-[var(--text-primary)]">
-              {d.portal.noStores}
-            </p>
-            <p className="max-w-[380px] text-[13px] leading-relaxed text-[var(--text-secondary)]">
-              {fmt(d.portal.noStoresHelp, {
-                add: d.portal.addAccount,
-                request: d.portal.requestAccount,
-              })}
-            </p>
-          </div>
-        )
+        <div className="panel flex flex-col items-center gap-3 px-6 py-10 text-center">
+          <PackageOpen className="size-7 text-[var(--text-muted)]" />
+          <p className="text-[14px] font-medium text-[var(--text-primary)]">
+            {d.portal.noStores}
+          </p>
+          <p className="max-w-[380px] text-[13px] leading-relaxed text-[var(--text-secondary)]">
+            {d.portal.noDataHelp}
+          </p>
+        </div>
       ) : (
         <div className="space-y-4">
           {/* While any product has no cost, nudge — those sales use the default

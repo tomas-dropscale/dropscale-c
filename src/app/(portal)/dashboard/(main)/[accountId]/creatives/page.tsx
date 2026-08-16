@@ -11,7 +11,6 @@ import { getWorkspaceContext } from "@/lib/portal/workspace";
 import { CreativesGrid } from "@/components/portal/creatives-grid";
 import { CreativeAssetsGrid } from "@/components/portal/creative-assets-grid";
 import { CreativeSubmissions } from "@/components/portal/creative-submissions";
-import { ConnectAdsBanner } from "@/components/portal/connect-ads-banner";
 import { PageContainer } from "@/components/ui/page-container";
 import { fmt } from "@/lib/i18n";
 import { getServerDictionary } from "@/lib/i18n/server";
@@ -65,12 +64,9 @@ export default async function CreativesPage({
         // Connected → the account's real creative library.
         <CreativeAssetsGrid assets={assets} />
       ) : (
-        // Configured but this store not connected → say so, show nothing fake.
-        <div className="space-y-6">
-          <ConnectAdsBanner d={d} />
-          <div className="panel px-6 py-14 text-center text-[13px] text-[var(--text-secondary)]">
-            Connect Google Ads to see this store&apos;s creatives.
-          </div>
+        // Configured but reporting is not ready → show no fake assets or setup CTA.
+        <div className="panel px-6 py-14 text-center text-[13px] text-[var(--text-secondary)]">
+          {d.portal.noDataHelp}
         </div>
       )}
     </PageContainer>

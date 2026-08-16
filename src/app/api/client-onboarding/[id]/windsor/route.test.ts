@@ -41,6 +41,7 @@ const mocks = vi.hoisted(() => {
     WindsorError,
     authorizeClientOnboardingRequest: vi.fn(),
     getPublicClientOnboardingSession: vi.fn(),
+    submitClientOnboardingSessionIfReady: vi.fn(),
     createServiceClient: vi.fn(() => service),
     createGoogleAdsAuthorization: vi.fn(),
     decryptWindsorAccessToken: vi.fn(),
@@ -67,6 +68,8 @@ vi.mock("@/lib/client-onboarding/sessions", () => ({
   ClientOnboardingError: mocks.ClientOnboardingError,
   authorizeClientOnboardingRequest: mocks.authorizeClientOnboardingRequest,
   getPublicClientOnboardingSession: mocks.getPublicClientOnboardingSession,
+  submitClientOnboardingSessionIfReady:
+    mocks.submitClientOnboardingSessionIfReady,
 }));
 
 vi.mock("@/lib/supabase/service", () => ({
@@ -143,6 +146,7 @@ describe("client onboarding Windsor route", () => {
     mocks.service.from.mockReturnValue(mocks.secretQuery);
     mocks.createServiceClient.mockReturnValue(mocks.service);
     mocks.authorizeClientOnboardingRequest.mockResolvedValue(authorization());
+    mocks.submitClientOnboardingSessionIfReady.mockResolvedValue(true);
     mocks.secretQuery.maybeSingle.mockResolvedValue({
       data: { windsor_access_token_ciphertext: "encrypted-correlation-token" },
       error: null,
@@ -215,6 +219,7 @@ describe("client onboarding Windsor route", () => {
     expect(await response.json()).toEqual({
       status: "connected",
       accounts: PUBLIC_ACCOUNTS,
+      completed: true,
     });
     expect(mocks.getPublicClientOnboardingSession).toHaveBeenCalledWith(
       SESSION_ID,

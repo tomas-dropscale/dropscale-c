@@ -500,12 +500,19 @@ export function ClientOnboardingFlow({ sessionId }: { sessionId: string }) {
       );
       const body = (await response.json().catch(() => null)) as {
         needsEmailConfirmation?: boolean;
+        completed?: boolean;
       } | null;
       if (!response.ok)
         throw new Error(
           responseError(body, "The account could not be created."),
         );
       setNeedsEmailConfirmation(Boolean(body?.needsEmailConfirmation));
+      if (body?.completed) {
+        tokenRef.current = "";
+        setComplete(true);
+        setFeedback(null);
+        return;
+      }
       const updated = await fetchSession();
       setStep(suggestedStep(updated));
       setFeedback({
@@ -576,12 +583,20 @@ export function ClientOnboardingFlow({ sessionId }: { sessionId: string }) {
           }),
         },
       );
-      const body = await response.json().catch(() => null);
+      const body = (await response.json().catch(() => null)) as {
+        completed?: boolean;
+      } | null;
       setShopify((value) => ({ ...value, clientSecret: "" }));
       if (!response.ok)
         throw new Error(
           responseError(body, "The Shopify store could not be connected."),
         );
+      if (body?.completed) {
+        tokenRef.current = "";
+        setComplete(true);
+        setFeedback(null);
+        return;
+      }
       const updated = await fetchSession();
       if (!hasCurrentShopify(updated)) {
         throw new Error(
@@ -668,12 +683,19 @@ export function ClientOnboardingFlow({ sessionId }: { sessionId: string }) {
         const body = (await response.json().catch(() => null)) as {
           status?: string;
           accounts?: unknown[];
+          completed?: boolean;
         } | null;
         if (!response.ok)
           throw new Error(
             responseError(body, "Google Ads could not be checked."),
           );
         if (body?.status === "connected" && (body.accounts?.length ?? 0) > 0) {
+          if (body.completed) {
+            tokenRef.current = "";
+            setComplete(true);
+            setFeedback(null);
+            return;
+          }
           await fetchSession();
           setFeedback({
             tone: "success",

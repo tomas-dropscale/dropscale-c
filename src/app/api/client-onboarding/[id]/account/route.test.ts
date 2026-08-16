@@ -55,6 +55,7 @@ describe("client onboarding account route", () => {
     mocks.createClientOnboardingIdentity.mockResolvedValue({
       needsEmailConfirmation: true,
       alreadyCreated: false,
+      completed: true,
     });
     mocks.recoverClientOnboardingIdentity.mockResolvedValue({
       needsEmailConfirmation: true,
@@ -87,6 +88,7 @@ describe("client onboarding account route", () => {
     expect(JSON.stringify(mocks.createClientOnboardingIdentity.mock.calls)).not.toContain(
       "password",
     );
+    await expect(response.json()).resolves.toMatchObject({ completed: true });
   });
 
   it("verifies an authenticated existing client after an OAuth redirect without the bearer", async () => {

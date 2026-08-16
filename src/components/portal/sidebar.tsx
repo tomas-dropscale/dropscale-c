@@ -1,6 +1,5 @@
 "use client";
 
-import * as React from "react";
 import { usePathname } from "next/navigation";
 import {
   AlertCircle,
@@ -9,39 +8,28 @@ import {
   Table2,
   Gauge,
   LayoutGrid,
-  Plus,
   ShieldCheck,
   Store,
-  UserPlus,
 } from "lucide-react";
 
 import type { AdAccount } from "@/lib/supabase/types";
-import { AddAccountModal } from "@/components/portal/add-account-modal";
-import { ManagedAssetsNotice } from "@/components/portal/managed-assets-notice";
 import { Logo } from "@/components/brand/logo";
-import { SideNav, SideNavAction, SideNavItem, SideNavLabel } from "@/components/ui/side-nav";
+import { SideNav, SideNavItem, SideNavLabel } from "@/components/ui/side-nav";
 import { useI18n } from "@/lib/i18n/provider";
 
 export function Sidebar({
-  workspaceId,
   accounts,
   activeAccountId,
   isAdmin = false,
-  blockLegacyAssetActions = false,
   onNavigate,
 }: {
-  /** The workspace new stores belong to — the owner's id, not the viewer's. */
-  workspaceId: string;
   accounts: AdAccount[];
   activeAccountId: string | null;
   isAdmin?: boolean;
-  /** V2-active clients receive an Add Assets link instead of writing legacy rows. */
-  blockLegacyAssetActions?: boolean;
   onNavigate?: () => void;
 }) {
   const { d } = useI18n();
   const pathname = usePathname();
-  const [addOpen, setAddOpen] = React.useState(false);
 
   return (
     <SideNav label={d.nav.mainNav}>
@@ -129,23 +117,6 @@ export function Sidebar({
           </ul>
         </div>
 
-        {blockLegacyAssetActions ? (
-          <ManagedAssetsNotice compact />
-        ) : (
-          <ul className="flex flex-col gap-0.5">
-            <SideNavAction
-              icon={Plus}
-              label={d.portal.addAccount}
-              onClick={() => setAddOpen(true)}
-            />
-            <SideNavItem
-              href="/dashboard/request-account"
-              icon={UserPlus}
-              label={d.portal.requestAccount}
-              onNavigate={onNavigate}
-            />
-          </ul>
-        )}
       </div>
 
       {isAdmin && (
@@ -157,10 +128,6 @@ export function Sidebar({
             onNavigate={onNavigate}
           />
         </ul>
-      )}
-
-      {!blockLegacyAssetActions && (
-        <AddAccountModal open={addOpen} onOpenChange={setAddOpen} clientId={workspaceId} />
       )}
     </SideNav>
   );

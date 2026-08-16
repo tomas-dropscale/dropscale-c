@@ -884,7 +884,12 @@ export async function createClientOnboardingIdentity(input: {
   const identity = normaliseIdentity(input);
   if (authorization.session.claimed_user_id) {
     if (authorization.session.email === identity.email) {
-      return { needsEmailConfirmation: true, alreadyCreated: true };
+      const completed = await submitClientOnboardingSessionIfReady(authorization);
+      return {
+        needsEmailConfirmation: true,
+        alreadyCreated: true,
+        completed,
+      };
     }
     throw new ClientOnboardingError(
       "invalid_state",
@@ -943,9 +948,11 @@ export async function createClientOnboardingIdentity(input: {
       claimError?.code === "23505" ? 409 : 500,
     );
   }
+  const completed = await submitClientOnboardingSessionIfReady(authorization);
   return {
     needsEmailConfirmation: !authUser.email_confirmed_at,
     alreadyCreated: false,
+    completed,
   };
 }
 
@@ -1039,7 +1046,12 @@ export async function recoverClientOnboardingIdentity(input: {
       },
     });
   }
-  return { needsEmailConfirmation: !user.email_confirmed_at, alreadyCreated: true };
+  const completed = await submitClientOnboardingSessionIfReady(authorization);
+  return {
+    needsEmailConfirmation: !user.email_confirmed_at,
+    alreadyCreated: true,
+    completed,
+  };
 }
 
 export async function claimExistingClientOnboardingIdentity(input: {
@@ -1117,6 +1129,114 @@ export async function submitClientOnboardingSession(
       error?.code === "23514" ? 409 : 500,
     );
   }
+}
+
+/** Consume the verified link as soon as every requested connection exists. */
+export async function submitClientOnboardingSessionIfReady(
+  authorization: ClientOnboardingAuthorization,
+): Promise<boolean> {
+  const service = serviceOrThrow();
+  const { data: current, error: sessionError } = await service
+    .from("client_onboarding_sessions")
+    .select(
+      "id, mode, requested_assets, status, claimed_user_id, reconnect_completed_at, invite_token_hash",
+    )
+    .eq("id", authorization.session.id)
+    .maybeSingle();
+  if (sessionError) {
+    throw new ClientOnboardingError(
+      "database_error",
+      "The completed onboarding could not be verified.",
+      500,
+    );
+  }
+  if (!current) return false;
+  if (["submitted", "reviewed", "active"].includes(current.status)) return true;
+  if (
+    current.status !== "collecting" ||
+    !current.claimed_user_id ||
+    !current.invite_token_hash ||
+    current.invite_token_hash !== authorization.tokenHash
+  ) {
+    return false;
+  }
+  if (current.mode === "reconnect" && !current.reconnect_completed_at) return false;
+
+  const needsShopify = current.requested_assets.includes("shopify");
+  const needsGoogle = current.requested_assets.includes("google_ads");
+  const [shopifyResult, googleResult] = await Promise.all([
+    needsShopify
+      ? service
+          .from("client_shopify_connections")
+          .select("id")
+          .eq("session_id", current.id)
+          .eq("status", "connected")
+          .limit(100)
+      : Promise.resolve({ data: [] as Array<{ id: string }>, error: null }),
+    needsGoogle
+      ? service
+          .from("client_google_ads_connections")
+          .select("id")
+          .eq("session_id", current.id)
+          .eq("status", "connected")
+          .limit(100)
+      : Promise.resolve({ data: [] as Array<{ id: string }>, error: null }),
+  ]);
+  if (shopifyResult.error || googleResult.error) {
+    throw new ClientOnboardingError(
+      "database_error",
+      "The completed onboarding could not be verified.",
+      500,
+    );
+  }
+  if (
+    (needsShopify && !shopifyResult.data?.length) ||
+    (needsGoogle && !googleResult.data?.length)
+  ) {
+    return false;
+  }
+
+  // One connected store is the only deterministic automatic mapping. Keep a
+  // multi-store link open until an explicit mapping exists instead of guessing
+  // and sending campaign data to the wrong store.
+  if (needsShopify && needsGoogle) {
+    if (shopifyResult.data.length !== 1) return false;
+    const shopifyConnectionId = shopifyResult.data[0]?.id;
+    if (!shopifyConnectionId) return false;
+    const { error: mappingError } = await service.rpc(
+      "replace_client_asset_mappings",
+      {
+        p_session_id: current.id,
+        p_token_hash: authorization.tokenHash,
+        p_mappings: googleResult.data.map((connection) => ({
+          shopifyConnectionId,
+          googleAdsConnectionId: connection.id,
+        })),
+      },
+    );
+    if (mappingError) {
+      throw new ClientOnboardingError(
+        "database_error",
+        "The connected store and Google Ads accounts could not be matched.",
+        500,
+      );
+    }
+  }
+
+  const { data, error } = await service.rpc("submit_client_onboarding_session", {
+    p_session_id: current.id,
+    p_token_hash: authorization.tokenHash,
+  });
+  if (error || data !== current.id) {
+    throw new ClientOnboardingError(
+      error?.code === "23514" ? "invalid_state" : "database_error",
+      error?.code === "23514"
+        ? error.message
+        : "The completed onboarding could not be finalized.",
+      error?.code === "23514" ? 409 : 500,
+    );
+  }
+  return true;
 }
 
 export async function replaceClientAssetMappings(

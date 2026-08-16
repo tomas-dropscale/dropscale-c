@@ -10,7 +10,6 @@ import type { Workspace } from "@/lib/portal/workspace";
 import type { PendingCounts } from "@/lib/admin/approvals";
 import { BrowserChrome, LiveIndicator } from "@/components/portal/browser-chrome";
 import { NotificationsMenu } from "@/components/admin/notifications-menu";
-import { ClientNotifications } from "@/components/portal/client-notifications";
 import { Sidebar } from "@/components/portal/sidebar";
 import { Topbar } from "@/components/portal/topbar";
 import { UserBadge } from "@/components/portal/user-menu";
@@ -31,8 +30,6 @@ export function PortalShell({
   accounts,
   isAdmin = false,
   pending = null,
-  setup,
-  blockLegacyAssetActions = false,
   children,
 }: {
   /** Who is signed in — the avatar and the sign-out menu. */
@@ -45,10 +42,6 @@ export function PortalShell({
   isAdmin?: boolean;
   /** Approval counts — only supplied when the viewer is staff-admin. */
   pending?: PendingCounts | null;
-  /** Onboarding state for the client bell: which setup steps are still open. */
-  setup?: { needsGoogle: boolean; costsDone: boolean };
-  /** V2-active workspaces add assets only through an admin-issued setup link. */
-  blockLegacyAssetActions?: boolean;
   children: React.ReactNode;
 }) {
   const { d } = useI18n();
@@ -66,11 +59,9 @@ export function PortalShell({
 
   const sidebar = (onNavigate?: () => void) => (
     <Sidebar
-      workspaceId={workspace.id}
       accounts={accounts}
       activeAccountId={activeAccountId}
       isAdmin={isAdmin}
-      blockLegacyAssetActions={blockLegacyAssetActions}
       onNavigate={onNavigate}
     />
   );
@@ -86,12 +77,6 @@ export function PortalShell({
             {/* Admins keep sight of the approval queue even while in the
                 client zone — the zone scopes DATA, not their duties. */}
             {isAdmin && pending && <NotificationsMenu counts={pending} />}
-            {/* The client's own bell: setup steps still open + accounts
-                awaiting approval. */}
-            <ClientNotifications
-              accounts={accounts}
-              setup={blockLegacyAssetActions ? undefined : setup}
-            />
             <UserBadge viewer={viewer} workspaces={workspaces} activeWorkspaceId={workspace.id} />
 
             <DialogPrimitive.Root open={mobileNavOpen} onOpenChange={setMobileNavOpen}>

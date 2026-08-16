@@ -35,6 +35,7 @@ const mocks = vi.hoisted(() => {
     ShopifyReportingError,
     isClientOnboardingId: vi.fn(() => true),
     authorizeClientOnboardingRequest: vi.fn(),
+    submitClientOnboardingSessionIfReady: vi.fn(),
     connectReportingShopifyStore: vi.fn(),
     createReportingShopifyRepository: vi.fn(),
   };
@@ -46,6 +47,8 @@ vi.mock("@/lib/client-onboarding/invitations", () => ({
 vi.mock("@/lib/client-onboarding/sessions", () => ({
   ClientOnboardingError: mocks.ClientOnboardingError,
   authorizeClientOnboardingRequest: mocks.authorizeClientOnboardingRequest,
+  submitClientOnboardingSessionIfReady:
+    mocks.submitClientOnboardingSessionIfReady,
 }));
 vi.mock("@/lib/client-onboarding/shopify-connections", () => ({
   ClientShopifyConnectionError: mocks.ClientShopifyConnectionError,
@@ -107,6 +110,7 @@ describe("public client reporting Shopify route", () => {
     vi.clearAllMocks();
     mocks.isClientOnboardingId.mockReturnValue(true);
     mocks.authorizeClientOnboardingRequest.mockResolvedValue(authorization());
+    mocks.submitClientOnboardingSessionIfReady.mockResolvedValue(true);
     mocks.createReportingShopifyRepository.mockReturnValue({ kind: "repository" });
     mocks.connectReportingShopifyStore.mockResolvedValue({
       id: "40000000-0000-4000-8000-000000000002",
@@ -188,6 +192,10 @@ describe("public client reporting Shopify route", () => {
     });
     const payload = await result.json();
     expect(payload.ok).toBe(true);
+    expect(payload.completed).toBe(true);
+    expect(mocks.submitClientOnboardingSessionIfReady).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenHash: "a".repeat(64) }),
+    );
     expect(JSON.stringify(payload)).not.toContain(BODY.clientSecret);
     expect(JSON.stringify(payload)).not.toContain(TOKEN);
   });

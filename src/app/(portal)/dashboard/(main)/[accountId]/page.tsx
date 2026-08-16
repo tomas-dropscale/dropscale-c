@@ -1,7 +1,7 @@
 import { UpdatedAt } from "@/components/portal/updated-at";
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
-import { CircleCheck, FileBarChart, Hourglass } from "lucide-react";
+import { CircleCheck, FileBarChart } from "lucide-react";
 
 import { fetchAccount, fetchCampaigns, reportingMetricAccountIds } from "@/lib/portal/data";
 import {
@@ -19,10 +19,8 @@ import { Button } from "@/components/ui/button";
 import { MetricsGrid } from "@/components/portal/metric-card";
 import { RangePicker } from "@/components/portal/range-picker";
 import { SuspendedBanner } from "@/components/portal/suspended-banner";
-import { ConnectAdsBanner } from "@/components/portal/connect-ads-banner";
 import { CampaignsTable } from "@/components/portal/campaigns-table";
 import { PageContainer } from "@/components/ui/page-container";
-import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
 
 import { getServerDictionary } from "@/lib/i18n/server";
 
@@ -123,24 +121,6 @@ export default async function AccountPage({
             </div>
           </div>
         )}
-        {account.status === "pending" && (
-          <div className="flex items-start gap-3 rounded-[var(--radius-card)] border border-[var(--accent-gold)]/30 bg-[var(--accent-gold-dim)] px-4 py-3.5">
-            <Hourglass className="mt-0.5 size-4 shrink-0 text-[var(--accent-gold)]" />
-            <div>
-              <p className="text-[13.5px] font-semibold text-[var(--text-primary)]">
-                Waiting for team approval
-              </p>
-              <p className="text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
-                This account is connected but not active yet. Data starts syncing the
-                moment the Dropscale team approves it — history included.
-              </p>
-            </div>
-          </div>
-        )}
-        {account.status !== "pending" &&
-          hasGoogleAdsEnv() &&
-          !account.google_ads_connected && <ConnectAdsBanner d={d} />}
-
         <section className="space-y-3">
           <h2 className="text-[15px] font-semibold text-[var(--text-primary)]">Metrics</h2>
           <MetricsGrid

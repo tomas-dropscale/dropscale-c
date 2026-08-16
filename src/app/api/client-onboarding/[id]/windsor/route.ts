@@ -8,6 +8,7 @@ import {
   authorizeClientOnboardingRequest,
   ClientOnboardingError,
   getPublicClientOnboardingSession,
+  submitClientOnboardingSessionIfReady,
 } from "@/lib/client-onboarding/sessions";
 import { createServiceClient } from "@/lib/supabase/service";
 import {
@@ -163,9 +164,14 @@ export async function GET(request: NextRequest, { params }: Context) {
       id,
       invitationToken(request),
     );
+    const completed =
+      result.status === "connected"
+        ? await submitClientOnboardingSessionIfReady(authorization)
+        : false;
     return clientOnboardingResponse({
       status: result.status,
       accounts: session.googleAds,
+      completed,
     });
   } catch (error) {
     return errorResponse(error);
