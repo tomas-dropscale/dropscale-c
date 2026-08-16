@@ -18,6 +18,10 @@ export const dynamic = "force-dynamic";
 
 type Context = { params: Promise<{ id: string }> };
 
+async function hasNonEmptyBody(request: NextRequest): Promise<boolean> {
+  return (await request.text()).trim().length > 0;
+}
+
 export async function PATCH(request: NextRequest, { params }: Context) {
   try {
     const admin = await requireClientOnboardingAdmin();
@@ -62,7 +66,7 @@ export async function POST(request: NextRequest, { params }: Context) {
     if (!isClientOnboardingId(id)) {
       return clientOnboardingResponse({ error: "Client not found." }, 404);
     }
-    if (request.body) {
+    if (await hasNonEmptyBody(request)) {
       return clientOnboardingResponse(
         { error: "This request does not accept a body." },
         400,
@@ -86,7 +90,7 @@ export async function DELETE(request: NextRequest, { params }: Context) {
     if (!isClientOnboardingId(id)) {
       return clientOnboardingResponse({ error: "Client not found." }, 404);
     }
-    if (request.body) {
+    if (await hasNonEmptyBody(request)) {
       return clientOnboardingResponse(
         { error: "This request does not accept a body." },
         400,
