@@ -7,6 +7,10 @@ const MIGRATION = readFileSync(
   "supabase/migrations/0063_connected_clients_auto_approval.sql",
   "utf8",
 );
+const PENDING_WORKSPACE_MIGRATION = readFileSync(
+  "supabase/migrations/0064_pending_portal_workspaces.sql",
+  "utf8",
+);
 
 const ADMIN = "63000000-0000-4000-8000-000000000001";
 const CONNECTED = "63000000-0000-4000-8000-000000000002";
@@ -15,10 +19,12 @@ const REJECTED = "63000000-0000-4000-8000-000000000004";
 const LEGACY = "63000000-0000-4000-8000-000000000005";
 const INVALID_LEGACY = "63000000-0000-4000-8000-000000000006";
 const NEW_CLIENT = "63000000-0000-4000-8000-000000000007";
+const HISTORICAL_ACCOUNT_ONLY = "63000000-0000-4000-8000-000000000008";
 
 const SUBMITTED_SESSION = "63000000-0000-4000-8000-000000000010";
 const REJECTED_SESSION = "63000000-0000-4000-8000-000000000011";
 const NEW_SESSION = "63000000-0000-4000-8000-000000000012";
+const HISTORICAL_ACCOUNT_ONLY_SESSION = "63000000-0000-4000-8000-000000000013";
 
 const PRELUDE = `
 do $$ begin
@@ -44,6 +50,9 @@ returns text language sql immutable strict as $$
     regexp_replace(btrim(p_value), '^https?://', '', 'i'), '/.*$', ''
   )), '')
 $$;
+
+create or replace function public.is_client_member(p_client_id uuid)
+returns boolean language sql stable as $$ select p_client_id is not null $$;
 
 create table public.portal_clients (
   id uuid primary key,
@@ -168,7 +177,9 @@ beforeEach(async () => {
        ($2, 'add_assets', array['google_ads'], 'submitted', $5,
         'Archived', 'Client', 'archived@example.com', null, $7),
        ($3, 'new_client', array['shopify'], 'collecting', $6,
-        'New', 'Client', 'new@example.com', 'new.client', $7)`,
+        'New', 'Client', 'new@example.com', 'new.client', $7),
+       ($8, 'new_client', array[]::text[], 'submitted', $9,
+        'Historical', 'Account', 'historical@example.com', 'historical.account', $7)`,
     [
       SUBMITTED_SESSION,
       REJECTED_SESSION,
@@ -177,6 +188,8 @@ beforeEach(async () => {
       REJECTED,
       NEW_CLIENT,
       ADMIN,
+      HISTORICAL_ACCOUNT_ONLY_SESSION,
+      HISTORICAL_ACCOUNT_ONLY,
     ],
   );
   await db.query(
@@ -200,6 +213,7 @@ beforeEach(async () => {
   );
 
   await db.exec(MIGRATION);
+  await db.exec(PENDING_WORKSPACE_MIGRATION);
   await db.query("select set_config('test.role', 'service_role', false)");
 });
 
@@ -307,7 +321,7 @@ describe("0063 connected-client automatic approval", () => {
     expect((await status(revokedClient))?.approval_status).toBe("approved");
   });
 
-  it("reviews an asset-bearing submission atomically and leaves account-only clients empty", async () => {
+  it("reviews connected clients while account-only identities become open pending workspaces", async () => {
     const connectedClient = "63000000-0000-4000-8000-000000000040";
     const emptyClient = "63000000-0000-4000-8000-000000000041";
     const connectedSession = "63000000-0000-4000-8000-000000000050";
@@ -349,7 +363,40 @@ describe("0063 connected-client automatic approval", () => {
       { id: emptySession, status: "submitted" },
     ]);
     expect((await status(connectedClient))?.approval_status).toBe("approved");
-    expect(await status(emptyClient)).toBeNull();
+    expect(await status(emptyClient)).toEqual({
+      approval_status: "pending",
+      approved_by: null,
+    });
+    expect(await status(HISTORICAL_ACCOUNT_ONLY)).toEqual({
+      approval_status: "pending",
+      approved_by: null,
+    });
+    const access = await db.query<{ pending_open: boolean; rejected_open: boolean }>(
+      `select public.can_open_workspace($1) as pending_open,
+              public.can_open_workspace($2) as rejected_open`,
+      [HISTORICAL_ACCOUNT_ONLY, REJECTED],
+    );
+    expect(access.rows[0]).toEqual({ pending_open: true, rejected_open: false });
+
+    await db.query(
+      `insert into public.client_onboarding_sessions (
+         id, mode, requested_assets, status, target_client_id, created_by
+       ) values ($1, 'add_assets', array['shopify'], 'pending', $2, $3)`,
+      [
+        "63000000-0000-4000-8000-000000000052",
+        HISTORICAL_ACCOUNT_ONLY,
+        ADMIN,
+      ],
+    );
+    await expectSqlState(
+      db.query(
+        `insert into public.client_onboarding_sessions (
+           id, mode, requested_assets, status, target_client_id, created_by
+         ) values ($1, 'add_assets', array['shopify'], 'pending', $2, $3)`,
+        ["63000000-0000-4000-8000-000000000053", REJECTED, ADMIN],
+      ),
+      "P0002",
+    );
 
     const events = await db.query<{ event_type: string; actor_type: string }>(
       `select event_type, actor_type from public.client_onboarding_events

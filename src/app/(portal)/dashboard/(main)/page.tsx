@@ -16,8 +16,6 @@ import {
 
 import { fetchAccounts, reportingMetricScope } from "@/lib/portal/data";
 import { createClient } from "@/lib/supabase/server";
-import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
-import { GettingStartedGuide } from "@/components/portal/getting-started-guide";
 import { ManagedAssetsNotice } from "@/components/portal/managed-assets-notice";
 import {
   fetchDailyMetrics,
@@ -106,13 +104,6 @@ export default async function DashboardPage({
   const scope = currencyScope(physicalAccounts);
   const currency = displayCurrency(scope);
 
-  // Setup state drives the first-run guide. It does NOT vanish after the first
-  // connection: it stays, ticking each step off, until EVERY applicable step is
-  // done. Every check below reads THIS client's own rows (RLS scopes them), so
-  // the guide can only ever describe the account you're signed into.
-  const googleConnected = visible.some((account) => account.google_ads_connected);
-  const shopifyConnected = visible.some((account) => account.shopify_connected);
-
   const supabase = await createClient();
 
   // Products of the visible stores, and how many still have NO cost (no manual
@@ -124,7 +115,6 @@ export default async function DashboardPage({
   const products = productRows ?? [];
 
   let uncostedCount = 0;
-  let hasAnyCost = false;
   if (products.length > 0) {
     const productIds = products.map((product) => product.id);
     const [costsRes, membersRes] = await Promise.all([
@@ -134,24 +124,8 @@ export default async function DashboardPage({
     const costed = new Set<string>();
     for (const row of costsRes.data ?? []) costed.add(row.product_id);
     for (const row of membersRes.data ?? []) costed.add(row.product_id);
-    hasAnyCost = (costsRes.data ?? []).length > 0;
     uncostedCount = products.filter((product) => !costed.has(product.id)).length;
   }
-
-  // The costs step is done when THIS client has real costs: either a saved
-  // product cost, or every synced product covered by a bundle. It used to also
-  // accept a "visited the Costs page" cookie, but a cookie belongs to the
-  // browser, not to the account — visiting Costs on one Dropscale account
-  // ticked the step off on every other account signed in from that browser,
-  // and reported costs that were never set.
-  const costsDone = hasAnyCost || (products.length > 0 && uncostedCount === 0);
-
-  const needsGoogle = hasGoogleAdsEnv();
-  const setupComplete =
-    accounts.length > 0 &&
-    (needsGoogle ? googleConnected : true) &&
-    shopifyConnected &&
-    costsDone;
 
   // A Monday referral decision changes that Monday onward only. Standard 10%
   // accounts use the sealed history. Legacy/custom contracts keep their own
@@ -230,23 +204,17 @@ export default async function DashboardPage({
         blockLegacyAssetActions ? (
           <ManagedAssetsNotice />
         ) : (
-          /* No stores yet is the FIRST legacy onboarding state, not an empty
-             page. V2-active clients use the secure Add Assets link above. */
-          <div className="space-y-4">
-            <GettingStartedGuide accounts={[]} costsSet={costsDone} showGoogle={needsGoogle} />
-
-            <div className="panel flex flex-col items-center gap-3 px-6 py-10 text-center">
-              <PackageOpen className="size-7 text-[var(--text-muted)]" />
-              <p className="text-[14px] font-medium text-[var(--text-primary)]">
-                {d.portal.noStores}
-              </p>
-              <p className="max-w-[380px] text-[13px] leading-relaxed text-[var(--text-secondary)]">
-                {fmt(d.portal.noStoresHelp, {
-                  add: d.portal.addAccount,
-                  request: d.portal.requestAccount,
-                })}
-              </p>
-            </div>
+          <div className="panel flex flex-col items-center gap-3 px-6 py-10 text-center">
+            <PackageOpen className="size-7 text-[var(--text-muted)]" />
+            <p className="text-[14px] font-medium text-[var(--text-primary)]">
+              {d.portal.noStores}
+            </p>
+            <p className="max-w-[380px] text-[13px] leading-relaxed text-[var(--text-secondary)]">
+              {fmt(d.portal.noStoresHelp, {
+                add: d.portal.addAccount,
+                request: d.portal.requestAccount,
+              })}
+            </p>
           </div>
         )
       ) : (
@@ -274,28 +242,13 @@ export default async function DashboardPage({
             </Link>
           )}
 
-          {/* Setup still in progress → keep the guide up, ticking off each
-              step as it's done. Once everything's set but data is still
-              syncing, the quiet banner. */}
-          {!setupComplete ? (
-            blockLegacyAssetActions ? (
-              <ManagedAssetsNotice />
-            ) : (
-              <GettingStartedGuide
-                accounts={visible}
-                costsSet={costsDone}
-                showGoogle={needsGoogle}
-              />
-            )
-          ) : (
-            rows.length === 0 && (
-              <div className="panel flex items-center gap-3 px-4 py-3.5">
-                <Database className="size-4 shrink-0 text-[var(--text-muted)]" />
-                <p className="text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
-                  {d.portal.noData} — {d.portal.noDataHelp}
-                </p>
-              </div>
-            )
+          {rows.length === 0 && (
+            <div className="panel flex items-center gap-3 px-4 py-3.5">
+              <Database className="size-4 shrink-0 text-[var(--text-muted)]" />
+              <p className="text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
+                {d.portal.noData} — {d.portal.noDataHelp}
+              </p>
+            </div>
           )}
 
           {/* Above the money, not below it: by the time someone has read a

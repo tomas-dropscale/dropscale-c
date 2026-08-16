@@ -15,19 +15,16 @@ import { PendingApproval } from "@/components/auth/pending-approval";
  *
  * Who lands where:
  *   at least one open workspace   → the portal (regardless of any staff role)
- *   client row but no workspace   → awaiting-approval screen
+ *   archived client row          → blocked screen
  *   no client row + role 'admin'  → /admin
  *   no client row + role 'member' → staff awaiting approval screen
  *   no client row + no profile    → generic "no client account"
  *
- * "A workspace" is their own approved account OR one they were invited into as
- * a sócio (migration 0015) — which is why the check is no longer "is my own row
- * approved": a sócio's own row is usually untouched and pending forever, and
- * that must not keep them out of the workspace that invited them.
+ * "A workspace" is their own non-archived account OR one they were invited into
+ * as a sócio (migration 0015). Pending remains available for audit, but it no
+ * longer creates a manual approval hop.
  *
- * The approval check here is a courtesy screen, not the boundary — migrations
- * 0002/0015 scope the data itself to approved workspaces, so someone who
- * skipped this layout would still read nothing.
+ * Rejected is the durable archive boundary in both this layout and RLS.
  */
 export const dynamic = "force-dynamic";
 
@@ -51,8 +48,8 @@ export default async function PortalGate({ children }: { children: React.ReactNo
   }
 
   if (workspaces.length === 0) {
-    // Staff who are also clients keep their own way in, so a pending client
-    // row can never lock an admin out of the product entirely.
+    // Staff who are also clients keep their own way in when their client row
+    // was archived.
     const { profile } = await getSessionProfile();
     if (profile?.role === "admin") redirect("/admin");
 

@@ -109,14 +109,14 @@ export const getWorkspaceContext = cache(async function getWorkspaceContext(): P
     owners.push(...((data as Client[] | null) ?? []));
   }
 
-  // Only approved workspaces are openable — an unapproved one has no readable
-  // data anyway (can_open_workspace), so listing it would be a dead end.
+  // Pending is an internal onboarding/audit state, not a portal gate. A real
+  // workspace stays open while assets are added; only archived rows are shut.
   const workspaces: Workspace[] = [];
-  if (viewer.approval_status === "approved") {
+  if (viewer.approval_status !== "rejected") {
     workspaces.push({ id: viewer.id, name: viewer.full_name, email: viewer.email, isOwner: true });
   }
   for (const owner of owners) {
-    if (owner.approval_status !== "approved") continue;
+    if (owner.approval_status === "rejected") continue;
     workspaces.push({ id: owner.id, name: owner.full_name, email: owner.email, isOwner: false });
   }
 

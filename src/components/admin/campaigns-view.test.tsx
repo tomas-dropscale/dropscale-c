@@ -164,13 +164,11 @@ describe("CampaignsView approved visual structure", () => {
     expect(html).toContain("TOTAL");
     expect(html).toContain("€2,800.00");
     expect(html).toContain("€200.00");
-    expect(html).toContain("Google ROAS");
-    expect(html).toContain("Google conversion value divided by campaign spend");
-    expect(html).toContain("2.14x");
-    expect(html.indexOf("Real ROAS")).toBeLessThan(html.indexOf("Google ROAS"));
+    expect(html).toContain("ROAS");
+    expect(html).toContain("2.50x");
     expect(html).not.toContain(">real<");
     expect(html).toContain("PMAX (SF)");
-    expect(html).toContain("Last Scaled at");
+    expect(html).not.toContain("Last Scaled at");
     expect(html).toContain(
       'href="/admin/analytics?client=client-1&amp;store=store-1&amp;range=d7&amp;from=2026-08-08&amp;to=2026-08-14"',
     );
@@ -178,7 +176,7 @@ describe("CampaignsView approved visual structure", () => {
     expect(html).toContain('aria-label="Enable PMax · Best sellers · EU"');
     expect(html).toContain("hover or focus for scale history");
     const campaignGrid =
-      "xl:grid-cols-[minmax(190px,1.65fr)_repeat(3,minmax(88px,1fr))_minmax(196px,1fr)_repeat(3,minmax(88px,1fr))]";
+      "xl:grid-cols-[minmax(190px,1.65fr)_repeat(3,minmax(88px,1fr))_minmax(196px,1fr)_repeat(2,minmax(88px,1fr))]";
     expect(html.split(campaignGrid)).toHaveLength(6);
     expect(html).toContain(
       "xl:grid-cols-[1.75rem_max-content_1.75rem]",
@@ -211,8 +209,7 @@ describe("CampaignsView approved visual structure", () => {
       "Status",
       "Spend",
       "Daily budget",
-      "Google ROAS",
-      "Last Scaled at",
+      "ROAS",
       "Action",
     ]) {
       expect(html).toContain(heading);
@@ -254,10 +251,8 @@ describe("CampaignsView approved visual structure", () => {
       <CampaignsView clients={degraded} history={history} historyTruncated={false} range={range} />,
     );
 
-    expect(html).toContain("Refresh failed");
-    expect(html).toContain("Refreshed");
-    expect(html).toContain("attempted");
-    expect(html).toContain("error provider_failed");
+    expect(html).not.toContain("Refresh failed");
+    expect(html).not.toContain("error provider_failed");
     expect(html).toContain("DGEN · Summer Living · Scale");
   });
 

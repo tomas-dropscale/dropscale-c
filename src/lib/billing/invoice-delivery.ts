@@ -11,6 +11,12 @@ type DeliveryRecoveryInvoice = Pick<
   | "stripe_delivery_assumed_at"
 >;
 
+type BillingReviewQueueEntry = {
+  clientName: string;
+  canIssue: boolean;
+  existingInvoice: DeliveryRecoveryInvoice | null;
+};
+
 /**
  * Decide whether Stripe mutation is still safe from durable local evidence.
  *
@@ -37,4 +43,26 @@ export function stripeInvoiceRecoveryMode(
   }
 
   return null;
+}
+
+/**
+ * Keep the issue queue actionable: settled/sent invoices live in the position
+ * and history sections, while new and safely recoverable issues remain here.
+ */
+export function billingReviewQueue<T extends BillingReviewQueueEntry>(
+  entries: readonly T[],
+): T[] {
+  return entries
+    .filter(
+      (entry) =>
+        !entry.existingInvoice ||
+        stripeInvoiceRecoveryMode(entry.existingInvoice) !== null,
+    )
+    .sort(
+      (left, right) =>
+        Number(right.canIssue) - Number(left.canIssue) ||
+        left.clientName.localeCompare(right.clientName, "en", {
+          sensitivity: "base",
+        }),
+    );
 }

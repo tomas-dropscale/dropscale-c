@@ -27,7 +27,6 @@ import {
   filterCampaignClients,
   normalizeDailyBudgetInput,
   projectCampaignClients,
-  totalGoogleRoas,
   type CampaignActionHistory,
   type CampaignViewCampaign,
   type CampaignViewClient,
@@ -42,14 +41,7 @@ import { cn } from "@/lib/utils";
 // the same intrinsic minimum in every row so their centre line cannot drift
 // with a shorter row value (for example €40 vs the €242 total).
 const CAMPAIGN_GRID =
-  "xl:grid-cols-[minmax(190px,1.65fr)_repeat(3,minmax(88px,1fr))_minmax(196px,1fr)_repeat(3,minmax(88px,1fr))]";
-
-const SCALE_DATE = new Intl.DateTimeFormat("en-GB", {
-  day: "2-digit",
-  month: "short",
-  year: "numeric",
-  timeZone: "Europe/Lisbon",
-});
+  "xl:grid-cols-[minmax(190px,1.65fr)_repeat(3,minmax(88px,1fr))_minmax(196px,1fr)_repeat(2,minmax(88px,1fr))]";
 
 const SCALE_DATE_TIME = new Intl.DateTimeFormat("en-GB", {
   dateStyle: "medium",
@@ -173,45 +165,6 @@ function CampaignMetric({ label, children }: { label: string; children: React.Re
         {children}
       </span>
     </span>
-  );
-}
-
-function StoreProviderFreshness({
-  freshness,
-}: {
-  freshness: CampaignViewClient["stores"][number]["providerFreshness"];
-}) {
-  if (!freshness || freshness.state === "live") return null;
-  const label = freshness.state === "not_synced"
-    ? "Not synced"
-    : freshness.state === "unavailable"
-      ? "Unavailable"
-      : freshness.stale
-        ? "Stale"
-        : freshness.lastErrorCode
-          ? "Refresh failed"
-          : freshness.state === "partial"
-            ? "Partial"
-            : "Refreshed";
-  const refreshed = freshness.refreshedAt
-    ? `Refreshed ${safeDate(SCALE_DATE_TIME, freshness.refreshedAt)}`
-    : "No successful refresh";
-  const attempted = freshness.lastAttemptAt
-    ? `attempted ${safeDate(SCALE_DATE_TIME, freshness.lastAttemptAt)}`
-    : "not attempted";
-  const error = freshness.lastErrorCode
-    ? ` · error ${freshness.lastErrorCode}`
-    : "";
-  return (
-    <p
-      role={freshness.state === "ready" ? "status" : "alert"}
-      className="mt-1 flex min-w-0 items-center gap-1.5 text-[10.5px] text-[var(--text-muted)]"
-    >
-      <Badge variant={freshness.state === "ready" ? "success" : "warning"}>{label}</Badge>
-      <span className="truncate" title={`${refreshed} · ${attempted}${error}`}>
-        {refreshed} · {attempted}{error}
-      </span>
-    </p>
   );
 }
 
@@ -592,12 +545,8 @@ function CampaignRow({
         />
       </div>
 
-      <CampaignMetric label="Google ROAS">
+      <CampaignMetric label="ROAS">
         {campaign.googleRoas === null ? "—" : multiplier(campaign.googleRoas)}
-      </CampaignMetric>
-
-      <CampaignMetric label="Last scaled at">
-        {campaign.lastScaledAt ? safeDate(SCALE_DATE, campaign.lastScaledAt) : "—"}
       </CampaignMetric>
 
       <div className="flex justify-self-end xl:justify-self-center">
@@ -624,7 +573,7 @@ function CampaignRow({
       {statusError && (
         <p
           role="alert"
-          className="col-span-2 text-[11px] text-[var(--danger-red)] xl:col-span-8 xl:pl-6"
+          className="col-span-2 text-[11px] text-[var(--danger-red)] xl:col-span-7 xl:pl-6"
         >
           {statusError}
         </p>
@@ -661,8 +610,6 @@ function StoreGroup({
     budgets.every((budget): budget is number => budget !== null)
     ? budgets.reduce((sum, budget) => sum + budget, 0)
     : null;
-  const googleRoas =
-    store.campaignState === "ready" ? totalGoogleRoas(store.campaigns) : null;
   const storeLabel = store.domain ? `https://${store.domain}` : store.name;
 
   return (
@@ -673,7 +620,7 @@ function StoreGroup({
           CAMPAIGN_GRID,
         )}
       >
-        <div className="flex min-w-0 items-center gap-2.5 xl:col-span-7 xl:pl-6">
+        <div className="flex min-w-0 items-center gap-2.5 xl:col-span-6 xl:pl-6">
           <Store className="size-4 shrink-0 text-[var(--accent-gold)]" aria-hidden />
           <div className="min-w-0 flex-1">
             <h3
@@ -682,21 +629,6 @@ function StoreGroup({
             >
               {storeLabel}
             </h3>
-            <StoreProviderFreshness freshness={store.providerFreshness} />
-            <p
-              className="mt-1 flex items-center gap-1.5 text-[10.5px]"
-              title="Non-Meta Shopify revenue divided by reporting-rollup ad spend"
-            >
-              <span className="label-caps">Real ROAS</span>
-              <span
-                className={cn(
-                  "font-semibold tabular-nums text-[var(--text-primary)]",
-                  clientRoasTone(store.realRoas),
-                )}
-              >
-                {store.realRoas === null ? "—" : multiplier(store.realRoas)}
-              </span>
-            </p>
           </div>
         </div>
 
@@ -729,11 +661,9 @@ function StoreGroup({
         <span className="label-caps text-center">Daily budget</span>
         <span
           className="label-caps text-center"
-          title="Google conversion value divided by campaign spend"
         >
-          Google ROAS
+          ROAS
         </span>
-        <span className="label-caps text-center">Last Scaled at</span>
         <span className="label-caps text-center">Action</span>
       </div>
       <ul>
@@ -759,10 +689,9 @@ function StoreGroup({
               </span>
             )}
           </CampaignMetric>
-          <CampaignMetric label="Google ROAS">
-            {googleRoas === null ? "—" : multiplier(googleRoas)}
+          <CampaignMetric label="ROAS">
+            {store.realRoas === null ? "—" : multiplier(store.realRoas)}
           </CampaignMetric>
-          <CampaignMetric label="Last scaled at">—</CampaignMetric>
           <span className="hidden xl:block" aria-hidden />
         </li>
 

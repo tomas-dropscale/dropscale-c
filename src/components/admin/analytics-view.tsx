@@ -61,7 +61,7 @@ function KpiCard({ metric, currency }: { metric: AnalyticsMetric; currency: stri
   return (
     <div
       className={cn(
-        "panel flex min-h-[104px] min-w-0 flex-col justify-between gap-2 p-3.5",
+        "panel flex min-h-[88px] min-w-0 flex-col justify-between gap-3 p-3.5",
         metric.tone === "gold" &&
           "border-[var(--accent-gold)]/25 bg-[var(--accent-gold-dim)]",
         metric.tone === "negative" && "border-[var(--danger-red)]/40",
@@ -77,9 +77,6 @@ function KpiCard({ metric, currency }: { metric: AnalyticsMetric; currency: stri
         )}
       >
         {formatMetric(metric, currency)}
-      </p>
-      <p className="truncate text-[10.5px] leading-snug text-[var(--text-muted)]" title={metric.hint}>
-        {metric.hint}
       </p>
     </div>
   );

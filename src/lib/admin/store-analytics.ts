@@ -1596,42 +1596,7 @@ async function shopifyFamilies(
   return { funnel, attribution, products, collections };
 }
 
-const COLLECTION_NAME_STOP_WORDS = new Set([
-  "a", "de", "del", "des", "du", "el", "en", "et", "la", "las", "le", "les",
-  "los", "para", "y",
-]);
-
-function collectionWords(value: string): string[] {
-  return value
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim()
-    .split(/\s+/)
-    .filter((word) => word.length >= 3 && !COLLECTION_NAME_STOP_WORDS.has(word))
-    .map((word) => word.replace(/(?:es|s)$/, ""));
-}
-
-/** DropHub-compatible fallback: accept a campaign-name match only when unique. */
-function uniqueNamedCollection(
-  collections: AdminAnalyticsCollection[],
-  campaignName: string,
-): AdminAnalyticsCollection | null {
-  const campaignTokens = new Set(collectionWords(campaignName).filter((word) => word.length >= 4));
-  if (campaignTokens.size === 0) return null;
-  const matches = collections.filter((collection) => {
-    const title = collectionWords(collection.title);
-    const handle = collection.handle
-      ? collectionWords(collection.handle).join("")
-      : "";
-    return (title.length > 0 && title.every((word) => campaignTokens.has(word))) ||
-      (handle.length >= 4 && campaignTokens.has(handle));
-  });
-  return matches.length === 1 ? matches[0] : null;
-}
-
-/** Exact URL/product mapping first; unique campaign-name mapping is the declared fallback. */
+/** Attribute spend only through exact provider URLs or verified Shopify product IDs. */
 export function attributeCollectionSpend(
   family: AdminStoreAnalytics["collections"],
   google: Attempt<GoogleCampaignLoad>,
@@ -1656,8 +1621,13 @@ export function attributeCollectionSpend(
   }
   const spendByProductBucket = new Map<string, number>();
   for (const campaign of google.value.rows) {
-    const target = collectionByHandle.get(collectionHandleFromUrl(campaign.name) ?? "") ??
-      uniqueNamedCollection(rows, campaign.name);
+    const handles = new Set(
+      [...(campaign.finalUrls ?? []), campaign.name]
+        .map(collectionHandleFromUrl)
+        .filter((handle): handle is string => Boolean(handle)),
+    );
+    const collectionHandle = handles.size === 1 ? handles.values().next().value : undefined;
+    const target = collectionHandle ? collectionByHandle.get(collectionHandle) ?? null : null;
     const mapped = mappedByCampaign.get(campaign.providerCampaignId) ?? [];
     let candidates = mapped
       .map((row) => productsById.get(row.productId))

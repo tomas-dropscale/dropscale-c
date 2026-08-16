@@ -10,6 +10,7 @@ import type { RangeSelection } from "@/lib/portal/range";
  */
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 const MAX_CAMPAIGN_ROWS = 1_001;
+const MAX_CAMPAIGN_URL_ROWS = 10_001;
 const MAX_CAMPAIGN_TIMELINE_ROWS = 25_001;
 const MAX_CREATIVE_ROWS = 1_001;
 const MAX_PRODUCT_ROWS = 10_001;
@@ -180,6 +181,8 @@ export type LiveCampaign = Campaign & {
   shoppingFeed: boolean;
   /** Google conversion value divided by Google spend. */
   googleRoas: number | null;
+  /** Exact ad landing pages reported by Google; absent when the provider does not expose them. */
+  finalUrls?: string[];
 };
 
 export type GoogleCampaignTimelinePoint = {
@@ -651,9 +654,56 @@ export async function fetchLiveCampaignsDetailed(
     LIMIT ${MAX_CAMPAIGN_ROWS}
   `;
 
-  const rows = await searchGoogleAds(customerId, refreshToken, query);
+  const [rows, finalUrlRows] = await Promise.all([
+    searchGoogleAds(customerId, refreshToken, query),
+    searchGoogleAds(
+      customerId,
+      refreshToken,
+      `SELECT
+        customer.id,
+        customer.currency_code,
+        customer.time_zone,
+        campaign.id,
+        ad_group_ad.ad.final_urls,
+        ad_group_ad.ad.final_mobile_urls
+      FROM ad_group_ad
+      WHERE campaign.status != 'REMOVED'
+        AND ad_group_ad.status != 'REMOVED'
+      ORDER BY campaign.id, ad_group_ad.ad.id
+      LIMIT ${MAX_CAMPAIGN_URL_ROWS}`,
+    ).catch(() => []),
+  ]);
   assertBounded(rows, "campaign", MAX_CAMPAIGN_ROWS);
   const seen = new Set<string>();
+  const finalUrlsByCampaign = new Map<string, Set<string>>();
+  try {
+    assertBounded(finalUrlRows, "campaign landing URL", MAX_CAMPAIGN_URL_ROWS);
+    for (const row of finalUrlRows) {
+      const identity = exactCustomer(row, customerId);
+      if (expectedCurrency && identity.currency !== expectedCurrency) {
+        throw new Error("Google Ads returned a different campaign URL currency.");
+      }
+      const campaignId = integerText(row.campaign?.id, "campaign identity");
+      const ad = row.adGroupAd?.ad;
+      if (!ad || typeof ad !== "object" || Array.isArray(ad)) continue;
+      const record = ad as Record<string, unknown>;
+      const rawUrls = [record.finalUrls, record.finalMobileUrls].flatMap((value) =>
+        value == null ? [] : Array.isArray(value) ? value : [value]);
+      if (rawUrls.length > 40) throw new Error("Google Ads returned too many campaign URLs.");
+      const urls = finalUrlsByCampaign.get(campaignId) ?? new Set<string>();
+      for (const rawUrl of rawUrls) {
+        const parsed = new URL(cleanText(rawUrl, "campaign final URL", 4_096));
+        if (parsed.protocol !== "https:" || parsed.username || parsed.password) {
+          throw new Error("Google Ads returned an invalid campaign final URL.");
+        }
+        urls.add(parsed.toString());
+      }
+      if (urls.size > 0) finalUrlsByCampaign.set(campaignId, urls);
+    }
+  } catch {
+    // Landing-page metadata is supplemental: never hide valid campaign metrics.
+    finalUrlsByCampaign.clear();
+  }
 
   // The REST API serialises fields as camelCase (costMicros, startDateTime), even
   // though the GAQL query above uses the proto snake_case names.
@@ -698,6 +748,7 @@ export async function fetchLiveCampaignsDetailed(
       ? null
       : nonNegative(budget.amountMicros, "daily budget") / 1_000_000;
 
+    const finalUrls = [...(finalUrlsByCampaign.get(providerCampaignId) ?? [])].sort();
     return {
       // Not a DB uuid — the table is never written in the live path. Prefixed
       // so it can never collide with a real row id if the two ever mix.
@@ -722,6 +773,7 @@ export async function fetchLiveCampaignsDetailed(
       advertisingChannelType,
       shoppingFeed: hasShoppingFeed(campaign),
       googleRoas: spend > 0 ? conversionValue / spend : null,
+      ...(finalUrls.length > 0 ? { finalUrls } : {}),
     };
   });
 }

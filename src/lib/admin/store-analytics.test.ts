@@ -1295,8 +1295,9 @@ describe("collection spend allocation", () => {
     };
     const campaign = {
       ...googleCampaign(),
-      name: "https://northwind.example/collections/best-sellers",
+      name: "SK - TOTTEBAGS",
       status: "active" as const,
+      finalUrls: ["https://northwind.example/collections/best-sellers"],
     };
     const result = attributeCollectionSpend(
       family,

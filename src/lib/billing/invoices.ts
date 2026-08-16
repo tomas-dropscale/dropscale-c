@@ -85,7 +85,10 @@ import {
   loadManualReferralCutoverGate,
   manualReferralCutoverPreviewBlocker,
 } from "@/lib/billing/manual-referral-cutover";
-import { stripeInvoiceRecoveryMode } from "@/lib/billing/invoice-delivery";
+import {
+  billingReviewQueue,
+  stripeInvoiceRecoveryMode,
+} from "@/lib/billing/invoice-delivery";
 import {
   buildBillingPositions,
   type BillingPositionAccount,
@@ -1934,19 +1937,10 @@ export async function fetchAdminBillingDashboard(
       failedCount: failed.length,
     },
     positions,
-    // Pre-v2 rows can contain spend/revenue-share lines and do not carry the
-    // boundary/referral fields needed by this review card. Keep them in the
-    // immutable history below instead of reconstructing a false v3 preview.
-    clients: calculated
-      .map((entry) => entry.preview)
-      .filter(
-        (preview) =>
-          !preview.existingInvoice ||
-          !preview.existingInvoice.issued_at ||
-          isManualAgencyCalculationVersion(
-            preview.existingInvoice.calculation_version,
-          ),
-      ),
+    // This is an action queue. Sent/settled invoices remain visible in the
+    // position and immutable history; only new or safely recoverable issues
+    // belong here.
+    clients: billingReviewQueue(calculated.map((entry) => entry.preview)),
     invoices,
   };
 }

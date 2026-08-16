@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { stripeInvoiceRecoveryMode } from "./invoice-delivery";
+import {
+  billingReviewQueue,
+  stripeInvoiceRecoveryMode,
+} from "./invoice-delivery";
 
 const BASE = {
   status: "draft" as const,
@@ -64,5 +67,44 @@ describe("Stripe invoice delivery recovery", () => {
     for (const status of ["paid", "void", "uncollectible", "waived"] as const) {
       expect(stripeInvoiceRecoveryMode({ ...BASE, status })).toBeNull();
     }
+  });
+
+  it("keeps only actionable review entries and orders ready clients first", () => {
+    const invoice = (status: "draft" | "open" | "paid", sent = false) => ({
+      ...BASE,
+      status,
+      issued_at: status === "draft" ? null : "2026-08-10T23:56:03.000Z",
+      stripe_sent_at: sent ? "2026-08-10T23:56:05.000Z" : null,
+    });
+
+    expect(
+      billingReviewQueue([
+        {
+          clientName: "Diogo Barbosa",
+          canIssue: false,
+          existingInvoice: invoice("open", true),
+        },
+        {
+          clientName: "Edgar e Rodrigo",
+          canIssue: false,
+          existingInvoice: null,
+        },
+        {
+          clientName: "Paulo & Joao",
+          canIssue: false,
+          existingInvoice: invoice("paid", true),
+        },
+        {
+          clientName: "Ready client",
+          canIssue: true,
+          existingInvoice: null,
+        },
+        {
+          clientName: "Retry client",
+          canIssue: true,
+          existingInvoice: invoice("draft"),
+        },
+      ]).map((entry) => entry.clientName),
+    ).toEqual(["Ready client", "Retry client", "Edgar e Rodrigo"]);
   });
 });
