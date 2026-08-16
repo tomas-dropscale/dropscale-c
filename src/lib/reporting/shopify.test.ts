@@ -484,6 +484,7 @@ describe("V2 Shopify reporting adapter", () => {
                     utm_campaign: "123456789",
                     referring_platform: "Google",
                     day: "2026-08-13",
+                    hour: "2026-08-13T12:00:00Z",
                     campaign_last_non_direct_click_total_sales: "625.50",
                     campaign_last_non_direct_click_order_count: "8",
                   },
@@ -515,14 +516,15 @@ describe("V2 Shopify reporting adapter", () => {
                   { name: "utm_campaign" },
                   { name: "referring_platform" },
                   { name: "day" },
-                  { name: "sessions" },
+                  { name: "campaign_sessions" },
                 ],
                 rows: [
                   {
                     utm_campaign: "123456789",
                     referring_platform: "Google",
                     day: "2026-08-13",
-                    sessions: "190",
+                    hour: "2026-08-13T12:00:00Z",
+                    campaign_sessions: "190",
                   },
                 ],
               },
@@ -580,10 +582,11 @@ describe("V2 Shopify reporting adapter", () => {
                 columns: [
                   { name: "product_id" },
                   { name: "day" },
+                  { name: "hour" },
                   { name: "net_sales" },
                   { name: "net_items_sold" },
                 ],
-                rows: [["10", "2026-08-13", "120.50", "2"]],
+                rows: [["10", "2026-08-13", "2026-08-13T12:00:00Z", "120.50", "2"]],
               },
               parseErrors: [],
             },
@@ -628,6 +631,20 @@ describe("V2 Shopify reporting adapter", () => {
       },
     ]);
     await expect(
+      adapter.fetchCampaignAttributionSeries("2026-08-13", "2026-08-13"),
+    ).resolves.toMatchObject([{
+      campaignId: "123456789",
+      sessions: 190,
+      revenue: 625.5,
+      orders: 8,
+      timeline: [{
+        bucket: "2026-08-13T12:00:00",
+        sessions: 190,
+        revenue: 625.5,
+        orders: 8,
+      }],
+    }]);
+    await expect(
       adapter.fetchCampaignProducts("2026-08-13", "2026-08-13"),
     ).resolves.toEqual([
       {
@@ -660,7 +677,7 @@ describe("V2 Shopify reporting adapter", () => {
     const exactQueries = mocks.reportingShopifyGraphql.mock.calls
       .map(([input]) => String(input.variables?.query ?? ""))
       .filter(Boolean);
-    expect(exactQueries).toHaveLength(5);
+    expect(exactQueries).toHaveLength(7);
     expect(exactQueries.every((query) => query.includes("SINCE 2026-08-13"))).toBe(true);
     expect(exactQueries.every((query) => query.includes("UNTIL 2026-08-13"))).toBe(true);
   });
@@ -959,13 +976,13 @@ describe("V2 Shopify reporting adapter", () => {
                   { name: "utm_campaign" },
                   { name: "referring_platform" },
                   { name: "day" },
-                  { name: "sessions" },
+                  { name: "campaign_sessions" },
                 ],
                 rows: [{
                   utm_campaign: "123456789",
                   referring_platform: "Google",
                   day: left ? "2026-03-01" : "2026-09-01",
-                  sessions: left ? "5" : "7",
+                  campaign_sessions: left ? "5" : "7",
                 }],
               },
               parseErrors: [],

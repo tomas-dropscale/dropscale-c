@@ -899,7 +899,7 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
           from,
           to,
           (chunkFrom, chunkTo) => `FROM campaign_sessions
-SHOW sessions
+SHOW campaign_sessions
 GROUP BY utm_campaign, referring_platform
 TIMESERIES day
 SINCE ${chunkFrom}
@@ -949,7 +949,7 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
           revenue: null,
         };
         current.sessions = (current.sessions ?? 0) + nonNegativeInteger(
-          row.sessions,
+          row.campaign_sessions,
           "campaign sessions",
         );
         byCampaign.set(campaignId, current);
@@ -977,7 +977,7 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`;
         ),
         fetchBoundedShopifyQlRows(
           shopDomain, accessToken, from, to,
-          (a, b) => q("campaign_sessions", "sessions", a, b),
+          (a, b) => q("campaign_sessions", "campaign_sessions", a, b),
           "A single reporting day has too many campaign session rows for an exact report.", graphql,
         ),
       ]);
@@ -1032,7 +1032,7 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`;
         const { bucket } = reportingBucket(row, from, to, verifiedTimeZone);
         const current = currentFor(campaignId);
         const point = pointFor(current, bucket);
-        const sessions = nonNegativeInteger(row.sessions, "campaign sessions");
+        const sessions = nonNegativeInteger(row.campaign_sessions, "campaign sessions");
         current.sessions = (current.sessions ?? 0) + sessions;
         point.sessions = (point.sessions ?? 0) + sessions;
       }

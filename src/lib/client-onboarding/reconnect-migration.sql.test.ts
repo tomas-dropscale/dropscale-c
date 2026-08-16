@@ -11,6 +11,10 @@ const RECONNECT_MIGRATION = readFileSync(
   "supabase/migrations/0046_client_shopify_reconnect_targets.sql",
   "utf8",
 );
+const AUTO_FINALIZE_MIGRATION = readFileSync(
+  "supabase/migrations/0065_finalize_verified_shopify_reconnects.sql",
+  "utf8",
+);
 
 const ADMIN = "46000000-0000-4000-8000-000000000001";
 const USER = "46000000-0000-4000-8000-000000000002";
@@ -246,6 +250,38 @@ beforeEach(async () => {
 });
 
 describe("exact Shopify reconnect migration", () => {
+  it("consumes a verified reconnect invitation atomically and rejects bearer replay", async () => {
+    await db.exec(AUTO_FINALIZE_MIGRATION);
+    await seedV2Target();
+    await createReconnect("onboarding", SHOPIFY);
+
+    await completeShopify({ secret: "encrypted-rotated-secret" });
+
+    const completed = await db.query<{
+      status: string;
+      invite_token_hash: string | null;
+      invite_expires_at: string | null;
+      submitted_events: string;
+    }>(
+      `select session.status, session.invite_token_hash,
+              session.invite_expires_at::text,
+              (select count(*)::text
+               from public.client_onboarding_events event
+               where event.session_id = session.id
+                 and event.event_type = 'submitted') as submitted_events
+       from public.client_onboarding_sessions session
+       where session.id = $1`,
+      [RECONNECT_SESSION],
+    );
+    expect(completed.rows[0]).toEqual({
+      status: "submitted",
+      invite_token_hash: null,
+      invite_expires_at: null,
+      submitted_events: "1",
+    });
+    await expectSqlState(completeShopify(), "P0002");
+  });
+
   it("derives and locks the owner through the dedicated service/admin RPC", async () => {
     await seedClient(USER_2, "Other Client");
     await db.query(

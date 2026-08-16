@@ -109,7 +109,11 @@ export function onboardingSessionPurpose(session: ClientOnboardingSessionDTO) {
 }
 
 export function clientCardStatus(card: ClientCard): ClientCardStatus {
-  if (openOnboardingSessions(card.sessions).length > 0) {
+  if (
+    openOnboardingSessions(card.sessions).some(
+      (session) => session.mode !== "reconnect",
+    )
+  ) {
     return "waiting_for_assets";
   }
   if (card.shopify.length === 0 && card.googleAds.length === 0) {
