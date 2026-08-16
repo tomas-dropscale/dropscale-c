@@ -47,7 +47,10 @@ function safeHttpsImageUrl(value: string | null | undefined): string | null {
   if (!value) return null;
   try {
     const url = new URL(value);
-    return url.protocol === "https:" && !url.username && !url.password
+    return url.protocol === "https:" &&
+      url.hostname === "tpc.googlesyndication.com" &&
+      !url.username &&
+      !url.password
       ? url.toString()
       : null;
   } catch {
@@ -57,19 +60,22 @@ function safeHttpsImageUrl(value: string | null | undefined): string | null {
 
 function CreativeThumbnail({ src }: { src: string | null | undefined }) {
   const safeSrc = safeHttpsImageUrl(src);
+  const proxySrc = safeSrc
+    ? `/api/admin/reporting-asset?url=${encodeURIComponent(safeSrc)}`
+    : null;
   const [failedSrc, setFailedSrc] = React.useState<string | null>(null);
-  const showImage = safeSrc !== null && failedSrc !== safeSrc;
+  const showImage = proxySrc !== null && failedSrc !== proxySrc;
 
   return (
     <div className="flex size-11 shrink-0 items-center justify-center overflow-hidden rounded-md border border-[var(--border-subtle)] bg-[var(--bg-elevated)]">
       {showImage ? (
-        // eslint-disable-next-line @next/next/no-img-element -- exact provider asset URLs have unknown Google CDN hosts
+        // eslint-disable-next-line @next/next/no-img-element -- authenticated proxy assets have no build-time dimensions
         <img
-          src={safeSrc}
+          src={proxySrc}
           alt=""
           loading="lazy"
           referrerPolicy="no-referrer"
-          onError={() => setFailedSrc(safeSrc)}
+          onError={() => setFailedSrc(proxySrc)}
           className="size-full object-cover"
         />
       ) : (

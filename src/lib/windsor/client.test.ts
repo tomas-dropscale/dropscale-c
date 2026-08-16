@@ -9,6 +9,7 @@ import {
   decryptWindsorAccessToken,
   encryptWindsorAccessToken,
   fetchGoogleAdsCampaignBreakdown,
+  fetchGoogleAdsCampaignTimeline,
   fetchGoogleAdsDailyBreakdown,
   fetchGoogleAdsDemandGenAdBreakdown,
   fetchGoogleAdsPmaxProductBreakdown,
@@ -470,6 +471,66 @@ describe("Windsor Google Ads server adapter", () => {
     expect(upstream.searchParams.get("_max_rows")).toBe("4");
     expect(upstream.searchParams.get("_renderer")).toBe("json");
     expect(upstream.searchParams.has("date_preset")).toBe(false);
+  });
+
+  it("segments campaign timelines by local hour only for a one-day range", async () => {
+    const hourlyFetcher = mockFetch(jsonResponse({ data: [{
+      date: "2026-08-16",
+      hour_of_day: 6,
+      account_id: "123-456-7890",
+      account_currency_code: "EUR",
+      account_time_zone: "Europe/Lisbon",
+      campaign_id: "42",
+      spend: 24.68,
+      impressions: 1_000,
+      clicks: 50,
+      conversions: 2,
+      conversion_value: 80,
+    }] }));
+    const dailyFetcher = mockFetch(jsonResponse({ data: [{
+      date: "2026-08-15",
+      account_id: "123-456-7890",
+      account_currency_code: "EUR",
+      account_time_zone: "Europe/Lisbon",
+      campaign_id: "42",
+      spend: 20,
+      impressions: 900,
+      clicks: 40,
+      conversions: 1,
+      conversion_value: 50,
+    }] }));
+
+    await expect(fetchGoogleAdsCampaignTimeline(
+      "123-456-7890",
+      "2026-08-16",
+      "2026-08-16",
+      { fetcher: hourlyFetcher as typeof fetch },
+    )).resolves.toEqual([
+      expect.objectContaining({
+        date: "2026-08-16",
+        bucket: "2026-08-16T06:00:00",
+        granularity: "hour",
+        campaignId: "42",
+        spend: 24.68,
+      }),
+    ]);
+    expect(requestedUrl(hourlyFetcher).searchParams.get("fields")?.split(","))
+      .toContain("hour_of_day");
+
+    await expect(fetchGoogleAdsCampaignTimeline(
+      "123-456-7890",
+      "2026-08-15",
+      "2026-08-16",
+      { fetcher: dailyFetcher as typeof fetch },
+    )).resolves.toEqual([
+      expect.objectContaining({
+        date: "2026-08-15",
+        bucket: "2026-08-15",
+        granularity: "day",
+      }),
+    ]);
+    expect(requestedUrl(dailyFetcher).searchParams.get("fields")?.split(","))
+      .not.toContain("hour_of_day");
   });
 
   it.each([

@@ -117,6 +117,8 @@ export type WindsorGoogleAdsCampaignRow = {
 
 export type WindsorGoogleAdsCampaignTimelineRow = {
   date: string;
+  bucket: string;
+  granularity: "hour" | "day";
   accountId: string;
   customerId: string;
   currency: string;
@@ -1210,7 +1212,7 @@ export async function fetchGoogleAdsCampaignBreakdown(
   );
 }
 
-/** Daily campaign facts in one bounded Windsor read (no N-requests-per-day fanout). */
+/** Campaign facts in one bounded Windsor read; hourly for one day, daily otherwise. */
 export async function fetchGoogleAdsCampaignTimeline(
   accountId: string,
   from: string,
@@ -1219,11 +1221,13 @@ export async function fetchGoogleAdsCampaignTimeline(
 ): Promise<WindsorGoogleAdsCampaignTimelineRow[]> {
   const ids = normalizeGoogleAdsCustomerId(accountId);
   const range = reportingRange(from, to);
-  const maxRows = Math.min(range.days * 1_000 + 1, 25_001);
+  const hourly = from === to;
+  const maxRows = Math.min(range.days * (hourly ? 24_000 : 1_000) + 1, 25_001);
   const url = new URL(`/${WINDSOR_DATASOURCE}`, CONNECTORS_ORIGIN);
   url.searchParams.set(
     "fields",
-    "date,account_id,account_currency_code,account_time_zone,campaign_id," +
+    `date,${hourly ? "hour_of_day," : ""}` +
+      "account_id,account_currency_code,account_time_zone,campaign_id," +
       "spend,impressions,clicks,conversions,conversion_value",
   );
   url.searchParams.set("date_from", from);
@@ -1253,10 +1257,18 @@ export async function fetchGoogleAdsCampaignTimeline(
       throw invalidCampaignResponse();
     }
     const campaignId = breakdownIntegerId(raw.campaign_id, invalidCampaignResponse);
-    const key = `${campaignId}\u0000${date}`;
+    let bucket = date;
+    if (hourly) {
+      const hour = breakdownNumber(raw.hour_of_day, invalidCampaignResponse, true);
+      if (hour > 23) throw invalidCampaignResponse();
+      bucket = `${date}T${String(hour).padStart(2, "0")}:00:00`;
+    }
+    const key = `${campaignId}\u0000${bucket}`;
     if (rows.has(key)) throw invalidCampaignResponse();
     rows.set(key, {
       date,
+      bucket,
+      granularity: hourly ? "hour" : "day",
       ...identity,
       campaignId,
       spend: breakdownNumber(raw.spend, invalidCampaignResponse),
@@ -1268,7 +1280,7 @@ export async function fetchGoogleAdsCampaignTimeline(
   }
   return [...rows.values()].sort(
     (left, right) =>
-      left.date.localeCompare(right.date) || left.campaignId.localeCompare(right.campaignId),
+      left.bucket.localeCompare(right.bucket) || left.campaignId.localeCompare(right.campaignId),
   );
 }
 

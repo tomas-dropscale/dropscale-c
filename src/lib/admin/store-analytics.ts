@@ -805,7 +805,7 @@ async function loadGoogleCampaigns(
               left.bucket.localeCompare(right.bucket) ||
               left.accountId.localeCompare(right.accountId) ||
               left.campaignId.localeCompare(right.campaignId)),
-          granularity: "day",
+          granularity: range.from === range.to ? "hour" : "day",
         },
         message: succeeded.length === results.length
           ? null

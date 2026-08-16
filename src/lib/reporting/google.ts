@@ -64,7 +64,7 @@ export type ReportingCampaignTimelinePoint = {
   accountId: string;
   campaignId: string;
   bucket: string;
-  granularity: "day";
+  granularity: "hour" | "day";
   spend: number;
   impressions: number;
   clicks: number;
@@ -225,8 +225,8 @@ export async function fetchGoogleReportingCampaignTimeline(
     return {
       accountId: source.adAccountId,
       campaignId: row.campaignId,
-      bucket: row.date,
-      granularity: "day" as const,
+      bucket: row.bucket,
+      granularity: row.granularity,
       spend: row.spend,
       impressions: row.impressions,
       clicks: row.clicks,
