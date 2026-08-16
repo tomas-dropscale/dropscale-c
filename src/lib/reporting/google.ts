@@ -207,6 +207,7 @@ export async function fetchGoogleReportingCampaigns(
       biddingStrategyType: row.biddingStrategyType,
       conversionValue: row.conversionValue,
       googleRoas: row.spend > 0 ? row.conversionValue / row.spend : null,
+      ...(row.finalUrls?.length ? { finalUrls: row.finalUrls } : {}),
     };
   });
 }

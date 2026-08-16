@@ -572,7 +572,13 @@ const WINDOW_ROWS: ReadonlyArray<[keyof RoasEvolutionWindows, string]> = [
   ["today", "Today"],
 ];
 
-export function RoasEvolutionHover({ windows }: { windows: RoasEvolutionWindows }) {
+export function RoasEvolutionHover({
+  windows,
+  label = "Real ROAS evolution",
+}: {
+  windows: RoasEvolutionWindows;
+  label?: string;
+}) {
   const tooltipId = React.useId();
   const [anchor, setAnchor] = React.useState<DOMRect | null>(null);
 
@@ -584,7 +590,7 @@ export function RoasEvolutionHover({ windows }: { windows: RoasEvolutionWindows 
     <span className="inline-flex">
       <button
         type="button"
-        aria-label="View real ROAS evolution"
+        aria-label={`View ${label.toLowerCase()}`}
         aria-describedby={tooltipId}
         className="transition-smooth flex size-7 items-center justify-center rounded-[8px] text-[var(--text-muted)] outline-none hover:bg-[var(--bg-panel-hover)] hover:text-[var(--accent-gold-strong)] focus-visible:bg-[var(--bg-panel-hover)] focus-visible:text-[var(--accent-gold-strong)] focus-visible:ring-2 focus-visible:ring-[var(--accent-gold)]/30"
         onMouseEnter={show}
@@ -610,7 +616,7 @@ export function RoasEvolutionHover({ windows }: { windows: RoasEvolutionWindows 
             )}
           >
             <span className="mb-2 block text-[10px] font-medium tracking-[0.08em] text-[var(--text-muted)] uppercase">
-              Real ROAS evolution
+              {label}
             </span>
             <span className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-1.5 text-[11.5px]">
               {WINDOW_ROWS.map(([key, label]) => {

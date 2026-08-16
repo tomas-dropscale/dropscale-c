@@ -111,6 +111,8 @@ export type WindsorGoogleAdsCampaignRow = {
   clicks: number;
   conversions: number;
   conversionValue: number;
+  /** Exact ad final URLs reported by Windsor for this campaign. */
+  finalUrls?: string[];
 };
 
 export type WindsorGoogleAdsCampaignTimelineRow = {
@@ -1042,12 +1044,62 @@ export async function fetchGoogleAdsCampaignBreakdown(
   url.searchParams.set("_max_rows", String(maxRows));
   url.searchParams.set("_renderer", "json");
 
-  const rawRows = arrayPayload(
-    await requestJson(url, options),
-    ["data", "results", "rows"],
+  // `final_url` is an ad-level dimension and Windsor rejects it when mixed
+  // with the campaign metrics above, so read the exact campaign/url pairs in
+  // one separate bounded request for the same account and reporting range.
+  const finalUrlRequest = new URL(`/${WINDSOR_DATASOURCE}`, CONNECTORS_ORIGIN);
+  finalUrlRequest.searchParams.set("fields", "account_id,campaign_id,final_url");
+  finalUrlRequest.searchParams.set("date_from", from);
+  finalUrlRequest.searchParams.set("date_to", to);
+  finalUrlRequest.searchParams.set(
+    "filter",
+    JSON.stringify([["account_id", "eq", ids.accountId]]),
   );
+  finalUrlRequest.searchParams.set("_max_rows", String(maxRows));
+  finalUrlRequest.searchParams.set("_renderer", "json");
+
+  const [campaignPayload, finalUrlPayload] = await Promise.all([
+    requestJson(url, options),
+    requestJson(finalUrlRequest, options),
+  ]);
+  const rawRows = arrayPayload(campaignPayload, ["data", "results", "rows"]);
+  const rawFinalUrlRows = arrayPayload(finalUrlPayload, ["data", "results", "rows"]);
   // Asking for one sentinel row lets a silently truncated response fail closed.
-  if (rawRows.length >= maxRows) throw invalidCampaignResponse();
+  if (rawRows.length >= maxRows || rawFinalUrlRows.length >= maxRows) {
+    throw invalidCampaignResponse();
+  }
+
+  const finalUrlsByCampaign = new Map<string, Set<string>>();
+  for (const value of rawFinalUrlRows) {
+    const raw = asRecord(value);
+    if (!raw || typeof raw.account_id !== "string") throw invalidCampaignResponse();
+    let reportedIds: { accountId: string; customerId: string };
+    try {
+      reportedIds = normalizeGoogleAdsCustomerId(raw.account_id);
+    } catch {
+      throw invalidCampaignResponse();
+    }
+    const campaignId = typeof raw.campaign_id === "string"
+      ? raw.campaign_id.trim()
+      : "";
+    if (reportedIds.customerId !== ids.customerId || !/^\d{1,30}$/.test(campaignId)) {
+      throw invalidCampaignResponse();
+    }
+    if (raw.final_url == null || raw.final_url === "") continue;
+    const text = typeof raw.final_url === "string" ? raw.final_url.trim() : "";
+    let parsed: URL;
+    try {
+      parsed = new URL(text);
+    } catch {
+      throw invalidCampaignResponse();
+    }
+    if (!text || text.length > 4_096 || parsed.protocol !== "https:" || parsed.username || parsed.password) {
+      throw invalidCampaignResponse();
+    }
+    const urls = finalUrlsByCampaign.get(campaignId) ?? new Set<string>();
+    urls.add(parsed.toString());
+    finalUrlsByCampaign.set(campaignId, urls);
+  }
 
   const campaigns = new Map<string, WindsorGoogleAdsCampaignRow>();
   for (const value of rawRows) {
@@ -1147,6 +1199,7 @@ export async function fetchGoogleAdsCampaignBreakdown(
       clicks: number(raw.clicks),
       conversions: number(raw.conversions),
       conversionValue: number(raw.conversion_value),
+      finalUrls: [...(finalUrlsByCampaign.get(campaignId) ?? [])].sort(),
     };
     if (campaigns.has(campaignId)) throw invalidCampaignResponse();
     campaigns.set(campaignId, row);

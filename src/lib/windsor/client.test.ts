@@ -657,6 +657,15 @@ describe("Windsor Google Ads server adapter", () => {
           },
         ],
       }),
+      jsonResponse({
+        data: [
+          {
+            account_id: "123-456-7890",
+            campaign_id: "42",
+            final_url: "https://shop.example/collections/summer?ref=demand-gen",
+          },
+        ],
+      }),
     );
 
     await expect(
@@ -685,6 +694,7 @@ describe("Windsor Google Ads server adapter", () => {
         clicks: 250,
         conversions: 12,
         conversionValue: 490,
+        finalUrls: ["https://shop.example/collections/summer?ref=demand-gen"],
       },
     ]);
 
@@ -695,6 +705,12 @@ describe("Windsor Google Ads server adapter", () => {
     const fields = upstream.searchParams.get("fields")?.split(",") ?? [];
     expect(fields).toContain("campaign_shopping_setting_merchant_id");
     expect(fields).not.toContain("date");
+    const finalUrls = requestedUrl(fetcher, 1);
+    expect(finalUrls.searchParams.get("fields")).toBe(
+      "account_id,campaign_id,final_url",
+    );
+    expect(finalUrls.searchParams.get("date_from")).toBe("2026-08-01");
+    expect(finalUrls.searchParams.get("date_to")).toBe("2026-08-12");
   });
 
   it.each([

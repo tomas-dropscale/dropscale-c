@@ -420,7 +420,7 @@ export function CampaignPerformanceSection({
         />
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[1370px] text-[11.5px]">
+          <table className="w-full min-w-[1180px] text-[11.5px]">
             <thead>
               <tr className="label-caps border-b border-[var(--border-subtle)] text-left">
                 <th className="px-5 py-2.5 font-medium">Campaign / asset</th>
@@ -433,8 +433,6 @@ export function CampaignPerformanceSection({
                 <th className="px-2.5 py-2.5 text-center font-medium">CPA</th>
                 <th className="px-2.5 py-2.5 text-center font-medium">Conv.</th>
                 <th className="px-2.5 py-2.5 text-center font-medium">Google ROAS</th>
-                <th className="px-2.5 py-2.5 text-center font-medium">REV.</th>
-                <th className="px-2.5 py-2.5 text-center font-medium">Real ROAS</th>
                 <th className="px-5 py-2.5 text-center font-medium">Tracking</th>
               </tr>
             </thead>
@@ -486,15 +484,14 @@ export function CampaignPerformanceSection({
                       <td className="px-2.5 py-3 text-center tabular-nums">{campaign.cpa === null ? "—" : money(campaign.cpa, currency)}</td>
                       <td className="px-2.5 py-3 text-center tabular-nums">{campaign.conversions === null ? "—" : integer(campaign.conversions)}</td>
                       <td className="px-2.5 py-3 text-center tabular-nums">{campaign.googleRoas === null ? "—" : multiplier(campaign.googleRoas)}</td>
-                      <td className="px-2.5 py-3 text-center tabular-nums">{campaign.shopifyRevenue === null ? "—" : money(campaign.shopifyRevenue, currency)}</td>
-                      <td className="px-2.5 py-3 text-center font-medium tabular-nums text-[var(--accent-gold-strong)]">{campaign.realRoas === null ? "—" : multiplier(campaign.realRoas)}</td>
                       <td className="px-5 py-2 text-center">
                         <RoasEvolutionHover
+                          label="Google ROAS evolution"
                           windows={roasEvolutionWindows(
                             (campaign.trackingTimeline ?? campaign.timeline).map((point) => ({
                               bucket: point.bucket,
                               spend: point.spend,
-                              revenue: point.shopifyRevenue,
+                              revenue: point.googleRevenue,
                             })),
                             rangeEnd,
                           )}
@@ -517,9 +514,6 @@ export function CampaignPerformanceSection({
                         : null;
                       const googleRoas = row.spend !== null && row.spend > 0 && row.googleRevenue !== null
                         ? row.googleRevenue / row.spend
-                        : null;
-                      const realRoas = row.spend !== null && row.spend > 0 && row.shopifyRevenue !== null
-                        ? row.shopifyRevenue / row.spend
                         : null;
                       return (
                         <tr key={`${row.provider}:${row.kind}:${row.id}`} className="border-t border-[var(--border-subtle)] bg-[var(--bg-base)] hover:bg-[var(--bg-panel-hover)]">
@@ -545,8 +539,6 @@ export function CampaignPerformanceSection({
                           <td className="px-2.5 py-2.5 text-center tabular-nums">{cpa === null ? "—" : money(cpa, currency)}</td>
                           <td className="px-2.5 py-2.5 text-center tabular-nums">{row.conversions === null ? "—" : integer(row.conversions)}</td>
                           <td className="px-2.5 py-2.5 text-center tabular-nums">{googleRoas === null ? "—" : multiplier(googleRoas)}</td>
-                          <td className="px-2.5 py-2.5 text-center tabular-nums">{row.shopifyRevenue === null ? "—" : money(row.shopifyRevenue, currency)}</td>
-                          <td className="px-2.5 py-2.5 text-center tabular-nums text-[var(--accent-gold-strong)]">{realRoas === null ? "—" : multiplier(realRoas)}</td>
                           <td className="px-5 py-2.5 text-center text-[var(--text-muted)]">—</td>
                         </tr>
                       );
@@ -554,7 +546,7 @@ export function CampaignPerformanceSection({
 
                     {open && campaign.breakdown.rows.length === 0 ? (
                       <tr className="border-t border-[var(--border-subtle)] bg-[var(--bg-base)]">
-                        <td colSpan={13} className="px-12 py-3 text-[11px] text-[var(--text-muted)]">
+                        <td colSpan={11} className="px-12 py-3 text-[11px] text-[var(--text-muted)]">
                           {campaign.breakdown.reason ||
                             campaign.breakdown.sources
                               .map((source) => source.reason)
@@ -567,7 +559,7 @@ export function CampaignPerformanceSection({
 
                     {open && campaign.breakdown.rows.length > 0 && breakdownWarnings.length > 0 ? (
                       <tr className="border-t border-[var(--border-subtle)] bg-[var(--bg-base)]">
-                        <td colSpan={13} className="px-12 py-2.5 text-[10.5px] text-[var(--warning-orange)]">
+                        <td colSpan={11} className="px-12 py-2.5 text-[10.5px] text-[var(--warning-orange)]">
                           {breakdownWarnings.join(" ")}
                         </td>
                       </tr>
