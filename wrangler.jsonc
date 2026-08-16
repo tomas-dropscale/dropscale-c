@@ -10,17 +10,17 @@
     "crons": [
       // Mondays 14:05 UTC - every Google account timezone has crossed into
       // Monday, with extra time for Sunday's delayed Google reporting. Capture
-      // the exact closed-week evidence and reconcile Stripe payment state;
-      // invoice issue remains manual in /admin/billing.
+      // the exact closed-week evidence, then consume a bounded, receipt-backed
+      // automatic invoice batch. Daily close safely retries unfinished work.
       "5 14 * * 1",
       // Hourly on the hour, from midnight UTC — rebuild the metrics rollup the
       // client reports read, then the commission ledger the finance pages read.
       // The countdown in the report is derived from this same schedule, so if
       // this expression changes, change PERIOD_MINUTES in next-refresh.tsx too.
       "0 * * * *",
-      // 23:55 — close the day and reconcile all open Stripe invoices. This
-      // bounds stale payment state to one day even if a webhook delivery is
-      // missed, while still keeping the webhook as the primary live path.
+      // 23:55 — close the day, refresh the latest exact weekly ledger and retry
+      // a bounded billing batch. This also reconciles open Stripe invoices,
+      // while webhooks remain the primary live payment path.
       "55 23 * * *"
     ]
   },

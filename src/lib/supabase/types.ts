@@ -305,7 +305,8 @@ export type BillingIssueLease = {
   client_id: string;
   fencing_token: number;
   period_start: string;
-  issued_by: string;
+  /** Null is the database's explicit automatic issuer; admins remain UUIDs. */
+  issued_by: string | null;
   acquired_at: string;
   renewed_at: string;
   lease_expires_at: string;
@@ -3671,7 +3672,7 @@ export type Database = {
           p_client_id: string;
           p_lease_token: string;
           p_period_start: string;
-          p_issued_by: string;
+          p_issued_by: string | null;
         };
         Returns: BillingIssueLease[];
       };
@@ -3813,7 +3814,7 @@ export type Database = {
           }[];
           p_billing_recipient: BillingRecipientSnapshot;
           p_referral_term_id: string | null;
-          p_issued_by: string;
+          p_issued_by: string | null;
           p_calculation_version: string;
         };
         Returns: Invoice[];

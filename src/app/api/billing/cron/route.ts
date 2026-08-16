@@ -6,14 +6,18 @@ import {
   recordBillingAutomationOutcomes,
   skippedBillingRecoveryOutcome,
 } from "@/lib/billing/automation-receipts";
-import { billingRecoveryEnabled } from "@/lib/billing/issuance-gate";
+import { runAutomaticBilling } from "@/lib/billing/automation";
+import {
+  billingAutomationEnabled,
+  billingRecoveryEnabled,
+} from "@/lib/billing/issuance-gate";
 import { reconcileInvoices } from "@/lib/billing/invoices";
 import { createServiceClient } from "@/lib/supabase/service";
 
 /**
- * Default cron work is Stripe-state reconciliation only. The sole recovery
- * mode is explicit, separately armed and purpose-bound in SQL to expired
- * skipped-cycle claims; it cannot seed or consume the general billing queue.
+ * Default work remains Stripe-state reconciliation. `mode=automatic` is the
+ * separately armed, bounded queue worker used by the weekly and daily retry
+ * schedules; recovery remains purpose-bound to old expired skip claims.
  */
 export const dynamic = "force-dynamic";
 
@@ -31,7 +35,7 @@ function authorised(request: NextRequest): NextResponse | null {
   return null;
 }
 
-async function reconciliation() {
+async function reconciliation(extra: Record<string, unknown> = {}) {
   const supabase = createServiceClient();
   if (!supabase) {
     return NextResponse.json(
@@ -41,7 +45,12 @@ async function reconciliation() {
   }
   const result = await reconcileInvoices(supabase);
   return NextResponse.json(
-    { ok: result.errors.length === 0, ranAt: new Date().toISOString(), ...result },
+    {
+      ok: result.errors.length === 0,
+      ranAt: new Date().toISOString(),
+      ...extra,
+      ...result,
+    },
     { status: result.errors.length === 0 ? 200 : 502 },
   );
 }
@@ -68,6 +77,14 @@ async function recoverSkippedClaims() {
     // Always a non-issuance run. SQL rejects this recovery claim if that bit
     // is ever changed and rejects issued outcomes from non-issuance runs.
     const run = await beginBillingAutomationRun(supabase);
+    if (!run) {
+      return NextResponse.json({
+        ok: true,
+        alreadyRunning: true,
+        recovered: 0,
+        ranAt: new Date().toISOString(),
+      });
+    }
     runId = run.id;
     const claimed = await claimExpiredSkippedBillingItems(supabase, run.id, 2);
     const outcomes: Awaited<
@@ -112,6 +129,37 @@ async function recoverSkippedClaims() {
   }
 }
 
+async function automaticBilling() {
+  if (!billingAutomationEnabled()) {
+    // Preserve the historical cron safety net while automatic issue remains
+    // disarmed. This path can reconcile Stripe but cannot issue.
+    return reconciliation({ automatic: false, reason: "not_armed" });
+  }
+
+  const supabase = createServiceClient();
+  if (!supabase) {
+    return NextResponse.json(
+      { error: "SUPABASE_SERVICE_ROLE_KEY is not configured." },
+      { status: 503 },
+    );
+  }
+
+  try {
+    const result = await runAutomaticBilling(supabase);
+    return NextResponse.json({
+      ok: true,
+      ...result,
+      ranAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error("Automatic billing cron failed:", error);
+    return NextResponse.json(
+      { ok: false, error: "Automatic billing failed." },
+      { status: 502 },
+    );
+  }
+}
+
 export async function GET(request: NextRequest) {
   const denied = authorised(request);
   if (denied) return denied;
@@ -121,7 +169,8 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   const denied = authorised(request);
   if (denied) return denied;
-  return request.nextUrl.searchParams.get("mode") === "recovery"
-    ? recoverSkippedClaims()
-    : reconciliation();
+  const mode = request.nextUrl.searchParams.get("mode");
+  if (mode === "automatic") return automaticBilling();
+  if (mode === "recovery") return recoverSkippedClaims();
+  return reconciliation();
 }

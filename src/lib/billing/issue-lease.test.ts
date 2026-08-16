@@ -72,6 +72,26 @@ describe("billing issue lease client", () => {
     expect(rpc).toHaveBeenCalledTimes(1);
   });
 
+  it("preserves the null issuer used by automatic billing", async () => {
+    const automaticRow = { ...ROW, issued_by: null };
+    const rpc = vi.fn().mockResolvedValue({ data: [automaticRow], error: null });
+
+    await expect(
+      acquireBillingIssueLease(clientWithRpc(rpc), {
+        clientId: CLIENT,
+        periodStart: ROW.period_start,
+        issuedBy: null,
+        leaseToken: TOKEN,
+      }),
+    ).resolves.toMatchObject({ issuedBy: null });
+    expect(rpc).toHaveBeenCalledWith("acquire_billing_issue_lease", {
+      p_client_id: CLIENT,
+      p_lease_token: TOKEN,
+      p_period_start: ROW.period_start,
+      p_issued_by: null,
+    });
+  });
+
   it("fails closed when renewal cannot prove the exact fence", async () => {
     const rpc = vi.fn().mockResolvedValue({ data: [], error: null });
     await expect(

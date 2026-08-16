@@ -12,6 +12,22 @@ export function billingIssuanceEnabled(): boolean {
 }
 
 /**
+ * Separate fail-closed arm for unattended issuance.
+ *
+ * A deployment must opt into live invoice writes, the automation subsystem
+ * and this purpose-specific issue arm. Existing recovery configuration or
+ * enabling the admin issue button therefore cannot activate scheduled Stripe
+ * mutation by accident.
+ */
+export function billingAutomationEnabled(): boolean {
+  return (
+    billingIssuanceEnabled() &&
+    process.env.BILLING_AUTOMATION_ENABLED === "true" &&
+    process.env.BILLING_AUTOMATION_ISSUANCE_ARMED === "true"
+  );
+}
+
+/**
  * Recovery-only arm for the unattended billing engine.
  *
  * Recovery is permitted only while ordinary invoice issuance is disabled.

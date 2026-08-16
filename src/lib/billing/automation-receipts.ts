@@ -16,16 +16,25 @@ export type BillingAutomationFinish = {
   errorCount: number;
 };
 
-export type SkippedBillingRecoveryOutcome = {
+export type BillingAutomationOutcome = {
   itemId: string;
   claimVersion: number;
+  state: "blocked" | "issued" | "no_charge";
+  stage: "preview" | "google_evidence" | "stripe_issue" | "complete";
+  code: string | null;
+  invoiceId: string | null;
+  amount: number | null;
+  billableSpend: number | null;
+  evidenceAccountCount: number;
+};
+
+export type SkippedBillingRecoveryOutcome = BillingAutomationOutcome & {
   state: "no_charge";
   stage: "complete";
   code: null;
   invoiceId: null;
   amount: 0;
   billableSpend: number;
-  evidenceAccountCount: number;
 };
 
 function one<T>(rows: T[] | null, operation: string): T {
@@ -36,15 +45,69 @@ function one<T>(rows: T[] | null, operation: string): T {
 
 export async function beginBillingAutomationRun(
   client: Supabase,
-): Promise<BillingAutomationRun> {
+  issuanceEnabled = false,
+): Promise<BillingAutomationRun | null> {
   const { data: rows, error } = await client.rpc(
     "begin_billing_automation_run",
-    { p_issuance_enabled: false },
+    { p_issuance_enabled: issuanceEnabled },
   );
   if (error) {
     throw new Error(`begin_billing_automation_run failed: ${error.message}`);
   }
-  return one(rows, "begin_billing_automation_run");
+  // Migration 0067 returns no row while another fresh run owns the singleton
+  // worker. That is a successful idempotent no-op, not a missing receipt.
+  return rows?.[0] ?? null;
+}
+
+export async function seedBillingAutomationItems(
+  client: Supabase,
+  runId: string,
+  closedThrough: string,
+): Promise<number> {
+  const { data, error } = await client.rpc("seed_billing_automation_items", {
+    p_run_id: runId,
+    p_closed_through: closedThrough,
+  });
+  if (error) {
+    throw new Error(`seed_billing_automation_items failed: ${error.message}`);
+  }
+  if (!Number.isSafeInteger(data) || Number(data) < 0) {
+    throw new Error("seed_billing_automation_items returned an invalid count.");
+  }
+  return Number(data);
+}
+
+export async function claimBillingAutomationItems(
+  client: Supabase,
+  runId: string,
+  limit: number,
+): Promise<BillingAutomationItem[]> {
+  const { data, error } = await client.rpc("claim_billing_automation_items", {
+    p_run_id: runId,
+    p_limit: limit,
+  });
+  if (error) {
+    throw new Error(`claim_billing_automation_items failed: ${error.message}`);
+  }
+  return data ?? [];
+}
+
+/** A read hint only; migration 0066 remains the race-proof write guard. */
+export async function billingCycleIsSkipped(
+  client: Supabase,
+  item: Pick<BillingAutomationItem, "client_id" | "period_start" | "period_end">,
+): Promise<boolean> {
+  const { data, error } = await client
+    .from("billing_cycle_skips")
+    .select("id")
+    .eq("client_id", item.client_id)
+    .eq("period_start", item.period_start)
+    .eq("period_end", item.period_end)
+    .maybeSingle();
+  if (error) {
+    throw new Error(`billing_cycle_skips lookup failed: ${error.message}`);
+  }
+  return data !== null;
 }
 
 /**
@@ -118,32 +181,41 @@ export async function skippedBillingRecoveryOutcome(
   };
 }
 
+export async function recordBillingAutomationOutcome(
+  client: Supabase,
+  runId: string,
+  outcome: BillingAutomationOutcome,
+): Promise<BillingAutomationItem> {
+  const { data: rows, error } = await client.rpc(
+    "record_billing_automation_item_result",
+    {
+      p_item_id: outcome.itemId,
+      p_run_id: runId,
+      p_claim_version: outcome.claimVersion,
+      p_state: outcome.state,
+      p_stage: outcome.stage,
+      p_code: outcome.code,
+      p_invoice_id: outcome.invoiceId,
+      p_amount: outcome.amount,
+      p_billable_spend: outcome.billableSpend,
+      p_evidence_account_count: outcome.evidenceAccountCount,
+    },
+  );
+  if (error) {
+    throw new Error(
+      `record_billing_automation_item_result failed: ${error.message}`,
+    );
+  }
+  return one(rows, "record_billing_automation_item_result");
+}
+
 export async function recordBillingAutomationOutcomes(
   client: Supabase,
   runId: string,
-  outcomes: SkippedBillingRecoveryOutcome[],
+  outcomes: readonly BillingAutomationOutcome[],
 ): Promise<void> {
   for (const outcome of outcomes) {
-    const { error } = await client.rpc(
-      "record_billing_automation_item_result",
-      {
-        p_item_id: outcome.itemId,
-        p_run_id: runId,
-        p_claim_version: outcome.claimVersion,
-        p_state: outcome.state,
-        p_stage: outcome.stage,
-        p_code: outcome.code,
-        p_invoice_id: outcome.invoiceId,
-        p_amount: outcome.amount,
-        p_billable_spend: outcome.billableSpend,
-        p_evidence_account_count: outcome.evidenceAccountCount,
-      },
-    );
-    if (error) {
-      throw new Error(
-        `record_billing_automation_item_result failed: ${error.message}`,
-      );
-    }
+    await recordBillingAutomationOutcome(client, runId, outcome);
   }
 }
 

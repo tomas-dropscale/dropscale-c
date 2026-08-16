@@ -1,10 +1,10 @@
 /**
  * Review-first agency billing.
  *
- * This module never issues invoices on a page load or a cron. It calculates a
- * closed week's fixed 10% agency fee from Google-spend ledger rows, exposes the
- * evidence to the admin, and issues exactly one client's reviewed snapshot
- * only through issueClientWeek().
+ * This module never issues invoices on a page load. It calculates a closed
+ * week's agency fee from exact Google-spend ledger rows, then sends both the
+ * reviewed admin path and the separately armed automation path through the
+ * same idempotent issueClientWeek() implementation.
  */
 
 import "server-only";
@@ -2009,6 +2009,29 @@ export class BillingIssueError extends Error {
   }
 }
 
+export type AutomaticBillingIssueResult =
+  | {
+      state: "issued";
+      invoice: Invoice;
+      amount: number;
+      billableSpend: number;
+      evidenceAccountCount: number;
+    }
+  | {
+      state: "no_charge";
+      invoice: null;
+      amount: 0;
+      billableSpend: 0;
+      evidenceAccountCount: number;
+    };
+
+function hasDurableIssueReceipt(invoice: Invoice): boolean {
+  return invoice.status === "waived"
+    ? invoice.issued_at !== null
+    : invoice.stripe_sent_at !== null ||
+        invoice.stripe_delivery_assumed_at !== null;
+}
+
 function stripeRecipientExpectation(
   value: unknown,
 ): StripeInvoiceRecipientExpectation {
@@ -2295,7 +2318,8 @@ export async function issueClientWeek(input: {
   periodStart: string;
   expectedAmount: number;
   expectedReviewToken: string;
-  issuedBy: string;
+  /** Admin UUID for reviewed issue; null is the database's automation issuer. */
+  issuedBy: string | null;
   client?: Supabase;
 }): Promise<Invoice> {
   const week = closedWeekStarting(input.periodStart);
@@ -2565,6 +2589,96 @@ export async function issueClientWeek(input: {
       }
     }
   }
+}
+
+/**
+ * Reuse the reviewed calculation and issue contract without manufacturing an
+ * admin identity. The first preview supplies a short-lived integrity token;
+ * issueClientWeek recalculates it immediately before the database/Stripe
+ * mutation, so a changed ledger, boundary, recipient or rate fails closed.
+ */
+export async function issueClientWeekAutomatically(input: {
+  clientId: string;
+  periodStart: string;
+  client: Supabase;
+}): Promise<AutomaticBillingIssueResult> {
+  const week = closedWeekStarting(input.periodStart);
+  if (!week) {
+    throw new BillingIssueError(
+      "Select a fully closed Monday-to-Sunday week.",
+      422,
+      "period_not_closed",
+    );
+  }
+  if (!input.clientId) {
+    throw new BillingIssueError(
+      "Client is required.",
+      422,
+      "invalid_request",
+    );
+  }
+
+  const calculated = (await calculateWeek(input.client, week, input.clientId))[0];
+  if (!calculated) {
+    throw new BillingIssueError(
+      "Approved billing client not found.",
+      404,
+      "client_not_found",
+    );
+  }
+  const { preview } = calculated;
+  const evidenceAccountCount = preview.stores.length;
+
+  // A Stripe delivery may have committed while its queue receipt response was
+  // lost. Treat only durable local delivery evidence as success; never send it
+  // again merely to repair the automation receipt.
+  if (
+    preview.existingInvoice &&
+    stripeInvoiceRecoveryMode(preview.existingInvoice) === null &&
+    hasDurableIssueReceipt(preview.existingInvoice)
+  ) {
+    return {
+      state: "issued",
+      invoice: preview.existingInvoice,
+      amount: Number(preview.existingInvoice.amount),
+      billableSpend: preview.billableSpend,
+      evidenceAccountCount,
+    };
+  }
+
+  const blocking = preview.blockers.find((item) => item.severity === "error");
+  if (blocking) {
+    throw new BillingIssueError(blocking.message, 422, blocking.code, preview);
+  }
+
+  // An exact-zero week has evidence but no line to persist in an invoice.
+  // The receipt RPC independently rechecks the complete Google snapshot under
+  // table locks before accepting this as terminal no-charge work.
+  if (calculated.lines.length === 0) {
+    return {
+      state: "no_charge",
+      invoice: null,
+      amount: 0,
+      billableSpend: 0,
+      evidenceAccountCount,
+    };
+  }
+
+  const invoice = await issueClientWeek({
+    clientId: input.clientId,
+    periodStart: week.start,
+    expectedAmount: preview.amount,
+    expectedReviewToken: preview.reviewToken,
+    issuedBy: null,
+    client: input.client,
+  });
+  return {
+    state: "issued",
+    invoice,
+    amount: Number(invoice.amount),
+    billableSpend: preview.billableSpend,
+    evidenceAccountCount,
+  };
 }
 
 export type ReconcileResult = {
