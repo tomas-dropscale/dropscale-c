@@ -195,8 +195,20 @@ export default async function BillingPage({
     <PageContainer title={d.adminBilling.title} description={d.adminBilling.subtitle}>
       <div className="space-y-10">
         <BillingAdminView dashboard={dashboard} />
-        <section id="financial-operations" aria-labelledby="financial-operations-title">
-          <div className="mb-4">
+        <details id="financial-operations" className="panel overflow-hidden">
+          <summary className="cursor-pointer list-none px-4 py-3.5 transition-colors hover:bg-[var(--bg-panel-hover)] sm:px-5">
+            <span className="block text-[13px] font-semibold text-[var(--text-primary)]">
+              Configuração de contas
+            </span>
+            <span className="mt-0.5 block text-[11px] text-[var(--text-muted)]">
+              Stripe, evidência Google, limites de faturação e migração técnica
+            </span>
+          </summary>
+          <section
+            aria-labelledby="financial-operations-title"
+            className="border-t border-[var(--border-subtle)] p-4 sm:p-5"
+          >
+            <div className="mb-4">
             <h2
               id="financial-operations-title"
               className="text-[16px] font-semibold text-[var(--text-primary)]"
@@ -207,25 +219,26 @@ export default async function BillingPage({
               Approve pending accounts and requests, capture missing Google spend baselines, and
               manage immutable billing boundaries.
             </p>
-          </div>
-          <div className="mb-8">
-            <ReportingBindingsQueue queue={reportingCutover} />
-          </div>
-          <ClientsManager
-            clients={[]}
-            pendingClients={[]}
-            candidates={[]}
-            pendingAccounts={operations.pendingAccounts}
-            untrackedAccounts={operations.untrackedAccounts}
-            billingStartAuditFailed={operations.billingStartAuditFailed}
-            billingAccounts={operations.billingAccounts}
-            billingBoundaryAuditFailed={operations.billingBoundaryAuditFailed}
-            pendingRequests={operations.pendingRequests}
-            partnerOf={{}}
-            adminId=""
-            financialOnly
-          />
-        </section>
+            </div>
+            <div className="mb-8">
+              <ReportingBindingsQueue queue={reportingCutover} />
+            </div>
+            <ClientsManager
+              clients={[]}
+              pendingClients={[]}
+              candidates={[]}
+              pendingAccounts={operations.pendingAccounts}
+              untrackedAccounts={operations.untrackedAccounts}
+              billingStartAuditFailed={operations.billingStartAuditFailed}
+              billingAccounts={operations.billingAccounts}
+              billingBoundaryAuditFailed={operations.billingBoundaryAuditFailed}
+              pendingRequests={operations.pendingRequests}
+              partnerOf={{}}
+              adminId=""
+              financialOnly
+            />
+          </section>
+        </details>
       </div>
     </PageContainer>
   );

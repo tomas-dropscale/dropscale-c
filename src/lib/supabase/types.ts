@@ -368,6 +368,17 @@ export type BillingAutomationItem = {
   updated_at: string;
 };
 
+/** Admin-attributed no-charge decision for one Monday-to-Sunday cycle. */
+export type BillingCycleSkip = {
+  id: string;
+  client_id: string;
+  period_start: string;
+  period_end: string;
+  reason: string | null;
+  created_by: string;
+  created_at: string;
+};
+
 /** A week's agency commission, billed to one portal client (migration 0013). */
 export type Invoice = {
   id: string;
@@ -1619,6 +1630,27 @@ export type Database = {
             columns: ["claimed_by_run_id"];
             isOneToOne: false;
             referencedRelation: "billing_automation_runs";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      billing_cycle_skips: {
+        Row: Row<BillingCycleSkip>;
+        Insert: Insert<BillingCycleSkip, "id" | "reason" | "created_at">;
+        Update: never;
+        Relationships: [
+          {
+            foreignKeyName: "billing_cycle_skips_client_id_fkey";
+            columns: ["client_id"];
+            isOneToOne: false;
+            referencedRelation: "portal_clients";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "billing_cycle_skips_created_by_fkey";
+            columns: ["created_by"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
             referencedColumns: ["id"];
           },
         ];
@@ -3687,6 +3719,24 @@ export type Database = {
       claim_expired_skipped_billing_automation_items: {
         Args: { p_run_id: string; p_limit?: number };
         Returns: BillingAutomationItem[];
+      };
+      skip_billing_cycle: {
+        Args: {
+          p_client_id: string;
+          p_period_start: string;
+          p_period_end: string;
+          p_reason: string | null;
+          p_created_by: string;
+        };
+        Returns: BillingCycleSkip[];
+      };
+      remove_billing_cycle_skip: {
+        Args: {
+          p_client_id: string;
+          p_period_start: string;
+          p_removed_by: string;
+        };
+        Returns: boolean;
       };
       record_billing_automation_item_result: {
         Args: {

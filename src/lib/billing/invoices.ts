@@ -38,6 +38,7 @@ import type {
   AdAccountBillingStart,
   AdAccount,
   BillingProfile,
+  BillingCycleSkip,
   Client,
   Commission,
   Database,
@@ -99,6 +100,7 @@ import {
   type BillingPositionLedgerRow,
   type BillingPositionMetricRow,
   type BillingPositionReferralTerm,
+  type BillingPositionSkip,
   type BillingPositions,
   type BillingPositionStart,
 } from "@/lib/billing/positions";
@@ -1558,7 +1560,7 @@ async function fetchPositionInvoices(
     let query = supabase
       .from("invoices")
       .select(
-        "id, client_id, period_start, status, amount, amount_remaining, issued_at, calculation_version",
+        "id, client_id, period_start, status, amount, amount_remaining, currency, issued_at, paid_at, calculation_version",
       )
       .in("client_id", clientIds)
       .order("id", { ascending: true })
@@ -1577,7 +1579,9 @@ async function fetchPositionInvoices(
       status: row.status,
       amount: row.amount,
       amountRemaining: row.amount_remaining,
+      currency: row.currency,
       issuedAt: row.issued_at,
+      paidAt: row.paid_at,
       calculationVersion: row.calculation_version,
     })) as PositionInvoiceDatabaseRow[];
     rows.push(...page);
@@ -1586,13 +1590,58 @@ async function fetchPositionInvoices(
     if (!afterId) break;
   }
   return rows.map((row) => ({
+    id: row.id,
     clientId: row.clientId,
     periodStart: row.periodStart,
     status: row.status,
     amount: row.amount,
     amountRemaining: row.amountRemaining,
+    currency: row.currency,
     issuedAt: row.issuedAt,
+    paidAt: row.paidAt,
     calculationVersion: row.calculationVersion,
+  }));
+}
+
+async function fetchPositionSkips(
+  supabase: Supabase,
+  clientIds: string[],
+  periodStart: string,
+): Promise<BillingPositionSkip[]> {
+  if (clientIds.length === 0) return [];
+  type PositionSkipRow = Pick<
+    BillingCycleSkip,
+    "id" | "client_id" | "period_start" | "period_end"
+  >;
+  const rows: PositionSkipRow[] = [];
+  const pageSize = 1_000;
+  let afterId: string | null = null;
+  for (;;) {
+    let query = supabase
+      .from("billing_cycle_skips")
+      .select("id, client_id, period_start, period_end")
+      .in("client_id", clientIds)
+      .eq("period_start", periodStart)
+      .order("id", { ascending: true })
+      .limit(pageSize);
+    if (afterId) query = query.gt("id", afterId);
+    const { data, error } = await query;
+    if (error) {
+      throw new Error(
+        `Could not load billing cycle skips: ${error.message}`,
+      );
+    }
+    const page = (data ?? []) as PositionSkipRow[];
+    rows.push(...page);
+    if (page.length < pageSize) break;
+    afterId = page.at(-1)?.id ?? null;
+    if (!afterId) break;
+  }
+  return rows.map((row) => ({
+    id: row.id,
+    clientId: row.client_id,
+    periodStart: row.period_start,
+    periodEnd: row.period_end,
   }));
 }
 
@@ -1800,12 +1849,14 @@ async function fetchAdminBillingPositions(
     ledgerRows,
     metricRows,
     invoices,
+    skips,
     referralTermsByClient,
     commissionTermsByAccount,
   ] = await Promise.all([
     fetchPositionLedgerRows(supabase, source.id, accountIds),
     fetchPositionMetrics(supabase, accountIds, currentStart, currentEnd),
     fetchPositionInvoices(supabase, clientIds),
+    fetchPositionSkips(supabase, clientIds, currentStart),
     fetchPositionReferralTerms(supabase, clientIds),
     fetchAccountCommissionTerms(supabase, accountIds) as Promise<
       Map<string, BillingPositionAccountTerm[]>
@@ -1821,6 +1872,7 @@ async function fetchAdminBillingPositions(
     ledgerRows,
     metricRows,
     invoices,
+    skips,
     referralTermsByClient,
     commissionTermsByAccount,
   });

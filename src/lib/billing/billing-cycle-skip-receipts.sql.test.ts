@@ -14,6 +14,10 @@ const RECEIPT_FIX = readFileSync(
   "supabase/migrations/0053_billing_cycle_skip_receipts.sql",
   "utf8",
 );
+const INVOICE_GUARD = readFileSync(
+  "supabase/migrations/0066_billing_cycle_skip_invoice_guard.sql",
+  "utf8",
+);
 
 const ADMIN = "53000000-0000-4000-8000-000000000001";
 const CLIENT = "53000000-0000-4000-8000-000000000002";
@@ -280,6 +284,7 @@ beforeEach(async () => {
   );
 
   await db.exec(RECEIPT_FIX);
+  await db.exec(INVOICE_GUARD);
   await actAsService();
   await db.query(
     "insert into public.revenue_sources (id, name) values ($1, 'Google Ads Management')",
@@ -288,6 +293,25 @@ beforeEach(async () => {
 });
 
 describe("0053 skipped-cycle no-charge receipts", () => {
+  it("rejects invoice creation after the exact client cycle was skipped", async () => {
+    await seedProcessingItem();
+    await db.query(
+      `insert into public.billing_cycle_skips (
+         client_id, period_start, period_end, reason, created_by
+       ) values ($1, $2, $3, 'Goodwill', $4)`,
+      [CLIENT, MONDAY, SUNDAY, ADMIN],
+    );
+
+    await expect(
+      db.query(
+        `insert into public.invoices (
+           id, client_id, period_start, period_end, amount, status
+         ) values ($1, $2, $3, $4, 10, 'draft')`,
+        ["53000000-0000-4000-8000-000000000099", CLIENT, MONDAY, SUNDAY],
+      ),
+    ).rejects.toThrow(/skipped and cannot be invoiced/i);
+  });
+
   it("backfills only the provenance already guaranteed by the old constraint", async () => {
     const result = await db.query<Receipt>(
       "select * from public.billing_automation_items where id = $1",

@@ -146,7 +146,7 @@ export const en = {
 
   adminBilling: {
     title: "Billing",
-    subtitle: "Review the 10% agency fee, issue invoices manually and follow every payment.",
+    subtitle: "Track the current cycle, invoices awaiting payment and overdue balances by client.",
     weekLabel: "Closed week",
     refreshLedger: "Refresh Google ledger",
     refreshing: "Refreshing…",
@@ -1407,7 +1407,7 @@ export const pt: Dictionary = {
 
   adminBilling: {
     title: "Faturação",
-    subtitle: "Revê a fee de agência de 10%, emite faturas manualmente e acompanha cada pagamento.",
+    subtitle: "Acompanha o ciclo atual, as faturas por pagar e os valores em atraso por cliente.",
     weekLabel: "Semana fechada",
     refreshLedger: "Atualizar dados da Google",
     refreshing: "A atualizar…",
@@ -2650,7 +2650,7 @@ export const ptBR: Dictionary = {
 
   adminBilling: {
     title: "Faturamento",
-    subtitle: "Revise a taxa de agência de 10%, emita faturas manualmente e acompanhe cada pagamento.",
+    subtitle: "Acompanhe o ciclo atual, as faturas a pagar e os valores em atraso por cliente.",
     weekLabel: "Semana fechada",
     refreshLedger: "Atualizar dados do Google",
     refreshing: "Atualizando…",
@@ -3890,7 +3890,7 @@ export const es: Dictionary = {
 
   adminBilling: {
     title: "Facturación",
-    subtitle: "Revisa la comisión de agencia del 10 %, emite facturas manualmente y sigue cada pago.",
+    subtitle: "Sigue el ciclo actual, las facturas por pagar y los importes vencidos por cliente.",
     weekLabel: "Semana cerrada",
     refreshLedger: "Actualizar datos de Google",
     refreshing: "Actualizando…",
@@ -5133,7 +5133,7 @@ export const fr: Dictionary = {
 
   adminBilling: {
     title: "Facturation",
-    subtitle: "Vérifiez les honoraires d’agence de 10 %, émettez les factures manuellement et suivez chaque paiement.",
+    subtitle: "Suivez le cycle en cours, les factures à payer et les montants en retard par client.",
     weekLabel: "Semaine clôturée",
     refreshLedger: "Actualiser les données Google",
     refreshing: "Actualisation…",

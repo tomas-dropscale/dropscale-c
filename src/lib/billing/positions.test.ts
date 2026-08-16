@@ -372,4 +372,160 @@ describe("billing positions", () => {
       currentAccruedFee: 26.13,
     });
   });
+
+  it("builds the EUR cycle overview from authoritative balances and skip evidence", () => {
+    const skippedClient: BillingPositionClient = {
+      id: "client-2",
+      fullName: "Skipped Client",
+      email: "skipped@example.com",
+    };
+    const skippedAccount = account({
+      id: "account-2",
+      clientId: skippedClient.id,
+    });
+    const result = position({
+      clients: [client, skippedClient],
+      accounts: [account(), skippedAccount],
+      starts: [
+        {
+          id: "start-1",
+          accountId: "account-1",
+          googleLocalDate: "2026-08-03",
+          baselineCostMicros: "0",
+        },
+        {
+          id: "start-2",
+          accountId: "account-2",
+          googleLocalDate: "2026-08-03",
+          baselineCostMicros: "0",
+        },
+      ],
+      metricRows: [
+        {
+          accountId: "account-1",
+          day: "2026-08-03",
+          adSpend: 200,
+          computedAt: "2026-08-04T13:30:00.000Z",
+        },
+        {
+          accountId: "account-2",
+          day: "2026-08-03",
+          adSpend: 100,
+          computedAt: "2026-08-04T13:30:00.000Z",
+        },
+      ],
+      invoices: [
+        {
+          id: "invoice-payable",
+          clientId: client.id,
+          periodStart: "2026-07-27",
+          status: "open",
+          amount: 10,
+          amountRemaining: 7.5,
+          currency: "EUR",
+          issuedAt: "2026-08-03T16:00:00.000Z",
+          paidAt: null,
+          calculationVersion:
+            "agency-fee-eur-v4-account-rates-manual-referrals-google-boundaries",
+        },
+        {
+          id: "invoice-overdue",
+          clientId: client.id,
+          periodStart: "2026-07-20",
+          status: "open",
+          amount: 4,
+          amountRemaining: 4,
+          currency: "EUR",
+          issuedAt: "2026-07-27T16:00:00.000Z",
+          paidAt: null,
+          calculationVersion:
+            "agency-fee-eur-v4-account-rates-manual-referrals-google-boundaries",
+        },
+        {
+          id: "invoice-paid",
+          clientId: client.id,
+          periodStart: "2026-07-13",
+          status: "paid",
+          amount: 20,
+          amountRemaining: 0,
+          currency: "EUR",
+          issuedAt: "2026-07-20T16:00:00.000Z",
+          paidAt: "2026-08-04T10:00:00.000Z",
+          calculationVersion:
+            "agency-fee-eur-v4-account-rates-manual-referrals-google-boundaries",
+        },
+      ],
+      range: { start: "2026-08-03", end: "2026-08-04" },
+      skips: [
+        {
+          id: "skip-current",
+          clientId: skippedClient.id,
+          periodStart: "2026-08-03",
+          periodEnd: "2026-08-09",
+        },
+      ],
+      commissionTermsByAccount: new Map([
+        [
+          "account-1",
+          [
+            {
+              id: "term-12",
+              effectiveFrom: "2026-08-03",
+              revision: 1,
+              listRate: 12,
+            },
+          ],
+        ],
+      ]),
+    });
+
+    expect(result.overview).toMatchObject({
+      range: { start: "2026-08-03", end: "2026-08-04" },
+      currentPeriod: {
+        start: "2026-08-03",
+        end: "2026-08-09",
+        through: "2026-08-03",
+      },
+      previousPeriod: { start: "2026-07-27", end: "2026-08-02" },
+      capabilities: {
+        skipEvidence: "available",
+        pauseEvidence: "unavailable",
+      },
+      summary: {
+        currentAccrued: 24,
+        payable: 7.5,
+        payableCount: 1,
+        overdue: 4,
+        overdueCount: 1,
+        billed: 10,
+        billedCount: 1,
+        received: 20,
+        receivedCount: 1,
+      },
+    });
+    expect(
+      result.overview.clients.find((row) => row.clientId === client.id),
+    ).toMatchObject({
+      currentSpend: 200,
+      currentAccrued: 24,
+      currentRate: 12,
+      payable: 7.5,
+      payableInvoiceIds: ["invoice-payable"],
+      overdue: 4,
+      overdueInvoiceIds: ["invoice-overdue"],
+      status: "overdue",
+      currentSkipId: null,
+      capabilities: { canSkip: true, canPause: false },
+    });
+    expect(
+      result.overview.clients.find((row) => row.clientId === skippedClient.id),
+    ).toMatchObject({
+      currentSpend: 100,
+      currentAccrued: 10,
+      currentRate: 10,
+      status: "skip_cycle",
+      currentSkipId: "skip-current",
+      capabilities: { canSkip: false, canPause: false },
+    });
+  });
 });
