@@ -167,6 +167,7 @@ export type AdminAnalyticsCampaign = {
   realRoas: number | null;
   attributionState: "matched" | "unmatched" | "unavailable";
   timeline: AdminAnalyticsCampaignTimelinePoint[];
+  trackingTimeline?: AdminAnalyticsCampaignTimelinePoint[];
   breakdown: AdminAnalyticsCampaignBreakdown;
 };
 
@@ -178,6 +179,7 @@ export type AdminAnalyticsCollectionProduct = {
   spend?: number | null;
   roas?: number | null;
   timeline: AdminAnalyticsReturnTimelinePoint[];
+  trackingTimeline?: AdminAnalyticsReturnTimelinePoint[];
 };
 
 export type AdminAnalyticsCollection = {
@@ -190,6 +192,7 @@ export type AdminAnalyticsCollection = {
   roas: number | null;
   handle?: string | null;
   timeline: AdminAnalyticsReturnTimelinePoint[];
+  trackingTimeline?: AdminAnalyticsReturnTimelinePoint[];
 };
 
 export type AdminStoreAnalytics = {
@@ -320,6 +323,12 @@ function isDay(value: string): boolean {
   if (!ISO_DAY.test(value)) return false;
   const parsed = new Date(`${value}T00:00:00.000Z`);
   return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+function offsetDay(value: string, offset: number): string {
+  const day = new Date(`${value}T00:00:00.000Z`);
+  day.setUTCDate(day.getUTCDate() + offset);
+  return day.toISOString().slice(0, 10);
 }
 
 function assertInput(
@@ -2123,6 +2132,66 @@ function slicedCollectionFamily(
   };
 }
 
+function addTrackingTimelines(
+  campaigns: AdminAnalyticsFamily<CampaignSnapshotData>,
+  campaignTracking: AdminAnalyticsFamily<CampaignSnapshotData>,
+  collections: AdminAnalyticsFamily<CollectionSnapshotData>,
+  collectionTracking: AdminAnalyticsFamily<CollectionSnapshotData>,
+) {
+  const campaignTimelines = new Map(
+    "data" in campaignTracking
+      ? campaignTracking.data.rows.map((row) => [
+          `${row.accountId}:${row.campaignId}`,
+          row.timeline,
+        ] as const)
+      : [],
+  );
+  const collectionTimelines = new Map(
+    "data" in collectionTracking
+      ? collectionTracking.data.rows.map((row) => [row.collectionId, row.timeline] as const)
+      : [],
+  );
+  const productTimelines = new Map(
+    "data" in collectionTracking
+      ? collectionTracking.data.rows.flatMap((row) => row.products.map((product) => [
+          `${row.collectionId}:${product.productId}`,
+          product.timeline,
+        ] as const))
+      : [],
+  );
+
+  const trackedCampaigns = "data" in campaigns
+    ? {
+        ...campaigns,
+        data: {
+          ...campaigns.data,
+          rows: campaigns.data.rows.map((row) => ({
+            ...row,
+            trackingTimeline: campaignTimelines.get(`${row.accountId}:${row.campaignId}`) ?? row.timeline,
+          })),
+        },
+      }
+    : campaigns;
+  const trackedCollections = "data" in collections
+    ? {
+        ...collections,
+        data: {
+          ...collections.data,
+          rows: collections.data.rows.map((row) => ({
+            ...row,
+            trackingTimeline: collectionTimelines.get(row.collectionId) ?? row.timeline,
+            products: row.products.map((product) => ({
+              ...product,
+              trackingTimeline: productTimelines.get(`${row.collectionId}:${product.productId}`) ?? product.timeline,
+            })),
+          })),
+        },
+      }
+    : collections;
+
+  return { campaigns: trackedCampaigns, collections: trackedCollections };
+}
+
 function providerFreshness(
   snapshots: AdminReportingSnapshotValue<unknown>[],
   range: Pick<RangeSelection, "to">,
@@ -2214,7 +2283,9 @@ export async function fetchCachedAdminStoreAnalytics(
     "store_campaign_performance",
     "shopify_collection_sales",
   ] as const;
-  const [stored, rollup, activity] = await Promise.all([
+  const trackingFrom = offsetDay(input.range.to, -29);
+  const needsTrackingSnapshot = input.range.from > trackingFrom;
+  const [stored, trackingStored, rollup, activity] = await Promise.all([
     readAdminReportingSnapshotFamilySelections({
       client: topology.service,
       families: [...families],
@@ -2223,6 +2294,16 @@ export async function fetchCachedAdminStoreAnalytics(
       from: input.range.from,
       to: input.range.to,
     }).catch(() => new Map()),
+    needsTrackingSnapshot
+      ? readAdminReportingSnapshotFamilySelections({
+          client: topology.service,
+          families: ["store_campaign_performance", "shopify_collection_sales"],
+          accountId: input.store.accountId,
+          authorityKey: topology.authority.key,
+          from: trackingFrom,
+          to: input.range.to,
+        }).catch(() => new Map())
+      : Promise.resolve(new Map()),
     rollupFamilies(
       topology,
       [...new Set(input.store.activityAccountIds)],
@@ -2236,19 +2317,39 @@ export async function fetchCachedAdminStoreAnalytics(
   const snapshots = selections.map((selection) => selection.snapshot);
   const [funnelSnapshot, campaignsSnapshot, collectionsSnapshot] = snapshots;
   const [funnelSelection, campaignsSelection, collectionsSelection] = selections;
+  const trackingCampaignSelection = needsTrackingSnapshot
+    ? trackingStored.get("store_campaign_performance") ?? missingStoredSelection({ from: trackingFrom, to: input.range.to })
+    : campaignsSelection;
+  const trackingCollectionSelection = needsTrackingSnapshot
+    ? trackingStored.get("shopify_collection_sales") ?? missingStoredSelection({ from: trackingFrom, to: input.range.to })
+    : collectionsSelection;
   const funnel = slicedFunnelFamily(storedFamily<FunnelSnapshotData>(funnelSnapshot, {
     granularity: "day" as const,
     daily: [],
     totals: { sessions: 0, addedToCart: 0, reachedCheckout: 0, completedCheckout: 0 },
   }), funnelSelection);
-  const campaigns = slicedCampaignFamily(storedFamily<CampaignSnapshotData>(campaignsSnapshot, {
+  const selectedCampaigns = slicedCampaignFamily(storedFamily<CampaignSnapshotData>(campaignsSnapshot, {
     granularity: "day" as const,
     rows: [],
   }), campaignsSelection);
-  const collections = slicedCollectionFamily(storedFamily<CollectionSnapshotData>(collectionsSnapshot, {
+  const selectedCollections = slicedCollectionFamily(storedFamily<CollectionSnapshotData>(collectionsSnapshot, {
     granularity: "day" as const,
     rows: [],
   }), collectionsSelection);
+  const campaignTracking = slicedCampaignFamily(storedFamily<CampaignSnapshotData>(trackingCampaignSelection.snapshot, {
+    granularity: "day" as const,
+    rows: [],
+  }), trackingCampaignSelection);
+  const collectionTracking = slicedCollectionFamily(storedFamily<CollectionSnapshotData>(trackingCollectionSelection.snapshot, {
+    granularity: "day" as const,
+    rows: [],
+  }), trackingCollectionSelection);
+  const { campaigns, collections } = addTrackingTimelines(
+    selectedCampaigns,
+    campaignTracking,
+    selectedCollections,
+    collectionTracking,
+  );
   let spend = rollup.spend;
   if (
     "data" in campaigns &&

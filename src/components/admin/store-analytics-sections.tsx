@@ -13,8 +13,10 @@ import {
 
 import {
   FunnelDevelopmentChart,
+  RoasEvolutionHover,
   SpendDevelopmentChart,
   type FunnelChartPoint,
+  type RoasEvolutionWindows,
 } from "@/components/admin/performance-charts";
 import { Badge } from "@/components/ui/badge";
 import type {
@@ -77,72 +79,66 @@ function CreativeThumbnail({ src }: { src: string | null | undefined }) {
   );
 }
 
-function MiniSparkline({
-  values,
-  label,
-}: {
-  values: Array<number | null | undefined>;
-  label: string;
-}) {
-  const width = 88;
-  const height = 24;
-  const padding = 2;
-  const finite = values.filter(
-    (value): value is number => typeof value === "number" && Number.isFinite(value),
-  );
-  if (finite.length === 0) {
-    return <span aria-label={`${label}: unavailable`}>—</span>;
+type RoasTimelinePoint = {
+  bucket: string;
+  spend: number | null | undefined;
+  revenue: number | null | undefined;
+};
+
+function offsetUtcDay(day: string, offset: number): string | null {
+  const timestamp = Date.parse(`${day}T00:00:00Z`);
+  if (!Number.isFinite(timestamp)) return null;
+  if (new Date(timestamp).toISOString().slice(0, 10) !== day) return null;
+  return new Date(timestamp + offset * 86_400_000).toISOString().slice(0, 10);
+}
+
+function roasEvolutionWindows(
+  points: RoasTimelinePoint[],
+  endDay: string,
+): RoasEvolutionWindows {
+  const daily = new Map<string, { spend: number; revenue: number; complete: boolean }>();
+
+  for (const point of points) {
+    const day = point.bucket.slice(0, 10);
+    if (offsetUtcDay(day, 0) !== day) continue;
+    const current = daily.get(day) ?? { spend: 0, revenue: 0, complete: true };
+    if (
+      typeof point.spend !== "number" || !Number.isFinite(point.spend) ||
+      typeof point.revenue !== "number" || !Number.isFinite(point.revenue)
+    ) {
+      daily.set(day, { ...current, complete: false });
+      continue;
+    }
+    daily.set(day, {
+      spend: current.spend + point.spend,
+      revenue: current.revenue + point.revenue,
+      complete: current.complete,
+    });
   }
 
-  const minimum = Math.min(...finite);
-  const maximum = Math.max(...finite);
-  const range = maximum - minimum;
-  const point = (value: number, index: number) => ({
-    x: values.length === 1
-      ? width / 2
-      : padding + (index / (values.length - 1)) * (width - padding * 2),
-    y: range === 0
-      ? height / 2
-      : padding + ((maximum - value) / range) * (height - padding * 2),
-  });
-  const segments: Array<Array<{ x: number; y: number }>> = [];
-  values.forEach((value, index) => {
-    if (typeof value !== "number" || !Number.isFinite(value)) return;
-    if (index === 0 || typeof values[index - 1] !== "number" || !Number.isFinite(values[index - 1])) {
-      segments.push([]);
+  function windowRoas(to: string | null, days: number): number | null {
+    if (!to) return null;
+    let spend = 0;
+    let revenue = 0;
+    for (let offset = 1 - days; offset <= 0; offset += 1) {
+      const day = offsetUtcDay(to, offset);
+      const total = day ? daily.get(day) : null;
+      if (!total?.complete) return null;
+      spend += total.spend;
+      revenue += total.revenue;
     }
-    segments.at(-1)?.push(point(value, index));
-  });
+    return spend > 0 ? revenue / spend : null;
+  }
 
-  return (
-    <svg
-      viewBox={`0 0 ${width} ${height}`}
-      className="h-6 w-[88px] overflow-visible text-[var(--accent-gold)]"
-      role="img"
-      aria-label={label}
-    >
-      <title>{label}</title>
-      {segments.map((segment, index) => segment.length === 1 ? (
-        <circle
-          key={index}
-          cx={segment[0].x}
-          cy={segment[0].y}
-          r="1.75"
-          fill="currentColor"
-        />
-      ) : (
-        <polyline
-          key={index}
-          points={segment.map(({ x, y }) => `${x},${y}`).join(" ")}
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.75"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-      ))}
-    </svg>
-  );
+  const yesterday = offsetUtcDay(endDay, -1);
+  return {
+    d30: windowRoas(endDay, 30),
+    d14: windowRoas(endDay, 14),
+    d7: windowRoas(endDay, 7),
+    d3: windowRoas(endDay, 3),
+    yesterday: windowRoas(yesterday, 1),
+    today: windowRoas(endDay, 1),
+  };
 }
 
 function campaignTypeLabel(
@@ -380,9 +376,11 @@ export function StoreSpendSection({
 export function CampaignPerformanceSection({
   campaigns,
   currency,
+  rangeEnd,
 }: {
   campaigns: AdminStoreAnalytics["campaigns"];
   currency: string;
+  rangeEnd: string;
 }) {
   const [openCampaigns, setOpenCampaigns] = React.useState<Set<string>>(new Set());
   const hasData = "data" in campaigns;
@@ -437,7 +435,7 @@ export function CampaignPerformanceSection({
                 <th className="px-2.5 py-2.5 text-center font-medium">Google ROAS</th>
                 <th className="px-2.5 py-2.5 text-center font-medium">REV.</th>
                 <th className="px-2.5 py-2.5 text-center font-medium">Real ROAS</th>
-                <th className="px-5 py-2.5 text-center font-medium">Evolution</th>
+                <th className="px-5 py-2.5 text-center font-medium">Tracking</th>
               </tr>
             </thead>
             <tbody>
@@ -448,17 +446,6 @@ export function CampaignPerformanceSection({
                   .filter((source) => source.state === "failed" || source.state === "unavailable")
                   .map((source) => source.reason)
                   .filter((reason): reason is string => Boolean(reason));
-                const hasRealRoasTimeline = campaign.timeline.some(
-                  (point) => point.realRoas !== null && Number.isFinite(point.realRoas),
-                );
-                const hasGoogleRoasTimeline = campaign.timeline.some(
-                  (point) => point.googleRoas !== null && Number.isFinite(point.googleRoas),
-                );
-                const evolutionSource = hasRealRoasTimeline
-                  ? "Real"
-                  : hasGoogleRoasTimeline
-                    ? "Google"
-                    : null;
                 return (
                   <React.Fragment key={key}>
                     <tr className="transition-smooth border-t border-[var(--border-subtle)] first:border-t-0 hover:bg-[var(--bg-panel-hover)]">
@@ -502,18 +489,16 @@ export function CampaignPerformanceSection({
                       <td className="px-2.5 py-3 text-center tabular-nums">{campaign.shopifyRevenue === null ? "—" : money(campaign.shopifyRevenue, currency)}</td>
                       <td className="px-2.5 py-3 text-center font-medium tabular-nums text-[var(--accent-gold-strong)]">{campaign.realRoas === null ? "—" : multiplier(campaign.realRoas)}</td>
                       <td className="px-5 py-2 text-center">
-                        <div className="inline-flex flex-col items-center gap-0.5">
-                          <MiniSparkline
-                            values={campaign.timeline.map((point) =>
-                              hasRealRoasTimeline ? point.realRoas : point.googleRoas)}
-                            label={`${evolutionSource ?? "Campaign"} ROAS evolution for ${campaign.name}`}
-                          />
-                          {evolutionSource ? (
-                            <span className="text-[9px] leading-none text-[var(--text-muted)]">
-                              {evolutionSource} ROAS
-                            </span>
-                          ) : null}
-                        </div>
+                        <RoasEvolutionHover
+                          windows={roasEvolutionWindows(
+                            (campaign.trackingTimeline ?? campaign.timeline).map((point) => ({
+                              bucket: point.bucket,
+                              spend: point.spend,
+                              revenue: point.shopifyRevenue,
+                            })),
+                            rangeEnd,
+                          )}
+                        />
                       </td>
                     </tr>
 
@@ -601,9 +586,11 @@ export function CampaignPerformanceSection({
 export function CollectionReturnSection({
   collections,
   currency,
+  rangeEnd,
 }: {
   collections: AdminStoreAnalytics["collections"];
   currency: string;
+  rangeEnd: string;
 }) {
   const [open, setOpen] = React.useState<Set<string>>(new Set());
   const hasData = "data" in collections;
@@ -661,7 +648,7 @@ export function CollectionReturnSection({
                 <th className="px-3 py-2.5 text-center font-medium">Ad spend</th>
                 <th className="px-3 py-2.5 text-center font-medium">Revenue</th>
                 <th className="px-3 py-2.5 text-center font-medium">Real ROAS</th>
-                <th className="px-5 py-2.5 text-center font-medium">Evolution</th>
+                <th className="px-5 py-2.5 text-center font-medium">Tracking</th>
               </tr>
             </thead>
             <tbody>
@@ -687,9 +674,15 @@ export function CollectionReturnSection({
                       <td className="px-3 py-3 text-center tabular-nums">{money(collection.revenue, currency)}</td>
                       <td className="px-3 py-3 text-center font-medium tabular-nums text-[var(--accent-gold-strong)]">{collection.roas === null ? "—" : multiplier(collection.roas)}</td>
                       <td className="px-5 py-2 text-center">
-                        <MiniSparkline
-                          values={collection.timeline.map((point) => point.roas)}
-                          label={`Real ROAS evolution for ${collection.title}`}
+                        <RoasEvolutionHover
+                          windows={roasEvolutionWindows(
+                            (collection.trackingTimeline ?? collection.timeline).map((point) => ({
+                              bucket: point.bucket,
+                              spend: point.spend,
+                              revenue: point.revenue,
+                            })),
+                            rangeEnd,
+                          )}
                         />
                       </td>
                     </tr>
@@ -702,9 +695,15 @@ export function CollectionReturnSection({
                         <td className="px-3 py-2.5 text-center tabular-nums">{money(product.revenue, currency)}</td>
                         <td className="px-3 py-2.5 text-center tabular-nums text-[var(--text-muted)]">{product.roas === null || product.roas === undefined ? "—" : multiplier(product.roas)}</td>
                         <td className="px-5 py-2 text-center">
-                          <MiniSparkline
-                            values={product.timeline.map((point) => point.roas)}
-                            label={`Real ROAS evolution for ${product.title}`}
+                          <RoasEvolutionHover
+                            windows={roasEvolutionWindows(
+                              (product.trackingTimeline ?? product.timeline).map((point) => ({
+                                bucket: point.bucket,
+                                spend: point.spend,
+                                revenue: point.revenue,
+                              })),
+                              rangeEnd,
+                            )}
                           />
                         </td>
                       </tr>

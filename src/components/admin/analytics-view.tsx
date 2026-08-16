@@ -546,10 +546,12 @@ export function AnalyticsView({
             <CampaignPerformanceSection
               campaigns={storeAnalytics.campaigns}
               currency={scope.selectedStore.currency}
+              rangeEnd={storeAnalytics.range.to}
             />
             <CollectionReturnSection
               collections={storeAnalytics.collections}
               currency={scope.selectedStore.currency}
+              rangeEnd={storeAnalytics.range.to}
             />
             <StoreActivityLog
               activity={storeAnalytics.activity}

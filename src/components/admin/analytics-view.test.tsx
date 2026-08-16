@@ -38,6 +38,17 @@ vi.mock("@/components/admin/performance-charts", () => ({
   }) => (
     <div>Funnel Development chart · {granularity} · {points.map((point) => point.date).join(",")}</div>
   ),
+  RoasEvolutionHover: ({
+    windows,
+  }: {
+    windows: Record<string, number | null>;
+  }) => (
+    <span aria-label="View real ROAS evolution">
+      {Object.entries(windows)
+        .map(([key, value]) => `${key}:${value ?? "—"}`)
+        .join("|")}
+    </span>
+  ),
 }));
 
 vi.mock("@/components/admin/store-analytics-sections", async () =>
@@ -405,36 +416,34 @@ describe("AnalyticsView", () => {
     );
   });
 
-  it("renders honest campaign and collection ROAS evolution", () => {
+  it("renders materialized ROAS tracking windows without inventing missing ranges", () => {
     const analytics = storeAnalytics();
     if (!("data" in analytics.campaigns) || !("data" in analytics.collections)) {
       throw new Error("Expected ready ROAS fixtures.");
     }
     const campaign = analytics.campaigns.data.rows[0];
-    campaign.timeline = [
-      {
-        bucket: "2026-08-06",
-        spend: 100,
-        shopifyRevenue: 200,
-        googleRevenue: 300,
-        realRoas: 2,
-        googleRoas: 3,
-      },
-      {
-        bucket: "2026-08-07",
-        spend: 150,
-        shopifyRevenue: 450,
-        googleRevenue: 525,
-        realRoas: 3,
-        googleRoas: 3.5,
-      },
-    ];
-    analytics.collections.data.rows[0].timeline = [
-      { bucket: "2026-08-06", revenue: 200, units: 3, spend: 100, roas: 2 },
-      { bucket: "2026-08-07", revenue: 425, units: 5, spend: 150, roas: 2.83 },
-    ];
+    campaign.timeline = Array.from({ length: 7 }, (_, index) => ({
+      bucket: `2026-08-0${index + 1}`,
+      spend: 100,
+      shopifyRevenue: (index + 1) * 100,
+      googleRevenue: (index + 2) * 100,
+      realRoas: index + 1,
+      googleRoas: index + 2,
+    }));
+    const returnTimeline = campaign.timeline.map((point, index) => ({
+      bucket: point.bucket,
+      revenue: (index + 1) * 100,
+      units: index + 1,
+      spend: 100,
+      roas: index + 1,
+    }));
+    const collection = analytics.collections.data.rows[0];
+    collection.timeline = returnTimeline;
+    collection.products[0].spend = 700;
+    collection.products[0].roas = 4;
+    collection.products[0].timeline = returnTimeline;
 
-    const render = () => renderToStaticMarkup(
+    const html = renderToStaticMarkup(
       <AnalyticsView
         clients={clients}
         overview={overview()}
@@ -443,24 +452,11 @@ describe("AnalyticsView", () => {
         storeAnalytics={analytics}
       />,
     );
-    const realHtml = render();
 
-    expect(realHtml).toContain("Evolution</th>");
-    expect(realHtml).toContain('aria-label="Real ROAS evolution for PMax · Best sellers"');
-    expect(realHtml).toContain('aria-label="Real ROAS evolution for Best sellers"');
-    expect(realHtml).toContain("<polyline");
-
-    campaign.timeline = campaign.timeline.map((point) => ({
-      ...point,
-      shopifyRevenue: null,
-      realRoas: null,
-    }));
-    const fallbackHtml = render();
-
-    expect(fallbackHtml).toContain(
-      'aria-label="Google ROAS evolution for PMax · Best sellers"',
-    );
-    expect(fallbackHtml).toContain("Google ROAS</span>");
+    expect(html).toContain("Tracking</th>");
+    expect(html.match(/aria-label="View real ROAS evolution"/g)).toHaveLength(2);
+    expect(html).toContain("d30:—|d14:—|d7:4|d3:6|yesterday:6|today:7");
+    expect(html).not.toContain("<polyline");
   });
 
   it("keeps family errors without rendering redundant top-level freshness banners", () => {
