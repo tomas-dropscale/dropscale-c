@@ -405,6 +405,64 @@ describe("AnalyticsView", () => {
     );
   });
 
+  it("renders honest campaign and collection ROAS evolution", () => {
+    const analytics = storeAnalytics();
+    if (!("data" in analytics.campaigns) || !("data" in analytics.collections)) {
+      throw new Error("Expected ready ROAS fixtures.");
+    }
+    const campaign = analytics.campaigns.data.rows[0];
+    campaign.timeline = [
+      {
+        bucket: "2026-08-06",
+        spend: 100,
+        shopifyRevenue: 200,
+        googleRevenue: 300,
+        realRoas: 2,
+        googleRoas: 3,
+      },
+      {
+        bucket: "2026-08-07",
+        spend: 150,
+        shopifyRevenue: 450,
+        googleRevenue: 525,
+        realRoas: 3,
+        googleRoas: 3.5,
+      },
+    ];
+    analytics.collections.data.rows[0].timeline = [
+      { bucket: "2026-08-06", revenue: 200, units: 3, spend: 100, roas: 2 },
+      { bucket: "2026-08-07", revenue: 425, units: 5, spend: 150, roas: 2.83 },
+    ];
+
+    const render = () => renderToStaticMarkup(
+      <AnalyticsView
+        clients={clients}
+        overview={overview()}
+        selectedStoreId="store-gbp"
+        range={{ key: "custom", from: "2026-08-01", to: "2026-08-07" }}
+        storeAnalytics={analytics}
+      />,
+    );
+    const realHtml = render();
+
+    expect(realHtml).toContain("Evolution</th>");
+    expect(realHtml).toContain('aria-label="Real ROAS evolution for PMax · Best sellers"');
+    expect(realHtml).toContain('aria-label="Real ROAS evolution for Best sellers"');
+    expect(realHtml).toContain("<polyline");
+
+    campaign.timeline = campaign.timeline.map((point) => ({
+      ...point,
+      shopifyRevenue: null,
+      realRoas: null,
+    }));
+    const fallbackHtml = render();
+
+    expect(fallbackHtml).toContain(
+      'aria-label="Google ROAS evolution for PMax · Best sellers"',
+    );
+    expect(fallbackHtml).toContain("Google ROAS</span>");
+  });
+
   it("keeps family errors without rendering redundant top-level freshness banners", () => {
     const analytics = storeAnalytics();
     analytics.providerFreshness = {

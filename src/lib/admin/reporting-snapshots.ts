@@ -47,6 +47,15 @@ export type AdminReportingSnapshotValue<T> =
       revision: number;
     };
 
+export type AdminReportingSnapshotSelection<T> = {
+  snapshot: AdminReportingSnapshotValue<T>;
+  sourceFrom: string;
+  sourceTo: string;
+  availableFrom: string;
+  availableTo: string;
+  exact: boolean;
+};
+
 export type AdminReportingFamilyResult<T> = {
   state: "ready" | "partial" | "empty" | "unavailable";
   rows: T[];
@@ -252,6 +261,97 @@ export async function readAdminReportingSnapshotFamilies(input: {
           ? snapshotValue<unknown>(row)
           : notSynced<unknown>(),
       ];
+    }),
+  );
+}
+
+function dayNumber(value: string): number {
+  return Date.parse(`${value}T00:00:00.000Z`) / 86_400_000;
+}
+
+/**
+ * Exact range first; when absent, select the overlapping materialized snapshot
+ * with the largest usable day window. The caller owns slicing its typed payload.
+ */
+export async function readAdminReportingSnapshotFamilySelections(input: {
+  client: Supabase;
+  families: AdminReportingSnapshotFamily[];
+  accountId: string;
+  authorityKey: string;
+  from: string;
+  to: string;
+}): Promise<Map<AdminReportingSnapshotFamily, AdminReportingSnapshotSelection<unknown>>> {
+  const exact = await readAdminReportingSnapshotFamilies(input);
+  const families = [...new Set(input.families)];
+  const missing = families.filter((family) => exact.get(family)?.state === "not_synced");
+  let candidates: AdminReportingRangeSnapshot[] = [];
+  if (missing.length > 0) {
+    const { data, error } = await input.client
+      .from("admin_reporting_range_snapshots")
+      .select("*")
+      .eq("scope_account_id", input.accountId)
+      .eq("authority_key", input.authorityKey)
+      .lte("from_day", input.to)
+      .gte("to_day", input.from)
+      .in("family", missing);
+    if (error || !Array.isArray(data)) {
+      throw new Error("The reporting snapshot fallback could not be read.");
+    }
+    candidates = data as AdminReportingRangeSnapshot[];
+  }
+
+  return new Map<AdminReportingSnapshotFamily, AdminReportingSnapshotSelection<unknown>>(
+    families.map((family): [AdminReportingSnapshotFamily, AdminReportingSnapshotSelection<unknown>] => {
+    const exactSnapshot = exact.get(family) ?? notSynced<unknown>();
+    if (exactSnapshot.state !== "not_synced") {
+      return [family, {
+        snapshot: exactSnapshot,
+        sourceFrom: input.from,
+        sourceTo: input.to,
+        availableFrom: input.from,
+        availableTo: input.to,
+        exact: true,
+      }];
+    }
+    const row = candidates
+      .filter((candidate) => {
+        const value = snapshotValue<unknown>(candidate);
+        return candidate.family === family &&
+          (value.state === "ready" || value.state === "partial") &&
+          value.rows.length > 0;
+      })
+      .sort((left, right) => {
+        const leftOverlap = dayNumber(
+          left.to_day < input.to ? left.to_day : input.to,
+        ) - dayNumber(left.from_day > input.from ? left.from_day : input.from);
+        const rightOverlap = dayNumber(
+          right.to_day < input.to ? right.to_day : input.to,
+        ) - dayNumber(right.from_day > input.from ? right.from_day : input.from);
+        const overlapOrder = rightOverlap - leftOverlap;
+        if (overlapOrder !== 0) return overlapOrder;
+        const spanOrder = (dayNumber(left.to_day) - dayNumber(left.from_day)) -
+          (dayNumber(right.to_day) - dayNumber(right.from_day));
+        if (spanOrder !== 0) return spanOrder;
+        return (right.last_success_at ?? "").localeCompare(left.last_success_at ?? "");
+      })[0];
+    if (!row) {
+      return [family, {
+        snapshot: exactSnapshot,
+        sourceFrom: input.from,
+        sourceTo: input.to,
+        availableFrom: input.from,
+        availableTo: input.to,
+        exact: true,
+      }];
+    }
+    return [family, {
+      snapshot: snapshotValue<unknown>(row),
+      sourceFrom: row.from_day,
+      sourceTo: row.to_day,
+      availableFrom: row.from_day > input.from ? row.from_day : input.from,
+      availableTo: row.to_day < input.to ? row.to_day : input.to,
+      exact: false,
+    }];
     }),
   );
 }

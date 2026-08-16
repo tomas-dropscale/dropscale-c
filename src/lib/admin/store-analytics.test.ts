@@ -23,7 +23,7 @@ const mocks = vi.hoisted(() => ({
   refreshAccountsNow: vi.fn(),
   adminReportingSnapshotIsStale: vi.fn(),
   adminReportingAuthority: vi.fn(),
-  readAdminReportingSnapshotFamilies: vi.fn(),
+  readAdminReportingSnapshotFamilySelections: vi.fn(),
   refreshAdminReportingSnapshot: vi.fn(),
 }));
 
@@ -73,7 +73,7 @@ vi.mock("@/lib/metrics/recompute", () => ({
 vi.mock("@/lib/admin/reporting-snapshots", () => ({
   adminReportingSnapshotIsStale: mocks.adminReportingSnapshotIsStale,
   adminReportingAuthority: mocks.adminReportingAuthority,
-  readAdminReportingSnapshotFamilies: mocks.readAdminReportingSnapshotFamilies,
+  readAdminReportingSnapshotFamilySelections: mocks.readAdminReportingSnapshotFamilySelections,
   refreshAdminReportingSnapshot: mocks.refreshAdminReportingSnapshot,
 }));
 
@@ -90,6 +90,17 @@ const STORE_ID = "20000000-0000-4000-8000-000000000001";
 const CHILD_ID = "20000000-0000-4000-8000-000000000002";
 const CHILD_TWO_ID = "20000000-0000-4000-8000-000000000003";
 const RANGE = { from: "2026-08-08", to: "2026-08-14" };
+
+function exactSelection(snapshot: unknown, range = RANGE) {
+  return {
+    snapshot,
+    sourceFrom: range.from,
+    sourceTo: range.to,
+    availableFrom: range.from,
+    availableTo: range.to,
+    exact: true,
+  };
+}
 
 function account(overrides: Record<string, unknown> = {}) {
   return {
@@ -358,7 +369,7 @@ describe("admin store analytics DAL", () => {
       key: "a".repeat(64),
       manifest,
     }));
-    mocks.readAdminReportingSnapshotFamilies.mockResolvedValue(new Map());
+    mocks.readAdminReportingSnapshotFamilySelections.mockResolvedValue(new Map());
     mocks.fetchLiveGoogleDemandGenBreakdowns.mockResolvedValue([]);
     mocks.fetchLiveGooglePmaxProductBreakdowns.mockResolvedValue([]);
     mocks.fetchGoogleReportingDemandGenAds.mockResolvedValue([]);
@@ -406,8 +417,8 @@ describe("admin store analytics DAL", () => {
       lastErrorCode: null,
       revision: 1,
     });
-    mocks.readAdminReportingSnapshotFamilies.mockResolvedValue(new Map([
-      ["shopify_funnel", snapshot([{
+    mocks.readAdminReportingSnapshotFamilySelections.mockResolvedValue(new Map([
+      ["shopify_funnel", exactSelection(snapshot([{
         daily: [{
           day: "2026-08-14",
           sessions: 200,
@@ -421,9 +432,9 @@ describe("admin store analytics DAL", () => {
           reachedCheckout: 19,
           completedCheckout: 8,
         },
-      }])],
-      ["store_campaign_performance", snapshot([{ rows: [] }])],
-      ["shopify_collection_sales", snapshot([{ rows: [] }])],
+      }]))],
+      ["store_campaign_performance", exactSelection(snapshot([{ rows: [] }]))],
+      ["shopify_collection_sales", exactSelection(snapshot([{ rows: [] }]))],
     ]));
 
     const result = await fetchCachedAdminStoreAnalytics({
@@ -447,7 +458,7 @@ describe("admin store analytics DAL", () => {
         refreshedAt: "2026-08-15T10:00:00.000Z",
       },
     });
-    expect(mocks.readAdminReportingSnapshotFamilies).toHaveBeenCalledWith({
+    expect(mocks.readAdminReportingSnapshotFamilySelections).toHaveBeenCalledWith({
       client: expect.any(Object),
       families: [
         "shopify_funnel",
@@ -478,8 +489,9 @@ describe("admin store analytics DAL", () => {
       lastErrorCode,
       revision: 2,
     });
-    mocks.readAdminReportingSnapshotFamilies.mockResolvedValue(new Map([
-      ["shopify_funnel", snapshot([{
+    const range = { from: "2026-08-15", to: "2026-08-15" };
+    mocks.readAdminReportingSnapshotFamilySelections.mockResolvedValue(new Map([
+      ["shopify_funnel", exactSelection(snapshot([{
         daily: [],
         totals: {
           sessions: 200,
@@ -487,9 +499,9 @@ describe("admin store analytics DAL", () => {
           reachedCheckout: 19,
           completedCheckout: 8,
         },
-      }], "provider_failed")],
-      ["store_campaign_performance", snapshot([{ rows: [] }])],
-      ["shopify_collection_sales", snapshot([{ rows: [] }])],
+      }], "provider_failed"), range)],
+      ["store_campaign_performance", exactSelection(snapshot([{ rows: [] }]), range)],
+      ["shopify_collection_sales", exactSelection(snapshot([{ rows: [] }]), range)],
     ]));
 
     const result = await fetchCachedAdminStoreAnalytics({
@@ -500,7 +512,7 @@ describe("admin store analytics DAL", () => {
         currency: "EUR",
         days: [],
       },
-      range: { from: "2026-08-15", to: "2026-08-15" },
+      range,
     });
 
     expect(result.funnel).toMatchObject({

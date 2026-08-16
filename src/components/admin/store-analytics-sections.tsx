@@ -41,6 +41,110 @@ function seriesBucket(point: { day?: string; bucket?: string }) {
   return point.bucket ?? point.day ?? "";
 }
 
+function safeHttpsImageUrl(value: string | null | undefined): string | null {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && !url.username && !url.password
+      ? url.toString()
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function CreativeThumbnail({ src }: { src: string | null | undefined }) {
+  const safeSrc = safeHttpsImageUrl(src);
+  const [failedSrc, setFailedSrc] = React.useState<string | null>(null);
+  const showImage = safeSrc !== null && failedSrc !== safeSrc;
+
+  return (
+    <div className="flex size-11 shrink-0 items-center justify-center overflow-hidden rounded-md border border-[var(--border-subtle)] bg-[var(--bg-elevated)]">
+      {showImage ? (
+        // eslint-disable-next-line @next/next/no-img-element -- exact provider asset URLs have unknown Google CDN hosts
+        <img
+          src={safeSrc}
+          alt=""
+          loading="lazy"
+          referrerPolicy="no-referrer"
+          onError={() => setFailedSrc(safeSrc)}
+          className="size-full object-cover"
+        />
+      ) : (
+        <ImageIcon className="size-4 text-[var(--text-muted)]" aria-hidden />
+      )}
+    </div>
+  );
+}
+
+function MiniSparkline({
+  values,
+  label,
+}: {
+  values: Array<number | null | undefined>;
+  label: string;
+}) {
+  const width = 88;
+  const height = 24;
+  const padding = 2;
+  const finite = values.filter(
+    (value): value is number => typeof value === "number" && Number.isFinite(value),
+  );
+  if (finite.length === 0) {
+    return <span aria-label={`${label}: unavailable`}>—</span>;
+  }
+
+  const minimum = Math.min(...finite);
+  const maximum = Math.max(...finite);
+  const range = maximum - minimum;
+  const point = (value: number, index: number) => ({
+    x: values.length === 1
+      ? width / 2
+      : padding + (index / (values.length - 1)) * (width - padding * 2),
+    y: range === 0
+      ? height / 2
+      : padding + ((maximum - value) / range) * (height - padding * 2),
+  });
+  const segments: Array<Array<{ x: number; y: number }>> = [];
+  values.forEach((value, index) => {
+    if (typeof value !== "number" || !Number.isFinite(value)) return;
+    if (index === 0 || typeof values[index - 1] !== "number" || !Number.isFinite(values[index - 1])) {
+      segments.push([]);
+    }
+    segments.at(-1)?.push(point(value, index));
+  });
+
+  return (
+    <svg
+      viewBox={`0 0 ${width} ${height}`}
+      className="h-6 w-[88px] overflow-visible text-[var(--accent-gold)]"
+      role="img"
+      aria-label={label}
+    >
+      <title>{label}</title>
+      {segments.map((segment, index) => segment.length === 1 ? (
+        <circle
+          key={index}
+          cx={segment[0].x}
+          cy={segment[0].y}
+          r="1.75"
+          fill="currentColor"
+        />
+      ) : (
+        <polyline
+          key={index}
+          points={segment.map(({ x, y }) => `${x},${y}`).join(" ")}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.75"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      ))}
+    </svg>
+  );
+}
+
 function campaignTypeLabel(
   campaign: { type: string | null; shoppingFeed: boolean },
 ): string {
@@ -318,7 +422,7 @@ export function CampaignPerformanceSection({
         />
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[1260px] text-[11.5px]">
+          <table className="w-full min-w-[1370px] text-[11.5px]">
             <thead>
               <tr className="label-caps border-b border-[var(--border-subtle)] text-left">
                 <th className="px-5 py-2.5 font-medium">Campaign / asset</th>
@@ -332,7 +436,8 @@ export function CampaignPerformanceSection({
                 <th className="px-2.5 py-2.5 text-center font-medium">Conv.</th>
                 <th className="px-2.5 py-2.5 text-center font-medium">Google ROAS</th>
                 <th className="px-2.5 py-2.5 text-center font-medium">REV.</th>
-                <th className="px-5 py-2.5 text-center font-medium">Real ROAS</th>
+                <th className="px-2.5 py-2.5 text-center font-medium">Real ROAS</th>
+                <th className="px-5 py-2.5 text-center font-medium">Evolution</th>
               </tr>
             </thead>
             <tbody>
@@ -343,6 +448,17 @@ export function CampaignPerformanceSection({
                   .filter((source) => source.state === "failed" || source.state === "unavailable")
                   .map((source) => source.reason)
                   .filter((reason): reason is string => Boolean(reason));
+                const hasRealRoasTimeline = campaign.timeline.some(
+                  (point) => point.realRoas !== null && Number.isFinite(point.realRoas),
+                );
+                const hasGoogleRoasTimeline = campaign.timeline.some(
+                  (point) => point.googleRoas !== null && Number.isFinite(point.googleRoas),
+                );
+                const evolutionSource = hasRealRoasTimeline
+                  ? "Real"
+                  : hasGoogleRoasTimeline
+                    ? "Google"
+                    : null;
                 return (
                   <React.Fragment key={key}>
                     <tr className="transition-smooth border-t border-[var(--border-subtle)] first:border-t-0 hover:bg-[var(--bg-panel-hover)]">
@@ -381,10 +497,24 @@ export function CampaignPerformanceSection({
                       <td className="px-2.5 py-3 text-center tabular-nums">{percent(campaign.ctr)}</td>
                       <td className="px-2.5 py-3 text-center tabular-nums">{campaign.cpm === null ? "—" : money(campaign.cpm, currency)}</td>
                       <td className="px-2.5 py-3 text-center tabular-nums">{campaign.cpa === null ? "—" : money(campaign.cpa, currency)}</td>
-                      <td className="px-2.5 py-3 text-center tabular-nums">{integer(campaign.conversions)}</td>
+                      <td className="px-2.5 py-3 text-center tabular-nums">{campaign.conversions === null ? "—" : integer(campaign.conversions)}</td>
                       <td className="px-2.5 py-3 text-center tabular-nums">{campaign.googleRoas === null ? "—" : multiplier(campaign.googleRoas)}</td>
                       <td className="px-2.5 py-3 text-center tabular-nums">{campaign.shopifyRevenue === null ? "—" : money(campaign.shopifyRevenue, currency)}</td>
-                      <td className="px-5 py-3 text-center font-medium tabular-nums text-[var(--accent-gold-strong)]">{campaign.realRoas === null ? "—" : multiplier(campaign.realRoas)}</td>
+                      <td className="px-2.5 py-3 text-center font-medium tabular-nums text-[var(--accent-gold-strong)]">{campaign.realRoas === null ? "—" : multiplier(campaign.realRoas)}</td>
+                      <td className="px-5 py-2 text-center">
+                        <div className="inline-flex flex-col items-center gap-0.5">
+                          <MiniSparkline
+                            values={campaign.timeline.map((point) =>
+                              hasRealRoasTimeline ? point.realRoas : point.googleRoas)}
+                            label={`${evolutionSource ?? "Campaign"} ROAS evolution for ${campaign.name}`}
+                          />
+                          {evolutionSource ? (
+                            <span className="text-[9px] leading-none text-[var(--text-muted)]">
+                              {evolutionSource} ROAS
+                            </span>
+                          ) : null}
+                        </div>
+                      </td>
                     </tr>
 
                     {open && campaign.breakdown.rows.map((row) => {
@@ -406,28 +536,12 @@ export function CampaignPerformanceSection({
                       const realRoas = row.spend !== null && row.spend > 0 && row.shopifyRevenue !== null
                         ? row.shopifyRevenue / row.spend
                         : null;
-                      const thumbnailUrl = row.thumbnailUrl?.startsWith("https://")
-                        ? row.thumbnailUrl
-                        : null;
                       return (
                         <tr key={`${row.provider}:${row.kind}:${row.id}`} className="border-t border-[var(--border-subtle)] bg-[var(--bg-base)] hover:bg-[var(--bg-panel-hover)]">
                           <td className="px-5 py-2.5 pl-12">
                             <div className="flex items-center gap-2.5">
                               {row.kind === "creative" ? (
-                                <div className="flex size-11 shrink-0 items-center justify-center overflow-hidden rounded-md border border-[var(--border-subtle)] bg-[var(--bg-elevated)]">
-                                  {thumbnailUrl ? (
-                                    // eslint-disable-next-line @next/next/no-img-element -- exact provider asset URLs have unknown Google CDN hosts
-                                    <img
-                                      src={thumbnailUrl}
-                                      alt=""
-                                      loading="lazy"
-                                      referrerPolicy="no-referrer"
-                                      className="size-full object-cover"
-                                    />
-                                  ) : (
-                                    <ImageIcon className="size-4 text-[var(--text-muted)]" aria-hidden />
-                                  )}
-                                </div>
+                                <CreativeThumbnail src={row.thumbnailUrl} />
                               ) : null}
                               <div className="min-w-0">
                                 <p className="truncate font-medium text-[var(--text-secondary)]">{row.name}</p>
@@ -447,14 +561,15 @@ export function CampaignPerformanceSection({
                           <td className="px-2.5 py-2.5 text-center tabular-nums">{row.conversions === null ? "—" : integer(row.conversions)}</td>
                           <td className="px-2.5 py-2.5 text-center tabular-nums">{googleRoas === null ? "—" : multiplier(googleRoas)}</td>
                           <td className="px-2.5 py-2.5 text-center tabular-nums">{row.shopifyRevenue === null ? "—" : money(row.shopifyRevenue, currency)}</td>
-                          <td className="px-5 py-2.5 text-center tabular-nums text-[var(--accent-gold-strong)]">{realRoas === null ? "—" : multiplier(realRoas)}</td>
+                          <td className="px-2.5 py-2.5 text-center tabular-nums text-[var(--accent-gold-strong)]">{realRoas === null ? "—" : multiplier(realRoas)}</td>
+                          <td className="px-5 py-2.5 text-center text-[var(--text-muted)]">—</td>
                         </tr>
                       );
                     })}
 
                     {open && campaign.breakdown.rows.length === 0 ? (
                       <tr className="border-t border-[var(--border-subtle)] bg-[var(--bg-base)]">
-                        <td colSpan={12} className="px-12 py-3 text-[11px] text-[var(--text-muted)]">
+                        <td colSpan={13} className="px-12 py-3 text-[11px] text-[var(--text-muted)]">
                           {campaign.breakdown.reason ||
                             campaign.breakdown.sources
                               .map((source) => source.reason)
@@ -467,7 +582,7 @@ export function CampaignPerformanceSection({
 
                     {open && campaign.breakdown.rows.length > 0 && breakdownWarnings.length > 0 ? (
                       <tr className="border-t border-[var(--border-subtle)] bg-[var(--bg-base)]">
-                        <td colSpan={12} className="px-12 py-2.5 text-[10.5px] text-[var(--warning-orange)]">
+                        <td colSpan={13} className="px-12 py-2.5 text-[10.5px] text-[var(--warning-orange)]">
                           {breakdownWarnings.join(" ")}
                         </td>
                       </tr>
@@ -537,7 +652,7 @@ export function CollectionReturnSection({
         />
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[820px] text-[11.5px]">
+          <table className="w-full min-w-[930px] text-[11.5px]">
             <thead>
               <tr className="label-caps border-b border-[var(--border-subtle)] text-left">
                 <th className="px-5 py-2.5 font-medium">Collection / product</th>
@@ -545,7 +660,8 @@ export function CollectionReturnSection({
                 <th className="px-3 py-2.5 text-center font-medium">Units</th>
                 <th className="px-3 py-2.5 text-center font-medium">Ad spend</th>
                 <th className="px-3 py-2.5 text-center font-medium">Revenue</th>
-                <th className="px-5 py-2.5 text-center font-medium">Real ROAS</th>
+                <th className="px-3 py-2.5 text-center font-medium">Real ROAS</th>
+                <th className="px-5 py-2.5 text-center font-medium">Evolution</th>
               </tr>
             </thead>
             <tbody>
@@ -569,7 +685,13 @@ export function CollectionReturnSection({
                       <td className="px-3 py-3 text-center tabular-nums">{integer(collection.units)}</td>
                       <td className="px-3 py-3 text-center tabular-nums">{collection.spend === null ? "—" : money(collection.spend, currency)}</td>
                       <td className="px-3 py-3 text-center tabular-nums">{money(collection.revenue, currency)}</td>
-                      <td className="px-5 py-3 text-center font-medium tabular-nums text-[var(--accent-gold-strong)]">{collection.roas === null ? "—" : multiplier(collection.roas)}</td>
+                      <td className="px-3 py-3 text-center font-medium tabular-nums text-[var(--accent-gold-strong)]">{collection.roas === null ? "—" : multiplier(collection.roas)}</td>
+                      <td className="px-5 py-2 text-center">
+                        <MiniSparkline
+                          values={collection.timeline.map((point) => point.roas)}
+                          label={`Real ROAS evolution for ${collection.title}`}
+                        />
+                      </td>
                     </tr>
                     {expanded && collection.products.map((product) => (
                       <tr key={product.productId} className="border-t border-[var(--border-subtle)] bg-[var(--bg-base)] hover:bg-[var(--bg-panel-hover)]">
@@ -578,7 +700,13 @@ export function CollectionReturnSection({
                         <td className="px-3 py-2.5 text-center tabular-nums">{integer(product.units)}</td>
                         <td className="px-3 py-2.5 text-center tabular-nums text-[var(--text-muted)]">{product.spend === null || product.spend === undefined ? "—" : money(product.spend, currency)}</td>
                         <td className="px-3 py-2.5 text-center tabular-nums">{money(product.revenue, currency)}</td>
-                        <td className="px-5 py-2.5 text-center tabular-nums text-[var(--text-muted)]">{product.roas === null || product.roas === undefined ? "—" : multiplier(product.roas)}</td>
+                        <td className="px-3 py-2.5 text-center tabular-nums text-[var(--text-muted)]">{product.roas === null || product.roas === undefined ? "—" : multiplier(product.roas)}</td>
+                        <td className="px-5 py-2 text-center">
+                          <MiniSparkline
+                            values={product.timeline.map((point) => point.roas)}
+                            label={`Real ROAS evolution for ${product.title}`}
+                          />
+                        </td>
                       </tr>
                     ))}
                   </React.Fragment>

@@ -298,9 +298,8 @@ async function bootstrapReportingAccount(accountId: string) {
   if (!service) return response({ error: "Reporting sync is not configured." }, 503);
   const today = new Date(`${presetSelection("today").to}T00:00:00.000Z`);
   const to = new Date(today);
-  to.setUTCDate(to.getUTCDate() - 1);
   const from = new Date(to);
-  from.setUTCDate(from.getUTCDate() - 89);
+  from.setUTCDate(from.getUTCDate() - 90);
   await refreshReportingSourcesNow([accountId], {
     client: service,
     from: from.toISOString().slice(0, 10),

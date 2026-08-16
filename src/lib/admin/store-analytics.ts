@@ -42,9 +42,10 @@ import {
 import {
   adminReportingSnapshotIsStale,
   adminReportingAuthority,
-  readAdminReportingSnapshotFamilies,
+  readAdminReportingSnapshotFamilySelections,
   refreshAdminReportingSnapshot,
   type AdminReportingAuthority,
+  type AdminReportingSnapshotSelection,
   type AdminReportingSnapshotValue,
 } from "@/lib/admin/reporting-snapshots";
 import { createServiceClient } from "@/lib/supabase/service";
@@ -80,6 +81,9 @@ export type AdminAnalyticsGranularity = "hour" | "day";
 export type AdminAnalyticsCampaignTimelinePoint = {
   bucket: string;
   spend: number;
+  impressions?: number;
+  clicks?: number;
+  conversions?: number;
   shopifyRevenue: number | null;
   googleRevenue: number;
   realRoas: number | null;
@@ -148,9 +152,9 @@ export type AdminAnalyticsCampaign = {
   shoppingFeed: boolean;
   budget: number | null;
   spend: number;
-  impressions: number;
-  clicks: number;
-  conversions: number;
+  impressions: number | null;
+  clicks: number | null;
+  conversions: number | null;
   googleRevenue: number;
   shopifySessions: number | null;
   shopifyOrders: number | null;
@@ -1408,6 +1412,9 @@ function campaignFamily(
         return {
           bucket,
           spend: pointSpend,
+          impressions: googlePoint?.impressions ?? 0,
+          clicks: googlePoint?.clicks ?? 0,
+          conversions: googlePoint?.conversions ?? 0,
           shopifyRevenue,
           googleRevenue,
           realRoas: pointSpend > 0 && shopifyRevenue !== null
@@ -1930,6 +1937,192 @@ function storedFamily<T>(
   return { state: "ready", data: snapshot.rows[0] as T, message: message || null };
 }
 
+type FunnelSnapshotData = {
+  granularity: AdminAnalyticsGranularity;
+  daily: AdminAnalyticsFunnelDay[];
+  totals: {
+    sessions: number;
+    addedToCart: number;
+    reachedCheckout: number;
+    completedCheckout: number;
+  };
+};
+
+type CampaignSnapshotData = {
+  granularity: AdminAnalyticsGranularity;
+  rows: AdminAnalyticsCampaign[];
+};
+
+type CollectionSnapshotData = {
+  granularity: AdminAnalyticsGranularity;
+  rows: AdminAnalyticsCollection[];
+};
+
+function bucketInRange(bucket: string, from: string, to: string): boolean {
+  const day = bucket.slice(0, 10);
+  return isDay(day) && day >= from && day <= to;
+}
+
+function fallbackPeriodMessage(
+  selection: AdminReportingSnapshotSelection<unknown>,
+  buckets: string[],
+): string {
+  const days = buckets.map((bucket) => bucket.slice(0, 10)).filter(isDay).sort();
+  const from = days[0] ?? selection.availableFrom;
+  const to = days.at(-1) ?? selection.availableTo;
+  return `Showing materialized provider data available for ${from} → ${to} from the synced ${selection.sourceFrom} → ${selection.sourceTo} snapshot. Sync the selected period for an exact provider view.`;
+}
+
+function slicedFunnelFamily(
+  family: AdminAnalyticsFamily<FunnelSnapshotData>,
+  selection: AdminReportingSnapshotSelection<unknown>,
+): AdminAnalyticsFamily<FunnelSnapshotData> {
+  if (selection.exact || !("data" in family)) return family;
+  const daily = family.data.daily.filter((point) =>
+    bucketInRange(point.bucket || point.day, selection.availableFrom, selection.availableTo));
+  const totals = daily.reduce((sum, point) => ({
+    sessions: sum.sessions + point.sessions,
+    addedToCart: sum.addedToCart + point.addedToCart,
+    reachedCheckout: sum.reachedCheckout + point.reachedCheckout,
+    completedCheckout: sum.completedCheckout + point.completedCheckout,
+  }), { sessions: 0, addedToCart: 0, reachedCheckout: 0, completedCheckout: 0 });
+  if (daily.length === 0) {
+    return { state: "empty", data: { ...family.data, daily, totals }, message: fallbackPeriodMessage(selection, []) };
+  }
+  return {
+    state: "partial",
+    data: { ...family.data, daily, totals },
+    message: fallbackPeriodMessage(selection, daily.map((point) => point.bucket || point.day)),
+  };
+}
+
+function sumOptionalCampaignMetric(
+  points: AdminAnalyticsCampaignTimelinePoint[],
+  key: "impressions" | "clicks" | "conversions",
+): number | null {
+  return points.every((point) => typeof point[key] === "number" && Number.isFinite(point[key]))
+    ? points.reduce((sum, point) => sum + (point[key] ?? 0), 0)
+    : null;
+}
+
+function slicedCampaignFamily(
+  family: AdminAnalyticsFamily<CampaignSnapshotData>,
+  selection: AdminReportingSnapshotSelection<unknown>,
+): AdminAnalyticsFamily<CampaignSnapshotData> {
+  if (selection.exact || !("data" in family)) return family;
+  const rows = family.data.rows.flatMap((campaign) => {
+    const timeline = campaign.timeline.filter((point) =>
+      bucketInRange(point.bucket, selection.availableFrom, selection.availableTo));
+    if (timeline.length === 0) return [];
+    const spend = timeline.reduce((sum, point) => sum + point.spend, 0);
+    const googleRevenue = timeline.reduce((sum, point) => sum + point.googleRevenue, 0);
+    const shopifyRevenue = timeline.every((point) => point.shopifyRevenue !== null)
+      ? timeline.reduce((sum, point) => sum + (point.shopifyRevenue ?? 0), 0)
+      : null;
+    const impressions = sumOptionalCampaignMetric(timeline, "impressions");
+    const clicks = sumOptionalCampaignMetric(timeline, "clicks");
+    const conversions = sumOptionalCampaignMetric(timeline, "conversions");
+    const breakdown: AdminAnalyticsCampaignBreakdown =
+      campaign.breakdown.state === "ready" || campaign.breakdown.state === "empty"
+        ? {
+          ...campaign.breakdown,
+          rows: campaign.breakdown.rows.map((row) => ({
+            ...row,
+            spend: null,
+            impressions: null,
+            clicks: null,
+            conversions: null,
+            googleRevenue: null,
+            shopifyUnits: null,
+            shopifyRevenue: null,
+          })),
+        }
+        : campaign.breakdown;
+    return [{
+      ...campaign,
+      spend,
+      impressions,
+      clicks,
+      conversions,
+      googleRevenue,
+      shopifySessions: null,
+      shopifyOrders: null,
+      shopifyRevenue,
+      ctr: impressions && impressions > 0 && clicks !== null ? clicks / impressions : null,
+      cpc: clicks && clicks > 0 ? spend / clicks : null,
+      cpm: impressions && impressions > 0 ? (spend / impressions) * 1_000 : null,
+      cpa: conversions && conversions > 0 ? spend / conversions : null,
+      googleRoas: spend > 0 ? googleRevenue / spend : null,
+      realRoas: spend > 0 && shopifyRevenue !== null ? shopifyRevenue / spend : null,
+      attributionState: shopifyRevenue === null ? "unavailable" as const : campaign.attributionState,
+      timeline,
+      breakdown,
+    }];
+  });
+  const buckets = rows.flatMap((row) => row.timeline.map((point) => point.bucket));
+  if (rows.length === 0) {
+    return { state: "empty", data: { ...family.data, rows }, message: fallbackPeriodMessage(selection, []) };
+  }
+  return {
+    state: "partial",
+    data: { ...family.data, rows },
+    message: fallbackPeriodMessage(selection, buckets),
+  };
+}
+
+function slicedCollectionFamily(
+  family: AdminAnalyticsFamily<CollectionSnapshotData>,
+  selection: AdminReportingSnapshotSelection<unknown>,
+): AdminAnalyticsFamily<CollectionSnapshotData> {
+  if (selection.exact || !("data" in family)) return family;
+  const rows = family.data.rows.flatMap((collection) => {
+    const timeline = collection.timeline.filter((point) =>
+      bucketInRange(point.bucket, selection.availableFrom, selection.availableTo));
+    const products = collection.products.flatMap((product) => {
+      const productTimeline = product.timeline.filter((point) =>
+        bucketInRange(point.bucket, selection.availableFrom, selection.availableTo));
+      if (productTimeline.length === 0) return [];
+      const revenue = productTimeline.reduce((sum, point) => sum + point.revenue, 0);
+      const units = productTimeline.reduce((sum, point) => sum + point.units, 0);
+      const spend = product.spend === null || product.spend === undefined
+        ? null
+        : productTimeline.reduce((sum, point) => sum + point.spend, 0);
+      return [{
+        ...product,
+        revenue,
+        units,
+        spend,
+        roas: spend && spend > 0 ? revenue / spend : null,
+        timeline: productTimeline,
+      }];
+    });
+    if (timeline.length === 0 && products.length === 0) return [];
+    const revenue = timeline.reduce((sum, point) => sum + point.revenue, 0);
+    const units = timeline.reduce((sum, point) => sum + point.units, 0);
+    const spend = collection.spend === null
+      ? null
+      : timeline.reduce((sum, point) => sum + point.spend, 0);
+    return [{
+      ...collection,
+      products,
+      revenue,
+      units,
+      spend,
+      roas: spend && spend > 0 ? revenue / spend : null,
+      timeline,
+    }];
+  });
+  const buckets = rows.flatMap((row) => row.timeline.map((point) => point.bucket));
+  if (rows.length === 0) {
+    return { state: "empty", data: { ...family.data, rows }, message: fallbackPeriodMessage(selection, []) };
+  }
+  return {
+    state: "partial",
+    data: { ...family.data, rows },
+    message: fallbackPeriodMessage(selection, buckets),
+  };
+}
+
 function providerFreshness(
   snapshots: AdminReportingSnapshotValue<unknown>[],
   range: Pick<RangeSelection, "to">,
@@ -1971,6 +2164,19 @@ function missingStoredSnapshot(): AdminReportingSnapshotValue<unknown> {
   };
 }
 
+function missingStoredSelection(
+  range: Pick<RangeSelection, "from" | "to">,
+): AdminReportingSnapshotSelection<unknown> {
+  return {
+    snapshot: missingStoredSnapshot(),
+    sourceFrom: range.from,
+    sourceTo: range.to,
+    availableFrom: range.from,
+    availableTo: range.to,
+    exact: true,
+  };
+}
+
 async function currentActivity(
   input: FetchAdminStoreAnalyticsInput,
 ): Promise<AdminStoreAnalytics["activity"]> {
@@ -2009,7 +2215,7 @@ export async function fetchCachedAdminStoreAnalytics(
     "shopify_collection_sales",
   ] as const;
   const [stored, rollup, activity] = await Promise.all([
-    readAdminReportingSnapshotFamilies({
+    readAdminReportingSnapshotFamilySelections({
       client: topology.service,
       families: [...families],
       accountId: input.store.accountId,
@@ -2024,38 +2230,25 @@ export async function fetchCachedAdminStoreAnalytics(
     ),
     currentActivity(input),
   ]);
-  const snapshots = families.map(
-    (family) => stored.get(family) ?? missingStoredSnapshot(),
+  const selections = families.map(
+    (family) => stored.get(family) ?? missingStoredSelection(input.range),
   );
+  const snapshots = selections.map((selection) => selection.snapshot);
   const [funnelSnapshot, campaignsSnapshot, collectionsSnapshot] = snapshots;
-  const funnel = storedFamily<{
-    granularity: AdminAnalyticsGranularity;
-    daily: AdminAnalyticsFunnelDay[];
-    totals: {
-      sessions: number;
-      addedToCart: number;
-      reachedCheckout: number;
-      completedCheckout: number;
-    };
-  }>(funnelSnapshot, {
+  const [funnelSelection, campaignsSelection, collectionsSelection] = selections;
+  const funnel = slicedFunnelFamily(storedFamily<FunnelSnapshotData>(funnelSnapshot, {
     granularity: "day" as const,
     daily: [],
     totals: { sessions: 0, addedToCart: 0, reachedCheckout: 0, completedCheckout: 0 },
-  });
-  const campaigns = storedFamily<{
-    granularity: AdminAnalyticsGranularity;
-    rows: AdminAnalyticsCampaign[];
-  }>(campaignsSnapshot, {
+  }), funnelSelection);
+  const campaigns = slicedCampaignFamily(storedFamily<CampaignSnapshotData>(campaignsSnapshot, {
     granularity: "day" as const,
     rows: [],
-  });
-  const collections = storedFamily<{
-    granularity: AdminAnalyticsGranularity;
-    rows: AdminAnalyticsCollection[];
-  }>(collectionsSnapshot, {
+  }), campaignsSelection);
+  const collections = slicedCollectionFamily(storedFamily<CollectionSnapshotData>(collectionsSnapshot, {
     granularity: "day" as const,
     rows: [],
-  });
+  }), collectionsSelection);
   let spend = rollup.spend;
   if (
     "data" in campaigns &&
@@ -2072,6 +2265,7 @@ export async function fetchCachedAdminStoreAnalytics(
       .sort((left, right) => left.bucket.localeCompare(right.bucket));
     spend = readyOrEmpty({ granularity: "hour", daily }, daily.length === 0);
   }
+  const freshness = providerFreshness(snapshots, input.range);
   return {
     clientId: input.clientId,
     storeAccountId: input.store.accountId,
@@ -2083,7 +2277,9 @@ export async function fetchCachedAdminStoreAnalytics(
     spend,
     rollupCoverage: rollup.rollupCoverage,
     activity,
-    providerFreshness: providerFreshness(snapshots, input.range),
+    providerFreshness: selections.some((selection) => !selection.exact) && freshness.state === "ready"
+      ? { ...freshness, state: "partial" }
+      : freshness,
     shopifyProvenance: topology.shopifyProvenance,
   };
 }
