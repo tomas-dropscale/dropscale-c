@@ -60,7 +60,7 @@ const worker = {
      * metrics pass. The ledger remains independent finance evidence.
      */
     const job: { name: string; paths: string[] } =
-      event.cron === "5 14 * * 1" || event.cron === "25 14 * * 1"
+      event.cron === "5 14 * * MON" || event.cron === "25 14 * * MON"
         ? {
             name: "weekly billing evidence and automatic invoice issue",
             paths: [
