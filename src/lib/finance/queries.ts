@@ -41,9 +41,8 @@ export async function fetchFinanceSnapshot(
   from: string,
   to: string,
 ): Promise<FinanceSnapshot> {
-  const [sources, clients, commissions, expenses] = await Promise.all([
+  const [sources, commissions, expenses] = await Promise.all([
     supabase.from("revenue_sources").select("*").order("name"),
-    supabase.from("clients").select("*").order("name"),
     supabase
       .from("commissions")
       .select("*")
@@ -60,7 +59,9 @@ export async function fetchFinanceSnapshot(
 
   return {
     sources: sources.data ?? [],
-    clients: clients.data ?? [],
+    // The legacy CRM "clients" table was dropped on 2026-08-17; it never held
+    // rows in production. Kept in the snapshot shape so readers stay stable.
+    clients: [],
     commissions: commissions.data ?? [],
     expenses: expenses.data ?? [],
     from,

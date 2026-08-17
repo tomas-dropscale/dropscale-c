@@ -672,11 +672,10 @@ async function runSync(supabase: Supabase): Promise<HstSyncResult> {
     };
   }
 
-  // Attribute to a CRM client by name (exact, case-insensitive) when one exists.
-  const { data: crmClients } = await supabase.from("clients").select("id, name");
-  const clientIdByName = new Map(
-    (crmClients ?? []).map((row) => [row.name.trim().toLowerCase(), row.id]),
-  );
+  // The legacy CRM "clients" table was dropped on 2026-08-17 — it never held
+  // rows, so HST commissions were always unattributed by id and the finance
+  // reader already falls back to the client name carried in the note.
+  const clientIdByName = new Map<string, string>();
 
   // Settlement is re-derived, never carried: these rows are about to be
   // rewritten, so "paid" has to come from the payments table each time.
