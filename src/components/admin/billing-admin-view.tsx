@@ -11,6 +11,7 @@ import {
   ExternalLink,
   FileWarning,
   MoreHorizontal,
+  ReceiptText,
   Search,
   type LucideIcon,
 } from "lucide-react";
@@ -57,6 +58,17 @@ import { cn } from "@/lib/utils";
 type InvoiceHistoryItem = BillingAdminDashboard["invoices"][number];
 
 type Feedback = { tone: "error" | "success"; message: string } | null;
+
+type IssueAllResponse = {
+  error?: string;
+  period?: { start: string; end: string };
+  summary?: {
+    newlyIssued: number;
+    alreadyIssued: number;
+    noCharge: number;
+    blocked: number;
+  };
+};
 
 type OverviewClient =
   BillingAdminDashboard["positions"]["overview"]["clients"][number];
@@ -315,6 +327,9 @@ export function BillingAdminView({
   );
   const [skippingId, setSkippingId] = React.useState<string | null>(null);
   const [skipFeedback, setSkipFeedback] = React.useState<Feedback>(null);
+  const [issueDialogOpen, setIssueDialogOpen] = React.useState(false);
+  const [issuingAll, setIssuingAll] = React.useState(false);
+  const [issueFeedback, setIssueFeedback] = React.useState<Feedback>(null);
 
   const clientRows = React.useMemo<ClientBillingRow[]>(
     () =>
@@ -424,6 +439,47 @@ export function BillingAdminView({
     }
   }
 
+  async function issueAllInvoices() {
+    setIssuingAll(true);
+    setIssueFeedback(null);
+    try {
+      const response = await fetch("/api/billing/issue-all", {
+        method: "POST",
+      });
+      const body = (await response.json().catch(() => null)) as
+        | IssueAllResponse
+        | null;
+      if (!response.ok) {
+        setIssueFeedback({
+          tone: "error",
+          message: requestError(body, "Não foi possível emitir as faturas."),
+        });
+        return;
+      }
+
+      const issued = body?.summary?.newlyIssued ?? 0;
+      const alreadyIssued = body?.summary?.alreadyIssued ?? 0;
+      const noCharge = body?.summary?.noCharge ?? 0;
+      const blocked = body?.summary?.blocked ?? 0;
+      const period = body?.period
+        ? formatPeriod(body.period.start, body.period.end, intl)
+        : "o último ciclo fechado";
+      setIssueFeedback({
+        tone: blocked > 0 ? "error" : "success",
+        message: `${period}: ${issued} ${issued === 1 ? "fatura emitida agora" : "faturas emitidas agora"}, ${alreadyIssued} já emitidas, ${noCharge} sem cobrança e ${blocked} ${blocked === 1 ? "bloqueio" : "bloqueios"}.`,
+      });
+      setIssueDialogOpen(false);
+      router.refresh();
+    } catch {
+      setIssueFeedback({
+        tone: "error",
+        message: "Não foi possível emitir as faturas.",
+      });
+    } finally {
+      setIssuingAll(false);
+    }
+  }
+
   return (
     <div className="space-y-6">
       <section
@@ -431,13 +487,28 @@ export function BillingAdminView({
         className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between"
       >
         <DateRangePicker value={range} onApply={setRange} align="start" />
-        <p className="text-[11px] text-[var(--text-muted)]">
-          Faturado e recebido:{" "}
-          <span className="font-medium text-[var(--text-secondary)]">
-            {formatPeriod(range.from, range.to, intl)}
-          </span>
-        </p>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <p className="text-[11px] text-[var(--text-muted)]">
+            Faturado e recebido:{" "}
+            <span className="font-medium text-[var(--text-secondary)]">
+              {formatPeriod(range.from, range.to, intl)}
+            </span>
+          </p>
+          <Button
+            type="button"
+            variant="primary"
+            disabled={issuingAll}
+            onClick={() => setIssueDialogOpen(true)}
+          >
+            <ReceiptText />
+            Emitir faturas
+          </Button>
+        </div>
       </section>
+
+      {issueFeedback && (
+        <FormAlert tone={issueFeedback.tone}>{issueFeedback.message}</FormAlert>
+      )}
 
       {skipFeedback && (
         <FormAlert tone={skipFeedback.tone}>{skipFeedback.message}</FormAlert>
@@ -931,6 +1002,48 @@ export function BillingAdminView({
             >
               <CalendarDays />
               {skippingId ? "A guardar skip" : "Confirmar skip"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={issueDialogOpen}
+        onOpenChange={(open) => {
+          if (!issuingAll) setIssueDialogOpen(open);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Emitir faturas do último ciclo?</DialogTitle>
+            <DialogDescription>
+              O sistema atualiza a prova Google e emite na Stripe todas as
+              faturas elegíveis do último ciclo fechado.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="rounded-xl border border-[var(--warning-orange)]/25 bg-[var(--warning-orange)]/10 p-3 text-[12px] leading-relaxed text-[var(--text-secondary)]">
+            Clientes com skip, fatura já emitida ou dados incompletos não serão
+            cobrados duas vezes. Os bloqueios ficam visíveis para correção.
+          </div>
+
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={issuingAll}
+              onClick={() => setIssueDialogOpen(false)}
+            >
+              {d.common.cancel}
+            </Button>
+            <Button
+              type="button"
+              variant="primary"
+              loading={issuingAll}
+              onClick={issueAllInvoices}
+            >
+              <ReceiptText />
+              {issuingAll ? "A emitir faturas" : "Emitir todas"}
             </Button>
           </DialogFooter>
         </DialogContent>

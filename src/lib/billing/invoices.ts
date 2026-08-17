@@ -2103,6 +2103,35 @@ export type AutomaticBillingIssueResult =
       evidenceAccountCount: number;
     };
 
+export type BillingBatchIssued = {
+  clientId: string;
+  clientName: string;
+  invoiceId: string;
+  amount: number;
+  alreadyIssued: boolean;
+};
+
+export type BillingBatchNoCharge = {
+  clientId: string;
+  clientName: string;
+  billableSpend: number;
+  reason: "exact_zero" | "cycle_skipped";
+};
+
+export type BillingBatchBlocked = {
+  clientId: string;
+  clientName: string;
+  code: string;
+  message: string;
+};
+
+export type BillingBatchResult = {
+  period: { start: string; end: string };
+  issued: BillingBatchIssued[];
+  noCharge: BillingBatchNoCharge[];
+  blocked: BillingBatchBlocked[];
+};
+
 function hasDurableIssueReceipt(invoice: Invoice): boolean {
   return invoice.status === "waived"
     ? invoice.issued_at !== null
@@ -2670,14 +2699,16 @@ export async function issueClientWeek(input: {
 }
 
 /**
- * Reuse the reviewed calculation and issue contract without manufacturing an
- * admin identity. The first preview supplies a short-lived integrity token;
- * issueClientWeek recalculates it immediately before the database/Stripe
- * mutation, so a changed ledger, boundary, recipient or rate fails closed.
+ * Reuse the reviewed calculation and issue contract with an explicit admin
+ * issuer, or null for the legacy automation caller. The first preview supplies
+ * a short-lived integrity token; issueClientWeek recalculates it immediately
+ * before the database/Stripe mutation, so a changed ledger, boundary,
+ * recipient or rate fails closed.
  */
-export async function issueClientWeekAutomatically(input: {
+export async function issueClientWeekFromCurrentPreview(input: {
   clientId: string;
   periodStart: string;
+  issuedBy: string | null;
   client: Supabase;
 }): Promise<AutomaticBillingIssueResult> {
   const week = closedWeekStarting(input.periodStart);
@@ -2747,7 +2778,7 @@ export async function issueClientWeekAutomatically(input: {
     periodStart: week.start,
     expectedAmount: preview.amount,
     expectedReviewToken: preview.reviewToken,
-    issuedBy: null,
+    issuedBy: input.issuedBy,
     client: input.client,
   });
   return {
@@ -2757,6 +2788,143 @@ export async function issueClientWeekAutomatically(input: {
     billableSpend: preview.billableSpend,
     evidenceAccountCount,
   };
+}
+
+/** Automatic callers have no admin issuer; reviewed bulk actions do. */
+export function issueClientWeekAutomatically(input: {
+  clientId: string;
+  periodStart: string;
+  client: Supabase;
+}): Promise<AutomaticBillingIssueResult> {
+  return issueClientWeekFromCurrentPreview({ ...input, issuedBy: null });
+}
+
+/**
+ * Issue one exact closed week for every billing client. Each client is its own
+ * result so one disconnected account cannot stop invoices whose evidence is
+ * complete. `issueClientWeek` remains the sole Stripe mutation and rechecks
+ * the preview immediately before every write.
+ */
+export async function issueClosedBillingWeekBatch(input: {
+  periodStart: string;
+  issuedBy: string;
+  client: Supabase;
+}): Promise<BillingBatchResult> {
+  const week = closedWeekStarting(input.periodStart);
+  if (!week) {
+    throw new BillingIssueError(
+      "Select a fully closed Monday-to-Sunday week.",
+      422,
+      "period_not_closed",
+    );
+  }
+  if (!input.issuedBy) {
+    throw new BillingIssueError(
+      "An admin issuer is required.",
+      422,
+      "invalid_request",
+    );
+  }
+
+  const calculated = await calculateWeek(input.client, week);
+  const skips = await fetchPositionSkips(
+    input.client,
+    calculated.map((entry) => entry.preview.clientId),
+    week.start,
+  );
+  const skippedClients = new Set(
+    skips
+      .filter((skip) => skip.periodEnd === week.end)
+      .map((skip) => skip.clientId),
+  );
+  const result: BillingBatchResult = {
+    period: week,
+    issued: [],
+    noCharge: [],
+    blocked: [],
+  };
+
+  // Match the proven queue fan-out without making one client's failure fatal.
+  for (let offset = 0; offset < calculated.length; offset += 3) {
+    const outcomes = await Promise.all(
+      calculated.slice(offset, offset + 3).map(async (entry) => {
+        const { preview } = entry;
+        if (skippedClients.has(preview.clientId)) {
+          return {
+            state: "no_charge" as const,
+            value: {
+              clientId: preview.clientId,
+              clientName: preview.clientName,
+              billableSpend: preview.billableSpend,
+              reason: "cycle_skipped" as const,
+            },
+          };
+        }
+
+        const alreadyIssued = Boolean(
+          preview.existingInvoice &&
+            hasDurableIssueReceipt(preview.existingInvoice),
+        );
+        try {
+          const issued = await issueClientWeekFromCurrentPreview({
+            clientId: preview.clientId,
+            periodStart: week.start,
+            issuedBy: input.issuedBy,
+            client: input.client,
+          });
+          if (issued.state === "no_charge") {
+            return {
+              state: "no_charge" as const,
+              value: {
+                clientId: preview.clientId,
+                clientName: preview.clientName,
+                billableSpend: issued.billableSpend,
+                reason: "exact_zero" as const,
+              },
+            };
+          }
+          return {
+            state: "issued" as const,
+            value: {
+              clientId: preview.clientId,
+              clientName: preview.clientName,
+              invoiceId: issued.invoice.id,
+              amount: issued.amount,
+              alreadyIssued,
+            },
+          };
+        } catch (error) {
+          if (!(error instanceof BillingIssueError)) {
+            console.error("Bulk invoice issue failed for one client:", error);
+          }
+          return {
+            state: "blocked" as const,
+            value: {
+              clientId: preview.clientId,
+              clientName: preview.clientName,
+              code:
+                error instanceof BillingIssueError
+                  ? error.code
+                  : "unexpected_error",
+              message:
+                error instanceof BillingIssueError
+                  ? error.message
+                  : "This invoice could not be issued.",
+            },
+          };
+        }
+      }),
+    );
+
+    for (const outcome of outcomes) {
+      if (outcome.state === "issued") result.issued.push(outcome.value);
+      else if (outcome.state === "no_charge")
+        result.noCharge.push(outcome.value);
+      else result.blocked.push(outcome.value);
+    }
+  }
+
+  return result;
 }
 
 export type ReconcileResult = {

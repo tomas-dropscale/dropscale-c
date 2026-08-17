@@ -60,21 +60,13 @@ const worker = {
      * metrics pass. The ledger remains independent finance evidence.
      */
     const job: { name: string; paths: string[] } =
-      event.cron === "5 14 * * MON" || event.cron === "10 15 * * MON"
-        ? {
-            name: "weekly billing evidence and automatic invoice issue",
-            paths: [
-              "/api/admin/sync-ledgers?billingWeek=latest",
-              "/api/billing/cron?mode=automatic",
-            ],
-          }
-        : event.cron === "55 23 * * *"
+      event.cron === "55 23 * * *"
           ? {
               name: "daily close",
               paths: [
                 "/api/admin/sync-metrics",
                 "/api/admin/sync-ledgers?billingWeek=latest",
-                "/api/billing/cron?mode=automatic",
+                "/api/billing/cron",
               ],
             }
           : {
