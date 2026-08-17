@@ -941,6 +941,35 @@ export async function fetchGoogleAdsDailyBreakdown(
   to: string,
   options: WindsorRequestOptions = {},
 ): Promise<WindsorGoogleAdsDailyRow[]> {
+  if (from === to) {
+    const hourly = await fetchGoogleAdsCampaignTimeline(accountId, from, to, options);
+    const first = hourly[0];
+    if (!first) return [];
+    if (
+      hourly.some(
+        (row) =>
+          row.date !== from ||
+          row.accountId !== first.accountId ||
+          row.customerId !== first.customerId ||
+          row.currency !== first.currency ||
+          row.timeZone !== first.timeZone,
+      )
+    ) {
+      throw invalidDailyResponse();
+    }
+    return [{
+      date: from,
+      accountId: first.accountId,
+      customerId: first.customerId,
+      currency: first.currency,
+      timeZone: first.timeZone,
+      spend: hourly.reduce((sum, row) => sum + row.spend, 0),
+      impressions: hourly.reduce((sum, row) => sum + row.impressions, 0),
+      clicks: hourly.reduce((sum, row) => sum + row.clicks, 0),
+      conversions: hourly.reduce((sum, row) => sum + row.conversions, 0),
+      conversionValue: hourly.reduce((sum, row) => sum + row.conversionValue, 0),
+    }];
+  }
   const ids = normalizeGoogleAdsCustomerId(accountId);
   const range = reportingRange(from, to);
   const maxRows = range.days + 1;

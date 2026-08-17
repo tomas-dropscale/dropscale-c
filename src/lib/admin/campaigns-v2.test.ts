@@ -230,6 +230,7 @@ describe("admin V2 campaign inventory", () => {
       key: "a".repeat(64),
       manifest: {},
     });
+    mocks.resolveReportingSources.mockResolvedValue([]);
     mocks.readAdminReportingSnapshots.mockResolvedValue(new Map());
   });
 
@@ -425,7 +426,7 @@ describe("admin V2 campaign inventory", () => {
         campaigns: [expect.objectContaining({ id: "campaign-anchor" })],
       }),
     );
-    expect(partial.totals.activeCampaigns).toBeNull();
+    expect(partial.totals.activeCampaigns).toBe(1);
   });
 
   it("accepts an exact V2 anchor-plus-child snapshot and rejects rows outside its physical inventory", async () => {
@@ -518,7 +519,7 @@ describe("admin V2 campaign inventory", () => {
       ]),
       providerFreshness: expect.objectContaining({ state: "partial", stale: true }),
     }));
-    expect(stale.totals.activeCampaigns).toBeNull();
+    expect(stale.totals.activeCampaigns).toBe(2);
     expect(mocks.fetchGoogleReportingCampaigns).not.toHaveBeenCalled();
   });
 
@@ -622,9 +623,63 @@ describe("admin V2 campaign inventory", () => {
     );
     expect(mocks.refreshReportingSourcesNow).not.toHaveBeenCalled();
     expect(mocks.refreshAccountsNow).not.toHaveBeenCalled();
-    expect(mocks.resolveReportingSources).not.toHaveBeenCalled();
+    expect(mocks.resolveReportingSources).toHaveBeenCalledWith(
+      expect.objectContaining({ clientIds: ["client-1"] }),
+    );
     expect(mocks.fetchLiveCampaignsDetailed).not.toHaveBeenCalled();
     expect(mocks.fetchGoogleReportingCampaigns).not.toHaveBeenCalled();
+  });
+
+  it("uses verified pre-cutover bindings for campaign rows and active totals", async () => {
+    const accounts = [
+      account("anchor", "client-1", { reporting_role: "shopify_anchor" }),
+      account("child", "client-1", { reporting_role: "google_spend" }),
+    ];
+    mocks.createClient.mockResolvedValue(supabaseFor(accounts));
+    mocks.createServiceClient.mockReturnValue({
+      from: vi.fn(() => query([{
+        client_id: "client-1",
+        operational_surface: "v2_ready_for_cutover",
+        reporting_cutover_at: null,
+      }])),
+    });
+    mocks.resolveReportingSources.mockResolvedValue([
+      source("anchor", { anchor: true }),
+      source("child", { child: true }),
+    ]);
+    mocks.fetchGoogleReportingCampaigns.mockImplementation(async (reportingSource) => [{
+      id: `campaign-${reportingSource.adAccountId}`,
+      ad_account_id: reportingSource.adAccountId,
+      name: reportingSource.adAccountId,
+      status: "active",
+      spend: 10,
+      impressions: 100,
+      clicks: 10,
+      ctr: 0.1,
+      cpc: 1,
+      daily_budget: 20,
+      updated_at: "2026-08-17T00:00:00.000Z",
+      startDate: "2026-08-01",
+      conversions: 1,
+    }]);
+
+    const overview = await fetchAdminCampaigns({
+      key: "today",
+      from: "2026-08-17",
+      to: "2026-08-17",
+    });
+
+    expect(overview.clients[0].accounts).toEqual([
+      expect.objectContaining({
+        connected: true,
+        campaignState: "ready",
+        campaigns: [
+          expect.objectContaining({ reportingBindingId: null }),
+          expect.objectContaining({ reportingBindingId: null }),
+        ],
+      }),
+    ]);
+    expect(overview.totals.activeCampaigns).toBe(2);
   });
 
   it("uses an exact verified public domain only in the returned Campaigns display", async () => {
@@ -725,7 +780,6 @@ describe("admin V2 campaign inventory", () => {
     });
 
     expect(mocks.fetchLiveCampaignsDetailed).toHaveBeenCalledTimes(1);
-    expect(mocks.resolveReportingSources).not.toHaveBeenCalled();
     expect(mocks.fetchGoogleReportingCampaigns).not.toHaveBeenCalled();
   });
 

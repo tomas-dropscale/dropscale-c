@@ -363,8 +363,49 @@ async function adminAccountInventory(
   );
   if (unknown) throw new Error("Admin reporting inventory is unavailable.");
 
+  const preCutoverClientIds = clientIds.filter((clientId) => {
+    const rollout = rollouts.get(clientId);
+    return (
+      rollout !== undefined &&
+      rollout.operational_surface !== "legacy_only" &&
+      rollout.operational_surface !== "rollback_legacy" &&
+      !v2ClientIds.includes(clientId)
+    );
+  });
+  let preCutoverSources: CanonicalReportingSource[] = [];
+  if (preCutoverClientIds.length > 0) {
+    try {
+      preCutoverSources = await resolveReportingSources({
+        service,
+        clientIds: preCutoverClientIds,
+        includeShopifyCredentials: false,
+      });
+    } catch {
+      // One malformed pre-cutover client must not hide every other client's
+      // reporting. Resolve independently and retain only verified sources.
+      const settled = await Promise.allSettled(
+        preCutoverClientIds.map((clientId) =>
+          resolveReportingSources({
+            service,
+            clientIds: [clientId],
+            includeShopifyCredentials: false,
+          }),
+        ),
+      );
+      preCutoverSources = settled.flatMap((result) =>
+        result.status === "fulfilled" ? result.value : [],
+      );
+    }
+  }
+  const preCutoverSourceIds = new Set(
+    preCutoverSources.map((source) => source.adAccountId),
+  );
   const legacy = await Promise.all(accounts
-    .filter((account) => !v2ClientIds.includes(account.client_id))
+    .filter(
+      (account) =>
+        !v2ClientIds.includes(account.client_id) &&
+        !preCutoverSourceIds.has(account.id),
+    )
     .map(async (account) => {
       const legacyRefreshEligible =
         account.status !== "pending" &&
@@ -392,18 +433,22 @@ async function adminAccountInventory(
         }),
       };
     }));
-  if (v2ClientIds.length === 0) return legacy;
 
-  const sources = await resolveReportingSources({
-    service,
-    clientIds: v2ClientIds,
-    includeShopifyCredentials: false,
-  });
+  const v2Sources = v2ClientIds.length === 0
+    ? []
+    : await resolveReportingSources({
+        service,
+        clientIds: v2ClientIds,
+        includeShopifyCredentials: false,
+      });
+  const sources = [...preCutoverSources, ...v2Sources];
+  if (sources.length === 0) return legacy;
   const baseById = new Map(accounts.map((account) => [account.id, account]));
   if (
     sources.some(
       (source) =>
-        !v2ClientIds.includes(source.clientId) ||
+        (!v2ClientIds.includes(source.clientId) &&
+          !preCutoverClientIds.includes(source.clientId)) ||
         baseById.get(source.adAccountId)?.client_id !== source.clientId,
     )
   ) {
@@ -424,13 +469,17 @@ async function adminAccountInventory(
       throw new Error("Admin reporting inventory is unavailable.");
     }
     grouped.forEach((source) => usedSourceIds.add(source.adAccountId));
+    const campaignControlsEnabled = v2ClientIds.includes(base.client_id);
+    const rollout = rollouts.get(base.client_id);
     v2.push({
       account: {
         ...base,
         store_name: anchor.shopify.shopifyName,
         shopify_url: projectedShopDomain(anchor),
         currency: base.currency,
-        status: base.status === "suspended" ? "suspended" : "active",
+        status: campaignControlsEnabled
+          ? base.status === "suspended" ? "suspended" : "active"
+          : base.status,
         shopify_connected: true,
         google_ads_connected: grouped.some((source) => source.googleAds !== null),
         google_ads_customer_id: anchor.googleAds?.customerId ?? null,
@@ -451,11 +500,11 @@ async function adminAccountInventory(
           Number(baseById.get(source.adAccountId)!.commission_rate),
         ]),
       ),
-      campaignControlsEnabled: true,
+      campaignControlsEnabled,
       authority: await campaignReportingAuthority({
         account: base,
-        operationalSurface: "v2_active",
-        reportingCutoverAt: rollouts.get(base.client_id)?.reporting_cutover_at ?? null,
+        operationalSurface: rollout?.operational_surface ?? "legacy_only",
+        reportingCutoverAt: rollout?.reporting_cutover_at ?? null,
         sources: grouped,
       }),
     });
@@ -472,15 +521,19 @@ async function adminAccountInventory(
       throw new Error("Admin reporting inventory is unavailable.");
     }
     usedSourceIds.add(source.adAccountId);
+    const campaignControlsEnabled = v2ClientIds.includes(base.client_id);
+    const legacyStore =
+      !campaignControlsEnabled && base.shopify_connected && Boolean(base.shopify_url);
+    const rollout = rollouts.get(base.client_id);
     v2.push({
       account: {
         ...base,
-        store_name: source.googleAds.accountName,
+        store_name: legacyStore ? base.store_name : source.googleAds.accountName,
         currency: source.googleAds.currency ?? base.currency,
         google_ads_connected: true,
         google_ads_customer_id: source.googleAds.customerId,
       },
-      isStoreScope: false,
+      isStoreScope: legacyStore,
       googleSources: [source],
       campaignAccountIds: [source.adAccountId],
       metricAccountIds: [source.adAccountId],
@@ -489,11 +542,11 @@ async function adminAccountInventory(
       commissionRateByMetricAccount: new Map([
         [source.adAccountId, Number(base.commission_rate)],
       ]),
-      campaignControlsEnabled: true,
+      campaignControlsEnabled,
       authority: await campaignReportingAuthority({
         account: base,
-        operationalSurface: "v2_active",
-        reportingCutoverAt: rollouts.get(base.client_id)?.reporting_cutover_at ?? null,
+        operationalSurface: rollout?.operational_surface ?? "legacy_only",
+        reportingCutoverAt: rollout?.reporting_cutover_at ?? null,
         sources: [source],
       }),
     });
@@ -952,11 +1005,13 @@ export async function fetchAdminCampaigns(
     ...new Set(requiredScopes.flatMap((entry) => entry.rollupCurrencies)),
   ].sort();
   const financialReady = metricRows.length > 0 && currencies.length === 1;
-  const campaignTotalsReady = perAccount
-    .filter((entry) => entry.connected)
-    .every(
-      (entry) => entry.campaignState === "ready" || entry.campaignState === "empty",
-    );
+  const connectedCampaignAccounts = perAccount.filter((entry) => entry.connected);
+  const materializedCampaignAccounts = connectedCampaignAccounts.filter(
+    (entry) =>
+      entry.campaignState === "ready" ||
+      entry.campaignState === "empty" ||
+      entry.campaignState === "partial",
+  );
 
   // Costs are recorded per day for the whole shop, so only the Google share of
   // them is charged here — see lib/admin/google-attribution.ts. Our own fee is
@@ -983,13 +1038,14 @@ export async function fetchAdminCampaigns(
     totals: {
       spend: financialReady ? spend : null,
       commission: financialReady ? commission : null,
-      activeCampaigns: campaignTotalsReady
-        ? perAccount.reduce(
+      activeCampaigns:
+        connectedCampaignAccounts.length > 0 && materializedCampaignAccounts.length === 0
+          ? null
+          : materializedCampaignAccounts.reduce(
             (sum, entry) =>
               sum + entry.campaigns.filter((campaign) => campaign.status === "active").length,
             0,
-          )
-        : null,
+          ),
       connectedAccounts: accountsWithRollups.filter((entry) => entry.connected).length,
       revenue: financialReady ? revenue : null,
       profit,

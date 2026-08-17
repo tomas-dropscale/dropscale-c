@@ -473,6 +473,55 @@ describe("Windsor Google Ads server adapter", () => {
     expect(upstream.searchParams.has("date_preset")).toBe(false);
   });
 
+  it("builds today's daily metric from current campaign-hour rows", async () => {
+    const fetcher = mockFetch(jsonResponse({ data: [
+      {
+        date: "2026-08-17",
+        hour_of_day: 10,
+        account_id: "123-456-7890",
+        account_currency_code: "EUR",
+        account_time_zone: "Europe/Lisbon",
+        campaign_id: "1",
+        spend: 12,
+        impressions: 100,
+        clicks: 10,
+        conversions: 1,
+        conversion_value: 20,
+      },
+      {
+        date: "2026-08-17",
+        hour_of_day: 11,
+        account_id: "123-456-7890",
+        account_currency_code: "EUR",
+        account_time_zone: "Europe/Lisbon",
+        campaign_id: "2",
+        spend: 21,
+        impressions: 200,
+        clicks: 20,
+        conversions: 2,
+        conversion_value: 40,
+      },
+    ] }));
+
+    await expect(fetchGoogleAdsDailyBreakdown(
+      "123-456-7890",
+      "2026-08-17",
+      "2026-08-17",
+      { fetcher: fetcher as typeof fetch },
+    )).resolves.toEqual([
+      expect.objectContaining({
+        date: "2026-08-17",
+        spend: 33,
+        impressions: 300,
+        clicks: 30,
+        conversions: 3,
+        conversionValue: 60,
+      }),
+    ]);
+    expect(requestedUrl(fetcher).searchParams.get("fields")?.split(","))
+      .toContain("hour_of_day");
+  });
+
   it("segments campaign timelines by local hour only for a one-day range", async () => {
     const hourlyFetcher = mockFetch(jsonResponse({ data: [{
       date: "2026-08-16",
