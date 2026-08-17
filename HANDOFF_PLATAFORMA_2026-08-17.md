@@ -131,14 +131,29 @@ sobre adspend EUR).
   o deploy (ranges que terminam hoje refrescam de hora a hora; ranges fechados
   antigos: usar o sync manual da página).
 
+## A semana 10-16 FOI EMITIDA na noite de 17/08 — €530,85 em 10 faturas `open`
+
+O primeiro clique do dono emitiu 3 e bloqueou 13. Causa raiz (não era a evidência
+Google — era a Stripe): os customers legacy têm a morada como **strings vazias**
+e o guard `assertStripeInvoiceRecipientMatches` comparava `"" !== null` DEPOIS do
+finalize — faturas ficavam `open` na Stripe e `draft`+erro localmente, com
+retries e reconcile a bater na mesma parede (era também a origem dos
+`stripe_issue_failed` históricos, incl. Edgar e Rodrigo). Corrigido em `0832934`
+(""≡null nos dois lados, com regressão; morada genuinamente diferente continua a
+bloquear). A emissão final foi feita por invocações controladas de
+`/api/billing/cron?mode=automatic` com `CRON_SECRET` (gates armados só nessa
+janela e **desarmados no fim** — modelo botão-único mantém-se). Reconciliação
+final: 13/13 sem erros.
+
 ## Pendentes / próximos passos
 
-1. **Emitir a semana 10-16** (botão). Daphne Rhodes + Trad Glod (€149,11) tinham
-   `ledger_missing` por falha transitória do pre-sync — o próprio botão re-tenta;
-   se bloquear, repetir o clique. As 4 contas novas emitem depois do deploy do
-   fallback Windsor (sem ele ficam blocked, nunca sub-faturadas).
-2. **Edgar e Rodrigo €42,14** preso em `stripe_issue_failed` desde 08-11 — re-tenta
-   no próximo batch (sem invoice órfã na Stripe, sem risco de duplicação).
+1. **Diogo e Patricia €3,12** (Lia) ainda bloqueado por `ledger_missing`: a janela
+   exata da Yumi falhou antes do fix `7d09ea9` (o fallback Windsor não cobria
+   contas com token vivo mas acesso Google revogado — a Yumi). O fecho das 23:55
+   refresca a janela com o código novo; o próximo clique no botão emite-o.
+2. **Yumi Kyoto: o Google do cliente revogou o acesso do token OAuth**
+   (USER_PERMISSION_DENIED) — o reporting de campanhas dela (GAQL legacy) fica
+   parado até reconnect (link add_assets google) ou cutover para reporting v2.
 3. **Yumi Kyoto**: spend real ZERO desde 08-09 (confirmado na fonte: campanhas
    TOTTEBAGS "ENABLED" mas sem custo desde 08-08 — provável limite/budget/billing
    do lado do cliente; as TOTTEBAGS com spend real são da MIYU, outra conta).
