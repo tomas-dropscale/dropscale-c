@@ -516,8 +516,27 @@ export function BillingAdminView({
 
       <section
         aria-label="Resumo financeiro"
-        className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-5"
+        className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6"
       >
+        <SummaryCard
+          label="Por emitir · ciclos fechados"
+          value={money(
+            dashboard.positions.summary.closedSupportedUnissued,
+            intl,
+            overview.currency,
+          )}
+          detail={
+            dashboard.positions.summary.closedNeedsEntryReview > 0
+              ? `+${money(
+                  dashboard.positions.summary.closedNeedsEntryReview,
+                  intl,
+                  overview.currency,
+                )} dependem de revisão do dia de entrada`
+              : "Fee apurado dos ciclos fechados · Emitir faturas"
+          }
+          tone="warning"
+          icon={ReceiptText}
+        />
         <SummaryCard
           label="A faturar · ciclo atual"
           value={money(
