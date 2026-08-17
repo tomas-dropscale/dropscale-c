@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => ({
   resolveReportingSources: vi.fn(),
   fetchGoogleReportingCampaigns: vi.fn(),
   refreshAccountsNow: vi.fn(),
+  refreshReportingSourcesNow: vi.fn(),
   adminReportingSnapshotIsStale: vi.fn(),
   adminReportingAuthority: vi.fn(),
   readAdminReportingSnapshots: vi.fn(),
@@ -55,6 +56,7 @@ vi.mock("@/lib/metrics/queries", () => ({
 }));
 vi.mock("@/lib/metrics/recompute", () => ({
   refreshAccountsNow: mocks.refreshAccountsNow,
+  refreshReportingSourcesNow: mocks.refreshReportingSourcesNow,
 }));
 vi.mock("@/lib/portal/data", () => ({ ACCOUNT_COLUMNS: "columns" }));
 vi.mock("@/lib/portal/range", () => ({
@@ -573,6 +575,55 @@ describe("admin V2 campaign inventory", () => {
       "EUR",
     );
     expect(mocks.resolveReportingSources).not.toHaveBeenCalled();
+    expect(mocks.fetchGoogleReportingCampaigns).not.toHaveBeenCalled();
+  });
+
+  it("keeps materialized pre-cutover metrics visible for a pending account", async () => {
+    const pending = account("pending", "client-1");
+    mocks.createClient.mockResolvedValue(supabaseFor([pending]));
+    mocks.createServiceClient.mockReturnValue({
+      from: vi.fn(() => query([{
+        client_id: "client-1",
+        operational_surface: "v2_ready_for_cutover",
+        reporting_cutover_at: null,
+      }])),
+    });
+    mocks.fetchDailyMetrics.mockResolvedValue([
+      { ad_account_id: "pending", day: "2026-08-14" },
+    ]);
+    mocks.sumMetrics.mockImplementation((rows: unknown[]) =>
+      rows.length > 0
+        ? { ...emptyRollup, attributedRevenue: 48, revenue: 48, adSpend: 12 }
+        : emptyRollup,
+    );
+    const range = {
+      key: "today",
+      from: "2026-08-14",
+      to: "2026-08-14",
+    } as const;
+
+    const overview = await fetchAdminCampaigns(range);
+
+    expect(overview.clients[0].accounts[0]).toEqual(expect.objectContaining({
+      connected: false,
+      campaignState: "disconnected",
+      spend: 12,
+      rollupRevenue: 48,
+      rollupMaterialized: true,
+    }));
+    expect(overview.clients[0]).toEqual(expect.objectContaining({
+      revenue: 48,
+      rollupSpend: 12,
+    }));
+    expect(mocks.fetchDailyMetrics).toHaveBeenCalledWith(
+      ["pending"],
+      "2026-08-14",
+      "2026-08-14",
+    );
+    expect(mocks.refreshReportingSourcesNow).not.toHaveBeenCalled();
+    expect(mocks.refreshAccountsNow).not.toHaveBeenCalled();
+    expect(mocks.resolveReportingSources).not.toHaveBeenCalled();
+    expect(mocks.fetchLiveCampaignsDetailed).not.toHaveBeenCalled();
     expect(mocks.fetchGoogleReportingCampaigns).not.toHaveBeenCalled();
   });
 

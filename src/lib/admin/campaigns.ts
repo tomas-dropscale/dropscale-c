@@ -10,7 +10,10 @@ import { markIfAuthRevoked } from "@/lib/google-ads/revoked";
 import { fetchHstClientKeys } from "@/lib/admin/hst";
 import { googleProfit, googleRoas } from "@/lib/admin/google-attribution";
 import { fetchDailyMetrics, groupByAccount, sumMetrics } from "@/lib/metrics/queries";
-import { refreshAccountsNow } from "@/lib/metrics/recompute";
+import {
+  refreshAccountsNow,
+  refreshReportingSourcesNow,
+} from "@/lib/metrics/recompute";
 import { ACCOUNT_COLUMNS } from "@/lib/portal/data";
 import type { AdAccount, Database, Json } from "@/lib/supabase/types";
 import { rangeDays, type RangeSelection } from "@/lib/portal/range";
@@ -178,6 +181,7 @@ type AdminAccountInventory = {
   campaignAccountIds: string[];
   metricAccountIds: string[];
   metricCurrencies: string[];
+  metricRefreshKind: "reporting" | "legacy" | null;
   commissionRateByMetricAccount: Map<string, number>;
   /** Campaign mutations remain marker-gated even when Windsor is used read-only before cutover. */
   campaignControlsEnabled: boolean;
@@ -362,7 +366,7 @@ async function adminAccountInventory(
   const legacy = await Promise.all(accounts
     .filter((account) => !v2ClientIds.includes(account.client_id))
     .map(async (account) => {
-      const materializable =
+      const legacyRefreshEligible =
         account.status !== "pending" &&
         ((account.google_ads_connected && Boolean(account.google_ads_customer_id)) ||
           (account.shopify_connected && Boolean(account.shopify_url)));
@@ -373,8 +377,9 @@ async function adminAccountInventory(
         googleSources: null,
         campaignAccountIds:
           account.google_ads_connected && account.google_ads_customer_id ? [account.id] : [],
-        metricAccountIds: materializable ? [account.id] : [],
-        metricCurrencies: materializable ? [account.currency] : [],
+        metricAccountIds: [account.id],
+        metricCurrencies: [account.currency],
+        metricRefreshKind: legacyRefreshEligible ? ("legacy" as const) : null,
         commissionRateByMetricAccount: new Map([
           [account.id, Number(account.commission_rate)],
         ]),
@@ -439,6 +444,7 @@ async function adminAccountInventory(
       metricCurrencies: [
         ...new Set(grouped.map((source) => baseById.get(source.adAccountId)!.currency)),
       ].sort(),
+      metricRefreshKind: "reporting",
       commissionRateByMetricAccount: new Map(
         grouped.map((source) => [
           source.adAccountId,
@@ -479,6 +485,7 @@ async function adminAccountInventory(
       campaignAccountIds: [source.adAccountId],
       metricAccountIds: [source.adAccountId],
       metricCurrencies: [base.currency],
+      metricRefreshKind: "reporting",
       commissionRateByMetricAccount: new Map([
         [source.adAccountId, Number(base.commission_rate)],
       ]),
@@ -883,10 +890,15 @@ export async function fetchAdminCampaigns(
     const rows = inventoryEntry.metricAccountIds.flatMap(
       (accountId) => metricRowsByAccount.get(accountId) ?? [],
     );
+    const requiredMetricAccountIds = inventoryEntry.metricRefreshKind === null
+      ? inventoryEntry.metricAccountIds.filter(
+          (accountId) => (metricRowsByAccount.get(accountId)?.length ?? 0) > 0,
+        )
+      : inventoryEntry.metricAccountIds;
     const coverageRows = new Set(
       rows.map((row) => `${row.ad_account_id}\n${row.day}`),
     ).size;
-    const expectedRows = inventoryEntry.metricAccountIds.length * rangeDays(range);
+    const expectedRows = requiredMetricAccountIds.length * rangeDays(range);
     const rollupMaterialized = coverageRows > 0;
     const rollupComplete =
       expectedRows > 0 &&
@@ -911,8 +923,9 @@ export async function fetchAdminCampaigns(
       rollupSpend: totals.adSpend,
       rollupComplete,
       rollupMaterialized,
-      rollupRequired: inventoryEntry.metricAccountIds.length > 0,
-      rollupCurrencies: inventoryEntry.metricCurrencies,
+      rollupRequired: requiredMetricAccountIds.length > 0,
+      rollupCurrencies:
+        requiredMetricAccountIds.length > 0 ? inventoryEntry.metricCurrencies : [],
     };
   });
   const rollup = sumMetrics(metricRows);
@@ -920,15 +933,23 @@ export async function fetchAdminCampaigns(
 
   const spend = accountsWithRollups.reduce((sum, entry) => sum + entry.spend, 0);
   const commission = accountsWithRollups.reduce((sum, entry) => sum + entry.commission, 0);
-  const requiredScopes = inventory.filter((entry) => entry.metricAccountIds.length > 0);
+  const requiredMetricAccountIds = [
+    ...new Set(inventory.flatMap((entry) =>
+      entry.metricRefreshKind === null
+        ? entry.metricAccountIds.filter(
+            (accountId) => (metricRowsByAccount.get(accountId)?.length ?? 0) > 0,
+          )
+        : entry.metricAccountIds)),
+  ];
+  const requiredScopes = accountsWithRollups.filter((entry) => entry.rollupRequired);
   const portfolioCoverageRows = new Set(
     metricRows.map((row) => `${row.ad_account_id}\n${row.day}`),
   ).size;
-  const expectedPortfolioRows = metricAccountIds.length * rangeDays(range);
+  const expectedPortfolioRows = requiredMetricAccountIds.length * rangeDays(range);
   const rollupComplete =
     expectedPortfolioRows > 0 && portfolioCoverageRows === expectedPortfolioRows;
   const currencies = [
-    ...new Set(requiredScopes.flatMap((entry) => entry.metricCurrencies)),
+    ...new Set(requiredScopes.flatMap((entry) => entry.rollupCurrencies)),
   ].sort();
   const financialReady = metricRows.length > 0 && currencies.length === 1;
   const campaignTotalsReady = perAccount
@@ -1020,7 +1041,8 @@ export async function listAdminReportingStoreScopes(
       clientId: entry.account.client_id,
       store: {
         accountId: entry.account.id,
-        activityAccountIds: [...entry.metricAccountIds],
+        activityAccountIds:
+          entry.metricRefreshKind === null ? [] : [...entry.metricAccountIds],
         currency: entry.account.currency,
       },
     }));
@@ -1050,12 +1072,63 @@ export async function refreshAdminCampaignSnapshots(
     rows: number;
   } | null = null;
   if (options.refreshMetrics) {
-    await refreshAccountsNow(metricAccountIds, {
-      client: service,
-      reportingClient: service,
-      from: range.from,
-      to: range.to,
-    });
+    const preCutover = inventory.filter(
+      (entry) => entry.metricRefreshKind !== "reporting",
+    );
+    const preCutoverByAccount = new Map(
+      preCutover.map((entry) => [entry.account.id, entry.account]),
+    );
+    const preCutoverSources = preCutover.length === 0
+      ? []
+      : await resolveReportingSources({
+          service,
+          clientIds: [...new Set(preCutover.map((entry) => entry.account.client_id))],
+          adAccountIds: [...preCutoverByAccount.keys()],
+          includeShopifyCredentials: false,
+        });
+    if (preCutoverSources.some((source) => {
+      const account = preCutoverByAccount.get(source.adAccountId);
+      return !account || account.client_id !== source.clientId;
+    })) {
+      throw new Error("Admin reporting inventory is unavailable.");
+    }
+    const preCutoverBoundIds = new Set(
+      preCutoverSources.map((source) => source.adAccountId),
+    );
+    const reportingMetricAccountIds = [
+      ...new Set([
+        ...inventory
+          .filter((entry) => entry.metricRefreshKind === "reporting")
+          .flatMap((entry) => entry.metricAccountIds),
+        ...preCutoverBoundIds,
+      ]),
+    ];
+    const legacyMetricAccountIds = [
+      ...new Set(inventory
+        .filter(
+          (entry) =>
+            entry.metricRefreshKind === "legacy" &&
+            !preCutoverBoundIds.has(entry.account.id),
+        )
+        .flatMap((entry) => entry.metricAccountIds)),
+    ];
+    await Promise.all([
+      reportingMetricAccountIds.length > 0
+        ? refreshReportingSourcesNow(reportingMetricAccountIds, {
+            client: service,
+            from: range.from,
+            to: range.to,
+          })
+        : Promise.resolve(),
+      legacyMetricAccountIds.length > 0
+        ? refreshAccountsNow(legacyMetricAccountIds, {
+            client: service,
+            reportingClient: service,
+            from: range.from,
+            to: range.to,
+          })
+        : Promise.resolve(),
+    ]);
     const { data, error } = metricAccountIds.length === 0
       ? { data: [], error: null }
       : await service
@@ -1068,20 +1141,25 @@ export async function refreshAdminCampaignSnapshots(
       throw new Error("The exact campaign metric coverage could not be verified.");
     }
     const allowed = new Set(metricAccountIds);
+    const coverageAccountIds = new Set([
+      ...reportingMetricAccountIds,
+      ...legacyMetricAccountIds,
+      ...data.map((row) => row.ad_account_id).filter((id) => allowed.has(id)),
+    ]);
     const unique = new Set(
       data
         .filter(
           (row) =>
-            allowed.has(row.ad_account_id) &&
+            coverageAccountIds.has(row.ad_account_id) &&
             row.day >= range.from &&
             row.day <= range.to,
         )
         .map((row) => `${row.ad_account_id}\n${row.day}`),
     );
-    const expectedRows = metricAccountIds.length * rangeDays(range);
+    const expectedRows = coverageAccountIds.size * rangeDays(range);
     metricCoverage = {
       state: unique.size === expectedRows ? "ready" : "partial",
-      accounts: metricAccountIds.length,
+      accounts: coverageAccountIds.size,
       expectedRows,
       rows: unique.size,
     };

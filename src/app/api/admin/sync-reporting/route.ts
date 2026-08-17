@@ -5,6 +5,7 @@ import {
   readSmallJson,
 } from "@/lib/client-onboarding/http";
 import { ClientOnboardingError } from "@/lib/client-onboarding/sessions";
+import { provisionReviewedClientReportingSources } from "@/lib/client-onboarding/reporting-cutover";
 import {
   listAdminReportingStoreScopes,
   refreshAdminCampaignSnapshots,
@@ -190,6 +191,11 @@ async function refreshAll(
   const deadline = startedAt + REPORTING_ROUTE_BUDGET_MS;
   const service = createServiceClient();
   if (!service) return response({ error: "Reporting sync is not configured." }, 503);
+  const provisioning = await provisionReviewedClientReportingSources(service).catch(() => ({
+    attempted: 0,
+    provisioned: 0,
+    failed: 1,
+  }));
 
   type CampaignRefresh = Awaited<ReturnType<typeof refreshAdminCampaignSnapshots>>;
   // Portfolio Google, metric materialisation and every store are independent.
@@ -261,6 +267,7 @@ async function refreshAll(
       scope: responseScope,
       range,
       campaigns,
+      provisioning,
       stores,
       budget: {
         limitMs: REPORTING_ROUTE_BUDGET_MS,
@@ -318,6 +325,7 @@ async function bootstrapReportingAccount(accountId: string) {
 async function refreshMetricHistory(range: RangeSelection) {
   const service = createServiceClient();
   if (!service) return response({ error: "Reporting sync is not configured." }, 503);
+  await provisionReviewedClientReportingSources(service).catch(() => undefined);
   const result = await refreshAdminCampaignSnapshots(range, {
     authenticate: false,
     client: service,
@@ -414,6 +422,7 @@ export async function POST(request: NextRequest) {
 
     const service = createServiceClient();
     if (!service) return response({ error: "Reporting sync is not configured." }, 503);
+    await provisionReviewedClientReportingSources(service).catch(() => undefined);
     const result = await refreshAdminCampaignSnapshots(body.range, {
       authenticate: false,
       client: service,

@@ -6,7 +6,6 @@ const mocks = vi.hoisted(() => ({
   fetchAdminCampaigns: vi.fn(),
   listCampaignActionViewState: vi.fn(),
   parseRange: vi.fn(),
-  presetSelection: vi.fn(),
 }));
 
 vi.mock("@/components/admin/campaigns-view", () => ({
@@ -79,7 +78,6 @@ vi.mock("@/lib/i18n/server", () => ({
 
 vi.mock("@/lib/portal/range", () => ({
   parseRange: mocks.parseRange,
-  presetSelection: mocks.presetSelection,
 }));
 
 import AdminCampaignsPage from "./page";
@@ -87,14 +85,9 @@ import AdminCampaignsPage from "./page";
 describe("Campaigns page approved summary", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.presetSelection.mockReturnValue({
-      key: "d7",
-      from: "2026-08-08",
-      to: "2026-08-14",
-    });
     mocks.parseRange.mockReturnValue({
-      key: "d30",
-      from: "2026-07-16",
+      key: "today",
+      from: "2026-08-14",
       to: "2026-08-14",
     });
     mocks.fetchAdminCampaigns.mockResolvedValue({
@@ -127,7 +120,7 @@ describe("Campaigns page approved summary", () => {
     const html = renderToStaticMarkup(page);
 
     expect(html).toContain("Portfolio performance and active campaign controls");
-    expect(html).toContain("2026-08-08 → 2026-08-14");
+    expect(html).toContain("2026-08-14 → 2026-08-14");
     expect(html).toContain("New Campaign · Sync");
     expect(html).toContain("Date range");
     expect(html).toContain("Revenue");
@@ -144,17 +137,20 @@ describe("Campaigns page approved summary", () => {
     expect(html).not.toContain("Average ROAS");
     expect(html).not.toContain("Client controls");
     expect(html).not.toContain("Commercial terms");
-    expect(mocks.presetSelection).toHaveBeenCalledWith("d7");
-    expect(mocks.parseRange).not.toHaveBeenCalled();
+    expect(mocks.parseRange).toHaveBeenCalledWith({});
   });
 
   it("keeps an explicit range instead of replacing it with the page default", async () => {
     const params = { range: "d30" };
+    mocks.parseRange.mockReturnValueOnce({
+      key: "d30",
+      from: "2026-07-16",
+      to: "2026-08-14",
+    });
 
     await AdminCampaignsPage({ searchParams: Promise.resolve(params) });
 
     expect(mocks.parseRange).toHaveBeenCalledWith(params);
-    expect(mocks.presetSelection).not.toHaveBeenCalled();
     expect(mocks.fetchAdminCampaigns).toHaveBeenCalledWith(
       {
         key: "d30",

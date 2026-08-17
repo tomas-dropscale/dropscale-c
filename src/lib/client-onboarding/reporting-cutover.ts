@@ -51,6 +51,7 @@ type AdAccountRow = {
 };
 type ShopifyRow = {
   id: string;
+  session_id?: string;
   client_id: string;
   status: string;
   shopify_name: string;
@@ -63,6 +64,7 @@ type ShopifyRow = {
 type ShopifyCredentialRow = { connection_id: string };
 type GoogleRow = {
   id: string;
+  session_id?: string;
   client_id: string;
   status: string;
   windsor_account_id: string;
@@ -74,6 +76,7 @@ type GoogleRow = {
   updated_at: string;
 };
 type MappingRow = {
+  session_id?: string;
   shopify_connection_id: string;
   google_ads_connection_id: string;
 };
@@ -98,6 +101,7 @@ type SyncRow = {
 };
 type SessionRow = {
   id: string;
+  created_by?: string;
   mode: string;
   requested_assets: string[];
   status: string;
@@ -1193,17 +1197,17 @@ async function loadSnapshot(service: Service): Promise<ClientReportingCutoverSna
     service
       .from("client_shopify_connections")
       .select(
-        "id, client_id, status, shopify_name, shopify_domain, shopify_currency, last_verified_at, last_error_code, updated_at",
+        "id, session_id, client_id, status, shopify_name, shopify_domain, shopify_currency, last_verified_at, last_error_code, updated_at",
       ),
     service.from("client_shopify_credentials").select("connection_id"),
     service
       .from("client_google_ads_connections")
       .select(
-        "id, client_id, status, windsor_account_id, account_name, currency, time_zone, last_verified_at, last_error_code, updated_at",
+        "id, session_id, client_id, status, windsor_account_id, account_name, currency, time_zone, last_verified_at, last_error_code, updated_at",
       ),
     service
       .from("client_asset_mappings")
-      .select("shopify_connection_id, google_ads_connection_id"),
+      .select("session_id, shopify_connection_id, google_ads_connection_id"),
     service
       .from("client_reporting_bindings")
       .select(
@@ -1217,7 +1221,7 @@ async function loadSnapshot(service: Service): Promise<ClientReportingCutoverSna
     service
       .from("client_onboarding_sessions")
       .select(
-        "id, mode, requested_assets, status, target_client_id, claimed_user_id, reconnect_legacy_ad_account_id, reconnect_shopify_connection_id, reconnect_completed_at",
+        "id, created_by, mode, requested_assets, status, target_client_id, claimed_user_id, reconnect_legacy_ad_account_id, reconnect_shopify_connection_id, reconnect_completed_at",
       ),
     service
       .from("client_onboarding_events")
@@ -1424,6 +1428,197 @@ async function executeCutoverAction(
   if (error) throw databaseWriteError(error);
   if (typeof data !== "string" || !UUID.test(data)) throw databaseWriteError(null);
   return { action: action.kind };
+}
+
+function automaticProvisionSessionId(
+  action: ProvisionAction,
+  snapshot: ClientReportingCutoverSnapshot,
+): string | null {
+  const mappingSessions = snapshot.mappings
+    .filter((mapping) =>
+      (action.shopifyConnectionId === null ||
+        mapping.shopify_connection_id === action.shopifyConnectionId) &&
+      (action.googleAdsConnectionId === null ||
+        mapping.google_ads_connection_id === action.googleAdsConnectionId),
+    )
+    .map((mapping) => mapping.session_id);
+  const connectionSessions = [
+    action.shopifyConnectionId
+      ? snapshot.shopifyConnections.find(
+          (connection) => connection.id === action.shopifyConnectionId,
+        )?.session_id
+      : null,
+    action.googleAdsConnectionId
+      ? snapshot.googleConnections.find(
+          (connection) => connection.id === action.googleAdsConnectionId,
+        )?.session_id
+      : null,
+  ];
+  const sessionIds = [
+    ...new Set(
+      (mappingSessions.length > 0 ? mappingSessions : connectionSessions).filter(
+        (value): value is string => Boolean(value),
+      ),
+    ),
+  ];
+  return sessionIds.length === 1 ? sessionIds[0] : null;
+}
+
+function automaticProvisionIsSafe(
+  action: ProvisionAction,
+  snapshot: ClientReportingCutoverSnapshot,
+): boolean {
+  if (action.postCutover || !["provision", "adopt"].includes(action.kind)) return false;
+  const shopify = action.shopifyConnectionId
+    ? snapshot.shopifyConnections.find(
+        (connection) => connection.id === action.shopifyConnectionId,
+      ) ?? null
+    : null;
+  const google = action.googleAdsConnectionId
+    ? snapshot.googleConnections.find(
+        (connection) => connection.id === action.googleAdsConnectionId,
+      ) ?? null
+    : null;
+  if (
+    (shopify && shopify.client_id !== action.clientId) ||
+    (google && google.client_id !== action.clientId)
+  ) {
+    return false;
+  }
+
+  const mappedPair = Boolean(
+    shopify &&
+      google &&
+      snapshot.mappings.some(
+        (mapping) =>
+          mapping.shopify_connection_id === shopify.id &&
+          mapping.google_ads_connection_id === google.id,
+      ),
+  );
+  if (shopify && google && !mappedPair) return false;
+
+  if (action.kind === "adopt") {
+    const account = action.existingAdAccountId
+      ? snapshot.adAccounts.find((candidate) => candidate.id === action.existingAdAccountId)
+      : null;
+    const anchor = action.shopifyAnchorBindingId
+      ? snapshot.bindings.find((binding) => binding.id === action.shopifyAnchorBindingId) ?? null
+      : null;
+    const bundle: SourceBundle = {
+      clientId: action.clientId,
+      shopify,
+      google,
+      anchorBinding: anchor,
+    };
+    // Empty-shell adoption remains a deliberate admin operation. Automation
+    // is limited to an account whose canonical Shopify or Google identity is
+    // already the exact identity selected by the reviewed mapping.
+    if (!account || !accountOwnsBundleIdentity(account, bundle) || !accountCanAdoptBundle(account, bundle)) {
+      return false;
+    }
+  }
+
+  const activeBindings = snapshot.bindings.filter(
+    (binding) => binding.client_id === action.clientId && binding.status === "active",
+  );
+  if (shopify && !google) {
+    const unboundGoogle = snapshot.googleConnections.filter(
+      (connection) =>
+        connection.client_id === action.clientId &&
+        connection.status === "connected" &&
+        !activeBindings.some(
+          (binding) => binding.google_ads_connection_id === connection.id,
+        ),
+    );
+    return unboundGoogle.every((connection) =>
+      snapshot.mappings.some(
+        (mapping) =>
+          mapping.shopify_connection_id === shopify.id &&
+          mapping.google_ads_connection_id === connection.id,
+      ),
+    );
+  }
+  if (google && !shopify && !action.shopifyAnchorBindingId) {
+    return !snapshot.shopifyConnections.some(
+      (connection) =>
+        connection.client_id === action.clientId && connection.status === "connected",
+    );
+  }
+  return Boolean(shopify || google);
+}
+
+/**
+ * Materialise only unambiguous, reviewed onboarding mappings. This does not
+ * activate reporting cutover or billing; the reporting sync that called it
+ * remains responsible for writing the requested daily window.
+ */
+export async function provisionReviewedClientReportingSources(
+  service: Service,
+): Promise<{ attempted: number; provisioned: number; failed: number }> {
+  const snapshot = await loadSnapshot(service);
+  const queue = await buildClientReportingCutoverQueue(snapshot);
+  const adminIds = new Set(
+    snapshot.profiles
+      .filter((profile) => profile.role === "admin")
+      .map((profile) => profile.id),
+  );
+  const rows = queue.candidates.flatMap((candidate) => {
+    const action = queue.actions.get(candidate.id);
+    return action && (action.kind === "provision" || action.kind === "adopt")
+      ? [{ candidate, action }]
+      : [];
+  });
+  const signatureCount = new Map<string, number>();
+  for (const { action } of rows) {
+    const signature = [
+      action.clientId,
+      action.shopifyConnectionId,
+      action.googleAdsConnectionId,
+      action.shopifyAnchorBindingId,
+    ].join(":");
+    signatureCount.set(signature, (signatureCount.get(signature) ?? 0) + 1);
+  }
+
+  let attempted = 0;
+  let provisioned = 0;
+  let failed = 0;
+  for (const { candidate, action } of rows.slice(0, 25)) {
+    const signature = [
+      action.clientId,
+      action.shopifyConnectionId,
+      action.googleAdsConnectionId,
+      action.shopifyAnchorBindingId,
+    ].join(":");
+    if (
+      signatureCount.get(signature) !== 1 ||
+      !automaticProvisionIsSafe(action, snapshot)
+    ) {
+      continue;
+    }
+    const sessionId = automaticProvisionSessionId(action, snapshot);
+    const session = sessionId
+      ? snapshot.sessions.find((candidateSession) => candidateSession.id === sessionId)
+      : null;
+    if (
+      !session ||
+      !["reviewed", "active"].includes(session.status) ||
+      session.claimed_user_id !== action.clientId ||
+      typeof session.created_by !== "string" ||
+      !adminIds.has(session.created_by)
+    ) {
+      continue;
+    }
+    attempted += 1;
+    try {
+      await executeCutoverAction(service, action, candidate.id, session.created_by);
+      provisioned += 1;
+    } catch {
+      // One stale candidate cannot prevent healthy clients from syncing. The
+      // authoritative RPC is idempotent and revalidates every source under lock.
+      failed += 1;
+    }
+  }
+  return { attempted, provisioned, failed };
 }
 
 export async function listClientReportingCutoverQueue(): Promise<ClientReportingCutoverQueue> {

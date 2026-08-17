@@ -16,7 +16,7 @@ import { multiplier } from "@/lib/format";
 import { money } from "@/lib/format-intl";
 import { intlLocale } from "@/lib/i18n";
 import { getServerDictionary } from "@/lib/i18n/server";
-import { parseRange, presetSelection } from "@/lib/portal/range";
+import { parseRange } from "@/lib/portal/range";
 
 export async function generateMetadata(): Promise<Metadata> {
   const { d } = await getServerDictionary();
@@ -34,10 +34,7 @@ export default async function AdminCampaignsPage({
   }>;
 }) {
   const params = await searchParams;
-  const range =
-    params.range === undefined && params.from === undefined && params.to === undefined
-      ? presetSelection("d7")
-      : parseRange(params);
+  const range = parseRange(params);
   const overviewPromise = fetchAdminCampaigns(range, { campaignSource: "snapshot" });
   const dictionaryPromise = getServerDictionary();
   const overview = await overviewPromise;
