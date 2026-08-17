@@ -647,14 +647,21 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
       const seenCollections = new Set<string>();
       const memberships = node.collections.nodes.map((collection) => {
         const title = collection.title.trim();
-        const handle = typeof collection.handle === "string"
+        // Shopify handles are NOT ascii slugs on every store: Japanese and
+        // Greek shops keep their script in the handle (トートバッグ,
+        // φορέματα). The old ^[a-z0-9-]+$ check failed the whole collections
+        // family for every such store (Miyu, Aki, Daphne — 2026-08-17). A
+        // handle is accepted as Shopify sent it; only a blank one becomes
+        // null and only an absurd length fails closed.
+        const trimmedHandle = typeof collection.handle === "string"
           ? collection.handle.trim().toLowerCase()
-          : null;
+          : "";
+        const handle = trimmedHandle ? trimmedHandle : null;
         if (
           !/^gid:\/\/shopify\/Collection\/\d+$/.test(collection.id) ||
           !title ||
           title.length > 500 ||
-          (handle !== null && !/^[a-z0-9][a-z0-9-]*$/.test(handle)) ||
+          (handle !== null && handle.length > 255) ||
           seenCollections.has(collection.id)
         ) {
           invalidResponse("Shopify returned invalid collection identity.");

@@ -893,6 +893,78 @@ describe("V2 Shopify reporting adapter", () => {
     );
   });
 
+  it("accepts non-ascii collection handles from Japanese and Greek stores", async () => {
+    // Regression: 2026-08-17 — Miyu (JP), Aki (JP) and Daphne (GR) failed the
+    // whole collections family because their handles keep the store's script.
+    mocks.verifyReportingShop.mockResolvedValue(
+      verifiedShop({
+        scopes: {
+          granted: ["read_reports", "read_products"],
+          missing: [],
+          missingPermissionGated: [],
+          writeScopes: [],
+          unexpectedReadScopes: [],
+          valid: true,
+        },
+      }),
+    );
+    mocks.reportingShopifyGraphql.mockImplementation(
+      async ({ query, variables }: { query: string; variables?: Record<string, unknown> }) => {
+        const shopifyQl = String(variables?.query ?? "");
+        if (shopifyQl.includes("FROM sales")) {
+          return {
+            shopifyqlQuery: {
+              tableData: {
+                columns: [
+                  { name: "day" },
+                  { name: "product_id" },
+                  { name: "net_sales" },
+                  { name: "net_items_sold" },
+                ],
+                rows: [["2026-08-10", "10", "5000", "1"]],
+              },
+              parseErrors: [],
+            },
+          };
+        }
+        if (query.includes("DropscaleCollectionProducts")) {
+          return {
+            nodes: [
+              {
+                __typename: "Product",
+                id: "gid://shopify/Product/10",
+                title: "トートバッグ グランデ",
+                collections: {
+                  pageInfo: { hasNextPage: false },
+                  nodes: [
+                    {
+                      id: "gid://shopify/Collection/20",
+                      title: "トートバッグ",
+                      handle: "トートバッグ",
+                    },
+                    {
+                      id: "gid://shopify/Collection/21",
+                      title: "Φορέματα",
+                      handle: "Φορέματα",
+                    },
+                  ],
+                },
+              },
+            ],
+          };
+        }
+        throw new Error("Unexpected reporting query");
+      },
+    );
+    const adapter = await createShopifyReportingAdapter(source());
+
+    const rows = await adapter.fetchCollectionSales("2026-08-10", "2026-08-11");
+    expect(rows.map((row) => ({ id: row.collectionId, title: row.title }))).toEqual([
+      { id: "gid://shopify/Collection/20", title: "トートバッグ" },
+      { id: "gid://shopify/Collection/21", title: "Φορέματα" },
+    ]);
+  });
+
   it("skips products deleted from the store instead of failing collection sales", async () => {
     mocks.verifyReportingShop.mockResolvedValue(
       verifiedShop({
