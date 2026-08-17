@@ -226,6 +226,53 @@ describe("Stripe finalised recipient binding", () => {
     ).not.toThrow();
   });
 
+  it("treats Stripe's cleared empty-string address as the null snapshot", () => {
+    // Legacy customers created by the pre-platform integration store "" in
+    // every address field; our snapshot stores null. Regression: 2026-08-17,
+    // seven weekly invoices finalised on Stripe and then wedged locally as
+    // draft+error because "" !== null.
+    const blankRemote = {
+      ...remote,
+      customer_address: {
+        line1: "",
+        line2: "",
+        city: "",
+        postal_code: "",
+        state: "",
+        country: "",
+      },
+    };
+    const nullExpected = {
+      ...expected,
+      recipient: {
+        ...recipient,
+        address: {
+          line1: null,
+          line2: null,
+          city: null,
+          postal_code: null,
+          state: null,
+          country: null,
+        },
+      },
+    };
+    expect(() =>
+      assertStripeInvoiceMatchesLocal(blankRemote, nullExpected),
+    ).not.toThrow();
+    expect(() =>
+      assertStripeInvoiceMatchesLocal(
+        {
+          ...blankRemote,
+          customer_address: {
+            ...blankRemote.customer_address,
+            line1: "Rua Real 1",
+          },
+        },
+        nullExpected,
+      ),
+    ).toThrow(StripeError);
+  });
+
   it("fails closed when email, name, address or VAT identity differs", () => {
     const mismatches = [
       { ...remote, customer_email: "other@example.com" },

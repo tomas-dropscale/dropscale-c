@@ -679,9 +679,20 @@ export function assertStripeInvoiceRecipientMatches(
     );
   }
 
+  // Stripe stores a cleared address field as "" while our snapshot stores
+  // null; the two are the same commercial fact. Legacy customers created by
+  // the pre-platform integration carry all-empty-string addresses, and the
+  // strict comparison finalised their invoices on Stripe and then refused to
+  // record the receipt locally — every weekly issue for those clients wedged
+  // as draft+error while Stripe already showed the invoice as open.
+  const blankToNull = (value: string | null | undefined): string | null => {
+    const trimmed = typeof value === "string" ? value.trim() : value ?? null;
+    return trimmed ? trimmed : null;
+  };
+
   const expectedAddress = expected.address;
   const expectedHasAddress = Object.values(expectedAddress).some(
-    (value) => value !== null,
+    (value) => blankToNull(value) !== null,
   );
   const remoteAddress = invoice.customer_address;
   if (!remoteAddress) {
@@ -702,7 +713,7 @@ export function assertStripeInvoiceRecipientMatches(
     "state",
     "country",
   ] as const) {
-    if ((remoteAddress[key] ?? null) !== expectedAddress[key]) {
+    if (blankToNull(remoteAddress[key]) !== blankToNull(expectedAddress[key])) {
       throw new StripeError(
         `Stripe invoice ${invoice.id} has a different customer address snapshot.`,
         409,
