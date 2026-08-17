@@ -584,6 +584,9 @@ function shopifyFailure<T>(error: unknown, operation: string): AdminAnalyticsFam
   ) {
     return unavailable(`Shopify has not granted the read-only scope required for ${operation}.`);
   }
+  // Same blind spot as the snapshot catch: without this line the family reads
+  // provider_failed downstream with the actual Shopify error discarded.
+  console.error(`Shopify ${operation} failed:`, error);
   return failed(`Shopify could not load ${operation} for the selected period.`);
 }
 

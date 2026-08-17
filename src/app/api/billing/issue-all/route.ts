@@ -95,6 +95,16 @@ export async function POST(request: NextRequest) {
       client: service,
     });
     const counts = summary(result);
+    if (result.blocked.length > 0) {
+      // "13 blocked" alone is undiagnosable from the UI or the logs; the
+      // per-client codes are the difference between a stuck week and a click.
+      console.error(
+        "Issue-all blocked:",
+        JSON.stringify(
+          result.blocked.map(({ clientName, code }) => ({ clientName, code })),
+        ),
+      );
+    }
     return response({
       ok: true,
       status: syncError || counts.blocked > 0 ? "partial" : "succeeded",

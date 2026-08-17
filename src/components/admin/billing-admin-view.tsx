@@ -68,6 +68,7 @@ type IssueAllResponse = {
     noCharge: number;
     blocked: number;
   };
+  blocked?: { clientName: string; code: string; message: string }[];
 };
 
 type OverviewClient =
@@ -464,9 +465,12 @@ export function BillingAdminView({
       const period = body?.period
         ? formatPeriod(body.period.start, body.period.end, intl)
         : "o último ciclo fechado";
+      const blockedDetail = (body?.blocked ?? [])
+        .map((item) => `${item.clientName} (${item.code})`)
+        .join(" · ");
       setIssueFeedback({
         tone: blocked > 0 ? "error" : "success",
-        message: `${period}: ${issued} ${issued === 1 ? "fatura emitida agora" : "faturas emitidas agora"}, ${alreadyIssued} já emitidas, ${noCharge} sem cobrança e ${blocked} ${blocked === 1 ? "bloqueio" : "bloqueios"}.`,
+        message: `${period}: ${issued} ${issued === 1 ? "fatura emitida agora" : "faturas emitidas agora"}, ${alreadyIssued} já emitidas, ${noCharge} sem cobrança e ${blocked} ${blocked === 1 ? "bloqueio" : "bloqueios"}.${blockedDetail ? ` Bloqueios: ${blockedDetail}.` : ""}`,
       });
       setIssueDialogOpen(false);
       router.refresh();
