@@ -1202,7 +1202,7 @@ export async function refreshAdminCampaignSnapshots(
     return verifiedInventory;
   };
 
-  const results = await Promise.all(
+  const settled = await Promise.allSettled(
     inventory.map((entry) =>
       refreshAdminReportingSnapshot<AdminLiveCampaign>({
         client: service,
@@ -1249,6 +1249,11 @@ export async function refreshAdminCampaignSnapshots(
           };
         },
       })),
+  );
+  const results = settled.map((result) =>
+    result.status === "fulfilled"
+      ? result.value
+      : { state: "failed" as const, errorCode: "snapshot_failed" },
   );
 
   return {
