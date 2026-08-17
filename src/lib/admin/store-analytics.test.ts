@@ -219,44 +219,56 @@ function shopifyAdapter() {
   return {
     fetchDailySales: vi.fn(),
     fetchCollectionProductKeys: vi.fn(),
-    fetchFunnel: vi.fn().mockResolvedValue([
-      {
-        day: "2026-08-14",
-        sessions: 200,
-        addedToCart: 44,
-        reachedCheckout: 19,
-        completedCheckout: 8,
-      },
-    ]),
-    fetchCampaignAttribution: vi.fn().mockResolvedValue([
+    fetchFunnelSeries: vi.fn().mockResolvedValue({
+      granularity: "day",
+      points: [
+        {
+          bucket: "2026-08-14",
+          day: "2026-08-14",
+          sessions: 200,
+          addedToCart: 44,
+          reachedCheckout: 19,
+          completedCheckout: 8,
+        },
+      ],
+    }),
+    fetchCampaignAttributionSeries: vi.fn().mockResolvedValue([
       {
         campaignId: "987654321",
         attributionModel: "last_non_direct_click",
+        sessions: null,
         orders: 8,
         revenue: 625,
+        timeline: [
+          { bucket: "2026-08-14", sessions: null, orders: 8, revenue: 625 },
+        ],
       },
     ]),
-    fetchCampaignProducts: vi.fn().mockResolvedValue([
+    fetchCampaignProductSeries: vi.fn().mockResolvedValue([
       {
         campaignId: "987654321",
         productId: "gid://shopify/Product/10",
         title: "Lamp",
         attributionModel: "last_non_direct_click",
         units: 3,
+        timeline: [{ bucket: "2026-08-14", units: 3 }],
       },
     ]),
-    fetchCollectionSales: vi.fn().mockResolvedValue([
+    fetchCollectionSalesSeries: vi.fn().mockResolvedValue([
       {
         collectionId: "gid://shopify/Collection/20",
+        handle: "best-sellers",
         title: "Best sellers",
         revenue: 625,
         units: 8,
+        timeline: [{ bucket: "2026-08-14", revenue: 625, units: 8 }],
         products: [
           {
             productId: "gid://shopify/Product/10",
             title: "Lamp",
             revenue: 300,
             units: 3,
+            timeline: [{ bucket: "2026-08-14", revenue: 300, units: 3 }],
           },
         ],
       },
@@ -372,8 +384,10 @@ describe("admin store analytics DAL", () => {
     mocks.readAdminReportingSnapshotFamilySelections.mockResolvedValue(new Map());
     mocks.fetchLiveGoogleDemandGenBreakdowns.mockResolvedValue([]);
     mocks.fetchLiveGooglePmaxProductBreakdowns.mockResolvedValue([]);
+    mocks.fetchLiveCampaignTimeline.mockResolvedValue([]);
     mocks.fetchGoogleReportingDemandGenAds.mockResolvedValue([]);
     mocks.fetchGoogleReportingPmaxProducts.mockResolvedValue([]);
+    mocks.fetchGoogleReportingCampaignTimeline.mockResolvedValue([]);
     mocks.listCampaignActionActivity.mockResolvedValue({
       history: [],
       truncated: false,
@@ -534,7 +548,7 @@ describe("admin store analytics DAL", () => {
   it("does not let one malformed provider projection erase independent families", async () => {
     mocks.createServiceClient.mockReturnValue(service([account()], null));
     const adapter = shopifyAdapter();
-    adapter.fetchCampaignProducts.mockResolvedValue([null]);
+    adapter.fetchCampaignProductSeries.mockResolvedValue([null]);
     mocks.createLegacyShopifyReportingAdapter.mockResolvedValue(adapter);
     mocks.fetchLiveCampaignsDetailed.mockResolvedValue([googleCampaign()]);
 
@@ -560,7 +574,7 @@ describe("admin store analytics DAL", () => {
   it("contains a synchronous missing collection scope to that Shopify family", async () => {
     mocks.createServiceClient.mockReturnValue(service([account()], null));
     const adapter = shopifyAdapter();
-    adapter.fetchCollectionSales.mockImplementation(() => {
+    adapter.fetchCollectionSalesSeries.mockImplementation(() => {
       throw new ShopifyReportingAdapterError(
         "missing_scope",
         "read_reports is missing",
@@ -640,14 +654,21 @@ describe("admin store analytics DAL", () => {
       STORE_ID,
       RANGE,
     );
-    expect(adapter.fetchFunnel).toHaveBeenCalledWith(RANGE.from, RANGE.to);
-    expect(adapter.fetchCampaignAttribution).toHaveBeenCalledWith(
+    expect(mocks.fetchLiveCampaignTimeline).toHaveBeenCalledWith(
+      "1234567890",
+      "google-refresh-token",
+      STORE_ID,
+      RANGE,
+      "EUR",
+    );
+    expect(adapter.fetchFunnelSeries).toHaveBeenCalledWith(RANGE.from, RANGE.to);
+    expect(adapter.fetchCampaignAttributionSeries).toHaveBeenCalledWith(
       RANGE.from,
       RANGE.to,
       "EUR",
     );
-    expect(adapter.fetchCampaignProducts).toHaveBeenCalledWith(RANGE.from, RANGE.to);
-    expect(adapter.fetchCollectionSales).toHaveBeenCalledWith(
+    expect(adapter.fetchCampaignProductSeries).toHaveBeenCalledWith(RANGE.from, RANGE.to);
+    expect(adapter.fetchCollectionSalesSeries).toHaveBeenCalledWith(
       RANGE.from,
       RANGE.to,
       "EUR",
@@ -688,7 +709,7 @@ describe("admin store analytics DAL", () => {
     });
     expect(result.collections).toMatchObject({
       state: "ready",
-      message: expect.stringContaining("collection rows are not additive"),
+      message: expect.stringContaining("non-additive"),
       data: {
         rows: [
           {
@@ -894,22 +915,27 @@ describe("admin store analytics DAL", () => {
   it("marks an all-zero, fully materialised funnel as empty", async () => {
     mocks.createServiceClient.mockReturnValue(service([account()], null));
     const adapter = shopifyAdapter();
-    adapter.fetchFunnel.mockResolvedValue([
-      {
-        day: "2026-08-08",
-        sessions: 0,
-        addedToCart: 0,
-        reachedCheckout: 0,
-        completedCheckout: 0,
-      },
-      {
-        day: "2026-08-14",
-        sessions: 0,
-        addedToCart: 0,
-        reachedCheckout: 0,
-        completedCheckout: 0,
-      },
-    ]);
+    adapter.fetchFunnelSeries.mockResolvedValue({
+      granularity: "day",
+      points: [
+        {
+          bucket: "2026-08-08",
+          day: "2026-08-08",
+          sessions: 0,
+          addedToCart: 0,
+          reachedCheckout: 0,
+          completedCheckout: 0,
+        },
+        {
+          bucket: "2026-08-14",
+          day: "2026-08-14",
+          sessions: 0,
+          addedToCart: 0,
+          reachedCheckout: 0,
+          completedCheckout: 0,
+        },
+      ],
+    });
     mocks.createLegacyShopifyReportingAdapter.mockResolvedValue(adapter);
     mocks.fetchLiveCampaignsDetailed.mockResolvedValue([]);
 
@@ -1144,7 +1170,11 @@ describe("admin store analytics DAL", () => {
     expect(mocks.refreshAccountsNow).not.toHaveBeenCalled();
     expect(result.spend).toMatchObject({
       state: "ready",
-      data: { daily: expect.arrayContaining([{ day: "2026-08-14", spend: 250 }]) },
+      data: {
+        daily: expect.arrayContaining([
+          { day: "2026-08-14", bucket: "2026-08-14", spend: 250 },
+        ]),
+      },
     });
     expect(result.rollupCoverage).toMatchObject({
       state: "ready",

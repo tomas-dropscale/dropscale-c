@@ -1840,11 +1840,19 @@ async function buildLiveAdminStoreAnalytics(
     console.error("Admin store campaign analytics composition failed:", error);
     campaigns = failed("Campaign performance could not be loaded for this store.");
   }
-  const collections = attributeCollectionSpend(
-    shopify.collections,
-    google,
-    shopify.products,
-  );
+  let collections: AdminStoreAnalytics["collections"];
+  try {
+    collections = attributeCollectionSpend(
+      shopify.collections,
+      google,
+      shopify.products,
+    );
+  } catch (error) {
+    // Spend attribution is an enrichment. A malformed campaign-product
+    // projection must not erase the sound Shopify collection sales family.
+    console.error("Admin store collection spend attribution failed:", error);
+    collections = shopify.collections;
+  }
   let spend = rollup.spend;
   if (google.ok && google.value.granularity === "hour") {
     const byBucket = new Map<string, number>();
