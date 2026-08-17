@@ -657,14 +657,24 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
           ? collection.handle.trim().toLowerCase()
           : "";
         const handle = trimmedHandle ? trimmedHandle : null;
-        if (
-          !/^gid:\/\/shopify\/Collection\/\d+$/.test(collection.id) ||
-          !title ||
-          title.length > 500 ||
-          (handle !== null && handle.length > 255) ||
-          seenCollections.has(collection.id)
-        ) {
-          invalidResponse("Shopify returned invalid collection identity.");
+        const identityProblem = !/^gid:\/\/shopify\/Collection\/\d+$/.test(collection.id)
+          ? "id"
+          : !title
+            ? "empty title"
+            : title.length > 500
+              ? "title length"
+              : handle !== null && handle.length > 255
+                ? "handle length"
+                : seenCollections.has(collection.id)
+                  ? "duplicate id"
+                  : null;
+        if (identityProblem) {
+          // Name the condition and the row: this guard fired for three live
+          // stores in a row and each blind failure cost a deploy round-trip.
+          invalidResponse(
+            `Shopify returned invalid collection identity (${identityProblem}: ` +
+              `${JSON.stringify(collection.id).slice(0, 60)}).`,
+          );
         }
         seenCollections.add(collection.id);
         return { id: collection.id, title, handle };
