@@ -59,6 +59,7 @@ import {
   executeClientReportingCutoverRequest,
   listClientReportingCutoverQueue,
   projectClientReportingCutover,
+  provisionReviewedClientReportingSources,
   type ClientReportingCutoverSnapshot,
 } from "./reporting-cutover";
 
@@ -298,6 +299,46 @@ describe("Phase 2 admin reporting cutover workflow", () => {
     expect(queue.candidates.every((candidate) => /^rw_[0-9a-f]{64}$/.test(candidate.id))).toBe(
       true,
     );
+  });
+
+  it("does not auto-provision a shopify-only shell while a google-only binding is active", async () => {
+    // Regression: "Lia Singapura" 2026-08-17 — the client's Google spend
+    // already reported through an existing account (google-only binding), and
+    // the automatic provisioner still created a second, Shopify-only shell for
+    // the same store, splitting spend and sales across two ad accounts.
+    const data = snapshot({
+      adAccounts: [
+        account({
+          status: "active",
+          google_ads_customer_id: "1234567890",
+          google_ads_connected: true,
+        }),
+      ],
+      mappings: [],
+      bindings: [
+        {
+          id: BINDING,
+          client_id: CLIENT,
+          ad_account_id: ACCOUNT,
+          shopify_connection_id: null,
+          google_ads_connection_id: GOOGLE,
+          shopify_anchor_binding_id: null,
+          status: "active",
+          bound_at: BOUND_AT,
+        },
+      ],
+    });
+    data.profiles.push({ id: ADMIN, role: "admin" });
+    data.shopifyConnections[0].session_id = SESSION;
+    data.sessions[0].requested_assets = ["shopify"];
+    data.sessions[0].created_by = ADMIN;
+
+    const queue = await projectClientReportingCutover(data);
+    expect(queue.candidates.some((candidate) => candidate.kind === "provision")).toBe(true);
+
+    const result = await provisionReviewedClientReportingSources(serviceFor(data) as never);
+    expect(result).toEqual({ attempted: 0, provisioned: 0, failed: 0 });
+    expect(mocks.rpc).not.toHaveBeenCalled();
   });
 
   it("never offers an unbillable mapped non-EUR Google source", async () => {

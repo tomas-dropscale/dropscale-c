@@ -1522,6 +1522,20 @@ function automaticProvisionIsSafe(
     (binding) => binding.client_id === action.clientId && binding.status === "active",
   );
   if (shopify && !google) {
+    // A client whose Google spend already reports through an existing account
+    // (an active google-only binding) must not get a parallel Shopify-only
+    // shell: that splits one store's spend and sales across two ad accounts.
+    // Anchoring the Shopify identity to the existing account is an admin
+    // decision, never an automatic provision.
+    if (
+      activeBindings.some(
+        (binding) =>
+          binding.google_ads_connection_id !== null &&
+          binding.shopify_connection_id === null,
+      )
+    ) {
+      return false;
+    }
     const unboundGoogle = snapshot.googleConnections.filter(
       (connection) =>
         connection.client_id === action.clientId &&
