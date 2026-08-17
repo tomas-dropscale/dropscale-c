@@ -1078,22 +1078,25 @@ export async function refreshAdminCampaignSnapshots(
     const preCutoverByAccount = new Map(
       preCutover.map((entry) => [entry.account.id, entry.account]),
     );
-    const preCutoverSources = preCutover.length === 0
-      ? []
-      : await resolveReportingSources({
-          service,
-          clientIds: [...new Set(preCutover.map((entry) => entry.account.client_id))],
-          adAccountIds: [...preCutoverByAccount.keys()],
-          includeShopifyCredentials: false,
-        });
-    if (preCutoverSources.some((source) => {
-      const account = preCutoverByAccount.get(source.adAccountId);
-      return !account || account.client_id !== source.clientId;
-    })) {
+    const { data: preCutoverBindings, error: preCutoverBindingsError } =
+      preCutoverByAccount.size === 0
+        ? { data: [], error: null }
+        : await service
+            .from("client_reporting_bindings")
+            .select("id, client_id, ad_account_id, shopify_anchor_binding_id")
+            .eq("status", "active")
+            .in("ad_account_id", [...preCutoverByAccount.keys()]);
+    if (
+      preCutoverBindingsError ||
+      preCutoverBindings.some((binding) => {
+        const account = preCutoverByAccount.get(binding.ad_account_id);
+        return !account || account.client_id !== binding.client_id;
+      })
+    ) {
       throw new Error("Admin reporting inventory is unavailable.");
     }
     const preCutoverBoundIds = new Set(
-      preCutoverSources.map((source) => source.adAccountId),
+      preCutoverBindings.map((binding) => binding.ad_account_id),
     );
     const reportingMetricAccountIds = [
       ...new Set([
@@ -1112,22 +1115,39 @@ export async function refreshAdminCampaignSnapshots(
         )
         .flatMap((entry) => entry.metricAccountIds)),
     ];
-    await Promise.all([
-      reportingMetricAccountIds.length > 0
-        ? refreshReportingSourcesNow(reportingMetricAccountIds, {
-            client: service,
-            from: range.from,
-            to: range.to,
-          })
-        : Promise.resolve(),
-      legacyMetricAccountIds.length > 0
-        ? refreshAccountsNow(legacyMetricAccountIds, {
-            client: service,
-            reportingClient: service,
-            from: range.from,
-            to: range.to,
-          })
-        : Promise.resolve(),
+    const selectedBindingIds = new Set(
+      preCutoverBindings.map((binding) => binding.id),
+    );
+    const preCutoverReportingRoots = preCutoverBindings
+      .filter(
+        (binding) =>
+          !binding.shopify_anchor_binding_id ||
+          !selectedBindingIds.has(binding.shopify_anchor_binding_id),
+      )
+      .map((binding) => binding.ad_account_id);
+    await Promise.allSettled([
+      ...[
+        ...new Set([
+          ...inventory
+            .filter((entry) => entry.metricRefreshKind === "reporting")
+            .map((entry) => entry.account.id),
+          ...preCutoverReportingRoots,
+        ]),
+      ].map((accountId) =>
+        refreshReportingSourcesNow([accountId], {
+          client: service,
+          from: range.from,
+          to: range.to,
+        }),
+      ),
+      ...legacyMetricAccountIds.map((accountId) =>
+        refreshAccountsNow([accountId], {
+          client: service,
+          reportingClient: service,
+          from: range.from,
+          to: range.to,
+        }),
+      ),
     ]);
     const { data, error } = metricAccountIds.length === 0
       ? { data: [], error: null }
