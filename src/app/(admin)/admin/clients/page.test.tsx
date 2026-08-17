@@ -89,7 +89,9 @@ describe("Clients page", () => {
     expect(html).toContain("Client onboarding");
     expect(html).toContain("Northwind Commerce");
     expect(html).not.toContain("Commission by client");
-    expect(html).toContain('href="/admin/client-onboarding"');
+    // The onboarding twin page now redirects here; the page must not link
+    // back into it and recreate the impression of a second clients list.
+    expect(html).not.toContain('href="/admin/client-onboarding"');
     expect(html).toContain('href="/admin/referrals"');
     expect(mocks.manager).toHaveBeenCalledWith(
       expect.objectContaining({

@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { BadgePercent, UserPlus } from "lucide-react";
+import { BadgePercent } from "lucide-react";
 
 import { ClientOnboardingManager } from "@/components/admin/client-onboarding-manager";
 import { Button } from "@/components/ui/button";
@@ -55,20 +55,12 @@ export default async function AdminClientsPage() {
       title="Clients"
       description="Create client-led onboarding links for portal access, Shopify stores and Google Ads accounts."
       actions={
-        <>
-          <Button asChild size="sm">
-            <Link href="/admin/client-onboarding">
-              <UserPlus aria-hidden />
-              Onboarding
-            </Link>
-          </Button>
-          <Button asChild size="sm" variant="ghost">
-            <Link href="/admin/referrals">
-              <BadgePercent aria-hidden />
-              Referrals
-            </Link>
-          </Button>
-        </>
+        <Button asChild size="sm" variant="ghost">
+          <Link href="/admin/referrals">
+            <BadgePercent aria-hidden />
+            Referrals
+          </Link>
+        </Button>
       }
     >
       <ClientOnboardingManager
