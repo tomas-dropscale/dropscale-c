@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => {
     ensureAdminAnalyticsRollupCoverage: vi.fn(),
     refreshAdminStoreAnalyticsSnapshots: vi.fn(),
     provisionReviewedClientReportingSources: vi.fn(),
+    ensureAutomaticBillingStarts: vi.fn(),
     refreshReportingSourcesNow: vi.fn(),
   };
 });
@@ -62,6 +63,9 @@ vi.mock("@/lib/client-onboarding/reporting-cutover", () => ({
 }));
 vi.mock("@/lib/metrics/recompute", () => ({
   refreshReportingSourcesNow: mocks.refreshReportingSourcesNow,
+}));
+vi.mock("@/lib/billing/auto-start", () => ({
+  ensureAutomaticBillingStarts: mocks.ensureAutomaticBillingStarts,
 }));
 vi.mock("@/lib/portal/range", async () =>
   import("../../../../lib/portal/range"),
@@ -190,6 +194,12 @@ describe("admin exact-range reporting sync route", () => {
     mocks.provisionReviewedClientReportingSources.mockResolvedValue({
       attempted: 0,
       provisioned: 0,
+      failed: 0,
+    });
+    mocks.ensureAutomaticBillingStarts.mockResolvedValue({
+      attempted: 0,
+      started: 0,
+      activated: 0,
       failed: 0,
     });
     mocks.refreshReportingSourcesNow.mockResolvedValue(undefined);

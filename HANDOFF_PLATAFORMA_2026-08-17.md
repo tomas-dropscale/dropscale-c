@@ -58,6 +58,15 @@ sobre adspend EUR).
   token OAuth → Google direto (como sempre); conta SEM token (onboarding v2) →
   **fallback Windsor** (`fetchGoogleAdsDailyBreakdown`), e o OAuth que falhe em
   runtime também cai para Windsor. Implementado a 17/08.
+- **Billing start automático** (`src/lib/billing/auto-start.ts`, regra do dono
+  17/08): assim que uma conta tem binding ativa com fonte Google, o sync horário
+  cria o start sozinho — `observed_google_counter`, baseline 0, datado do
+  **primeiro dia Google-local completo após o `connected_at` da ligação** — e
+  ativa a conta (pending→active). Todo o adspend após a entrada do cliente fica
+  imediatamente apto para faturação; o dia parcial da entrada nunca é cobrado
+  (zero risco de overcharge). Contas não-EUR/identidade divergente ficam de fora
+  e continuam a bloquear fail-closed. O passo manual "ativar + criar start" do
+  onboarding deixou de existir.
 
 ## O que foi corrigido/mudado a 2026-08-17 (commits dessa noite em `main`)
 
@@ -136,9 +145,10 @@ sobre adspend EUR).
    O sync do ledger dela falha desde 08-15 — com o fallback Windsor deployado
    deve sarar sozinho; se não, investigar o token OAuth dela.
 4. **Jedwabi (Guilherme)**: portal não mostra a loja (rollout `v2_ready_for_cutover`
-   com conta anchor-only) — fazer o cutover para v2_active quando a loja começar;
-   mesmo padrão para Orivelle Paris quando gastar (ambas ficaram `pending`, sem
-   billing start — criar start quando ativarem, senão repete-se o buraco do fee).
+   com conta anchor-only) — fazer o cutover para v2_active quando a loja começar.
+   O billing dela e da Orivelle Paris resolve-se sozinho: o auto-start do sync
+   horário cria os starts e ativa ambas (Jedwabi a partir de 08-17, Orivelle de
+   08-18 — primeiro dia completo após as ligações).
 5. **Payouts Stripe**: os 2 "failed" de julho eram débitos de −€39,95
    (`debit_not_authorized` — o banco recusou o direct debit da Stripe para cobrir
    saldo negativo); saldo hoje 0/0 e payout de €100,04 pago a 17/08. Se voltar a
