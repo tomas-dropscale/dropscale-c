@@ -856,6 +856,114 @@ describe("Windsor Google Ads server adapter", () => {
           },
         ],
       }),
+      // The final-URL companion read succeeds; the campaign row itself must
+      // still fail the account closed.
+      jsonResponse({ data: [] }),
+    );
+
+    await expect(
+      fetchGoogleAdsCampaignBreakdown(
+        "123-456-7890",
+        "2026-08-12",
+        "2026-08-12",
+        { fetcher: fetcher as typeof fetch },
+      ),
+    ).rejects.toMatchObject({ code: "invalid_response", status: 502 });
+  });
+
+  it("ignores an ad's invalid final URL without failing the whole account", async () => {
+    const fetcher = mockFetch(
+      jsonResponse({
+        data: [
+          {
+            account_id: "123-456-7890",
+            account_currency_code: "EUR",
+            account_time_zone: "Europe/Lisbon",
+            campaign_id: "42",
+            campaign: "Campaign",
+            campaign_status: "ENABLED",
+            advertising_channel_type: "PERFORMANCE_MAX",
+            campaign_shopping_setting_merchant_id: null,
+            campaign_budget: 20,
+            bidding_strategy_type: null,
+            start_date: null,
+            spend: 10,
+            impressions: 100,
+            clicks: 10,
+            conversions: 1,
+            conversion_value: 30,
+          },
+        ],
+      }),
+      jsonResponse({
+        data: [
+          {
+            account_id: "123-456-7890",
+            campaign_id: "42",
+            final_url: "https://shop.example/collections/summer",
+          },
+          {
+            account_id: "123-456-7890",
+            campaign_id: "42",
+            final_url: "http://insecure.example/landing",
+          },
+          {
+            account_id: "123-456-7890",
+            campaign_id: "42",
+            final_url: "not a url at all",
+          },
+        ],
+      }),
+    );
+
+    const campaigns = await fetchGoogleAdsCampaignBreakdown(
+      "123-456-7890",
+      "2026-08-12",
+      "2026-08-12",
+      { fetcher: fetcher as typeof fetch },
+    );
+
+    expect(campaigns).toHaveLength(1);
+    expect(campaigns[0]).toMatchObject({
+      campaignId: "42",
+      spend: 10,
+      finalUrls: ["https://shop.example/collections/summer"],
+    });
+  });
+
+  it("still fails closed when a final-URL row reports another account", async () => {
+    const fetcher = mockFetch(
+      jsonResponse({
+        data: [
+          {
+            account_id: "123-456-7890",
+            account_currency_code: "EUR",
+            account_time_zone: "Europe/Lisbon",
+            campaign_id: "42",
+            campaign: "Campaign",
+            campaign_status: "ENABLED",
+            advertising_channel_type: "PERFORMANCE_MAX",
+            campaign_shopping_setting_merchant_id: null,
+            campaign_budget: 20,
+            bidding_strategy_type: null,
+            start_date: null,
+            spend: 10,
+            impressions: 100,
+            clicks: 10,
+            conversions: 1,
+            conversion_value: 30,
+          },
+        ],
+      }),
+      jsonResponse({
+        data: [
+          {
+            account_id: "987-654-3210",
+            campaign_id: "42",
+            final_url: "https://shop.example/collections/summer",
+          },
+        ],
+      }),
     );
 
     await expect(
@@ -986,15 +1094,26 @@ describe("Windsor Google Ads server adapter", () => {
             account_time_zone: "Europe/Lisbon",
             campaign_id: "42",
             advertising_channel_type: "DEMAND_GEN",
-            ad_id: "9001",
-            ad_group_ad_ad_name: "Summer creative",
-            ad_type: "DEMAND_GEN_MULTI_ASSET_AD",
-            ad_group_ad_status: "ENABLED",
+            asset_id: "9001",
+            ad_group_ad_asset_view_field_type: "SQUARE_MARKETING_IMAGE",
             spend: "125.5",
             impressions: "10000",
             clicks: "250",
             conversions: "12",
             conversion_value: "490",
+          },
+        ],
+      }),
+      jsonResponse({
+        data: [
+          {
+            account_id: "123-456-7890",
+            account_currency_code: "EUR",
+            account_time_zone: "Europe/Lisbon",
+            asset_id: "9001",
+            asset_name: "Summer creative",
+            asset_type: "IMAGE",
+            asset_image_asset_full_size_url: "https://img.example/full.png",
           },
         ],
       }),
@@ -1016,8 +1135,9 @@ describe("Windsor Google Ads server adapter", () => {
         campaignId: "42",
         adId: "9001",
         name: "Summer creative",
-        type: "DEMAND_GEN_MULTI_ASSET_AD",
-        status: "ENABLED",
+        type: "SQUARE_MARKETING_IMAGE",
+        thumbnailUrl: "https://img.example/full.png",
+        assetKind: "image",
         spend: 125.5,
         impressions: 10000,
         clicks: 250,
@@ -1029,7 +1149,7 @@ describe("Windsor Google Ads server adapter", () => {
     const upstream = requestedUrl(fetcher);
     expect(upstream.searchParams.get("date_from")).toBe("2026-08-08");
     expect(upstream.searchParams.get("date_to")).toBe("2026-08-14");
-    expect(upstream.searchParams.get("_max_rows")).toBe("1001");
+    expect(upstream.searchParams.get("_max_rows")).toBe("10001");
     expect(upstream.searchParams.get("filter")).toBe(JSON.stringify([
       ["account_id", "eq", "123-456-7890"],
       "and",
@@ -1038,13 +1158,28 @@ describe("Windsor Google Ads server adapter", () => {
     const fields = upstream.searchParams.get("fields")?.split(",") ?? [];
     expect(fields).toEqual(expect.arrayContaining([
       "campaign_id",
-      "ad_id",
-      "ad_group_ad_ad_name",
-      "ad_type",
-      "ad_group_ad_status",
+      "asset_id",
+      "ad_group_ad_asset_view_field_type",
       "spend",
     ]));
     expect(fields).not.toContain("date");
+
+    const metadata = requestedUrl(fetcher, 1);
+    expect(metadata.searchParams.get("date_from")).toBe("2026-08-08");
+    expect(metadata.searchParams.get("date_to")).toBe("2026-08-14");
+    expect(metadata.searchParams.get("_max_rows")).toBe("10001");
+    expect(metadata.searchParams.get("filter")).toBe(
+      JSON.stringify([["account_id", "eq", "123-456-7890"]]),
+    );
+    expect(metadata.searchParams.get("fields")?.split(",")).toEqual(
+      expect.arrayContaining([
+        "asset_id",
+        "asset_name",
+        "asset_type",
+        "asset_image_asset_full_size_url",
+        "asset_youtube_video_asset_youtube_video_title",
+      ]),
+    );
   });
 
   it("reads exact PMax products and keeps the full Merchant identity", async () => {

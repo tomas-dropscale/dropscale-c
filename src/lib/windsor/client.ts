@@ -1117,15 +1117,20 @@ export async function fetchGoogleAdsCampaignBreakdown(
       throw invalidCampaignResponse();
     }
     if (raw.final_url == null || raw.final_url === "") continue;
+    // An unusable final URL (unparseable, non-https, credentialed, oversized)
+    // only loses that ad's attribution: the ad is treated as having no URL
+    // instead of failing the whole account read. Structural malformations of
+    // the row itself (shape, account, campaign id) still fail closed above.
     const text = typeof raw.final_url === "string" ? raw.final_url.trim() : "";
+    if (!text || text.length > 4_096) continue;
     let parsed: URL;
     try {
       parsed = new URL(text);
     } catch {
-      throw invalidCampaignResponse();
+      continue;
     }
-    if (!text || text.length > 4_096 || parsed.protocol !== "https:" || parsed.username || parsed.password) {
-      throw invalidCampaignResponse();
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password) {
+      continue;
     }
     const urls = finalUrlsByCampaign.get(campaignId) ?? new Set<string>();
     urls.add(parsed.toString());
