@@ -393,12 +393,12 @@ export async function POST(request: NextRequest) {
           422,
         );
       }
-      // d7 is the canonical rolling refresh: it upserts every individual
-      // account/day, so a separate sync-metrics pass would repeat the same
-      // daily provider window. Today remains a separate hourly-detail pass.
+      // d7 remains the rolling history refresh. Today also refreshes metrics:
+      // its campaign-hour feed is fresher than Windsor's current-day aggregate
+      // and replaces only today's row after the rolling pass.
       return await refreshAll(
         presetSelection(key),
-        key === "d7" || key === "d30",
+        key === "today" || key === "d7" || key === "d30",
       );
     }
 
