@@ -430,7 +430,15 @@ export async function refreshAdminReportingSnapshot<T>(input: {
       snapshotState: result.state,
       refreshedAt: new Date().toISOString(),
     };
-  } catch {
+  } catch (error) {
+    // The stored row only keeps an error code; without this line the actual
+    // provider failure is unobservable anywhere (no logs, no message, no
+    // trace) and every diagnosis starts from zero.
+    console.error(
+      `Reporting snapshot refresh failed: ${input.family} ${input.accountId} ` +
+        `${input.from}..${input.to} (${failure.errorCode})`,
+      error,
+    );
     await input.client.rpc("fail_admin_reporting_snapshot_refresh", {
       p_family: input.family,
       p_scope_account_id: input.accountId,
