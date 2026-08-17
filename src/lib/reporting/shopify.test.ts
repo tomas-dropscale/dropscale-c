@@ -893,6 +893,88 @@ describe("V2 Shopify reporting adapter", () => {
     );
   });
 
+  it("skips products deleted from the store instead of failing collection sales", async () => {
+    mocks.verifyReportingShop.mockResolvedValue(
+      verifiedShop({
+        scopes: {
+          granted: ["read_reports", "read_products"],
+          missing: [],
+          missingPermissionGated: [],
+          writeScopes: [],
+          unexpectedReadScopes: [],
+          valid: true,
+        },
+      }),
+    );
+    mocks.reportingShopifyGraphql.mockImplementation(
+      async ({ query, variables }: { query: string; variables?: Record<string, unknown> }) => {
+        const shopifyQl = String(variables?.query ?? "");
+        if (shopifyQl.includes("FROM sales")) {
+          return {
+            shopifyqlQuery: {
+              tableData: {
+                columns: [
+                  { name: "day" },
+                  { name: "product_id" },
+                  { name: "net_sales" },
+                  { name: "net_items_sold" },
+                ],
+                rows: [
+                  ["2026-08-10", "10", "50", "1"],
+                  ["2026-08-11", "11", "75", "2"],
+                ],
+              },
+              parseErrors: [],
+            },
+          };
+        }
+        if (query.includes("DropscaleCollectionProducts")) {
+          return {
+            nodes: [
+              {
+                __typename: "Product",
+                id: "gid://shopify/Product/10",
+                title: "Living Lamp",
+                collections: {
+                  pageInfo: { hasNextPage: false },
+                  nodes: [{ id: "gid://shopify/Collection/20", title: "Lamps" }],
+                },
+              },
+              null,
+            ],
+          };
+        }
+        throw new Error("Unexpected reporting query");
+      },
+    );
+    const adapter = await createShopifyReportingAdapter(source());
+
+    await expect(
+      adapter.fetchCollectionSales("2026-08-10", "2026-08-11"),
+    ).resolves.toEqual([
+      {
+        collectionId: "gid://shopify/Collection/20",
+        title: "Lamps",
+        revenue: 50,
+        units: 1,
+        products: [
+          {
+            productId: "gid://shopify/Product/10",
+            title: "Living Lamp",
+            revenue: 50,
+            units: 1,
+          },
+        ],
+      },
+    ]);
+
+    const membershipCall = mocks.reportingShopifyGraphql.mock.calls.find(([input]) =>
+      String(input.query).includes("DropscaleCollectionProducts"));
+    expect(membershipCall?.[0].variables).toEqual({
+      ids: ["gid://shopify/Product/10", "gid://shopify/Product/11"],
+    });
+  });
+
   it("splits every bounded ShopifyQL family without overlapping a long range", async () => {
     mocks.verifyReportingShop.mockResolvedValue(
       verifiedShop({

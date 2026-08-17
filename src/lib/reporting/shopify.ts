@@ -503,7 +503,6 @@ async function fetchCollectionSalesSeries(
   accessToken: string,
   expectedCurrency: string,
   targetCurrency: string,
-  timeZone: string,
   from: string,
   to: string,
   graphql: ShopifyGraphqlExecutor,
@@ -524,6 +523,9 @@ async function fetchCollectionSalesSeries(
     >;
   };
 
+  // Collection sales always report on Shopify's daily grain, including
+  // single-day ranges. Unlike the funnel and campaign families, this family
+  // has no hourly mode: membership is joined onto whole reporting days.
   const rows = await fetchBoundedShopifyQlRows(
     shopDomain,
     accessToken,
@@ -531,11 +533,11 @@ async function fetchCollectionSalesSeries(
     to,
     (chunkFrom, chunkTo) => `FROM sales
 SHOW net_sales, net_items_sold
-GROUP BY product_id${from === to ? ", hour" : ""}
-${from === to ? "" : "TIMESERIES day"}
+GROUP BY product_id
+TIMESERIES day
 SINCE ${chunkFrom}
 UNTIL ${chunkTo}
-ORDER BY ${timelineOrder(from, to)} ASC
+ORDER BY day ASC
 LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
     "A single reporting day has too many product sales rows for an exact report.",
     graphql,
@@ -553,7 +555,8 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
     }
   >();
   for (const row of rows) {
-    const { bucket, day } = reportingBucket(row, from, to, timeZone);
+    const day = rowDay(row.day, from, to);
+    const bucket = day;
     const productId = productGid(row.product_id);
     if (row.product_id != null && row.product_id !== "" && !productId) {
       invalidResponse("Shopify returned an invalid product identity in its sales report.");
@@ -588,6 +591,12 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
       collections: Array<{ id: string; title: string; handle: string | null }>;
     }
   >();
+  // Products that sold inside the range but were deleted from the store
+  // afterwards resolve to null nodes. That is routine catalog churn, not a
+  // malformed response: the store's current official collection membership no
+  // longer contains them, so their sales silently leave the by-collection
+  // attribution instead of failing the whole report.
+  const deletedProductIds = new Set<string>();
   const productIds = [...productSales.keys()];
   for (let start = 0; start < productIds.length; start += PRODUCT_NODE_PAGE_SIZE) {
     const ids = productIds.slice(start, start + PRODUCT_NODE_PAGE_SIZE);
@@ -614,7 +623,14 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
     if (!Array.isArray(data.nodes) || data.nodes.length !== ids.length) {
       invalidResponse("Shopify returned incomplete product collection membership.");
     }
-    for (const node of data.nodes) {
+    for (let index = 0; index < data.nodes.length; index += 1) {
+      const node = data.nodes[index];
+      if (node === null) {
+        // nodes() preserves request order, so a null at this position names
+        // exactly the requested product that no longer exists.
+        deletedProductIds.add(ids[index]);
+        continue;
+      }
       if (
         !node ||
         node.__typename !== "Product" ||
@@ -651,7 +667,7 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
         collections: memberships,
       });
     }
-    if (ids.some((id) => !productMembership.has(id))) {
+    if (ids.some((id) => !productMembership.has(id) && !deletedProductIds.has(id))) {
       invalidResponse("Shopify returned incomplete product collection membership.");
     }
   }
@@ -669,7 +685,10 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
   >();
   for (const [productId, sales] of productSales) {
     const product = productMembership.get(productId);
-    if (!product) invalidResponse("Shopify returned incomplete product collection membership.");
+    if (!product) {
+      if (deletedProductIds.has(productId)) continue;
+      invalidResponse("Shopify returned incomplete product collection membership.");
+    }
     for (const collection of product.collections) {
       const current = collections.get(collection.id) ?? {
         title: collection.title,
@@ -1167,7 +1186,6 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
         accessToken,
         verifiedCurrency,
         reportingCurrency,
-        verifiedTimeZone,
         from,
         to,
         graphql,
@@ -1185,7 +1203,6 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
         accessToken,
         verifiedCurrency,
         currency(targetCurrency),
-        verifiedTimeZone,
         from,
         to,
         graphql,
