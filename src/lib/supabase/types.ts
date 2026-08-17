@@ -267,12 +267,24 @@ export type InvoiceLine = {
   billingStartBaselineAmount?: number;
   /** Immutable billing-start record that authorised this line. */
   billingStartId?: string;
+  /** Which immutable opening-proof contract authorised this line. */
+  billingStartBasis?: "observed_google_counter" | "reviewed_full_day";
   /** Google-local day on which billing started for this store. */
   billingStartDate?: string;
   /** UTC instant at which the opening Google counter was captured. */
   billingStartedAt?: string;
   /** IANA timezone used by the Google Ads account for the opening day. */
   billingTimeZone?: string;
+  /** Immutable reviewed full-day proof used instead of an opening counter. */
+  reviewedFullDayBoundaryId?: string;
+  /** Reviewed full-day commercial policy frozen into this line. */
+  billingPolicyVersion?: string;
+  /** Lisbon commercial-entry day frozen by the reviewed policy. */
+  entryDate?: string;
+  /** Commercial-entry timezone frozen by the reviewed policy. */
+  entryTimeZone?: string;
+  /** How the reviewed policy treats the Google reporting entry day. */
+  entryDayTreatment?: string;
   /** Full cumulative Google counter observed when billing ended. */
   billingEndCounterAmount?: number;
   /** Immutable billing-end record that closed this line's commercial period. */
@@ -562,14 +574,42 @@ export type AdAccountBillingStart = {
   google_local_date: string;
   google_time_zone: string;
   currency: string;
+  start_basis: "observed_google_counter" | "reviewed_full_day";
+  reviewed_full_day_boundary_id: string | null;
   /** Integer micros, or null for a reviewed full-day opening boundary. */
   baseline_cost_micros: number | string | null;
-  capture_started_at: string;
-  captured_at: string;
-  capture_id: string;
-  source: string;
-  reviewed_by: string;
+  capture_started_at: string | null;
+  captured_at: string | null;
+  capture_id: string | null;
+  source: string | null;
+  reviewed_by: string | null;
   created_at: string;
+};
+
+/** Immutable policy evidence for a reviewed full Google reporting start day. */
+export type ReviewedFullDayBillingBoundary = {
+  id: string;
+  ad_account_id: string;
+  client_id: string;
+  google_ads_customer_id: string;
+  account_created_at: string;
+  entry_day: string;
+  entry_time_zone: string;
+  google_local_date: string;
+  google_time_zone: string;
+  entry_day_treatment: string;
+  currency: string;
+  cutover_monday: string;
+  policy_version: string;
+  metadata_capture_id: string;
+  metadata_capture_started_at: string;
+  metadata_captured_at: string;
+  metadata_authority: string;
+  metadata_contract: string;
+  source_snapshot: Record<string, unknown>;
+  source_fingerprint: string;
+  sealed_at: string;
+  sealed_by: string;
 };
 
 /** Immutable closing Google Ads counter that ends financial tracking. */
@@ -2461,6 +2501,27 @@ export type Database = {
             columns: ["reviewed_by"];
             isOneToOne: false;
             referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      reviewed_full_day_billing_boundaries: {
+        Row: Row<ReviewedFullDayBillingBoundary>;
+        Insert: never;
+        Update: never;
+        Relationships: [
+          {
+            foreignKeyName: "reviewed_full_day_billing_boundaries_ad_account_id_fkey";
+            columns: ["ad_account_id"];
+            isOneToOne: true;
+            referencedRelation: "ad_accounts";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "reviewed_full_day_billing_boundaries_client_id_fkey";
+            columns: ["client_id"];
+            isOneToOne: false;
+            referencedRelation: "portal_clients";
             referencedColumns: ["id"];
           },
         ];

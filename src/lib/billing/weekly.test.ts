@@ -249,6 +249,7 @@ describe("the sealed agency fee", () => {
         sourceGrossAmount: 250,
         baselineDeductionAmount: 80,
         billingStartId: "start-1",
+        billingStartBasis: "observed_google_counter",
         billingStartDate: "2026-08-06",
         billingStartedAt: "2026-08-06T14:30:00.123456Z",
         billingTimeZone: "Europe/Lisbon",
@@ -258,6 +259,47 @@ describe("the sealed agency fee", () => {
         amount: 17,
       },
     ]);
+  });
+
+  it("seals reviewed full-day proof without counter-shaped fields", () => {
+    const line = storeLines(
+      "acc-1",
+      "Viktoria Bratislava",
+      totals({
+        spend: 421.389731,
+        sourceSpend: 421.389731,
+        periodStart: "2026-08-03",
+        periodEnd: "2026-08-09",
+        billingStart: {
+          id: "start-1",
+          basis: "reviewed_full_day",
+          date: "2026-07-28",
+          capturedAt: null,
+          timeZone: "America/New_York",
+          baselineAmount: null,
+          reviewedFullDayBoundaryId: "boundary-1",
+          billingPolicyVersion: "reviewed-policy-v2",
+          entryDate: "2026-07-28",
+          entryTimeZone: "Europe/Lisbon",
+          entryDayTreatment: "full-day-inclusive",
+        },
+      }),
+    )[0];
+
+    expect(line).toMatchObject({
+      billingStartId: "start-1",
+      billingStartBasis: "reviewed_full_day",
+      billingStartDate: "2026-07-28",
+      billingTimeZone: "America/New_York",
+      reviewedFullDayBoundaryId: "boundary-1",
+      billingPolicyVersion: "reviewed-policy-v2",
+      entryDate: "2026-07-28",
+      entryTimeZone: "Europe/Lisbon",
+      entryDayTreatment: "full-day-inclusive",
+      amount: 42.14,
+    });
+    expect(line).not.toHaveProperty("billingStartedAt");
+    expect(line).not.toHaveProperty("billingStartBaselineAmount");
   });
 
   it("derives the weekly rate only from the approved referral count", () => {

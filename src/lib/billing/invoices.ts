@@ -45,6 +45,7 @@ import type {
   GoogleLedgerSnapshotRow,
   Invoice,
   InvoiceLine,
+  ReviewedFullDayBillingBoundary,
   ReferralDiscountTerm,
 } from "@/lib/supabase/types";
 import {
@@ -169,9 +170,10 @@ export type BillingStorePreview = {
   billingStart: {
     id: string;
     date: string;
-    capturedAt: string;
+    basis: "observed_google_counter" | "reviewed_full_day";
+    capturedAt: string | null;
     timeZone: string;
-    baselineAmount: number;
+    baselineAmount: number | null;
   } | null;
   billingEnd: {
     id: string;
@@ -276,6 +278,20 @@ type BillingAccount = Pick<
 
 type BillingStart = AdAccountBillingStart;
 type BillingEnd = AdAccountBillingEnd;
+type ReviewedBillingStart = Pick<
+  ReviewedFullDayBillingBoundary,
+  | "id"
+  | "ad_account_id"
+  | "client_id"
+  | "google_ads_customer_id"
+  | "entry_day"
+  | "entry_time_zone"
+  | "google_local_date"
+  | "google_time_zone"
+  | "entry_day_treatment"
+  | "currency"
+  | "policy_version"
+>;
 
 type BillingProfileRow = Pick<
   BillingProfile,
@@ -615,6 +631,28 @@ async function calculateWeek(
     billingStarts.map((start) => [start.ad_account_id, start]),
   );
 
+  const reviewedBoundaryIds = billingStarts
+    .map((start) => start.reviewed_full_day_boundary_id)
+    .filter((id): id is string => Boolean(id));
+  let reviewedBillingStarts: ReviewedBillingStart[] = [];
+  if (reviewedBoundaryIds.length > 0) {
+    const { data, error } = await supabase
+      .from("reviewed_full_day_billing_boundaries")
+      .select(
+        "id, ad_account_id, client_id, google_ads_customer_id, entry_day, entry_time_zone, google_local_date, google_time_zone, entry_day_treatment, currency, policy_version",
+      )
+      .in("id", reviewedBoundaryIds);
+    if (error) {
+      throw new Error(
+        `Could not load reviewed Google billing starts: ${error.message}`,
+      );
+    }
+    reviewedBillingStarts = (data ?? []) as ReviewedBillingStart[];
+  }
+  const reviewedStartById = new Map(
+    reviewedBillingStarts.map((boundary) => [boundary.id, boundary]),
+  );
+
   let billingEnds: BillingEnd[] = [];
   if (allAccounts.length > 0) {
     const { data, error } = await supabase
@@ -774,6 +812,9 @@ async function calculateWeek(
         referralRateTerms,
       );
       const start = startByAccount.get(account.id) ?? null;
+      const reviewedStart = start?.reviewed_full_day_boundary_id
+        ? (reviewedStartById.get(start.reviewed_full_day_boundary_id) ?? null)
+        : null;
       const end = endByAccount.get(account.id) ?? null;
       const rows = (rowsByAccount.get(account.id) ?? []).filter(
         (row) =>
@@ -824,7 +865,20 @@ async function calculateWeek(
         );
       } else if (
         start.google_ads_customer_id !== account.google_ads_customer_id ||
-        start.currency.toUpperCase() !== accountCurrency
+        start.currency.toUpperCase() !== accountCurrency ||
+        (start.start_basis === "observed_google_counter"
+          ? start.reviewed_full_day_boundary_id !== null ||
+            start.baseline_cost_micros === null ||
+            start.captured_at === null
+          : !reviewedStart ||
+            reviewedStart.ad_account_id !== account.id ||
+            reviewedStart.client_id !== account.client_id ||
+            reviewedStart.google_ads_customer_id !==
+              start.google_ads_customer_id ||
+            reviewedStart.google_local_date !== start.google_local_date ||
+            reviewedStart.google_time_zone !== start.google_time_zone ||
+            reviewedStart.currency.toUpperCase() !==
+              start.currency.toUpperCase())
       ) {
         storeBlockers.push(
           blocker(
@@ -940,6 +994,7 @@ async function calculateWeek(
         : BigInt(0);
       const openingBaselineApplied = Boolean(
         start &&
+        start.start_basis === "observed_google_counter" &&
         start.google_local_date >= week.start &&
         start.google_local_date <= week.end,
       );
@@ -986,11 +1041,28 @@ async function calculateWeek(
                     billingStart: {
                       id: start.id,
                       date: start.google_local_date,
+                      basis: start.start_basis,
                       capturedAt: start.captured_at,
                       timeZone: start.google_time_zone,
-                      baselineAmount: Number(
-                        microsToDecimal(String(start.baseline_cost_micros ?? 0)),
-                      ),
+                      baselineAmount:
+                        start.start_basis === "observed_google_counter"
+                          ? Number(
+                              microsToDecimal(
+                                String(start.baseline_cost_micros ?? 0),
+                              ),
+                            )
+                          : null,
+                      ...(start.start_basis === "reviewed_full_day" &&
+                      reviewedStart
+                        ? {
+                            reviewedFullDayBoundaryId: reviewedStart.id,
+                            billingPolicyVersion: reviewedStart.policy_version,
+                            entryDate: reviewedStart.entry_day,
+                            entryTimeZone: reviewedStart.entry_time_zone,
+                            entryDayTreatment:
+                              reviewedStart.entry_day_treatment,
+                          }
+                        : {}),
                     },
                   }
                 : {}),
@@ -1031,11 +1103,15 @@ async function calculateWeek(
           ? {
               id: start.id,
               date: start.google_local_date,
+              basis: start.start_basis,
               capturedAt: start.captured_at,
               timeZone: start.google_time_zone,
-              baselineAmount: Number(
-                microsToDecimal(String(start.baseline_cost_micros ?? 0)),
-              ),
+              baselineAmount:
+                start.start_basis === "observed_google_counter"
+                  ? Number(
+                      microsToDecimal(String(start.baseline_cost_micros ?? 0)),
+                    )
+                  : null,
             }
           : null,
         billingEnd:
@@ -1188,16 +1264,18 @@ async function calculateWeek(
             billingStart:
               line.billingStartId &&
               line.billingStartDate &&
-              line.billingStartedAt &&
               line.billingTimeZone
                 ? {
                     id: line.billingStartId,
                     date: line.billingStartDate,
-                    capturedAt: line.billingStartedAt,
+                    basis:
+                      line.billingStartBasis ?? "observed_google_counter",
+                    capturedAt: line.billingStartedAt ?? null,
                     timeZone: line.billingTimeZone,
-                    baselineAmount: Number(
-                      line.billingStartBaselineAmount ?? 0,
-                    ),
+                    baselineAmount:
+                      line.billingStartBasis === "reviewed_full_day"
+                        ? null
+                        : Number(line.billingStartBaselineAmount ?? 0),
                   }
                 : null,
             billingEnd:

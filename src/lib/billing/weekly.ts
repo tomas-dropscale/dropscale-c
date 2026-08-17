@@ -207,9 +207,15 @@ export type StoreTotals = {
   billingStart?: {
     id: string;
     date: string;
-    capturedAt: string;
+    basis?: "observed_google_counter" | "reviewed_full_day";
+    capturedAt?: string | null;
     timeZone: string;
-    baselineAmount: number;
+    baselineAmount?: number | null;
+    reviewedFullDayBoundaryId?: string;
+    billingPolicyVersion?: string;
+    entryDate?: string;
+    entryTimeZone?: string;
+    entryDayTreatment?: string;
   };
   /** Spend after the closing counter, excluded in the final partial week. */
   endDeduction?: number;
@@ -308,6 +314,24 @@ export function storeLines(
     throw new RangeError("Closing-boundary evidence is incomplete.");
   }
 
+  const startBasis = totals.billingStart?.basis ?? "observed_google_counter";
+  if (
+    totals.billingStart &&
+    (startBasis === "observed_google_counter"
+      ? !totals.billingStart.capturedAt ||
+        totals.billingStart.baselineAmount === null ||
+        totals.billingStart.baselineAmount === undefined
+      : !totals.billingStart.reviewedFullDayBoundaryId ||
+        !totals.billingStart.billingPolicyVersion ||
+        !totals.billingStart.entryDate ||
+        !totals.billingStart.entryTimeZone ||
+        !totals.billingStart.entryDayTreatment ||
+        totals.billingStart.capturedAt != null ||
+        totals.billingStart.baselineAmount != null)
+  ) {
+    throw new RangeError("Billing-start evidence does not match its basis.");
+  }
+
   const preciseSpend = Math.max(0, totals.spend);
   const spend = round2(preciseSpend);
   const sourceSpendExact = Math.max(0, totals.sourceSpend ?? preciseSpend);
@@ -381,10 +405,10 @@ export function storeLines(
   }
   const fee = agencyFee(preciseSpend, feeRate);
 
-  const billingStartedAt = capturedAt(
-    totals.billingStart?.capturedAt,
-    "unknown time",
-  );
+  const billingStartedAt =
+    startBasis === "observed_google_counter"
+      ? capturedAt(totals.billingStart?.capturedAt ?? undefined, "unknown time")
+      : null;
   const billingEndedAt = capturedAt(
     totals.billingEnd?.capturedAt,
     "unknown time",
@@ -395,7 +419,34 @@ export function storeLines(
       : `; manual referral term: approved referral count ${referralCount}` +
         `; ${AGENCY_FEE_RATE}% - ${exactRate(referralDiscountRate)} percentage points = ${exactRate(feeRate)}%`;
   let boundaryEvidence = "";
-  if (totals.openingBaselineApplied && totals.endingCapApplied) {
+  const reviewedFullDayApplied = Boolean(
+    startBasis === "reviewed_full_day" &&
+      totals.billingStart &&
+      totals.periodStart &&
+      totals.periodEnd &&
+      totals.billingStart.date >= totals.periodStart &&
+      totals.billingStart.date <= totals.periodEnd,
+  );
+  if (reviewedFullDayApplied && totals.endingCapApplied) {
+    boundaryEvidence =
+      `; billing began under reviewed full-day policy ${totals.billingStart?.billingPolicyVersion}` +
+      `; full ${totals.billingStart?.timeZone} Google reporting day ${totals.billingStart?.date} included` +
+      `; commercial entry ${totals.billingStart?.entryDate} in ${totals.billingStart?.entryTimeZone}` +
+      `; billing ended ${billingEndedAt}` +
+      ` at Google day counter EUR ${(totals.billingEnd?.counterAmount ?? 0).toFixed(6)}` +
+      `; billable period ${totals.billingStart?.date}` +
+      ` to ${totals.billingEnd?.date}` +
+      `; Google-reported spend EUR ${sourceSpendExact.toFixed(6)}` +
+      ` minus post-service spend EUR ${endDeductionExact.toFixed(6)}`;
+  } else if (reviewedFullDayApplied) {
+    boundaryEvidence =
+      `; billing began under reviewed full-day policy ${totals.billingStart?.billingPolicyVersion}` +
+      `; full ${totals.billingStart?.timeZone} Google reporting day ${totals.billingStart?.date} included` +
+      `; commercial entry ${totals.billingStart?.entryDate} in ${totals.billingStart?.entryTimeZone}` +
+      `; first billable period ${totals.billingStart?.date}` +
+      ` to ${totals.periodEnd}` +
+      `; Google-reported spend EUR ${sourceSpendExact.toFixed(6)}`;
+  } else if (totals.openingBaselineApplied && totals.endingCapApplied) {
     boundaryEvidence =
       `; billing started ${billingStartedAt}` +
       `; billing ended ${billingEndedAt}` +
@@ -448,14 +499,27 @@ export function storeLines(
       ...(totals.billingStart
         ? {
             billingStartId: totals.billingStart.id,
+            billingStartBasis: startBasis,
             billingStartDate: totals.billingStart.date,
-            // Preserve PostgreSQL's full timestamp precision in the immutable
-            // evidence field; only the human label is normalised to millis.
-            billingStartedAt: totals.billingStart.capturedAt,
             billingTimeZone: totals.billingStart.timeZone,
-            billingStartBaselineAmount: round2(
-              totals.billingStart.baselineAmount,
-            ),
+            ...(startBasis === "observed_google_counter"
+              ? {
+                  // Preserve PostgreSQL's full timestamp precision in the
+                  // immutable evidence field; only the label is millis.
+                  billingStartedAt: totals.billingStart.capturedAt!,
+                  billingStartBaselineAmount: round2(
+                    totals.billingStart.baselineAmount!,
+                  ),
+                }
+              : {
+                  reviewedFullDayBoundaryId:
+                    totals.billingStart.reviewedFullDayBoundaryId!,
+                  billingPolicyVersion:
+                    totals.billingStart.billingPolicyVersion!,
+                  entryDate: totals.billingStart.entryDate!,
+                  entryTimeZone: totals.billingStart.entryTimeZone!,
+                  entryDayTreatment: totals.billingStart.entryDayTreatment!,
+                }),
           }
         : {}),
       ...(totals.endingCapApplied && totals.billingEnd
