@@ -1636,55 +1636,117 @@ export async function provisionReviewedClientReportingSources(
 }
 
 /**
- * Owner policy (2026-08-18): a client whose bindings prove exact coverage and
- * complete 90-day receipts activates without an admin touch — the portal must
- * light up the moment reporting does. Eligibility is exactly the queue's own
- * activation offer; the reviewer of record is the admin who created the
- * client's onboarding session. Clients the queue does not offer stay put.
+ * Owner policy (2026-08-18): besides Sync and Issue Invoices there are no
+ * clicks. A client whose bindings prove exact coverage advances through the
+ * cutover queue's own offers without an admin touch — the 90-day source sync
+ * runs, and once receipts are complete the activation marker follows in the
+ * same pass, so the portal lights up the moment reporting does. The reviewer
+ * of record is the admin who created the client's still-valid onboarding
+ * session; clients the queue does not offer, or whose session cannot vouch
+ * for them, stay put.
  */
-export async function activateEligibleClientReportingCutovers(
+export async function advanceEligibleClientReportingCutovers(
   service: Service,
-): Promise<{ attempted: number; activated: number; failed: number }> {
-  const snapshot = await loadSnapshot(service);
-  const queue = await buildClientReportingCutoverQueue(snapshot);
-  const adminIds = new Set(
-    snapshot.profiles
-      .filter((profile) => profile.role === "admin")
-      .map((profile) => profile.id),
-  );
-  let attempted = 0;
-  let activated = 0;
-  let failed = 0;
-  for (const [actionId, action] of queue.actions) {
-    if (action.kind !== "activate") continue;
-    const rollout = snapshot.rolloutStates.find(
-      (state) => state.client_id === action.clientId,
+): Promise<{
+  syncsAttempted: number;
+  syncsCompleted: number;
+  activationsAttempted: number;
+  activated: number;
+  failed: number;
+}> {
+  const outcome = {
+    syncsAttempted: 0,
+    syncsCompleted: 0,
+    activationsAttempted: 0,
+    activated: 0,
+    failed: 0,
+  };
+
+  const eligibleActions = async () => {
+    const snapshot = await loadSnapshot(service);
+    const queue = await buildClientReportingCutoverQueue(snapshot);
+    const adminIds = new Set(
+      snapshot.profiles
+        .filter((profile) => profile.role === "admin")
+        .map((profile) => profile.id),
     );
-    const session = rollout?.onboarding_session_id
-      ? snapshot.sessions.find(
-          (candidate) => candidate.id === rollout.onboarding_session_id,
-        )
-      : null;
-    if (
-      !session ||
-      typeof session.created_by !== "string" ||
-      !adminIds.has(session.created_by)
-    ) {
-      continue;
-    }
-    attempted += 1;
+    return [...queue.actions.entries()].flatMap(([actionId, action]) => {
+      if (action.kind !== "activate" && action.kind !== "sync") return [];
+      const rollout = snapshot.rolloutStates.find(
+        (state) => state.client_id === action.clientId,
+      );
+      const session = rollout?.onboarding_session_id
+        ? snapshot.sessions.find(
+            (candidate) => candidate.id === rollout.onboarding_session_id,
+          )
+        : null;
+      // Mirror of the queue's activationSessionReady, plus the admin-creator
+      // requirement: without a session that can vouch for the client, the
+      // automatic path never touches it (and never loops on its sync).
+      if (
+        !session ||
+        typeof session.created_by !== "string" ||
+        !adminIds.has(session.created_by) ||
+        session.claimed_user_id !== action.clientId ||
+        !["submitted", "reviewed", "active"].includes(session.status) ||
+        !Array.isArray(session.requested_assets) ||
+        session.requested_assets.length === 0
+      ) {
+        return [];
+      }
+      return [{ actionId, action, adminId: session.created_by }];
+    });
+  };
+
+  const run = async (
+    entry: Awaited<ReturnType<typeof eligibleActions>>[number],
+  ): Promise<boolean> => {
     try {
-      await executeCutoverAction(service, action, actionId, session.created_by);
-      activated += 1;
+      await executeCutoverAction(
+        service,
+        entry.action,
+        entry.actionId,
+        entry.adminId,
+      );
+      return true;
     } catch (error) {
-      failed += 1;
+      outcome.failed += 1;
       console.error(
-        `Automatic reporting cutover failed for client ${action.clientId}:`,
+        `Automatic reporting cutover ${entry.action.kind} failed for client ${entry.action.clientId}:`,
         error,
       );
+      return false;
+    }
+  };
+
+  const executed = new Set<string>();
+  const firstPass = await eligibleActions();
+  for (const entry of firstPass) {
+    executed.add(entry.actionId);
+    if (entry.action.kind === "sync") {
+      outcome.syncsAttempted += 1;
+      if (await run(entry)) outcome.syncsCompleted += 1;
+    } else {
+      outcome.activationsAttempted += 1;
+      if (await run(entry)) outcome.activated += 1;
     }
   }
-  return { attempted, activated, failed };
+
+  // A completed 90-day sync often makes activation possible immediately —
+  // recompute once so a fresh client converges in a single pass instead of
+  // waiting for the next hourly cycle. Action ids are content-addressed, so
+  // anything already executed this pass is skipped by identity.
+  if (outcome.syncsCompleted > 0) {
+    for (const entry of await eligibleActions()) {
+      if (entry.action.kind !== "activate" || executed.has(entry.actionId)) {
+        continue;
+      }
+      outcome.activationsAttempted += 1;
+      if (await run(entry)) outcome.activated += 1;
+    }
+  }
+
+  return outcome;
 }
 
 export async function listClientReportingCutoverQueue(): Promise<ClientReportingCutoverQueue> {

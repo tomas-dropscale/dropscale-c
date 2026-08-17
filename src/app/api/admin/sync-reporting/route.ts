@@ -7,7 +7,7 @@ import {
 import { ClientOnboardingError } from "@/lib/client-onboarding/sessions";
 import { ensureAutomaticBillingStarts } from "@/lib/billing/auto-start";
 import {
-  activateEligibleClientReportingCutovers,
+  advanceEligibleClientReportingCutovers,
   provisionReviewedClientReportingSources,
 } from "@/lib/client-onboarding/reporting-cutover";
 import {
@@ -157,6 +157,17 @@ function parseManualRequest(value: unknown): AllRequest | CampaignsRequest | Sto
 }
 
 async function refreshStore(request: StoreRequest) {
+  // Owner policy: Sync and Issue Invoices are the only clicks. A store sync
+  // therefore also advances the automatic chain — provisioning, billing
+  // starts and cutover activation — before pulling fresh provider data, so a
+  // newly connected client converges on one click instead of waiting for the
+  // hourly cycle.
+  const service = createServiceClient();
+  if (service) {
+    await provisionReviewedClientReportingSources(service).catch(() => undefined);
+    await ensureAutomaticBillingStarts(service).catch(() => undefined);
+    await advanceEligibleClientReportingCutovers(service).catch(() => undefined);
+  }
   // The selected store's rollup and provider details are independent. Starting
   // both now makes Sync cost the slower upstream phase, not Shopify + Google
   // one after the other (the same pattern used by the local DropHub).
@@ -225,7 +236,7 @@ async function refreshAll(
   // Owner policy: a bound Google source starts billing without an admin touch,
   // and a fully-covered client activates its portal the same way.
   await ensureAutomaticBillingStarts(service).catch(() => undefined);
-  await activateEligibleClientReportingCutovers(service).catch(() => undefined);
+  await advanceEligibleClientReportingCutovers(service).catch(() => undefined);
 
   type CampaignRefresh = Awaited<ReturnType<typeof refreshAdminCampaignSnapshots>>;
   // Portfolio Google, metric materialisation and every store are independent.
@@ -357,7 +368,7 @@ async function refreshMetricHistory(range: RangeSelection) {
   if (!service) return response({ error: "Reporting sync is not configured." }, 503);
   await provisionReviewedClientReportingSources(service).catch(() => undefined);
   await ensureAutomaticBillingStarts(service).catch(() => undefined);
-  await activateEligibleClientReportingCutovers(service).catch(() => undefined);
+  await advanceEligibleClientReportingCutovers(service).catch(() => undefined);
   const result = await refreshAdminCampaignSnapshots(range, {
     authenticate: false,
     client: service,

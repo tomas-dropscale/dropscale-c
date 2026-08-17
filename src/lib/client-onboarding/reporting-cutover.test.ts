@@ -56,7 +56,7 @@ vi.mock("@/lib/shopify/client", () => ({
 
 import { ClientOnboardingError } from "@/lib/client-onboarding/sessions";
 import {
-  activateEligibleClientReportingCutovers,
+  advanceEligibleClientReportingCutovers,
   executeClientReportingCutoverRequest,
   listClientReportingCutoverQueue,
   projectClientReportingCutover,
@@ -769,32 +769,57 @@ describe("Phase 2 admin reporting cutover workflow", () => {
     });
   });
 
-  it("auto-activates an eligible client with the session's admin as reviewer", async () => {
+  it("advances an eligible client end to end with the session's admin as reviewer", async () => {
     const data = boundSnapshot(true);
     data.profiles.push({ id: ADMIN, role: "admin" });
     data.sessions[0].created_by = ADMIN;
     mocks.rpc.mockResolvedValue({ data: CLIENT, error: null });
 
-    const result = await activateEligibleClientReportingCutovers(
+    const result = await advanceEligibleClientReportingCutovers(
       serviceFor(data) as never,
     );
 
-    expect(result).toEqual({ attempted: 1, activated: 1, failed: 0 });
+    // One pass runs the offered 90-day sync AND the activation; the recompute
+    // does not re-execute the same content-addressed action ids.
+    expect(result).toEqual({
+      syncsAttempted: 1,
+      syncsCompleted: 1,
+      activationsAttempted: 1,
+      activated: 1,
+      failed: 0,
+    });
+    expect(mocks.refreshReportingSourcesNow).toHaveBeenCalledWith([ACCOUNT], {
+      client: expect.any(Object),
+      from: day(-90),
+      to: day(-1),
+    });
     expect(mocks.rpc).toHaveBeenCalledWith("activate_client_reporting_cutover", {
       p_client_id: CLIENT,
       p_admin_id: ADMIN,
       p_reason: "Admin-reviewed reporting cutover after 90-day source sync",
     });
+    expect(
+      mocks.rpc.mock.calls.filter(
+        ([name]) => name === "activate_client_reporting_cutover",
+      ),
+    ).toHaveLength(1);
   });
 
-  it("does not auto-activate without an admin-created onboarding session", async () => {
+  it("does not advance without an admin-created onboarding session", async () => {
     const data = boundSnapshot(true);
 
-    const result = await activateEligibleClientReportingCutovers(
+    const result = await advanceEligibleClientReportingCutovers(
       serviceFor(data) as never,
     );
 
-    expect(result).toEqual({ attempted: 0, activated: 0, failed: 0 });
+    expect(result).toEqual({
+      syncsAttempted: 0,
+      syncsCompleted: 0,
+      activationsAttempted: 0,
+      activated: 0,
+      failed: 0,
+    });
+    expect(mocks.refreshReportingSourcesNow).not.toHaveBeenCalled();
     expect(mocks.rpc).not.toHaveBeenCalledWith(
       "activate_client_reporting_cutover",
       expect.anything(),

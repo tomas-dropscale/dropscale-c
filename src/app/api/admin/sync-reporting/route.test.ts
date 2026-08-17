@@ -23,7 +23,7 @@ const mocks = vi.hoisted(() => {
     ensureAdminAnalyticsRollupCoverage: vi.fn(),
     refreshAdminStoreAnalyticsSnapshots: vi.fn(),
     provisionReviewedClientReportingSources: vi.fn(),
-    activateEligibleClientReportingCutovers: vi.fn(),
+    advanceEligibleClientReportingCutovers: vi.fn(),
     ensureAutomaticBillingStarts: vi.fn(),
     refreshReportingSourcesNow: vi.fn(),
   };
@@ -61,8 +61,8 @@ vi.mock("@/lib/admin/store-analytics", () => ({
 vi.mock("@/lib/client-onboarding/reporting-cutover", () => ({
   provisionReviewedClientReportingSources:
     mocks.provisionReviewedClientReportingSources,
-  activateEligibleClientReportingCutovers:
-    mocks.activateEligibleClientReportingCutovers,
+  advanceEligibleClientReportingCutovers:
+    mocks.advanceEligibleClientReportingCutovers,
 }));
 vi.mock("@/lib/metrics/recompute", () => ({
   refreshReportingSourcesNow: mocks.refreshReportingSourcesNow,
@@ -144,7 +144,9 @@ function reportingScope(index: number) {
 }
 
 async function flushMicrotasks() {
-  for (let step = 0; step < 10; step += 1) await Promise.resolve();
+  // Generous: the store path now awaits the automatic chain (provisioning,
+  // billing starts, cutover advance) before its parallel refresh begins.
+  for (let step = 0; step < 40; step += 1) await Promise.resolve();
 }
 
 const metricReady = {
@@ -205,8 +207,10 @@ describe("admin exact-range reporting sync route", () => {
       activated: 0,
       failed: 0,
     });
-    mocks.activateEligibleClientReportingCutovers.mockResolvedValue({
-      attempted: 0,
+    mocks.advanceEligibleClientReportingCutovers.mockResolvedValue({
+      syncsAttempted: 0,
+      syncsCompleted: 0,
+      activationsAttempted: 0,
       activated: 0,
       failed: 0,
     });
