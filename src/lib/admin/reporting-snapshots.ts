@@ -447,6 +447,8 @@ export async function refreshAdminReportingSnapshot<T>(input: {
       p_authority_key: input.authority.key,
       p_lease_token: leaseToken,
       p_error_code: failure.errorCode,
+      p_error_message:
+        error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500),
     });
     return failure;
   }

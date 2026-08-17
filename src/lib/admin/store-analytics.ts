@@ -584,10 +584,14 @@ function shopifyFailure<T>(error: unknown, operation: string): AdminAnalyticsFam
   ) {
     return unavailable(`Shopify has not granted the read-only scope required for ${operation}.`);
   }
-  // Same blind spot as the snapshot catch: without this line the family reads
-  // provider_failed downstream with the actual Shopify error discarded.
+  // Same blind spot as the snapshot catch: without this the family reads
+  // provider_failed downstream with the actual Shopify error discarded. The
+  // cause travels in the message so the snapshot row keeps it (0073).
   console.error(`Shopify ${operation} failed:`, error);
-  return failed(`Shopify could not load ${operation} for the selected period.`);
+  const cause = error instanceof Error ? error.message : String(error);
+  return failed(
+    `Shopify could not load ${operation} for the selected period. (${cause.slice(0, 220)})`,
+  );
 }
 
 async function loadTopology(
@@ -2398,7 +2402,12 @@ export async function fetchCachedAdminStoreAnalytics(
 
 function snapshotFamilyResult<T>(family: AdminAnalyticsFamily<T>) {
   if (family.state === "failed" || family.state === "not_synced") {
-    throw new Error("The provider family failed during refresh.");
+    // Carry the provider's own message: the refresh's failure path persists
+    // this text onto the snapshot row (0073) — a generic wrapper here made
+    // every provider failure indistinguishable.
+    throw new Error(
+      family.message || "The provider family failed during refresh.",
+    );
   }
   if (family.state === "unavailable") {
     return { state: "unavailable" as const, rows: [], message: family.message };
