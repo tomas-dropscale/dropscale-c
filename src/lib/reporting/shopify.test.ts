@@ -959,7 +959,12 @@ describe("V2 Shopify reporting adapter", () => {
     const adapter = await createShopifyReportingAdapter(source());
 
     const rows = await adapter.fetchCollectionSales("2026-08-10", "2026-08-11");
-    expect(rows.map((row) => ({ id: row.collectionId, title: row.title }))).toEqual([
+    // Output order is a locale sort over non-latin titles — assert membership.
+    expect(
+      rows
+        .map((row) => ({ id: row.collectionId, title: row.title }))
+        .sort((left, right) => left.id.localeCompare(right.id)),
+    ).toEqual([
       { id: "gid://shopify/Collection/20", title: "トートバッグ" },
       { id: "gid://shopify/Collection/21", title: "Φορέματα" },
     ]);
