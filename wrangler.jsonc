@@ -15,7 +15,7 @@
       "5 14 * * MON",
       // A second idempotent delivery prevents one missed Cron Trigger from
       // postponing weekly invoices until the nightly retry.
-      "25 14 * * MON",
+      "45 14 * * MON",
       // Hourly on the hour, from midnight UTC — rebuild the metrics rollup the
       // client reports read, then the commission ledger the finance pages read.
       // The countdown in the report is derived from this same schedule, so if
