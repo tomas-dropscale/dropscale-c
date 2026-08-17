@@ -535,10 +535,8 @@ describe("exact Google campaign breakdowns", () => {
       {
         ...providerIdentity(),
         campaign: { id: "42", advertisingChannelType: "DEMAND_GEN" },
-        adGroupAd: {
-          status: "ENABLED",
-          ad: { id: "1", type: "DEMAND_GEN_MULTI_ASSET_AD" },
-        },
+        asset: { id: "9001" },
+        adGroupAdAssetView: { fieldType: "MARKETING_IMAGE" },
         metrics: {
           costMicros: "0",
           impressions: "0",
@@ -587,10 +585,8 @@ describe("exact Google campaign breakdowns", () => {
         {
           ...providerIdentity(),
           campaign: { id: "42", advertisingChannelType: "DEMAND_GEN" },
-          adGroupAd: {
-            status: "PAUSED",
-            ad: { id: "9001", name: null, type: "DEMAND_GEN_CAROUSEL_AD" },
-          },
+          asset: { id: "9001" },
+          adGroupAdAssetView: { fieldType: "SQUARE_MARKETING_IMAGE" },
           metrics: {
             costMicros: "1000000",
             impressions: "10",
@@ -600,7 +596,19 @@ describe("exact Google campaign breakdowns", () => {
           },
         },
       ])
-      .mockResolvedValueOnce([]);
+      // PMax products start concurrently, so they claim the second call.
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          ...providerIdentity(),
+          asset: {
+            id: "9001",
+            name: "Square",
+            type: "IMAGE",
+            imageAsset: { fullSize: { url: "https://google.example/square.jpg" } },
+          },
+        },
+      ]);
 
     await expect(
       fetchLiveGoogleCampaignBreakdowns(
@@ -616,16 +624,18 @@ describe("exact Google campaign breakdowns", () => {
         provider: "google_ads",
         kind: "creative",
         id: "9001",
-        name: null,
-        detail: "DEMAND_GEN_CAROUSEL_AD",
+        name: "Square",
+        detail: "SQUARE_MARKETING_IMAGE",
         spend: 1,
         impressions: 10,
         clicks: 2,
         conversions: 1,
         googleRevenue: 5,
+        thumbnailUrl: "https://google.example/square.jpg",
+        assetKind: "image",
       },
     ]);
-    expect(mocks.searchGoogleAds).toHaveBeenCalledTimes(2);
+    expect(mocks.searchGoogleAds).toHaveBeenCalledTimes(3);
   });
 
   it("keeps the legacy creative and product reads independently settleable", async () => {

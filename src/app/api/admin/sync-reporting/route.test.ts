@@ -22,6 +22,8 @@ const mocks = vi.hoisted(() => {
     listAdminReportingStoreScopes: vi.fn(),
     ensureAdminAnalyticsRollupCoverage: vi.fn(),
     refreshAdminStoreAnalyticsSnapshots: vi.fn(),
+    provisionReviewedClientReportingSources: vi.fn(),
+    refreshReportingSourcesNow: vi.fn(),
   };
 });
 
@@ -53,6 +55,13 @@ vi.mock("@/lib/admin/campaigns", () => ({
 vi.mock("@/lib/admin/store-analytics", () => ({
   ensureAdminAnalyticsRollupCoverage: mocks.ensureAdminAnalyticsRollupCoverage,
   refreshAdminStoreAnalyticsSnapshots: mocks.refreshAdminStoreAnalyticsSnapshots,
+}));
+vi.mock("@/lib/client-onboarding/reporting-cutover", () => ({
+  provisionReviewedClientReportingSources:
+    mocks.provisionReviewedClientReportingSources,
+}));
+vi.mock("@/lib/metrics/recompute", () => ({
+  refreshReportingSourcesNow: mocks.refreshReportingSourcesNow,
 }));
 vi.mock("@/lib/portal/range", async () =>
   import("../../../../lib/portal/range"),
@@ -178,6 +187,12 @@ describe("admin exact-range reporting sync route", () => {
     ]);
     mocks.ensureAdminAnalyticsRollupCoverage.mockResolvedValue(metricReady);
     mocks.refreshAdminStoreAnalyticsSnapshots.mockResolvedValue(snapshotReady);
+    mocks.provisionReviewedClientReportingSources.mockResolvedValue({
+      attempted: 0,
+      provisioned: 0,
+      failed: 0,
+    });
+    mocks.refreshReportingSourcesNow.mockResolvedValue(undefined);
   });
 
   afterEach(() => {
@@ -198,6 +213,7 @@ describe("admin exact-range reporting sync route", () => {
     expect(mocks.readSmallJson).not.toHaveBeenCalled();
     expect(mocks.createServiceClient).not.toHaveBeenCalled();
     expect(mocks.refreshAdminCampaignSnapshots).not.toHaveBeenCalled();
+    expect(mocks.provisionReviewedClientReportingSources).not.toHaveBeenCalled();
   });
 
   it("rejects a cross-origin admin after auth and before body or service access", async () => {
@@ -216,6 +232,16 @@ describe("admin exact-range reporting sync route", () => {
 
     expect(response.status).toBe(200);
     expect(mocks.callOrder).toEqual(["auth", "body", "service"]);
+    // Reviewed clients are provisioned into reporting sources before the
+    // campaign refresh so a fresh cutover is included in the same sync.
+    expect(mocks.provisionReviewedClientReportingSources).toHaveBeenCalledWith(
+      serviceClient,
+    );
+    expect(
+      mocks.provisionReviewedClientReportingSources.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      mocks.refreshAdminCampaignSnapshots.mock.invocationCallOrder[0],
+    );
     expect(mocks.refreshAdminCampaignSnapshots).toHaveBeenCalledWith(RANGE, {
       authenticate: false,
       client: serviceClient,
@@ -382,10 +408,14 @@ describe("admin exact-range reporting sync route", () => {
     expect(response.status).toBe(200);
     expect(mocks.getSessionProfile).not.toHaveBeenCalled();
     expect(mocks.readSmallJson).not.toHaveBeenCalled();
+    // f5da538: today refreshes metrics too — its campaign-hour feed is
+    // fresher than Windsor's current-day aggregate. d7 stays the rolling
+    // history refresh.
+    expect(key === "today" || key === "d7").toBe(true);
     expect(mocks.refreshAdminCampaignSnapshots).toHaveBeenCalledWith(range, {
       authenticate: false,
       client: serviceClient,
-      ...(key === "d7" ? { refreshMetrics: true } : {}),
+      refreshMetrics: true,
     });
     expect(mocks.listAdminReportingStoreScopes).toHaveBeenCalledWith(serviceClient);
     expect(mocks.refreshAdminStoreAnalyticsSnapshots).toHaveBeenCalledWith(

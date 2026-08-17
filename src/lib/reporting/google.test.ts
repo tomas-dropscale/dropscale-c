@@ -207,6 +207,24 @@ describe("Google V2 reporting adapter", () => {
         conversions: 3,
         conversionValue: 120,
       },
+      {
+        accountId: "111-222-3333",
+        customerId: "1112223333",
+        currency: "EUR",
+        timeZone: "Europe/Lisbon",
+        campaignId: "42",
+        adId: "9002",
+        name: "Square",
+        type: "SQUARE_MARKETING_IMAGE",
+        status: "ENABLED" as const,
+        thumbnailUrl: "https://google.example/square.jpg",
+        assetKind: "image" as const,
+        spend: 5,
+        impressions: 400,
+        clicks: 16,
+        conversions: 1,
+        conversionValue: 20,
+      },
     ]);
 
     await expect(
@@ -230,6 +248,26 @@ describe("Google V2 reporting adapter", () => {
         clicks: 80,
         conversions: 3,
         googleRevenue: 120,
+        // A row without creative-asset metadata projects explicit nulls.
+        thumbnailUrl: null,
+        assetKind: null,
+      },
+      {
+        accountId: source.adAccountId,
+        campaignId: "42",
+        provider: "google_ads",
+        kind: "creative",
+        id: "9002",
+        name: "Square",
+        detail: "SQUARE_MARKETING_IMAGE",
+        spend: 5,
+        impressions: 400,
+        clicks: 16,
+        conversions: 1,
+        googleRevenue: 20,
+        // Asset metadata passes through the unified contract untouched.
+        thumbnailUrl: "https://google.example/square.jpg",
+        assetKind: "image",
       },
     ]);
     expect(fetcher).toHaveBeenCalledWith(

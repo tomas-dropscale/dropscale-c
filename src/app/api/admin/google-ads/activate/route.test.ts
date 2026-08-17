@@ -6,11 +6,19 @@ const mocks = vi.hoisted(() => ({
   createServiceClient: vi.fn(),
   createClient: vi.fn(),
   rpc: vi.fn(),
+  searchGoogleAds: vi.fn(),
+  decryptToken: vi.fn(),
 }));
 
 vi.mock("server-only", () => ({}));
 vi.mock("@/lib/google-ads/billing-start", () => ({
   captureGoogleBillingStartAsAgency: mocks.capture,
+}));
+vi.mock("@/lib/google-ads/client", () => ({
+  searchGoogleAds: mocks.searchGoogleAds,
+}));
+vi.mock("@/lib/google-ads/crypto", () => ({
+  decryptToken: mocks.decryptToken,
 }));
 vi.mock("@/lib/supabase/service", () => ({
   createServiceClient: mocks.createServiceClient,
@@ -92,10 +100,27 @@ const captured = {
   source: "agency",
 } as const;
 
+function serviceClient(refreshToken: string | null = "encrypted-refresh-token") {
+  return {
+    rpc: mocks.rpc,
+    from: vi.fn(() => ({
+      select: vi.fn(() => ({
+        eq: vi.fn(() => ({
+          maybeSingle: vi.fn(async () => ({
+            data: { google_ads_refresh_token: refreshToken },
+            error: null,
+          })),
+        })),
+      })),
+    })),
+  };
+}
+
 describe("admin Google billing activation", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.createServiceClient.mockReturnValue({ rpc: mocks.rpc });
+    mocks.createServiceClient.mockReturnValue(serviceClient());
+    mocks.decryptToken.mockResolvedValue("google-refresh-token");
   });
 
   it("accepts exactly one accountId or requestId", async () => {
@@ -149,7 +174,42 @@ describe("admin Google billing activation", () => {
     const response = await POST(request({ accountId: ACCOUNT_ID }));
 
     expect(response.status).toBe(502);
-    expect(mocks.capture).toHaveBeenCalledWith("1234567890");
+    // ce90b0e: account activation verifies Google through the account's own
+    // connected authority — its stored refresh token — not the agency login.
+    expect(mocks.capture).toHaveBeenCalledWith("1234567890", {
+      search: expect.any(Function),
+    });
+    expect(mocks.decryptToken).toHaveBeenCalledWith("encrypted-refresh-token");
+    const search = mocks.capture.mock.calls[0]?.[1]?.search as (
+      customerId: string,
+      query: string,
+    ) => unknown;
+    await search("1234567890", "SELECT customer.id FROM customer");
+    expect(mocks.searchGoogleAds).toHaveBeenCalledWith(
+      "1234567890",
+      "google-refresh-token",
+      "SELECT customer.id FROM customer",
+    );
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+
+  it("fails closed before Google when the account has no stored refresh token", async () => {
+    mocks.createClient.mockResolvedValue(
+      session({
+        account: {
+          id: ACCOUNT_ID,
+          store_name: "Lisbon Store",
+          google_ads_customer_id: "1234567890",
+          status: "pending",
+        },
+      }),
+    );
+    mocks.createServiceClient.mockReturnValue(serviceClient(null));
+
+    const response = await POST(request({ accountId: ACCOUNT_ID }));
+
+    expect(response.status).toBe(502);
+    expect(mocks.capture).not.toHaveBeenCalled();
     expect(mocks.rpc).not.toHaveBeenCalled();
   });
 
@@ -264,6 +324,10 @@ describe("admin Google billing activation", () => {
     const response = await POST(request({ requestId: REQUEST_ID }));
 
     expect(response.status).toBe(200);
+    // A request has no stored account token yet, so the capture keeps the
+    // default agency authority instead of a connected-account search.
+    expect(mocks.capture).toHaveBeenCalledWith("1234567890", {});
+    expect(mocks.decryptToken).not.toHaveBeenCalled();
     expect(mocks.rpc).toHaveBeenCalledWith(
       "commit_google_ads_billing_start",
       expect.objectContaining({

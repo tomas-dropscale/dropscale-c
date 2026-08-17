@@ -1,6 +1,10 @@
 import { readFileSync } from "node:fs";
 import { PGlite } from "@electric-sql/pglite";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+
+// PGlite boots a WASM Postgres per suite. Under a full parallel run these
+// tests can exceed vitest's default 5s timeout while still being correct.
+vi.setConfig({ testTimeout: 30_000 });
 
 const BILLING_MIGRATION = readFileSync(
   "supabase/migrations/0028_manual_agency_billing.sql",

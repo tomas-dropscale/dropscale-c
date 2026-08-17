@@ -353,7 +353,12 @@ describe("AnalyticsView", () => {
     expect(html).toContain("PMax · Best sellers");
     expect(html).toContain("PMAX (SF)");
     expect(html).toContain("Best sellers");
-    expect(html).toContain(">REV.</th>");
+    // 2d21f50 removed the per-campaign Shopify REV./Real ROAS columns; Google
+    // ROAS is the campaign table's return column, while Shopify return (Real
+    // ROAS) lives in the Collection Return section.
+    expect(html).toContain(">Google ROAS</th>");
+    expect(html).not.toContain(">REV.</th>");
+    expect(html).toContain(">Real ROAS</th>");
     expect(html).not.toContain("Provider + Shopify");
     expect(html).not.toContain("Shopify attribution unavailable for one provider.");
     expect(html).toContain('text-center font-medium">Spend</th>');
@@ -516,7 +521,10 @@ describe("AnalyticsView", () => {
     expect(html).toContain("Running");
     expect(html).toContain("complete selected-period grid");
     expect(html).toContain("Mixed currencies (EUR, GBP)");
-    expect(html.match(/title="Unavailable across mixed currencies/g)).toHaveLength(5);
+    // 609dda5 removed the KPI hint line. Withheld mixed-currency aggregates
+    // must surface as em-dash values on all five KPI cards; the hint text
+    // itself is covered by the scope-model test (lib/admin/analytics-view).
+    expect(html.match(/label-caps">[^<]+<\/p><p class="[^"]*">—<\/p>/g)).toHaveLength(5);
     expect(html).toContain("GBP 5000.00");
     expect(html).toContain("GBP 2000.00");
     expect(html).not.toContain("Store Activity Log");
@@ -583,6 +591,10 @@ describe("AnalyticsView", () => {
     );
 
     expect(html).not.toContain("Reporting data is unavailable for this scope");
-    expect(html).toContain("No verified rollup rows are available for this scope");
+    // 609dda5 removed the KPI hint line. Without a verified rollup timestamp
+    // every KPI card must withhold its value (em-dash) instead of presenting
+    // zero as verified, and the scope is labelled as not yet verified.
+    expect(html.match(/label-caps">[^<]+<\/p><p class="[^"]*">—<\/p>/g)).toHaveLength(5);
+    expect(html).toContain("No verified rollup yet");
   });
 });
