@@ -435,7 +435,10 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
     };
     const windsorConnectionByAccount = new Map<string, WindsorConnectionRow>();
     for (const account of billable) {
-      if (account.google_ads_refresh_token || !account.google_ads_customer_id) {
+      // Built for every account, not only the tokenless ones: an account whose
+      // OAuth token is alive but whose Google access was revoked (Yumi Kyoto,
+      // 2026-08-17) falls back to this map at runtime.
+      if (!account.google_ads_customer_id) {
         continue;
       }
       const matches = ((windsorRows ?? []) as unknown as WindsorConnectionRow[])
