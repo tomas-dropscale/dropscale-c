@@ -6,7 +6,10 @@ import {
 } from "@/lib/client-onboarding/http";
 import { ClientOnboardingError } from "@/lib/client-onboarding/sessions";
 import { ensureAutomaticBillingStarts } from "@/lib/billing/auto-start";
-import { provisionReviewedClientReportingSources } from "@/lib/client-onboarding/reporting-cutover";
+import {
+  activateEligibleClientReportingCutovers,
+  provisionReviewedClientReportingSources,
+} from "@/lib/client-onboarding/reporting-cutover";
 import {
   listAdminReportingStoreScopes,
   refreshAdminCampaignSnapshots,
@@ -219,8 +222,10 @@ async function refreshAll(
     provisioned: 0,
     failed: 1,
   }));
-  // Owner policy: a bound Google source starts billing without an admin touch.
+  // Owner policy: a bound Google source starts billing without an admin touch,
+  // and a fully-covered client activates its portal the same way.
   await ensureAutomaticBillingStarts(service).catch(() => undefined);
+  await activateEligibleClientReportingCutovers(service).catch(() => undefined);
 
   type CampaignRefresh = Awaited<ReturnType<typeof refreshAdminCampaignSnapshots>>;
   // Portfolio Google, metric materialisation and every store are independent.
@@ -352,6 +357,7 @@ async function refreshMetricHistory(range: RangeSelection) {
   if (!service) return response({ error: "Reporting sync is not configured." }, 503);
   await provisionReviewedClientReportingSources(service).catch(() => undefined);
   await ensureAutomaticBillingStarts(service).catch(() => undefined);
+  await activateEligibleClientReportingCutovers(service).catch(() => undefined);
   const result = await refreshAdminCampaignSnapshots(range, {
     authenticate: false,
     client: service,

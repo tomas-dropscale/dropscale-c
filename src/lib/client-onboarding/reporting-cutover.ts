@@ -1635,6 +1635,58 @@ export async function provisionReviewedClientReportingSources(
   return { attempted, provisioned, failed };
 }
 
+/**
+ * Owner policy (2026-08-18): a client whose bindings prove exact coverage and
+ * complete 90-day receipts activates without an admin touch — the portal must
+ * light up the moment reporting does. Eligibility is exactly the queue's own
+ * activation offer; the reviewer of record is the admin who created the
+ * client's onboarding session. Clients the queue does not offer stay put.
+ */
+export async function activateEligibleClientReportingCutovers(
+  service: Service,
+): Promise<{ attempted: number; activated: number; failed: number }> {
+  const snapshot = await loadSnapshot(service);
+  const queue = await buildClientReportingCutoverQueue(snapshot);
+  const adminIds = new Set(
+    snapshot.profiles
+      .filter((profile) => profile.role === "admin")
+      .map((profile) => profile.id),
+  );
+  let attempted = 0;
+  let activated = 0;
+  let failed = 0;
+  for (const [actionId, action] of queue.actions) {
+    if (action.kind !== "activate") continue;
+    const rollout = snapshot.rolloutStates.find(
+      (state) => state.client_id === action.clientId,
+    );
+    const session = rollout?.onboarding_session_id
+      ? snapshot.sessions.find(
+          (candidate) => candidate.id === rollout.onboarding_session_id,
+        )
+      : null;
+    if (
+      !session ||
+      typeof session.created_by !== "string" ||
+      !adminIds.has(session.created_by)
+    ) {
+      continue;
+    }
+    attempted += 1;
+    try {
+      await executeCutoverAction(service, action, actionId, session.created_by);
+      activated += 1;
+    } catch (error) {
+      failed += 1;
+      console.error(
+        `Automatic reporting cutover failed for client ${action.clientId}:`,
+        error,
+      );
+    }
+  }
+  return { attempted, activated, failed };
+}
+
 export async function listClientReportingCutoverQueue(): Promise<ClientReportingCutoverQueue> {
   await requireClientOnboardingAdmin();
   const service = serviceOrThrow();

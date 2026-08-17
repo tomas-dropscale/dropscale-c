@@ -56,6 +56,7 @@ vi.mock("@/lib/shopify/client", () => ({
 
 import { ClientOnboardingError } from "@/lib/client-onboarding/sessions";
 import {
+  activateEligibleClientReportingCutovers,
   executeClientReportingCutoverRequest,
   listClientReportingCutoverQueue,
   projectClientReportingCutover,
@@ -766,6 +767,38 @@ describe("Phase 2 admin reporting cutover workflow", () => {
       p_admin_id: ADMIN,
       p_reason: "Admin-reviewed reporting cutover after 90-day source sync",
     });
+  });
+
+  it("auto-activates an eligible client with the session's admin as reviewer", async () => {
+    const data = boundSnapshot(true);
+    data.profiles.push({ id: ADMIN, role: "admin" });
+    data.sessions[0].created_by = ADMIN;
+    mocks.rpc.mockResolvedValue({ data: CLIENT, error: null });
+
+    const result = await activateEligibleClientReportingCutovers(
+      serviceFor(data) as never,
+    );
+
+    expect(result).toEqual({ attempted: 1, activated: 1, failed: 0 });
+    expect(mocks.rpc).toHaveBeenCalledWith("activate_client_reporting_cutover", {
+      p_client_id: CLIENT,
+      p_admin_id: ADMIN,
+      p_reason: "Admin-reviewed reporting cutover after 90-day source sync",
+    });
+  });
+
+  it("does not auto-activate without an admin-created onboarding session", async () => {
+    const data = boundSnapshot(true);
+
+    const result = await activateEligibleClientReportingCutovers(
+      serviceFor(data) as never,
+    );
+
+    expect(result).toEqual({ attempted: 0, activated: 0, failed: 0 });
+    expect(mocks.rpc).not.toHaveBeenCalledWith(
+      "activate_client_reporting_cutover",
+      expect.anything(),
+    );
   });
 
   it("does not treat a preexisting v2_active surface without the marker as cut over", async () => {
