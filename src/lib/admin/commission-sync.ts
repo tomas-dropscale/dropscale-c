@@ -2,6 +2,10 @@ import { createClient } from "@/lib/supabase/server";
 import { decryptToken } from "@/lib/google-ads/crypto";
 import { searchGoogleAds } from "@/lib/google-ads/client";
 import {
+  fetchGoogleAdsDailyBreakdown,
+  normalizeGoogleAdsCustomerId,
+} from "@/lib/windsor/client";
+import {
   addIsoDays,
   decimalToMicros,
   fetchGoogleBillingMetadataAsAgency,
@@ -408,6 +412,52 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
       ]),
     );
 
+    // V2 accounts carry no OAuth refresh token; their ledger evidence comes
+    // from the connected Windsor source whose Google customer id matches the
+    // account (owner rule: Windsor is the platform's Google data source —
+    // never the agency MCC). Ambiguity resolves to the latest verification.
+    const { data: windsorRows, error: windsorRowsError } = await supabase
+      .from("client_google_ads_connections")
+      .select(
+        "client_id, windsor_account_id, currency, time_zone, last_verified_at",
+      )
+      .eq("status", "connected")
+      .in("client_id", [
+        ...new Set(billable.map((account) => account.client_id)),
+      ]);
+    if (windsorRowsError) throw windsorRowsError;
+    type WindsorConnectionRow = {
+      client_id: string;
+      windsor_account_id: string;
+      currency: string;
+      time_zone: string;
+      last_verified_at: string | null;
+    };
+    const windsorConnectionByAccount = new Map<string, WindsorConnectionRow>();
+    for (const account of billable) {
+      if (account.google_ads_refresh_token || !account.google_ads_customer_id) {
+        continue;
+      }
+      const matches = ((windsorRows ?? []) as unknown as WindsorConnectionRow[])
+        .filter((row) => {
+          if (row.client_id !== account.client_id) return false;
+          try {
+            return (
+              normalizeGoogleAdsCustomerId(row.windsor_account_id).customerId ===
+              account.google_ads_customer_id
+            );
+          } catch {
+            return false;
+          }
+        })
+        .sort((left, right) =>
+          (right.last_verified_at ?? "").localeCompare(
+            left.last_verified_at ?? "",
+          ),
+        );
+      if (matches[0]) windsorConnectionByAccount.set(account.id, matches[0]);
+    }
+
     // Portal login → CRM record, for the finance rows' client attribution.
     //
     // `crm_client_id` is nearly always null: nothing in the product writes it,
@@ -476,16 +526,103 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
               "Agency billing supports EUR Google Ads accounts only.",
             );
           }
-          if (!account.google_ads_refresh_token) {
-            throw new Error(
-              "Google Ads must be reconnected before its billing ledger can be refreshed.",
+          // Two evidence authorities, one per connection generation: legacy
+          // accounts hold the client's own OAuth refresh token and read Google
+          // directly; V2 onboarding never captures one — its Google data comes
+          // through Windsor (the platform's only other sanctioned Google
+          // source), so the same connector that feeds daily_metrics supplies
+          // the ledger evidence. An unreachable account fails closed alone.
+          const connection = windsorConnectionByAccount.get(account.id) ?? null;
+          const windsorMetadata = connection
+            ? async () => ({
+                customerId: accountCustomerId,
+                currency: connection.currency.toUpperCase(),
+                timeZone: connection.time_zone,
+              })
+            : null;
+          const windsorReportedDays = connection
+            ? async (windowFrom: string, windowTo: string) => {
+                const rows = await fetchGoogleAdsDailyBreakdown(
+                  connection.windsor_account_id,
+                  windowFrom,
+                  windowTo,
+                );
+                return rows.map((row) => {
+                  if (
+                    row.customerId !== accountCustomerId ||
+                    row.currency.toUpperCase() !==
+                      connection.currency.toUpperCase() ||
+                    row.timeZone !== connection.time_zone
+                  ) {
+                    throw new Error(
+                      "Windsor daily rows do not match the connected Google identity.",
+                    );
+                  }
+                  return {
+                    date: row.date,
+                    costMicros: decimalToMicros(row.spend).toString(),
+                  };
+                });
+              }
+            : null;
+          let fetchLiveMetadata: () => Promise<{
+            customerId: string;
+            currency: string;
+            timeZone: string;
+          }>;
+          let fetchReportedDays: (
+            windowFrom: string,
+            windowTo: string,
+          ) => Promise<{ date: string; costMicros: string }[]>;
+          if (account.google_ads_refresh_token) {
+            const refreshToken = await decryptToken(
+              account.google_ads_refresh_token,
             );
+            const searchAsClient = (customerId: string, query: string) =>
+              searchGoogleAds(customerId, refreshToken, query);
+            const oauthMetadata = () =>
+              fetchGoogleBillingMetadataAsAgency(
+                accountCustomerId,
+                searchAsClient,
+              );
+            const oauthReportedDays = (windowFrom: string, windowTo: string) =>
+              fetchGoogleDailyCostMicrosAsAgency(
+                accountCustomerId,
+                windowFrom,
+                windowTo,
+                searchAsClient,
+              );
+            // A dead or revoked client token must not stall the ledger while
+            // the same Google numbers remain readable through Windsor.
+            fetchLiveMetadata = windsorMetadata
+              ? () =>
+                  oauthMetadata().catch((error) => {
+                    console.error(
+                      `Ledger OAuth metadata failed for ${account.id}; using Windsor:`,
+                      error,
+                    );
+                    return windsorMetadata();
+                  })
+              : oauthMetadata;
+            fetchReportedDays = windsorReportedDays
+              ? (windowFrom, windowTo) =>
+                  oauthReportedDays(windowFrom, windowTo).catch((error) => {
+                    console.error(
+                      `Ledger OAuth spend read failed for ${account.id}; using Windsor:`,
+                      error,
+                    );
+                    return windsorReportedDays(windowFrom, windowTo);
+                  })
+              : oauthReportedDays;
+          } else {
+            if (!windsorMetadata || !windsorReportedDays) {
+              throw new Error(
+                "No connected Windsor Google Ads source matches this account's customer id.",
+              );
+            }
+            fetchLiveMetadata = windsorMetadata;
+            fetchReportedDays = windsorReportedDays;
           }
-          const refreshToken = await decryptToken(
-            account.google_ads_refresh_token,
-          );
-          const searchAsClient = (customerId: string, query: string) =>
-            searchGoogleAds(customerId, refreshToken, query);
           // PostgREST may represent an int8 as either string or number. Reject
           // an unsafe numeric value instead of stringifying an already-rounded
           // baseline and silently moving the commercial boundary.
@@ -575,11 +712,7 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
             );
           }
 
-          const metadata =
-            await fetchGoogleBillingMetadataAsAgency(
-              accountCustomerId,
-              searchAsClient,
-            );
+          const metadata = await fetchLiveMetadata();
           if (
             metadata.customerId !== start.google_ads_customer_id ||
             metadata.currency !== start.currency.toUpperCase() ||
@@ -599,12 +732,7 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
             start.google_local_date > from ? start.google_local_date : from;
           const reportedDays =
             queryFrom <= queryTo
-              ? await fetchGoogleDailyCostMicrosAsAgency(
-                  accountCustomerId,
-                  queryFrom,
-                  queryTo,
-                  searchAsClient,
-                )
+              ? await fetchReportedDays(queryFrom, queryTo)
               : [];
           const days = billableGoogleSpendWindow(
             from,
