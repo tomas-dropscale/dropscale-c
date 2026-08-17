@@ -76,7 +76,7 @@ export function CreativeSubmissions({
     // and says nothing is indistinguishable from a broken page.
     const missingTitle = title.trim().length === 0;
     const badUrl = !LINK.test(url.trim());
-    const badCollection = !LINK.test(collectionUrl.trim());
+    const badCollection = collectionUrl.trim().length > 0 && !LINK.test(collectionUrl.trim());
 
     if (missingTitle) setTitleError(d.submissions.titleRequired);
     if (badUrl) setUrlError(d.submissions.urlInvalid);
@@ -89,7 +89,7 @@ export function CreativeSubmissions({
       submitted_by: submittedBy,
       title: title.trim(),
       url: url.trim(),
-      collection_url: collectionUrl.trim(),
+      collection_url: collectionUrl.trim() || null,
       notes: notes.trim() || null,
     });
     setSaving(false);
