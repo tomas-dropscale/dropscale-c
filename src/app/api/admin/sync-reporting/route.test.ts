@@ -339,8 +339,15 @@ describe("admin exact-range reporting sync route", () => {
       { authenticate: false },
     );
     // Provider snapshots started while metric coverage was deliberately still
-    // pending; a sequential implementation would not have called it yet.
-    expect(mocks.refreshAdminStoreAnalyticsSnapshots).toHaveBeenCalledOnce();
+    // pending; a sequential implementation would not have called it yet. The
+    // second call settles the 30-day ROAS tracking range in the same sync.
+    expect(mocks.refreshAdminStoreAnalyticsSnapshots).toHaveBeenCalledTimes(2);
+    expect(mocks.refreshAdminStoreAnalyticsSnapshots).toHaveBeenCalledWith(
+      expect.objectContaining({
+        range: { key: "custom", from: "2026-07-14", to: "2026-08-12" },
+      }),
+      { authenticate: false },
+    );
     releaseMetrics(metricReady);
     const response = await responsePromise;
     expect(response.status).toBe(200);
@@ -381,7 +388,7 @@ describe("admin exact-range reporting sync route", () => {
     const response = await POST(adminRequest(storeRequest()));
 
     expect(response.status).toBe(502);
-    expect(mocks.refreshAdminStoreAnalyticsSnapshots).toHaveBeenCalledOnce();
+    expect(mocks.refreshAdminStoreAnalyticsSnapshots).toHaveBeenCalledTimes(2);
     await expect(response.json()).resolves.toMatchObject({
       ok: false,
       error: "Store reporting could not be fully refreshed.",

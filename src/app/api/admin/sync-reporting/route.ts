@@ -157,7 +157,18 @@ async function refreshStore(request: StoreRequest) {
   // The selected store's rollup and provider details are independent. Starting
   // both now makes Sync cost the slower upstream phase, not Shopify + Google
   // one after the other (the same pattern used by the local DropHub).
-  const [metricCoverage, result] = await Promise.all([
+  // The ROAS-evolution hover reads a 30-day tracking snapshot that nothing
+  // refreshed on Sync: it only aged out through the hourly presets, so a
+  // failed one looked permanently dead from the page. Sync now settles the
+  // tracking range alongside the selected one.
+  const trackingStart = new Date(`${request.range.to}T00:00:00Z`);
+  trackingStart.setUTCDate(trackingStart.getUTCDate() - 29);
+  const trackingFrom = trackingStart.toISOString().slice(0, 10);
+  const trackingRange: RangeSelection | null =
+    request.range.from > trackingFrom
+      ? { key: "custom", from: trackingFrom, to: request.range.to }
+      : null;
+  const [metricCoverage, result, trackingResult] = await Promise.all([
     ensureAdminAnalyticsRollupCoverage(
       {
         clientId: request.clientId,
@@ -174,12 +185,23 @@ async function refreshStore(request: StoreRequest) {
       },
       { authenticate: false },
     ),
+    trackingRange
+      ? refreshAdminStoreAnalyticsSnapshots(
+          {
+            clientId: request.clientId,
+            store: { ...request.store, days: [] },
+            range: trackingRange,
+          },
+          { authenticate: false },
+        ).catch(() => null)
+      : Promise.resolve(null),
   ]);
   return {
     ok: result.failed === 0 && result.partial === 0 && metricCoverage.state === "ready",
     scope: "store" as const,
     metricCoverage,
     result,
+    trackingResult,
   };
 }
 
