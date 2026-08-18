@@ -2190,6 +2190,30 @@ export type Database = {
         Update: Partial<Insert<AppSecret, "hint" | "updated_by" | "updated_at">>;
         Relationships: [];
       };
+      admin_server_errors: {
+        Row: {
+          id: string;
+          scope: string;
+          message: string;
+          stack: string | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          scope: string;
+          message: string;
+          stack?: string | null;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          scope?: string;
+          message?: string;
+          stack?: string | null;
+          created_at?: string;
+        };
+        Relationships: [];
+      };
       research_comparisons: {
         Row: Row<ResearchComparison>;
         Insert: Insert<
