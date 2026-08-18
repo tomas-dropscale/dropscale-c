@@ -32,6 +32,7 @@ vi.mock("@/lib/supabase/service", () => ({
   createServiceClient: mocks.createServiceClient,
 }));
 vi.mock("../reporting/sources", () => ({
+  ReportingSourceResolutionError: class ReportingSourceResolutionError extends Error {},
   resolveReportingSources: mocks.resolveReportingSources,
   resolveStagedReportingSource: mocks.resolveStagedReportingSource,
 }));

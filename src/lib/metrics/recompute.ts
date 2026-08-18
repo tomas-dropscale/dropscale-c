@@ -48,6 +48,7 @@ import {
 import { fetchGoogleReportingDailyMetrics } from "../reporting/google";
 import { createShopifyReportingAdapter } from "../reporting/shopify";
 import {
+  ReportingSourceResolutionError,
   resolveReportingSources,
   resolveStagedReportingSource,
   type CanonicalReportingSource,
@@ -304,8 +305,13 @@ async function reportingFamily<T>(
   } catch (error) {
     // Adapter errors are deliberately reduced to their class here: upstream
     // messages can contain request metadata and must never leak credentials.
+    // Resolver errors are the exception — their messages are curated safe
+    // strings, and hiding them made a rejected binding silently stop a
+    // store's sync for hours (Lia Singapura, 2026-08-18).
     const kind = error instanceof Error ? error.name : "unknown";
-    console.error(`${label} V2 reporting failed for ${adAccountId}: ${kind}`);
+    const safeDetail =
+      error instanceof ReportingSourceResolutionError ? ` — ${error.message}` : "";
+    console.error(`${label} V2 reporting failed for ${adAccountId}: ${kind}${safeDetail}`);
     return { state: "failed" };
   }
 }
