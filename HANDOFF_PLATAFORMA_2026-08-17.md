@@ -251,6 +251,26 @@ campanha sem URL utilizável mantém-se atribuída.
   família falha (a Yumi suspensa na Google garante isso em todos os runs) —
   alarme falso conhecido; o Bruno mandou deixar a Yumi `active` como está.
 
+### Correção da fatura do Daniel + "void reemite" como feature (0075/0076)
+
+A fatura de €24,24 (ciclo 08-10, com €8,78 de fee sobre Casa Luna) foi
+anulada na Stripe e reemitida a **€15,46** (open, `in_1U5k2c…`, 18/08 11:14)
+pela máquina real de emissão. Para isso, "cancelar e reemitir" passou a ser
+workflow suportado — **migrations 0075+0076, aplicadas live e registadas**:
+- o índice único (client, period) não-legacy deixa de contar faturas `void`;
+- transitar uma fatura para `void` reabre o item da fila de automação
+  (issued→pending) e liberta os claims do ledger (`invoice_commission_rows`
+  tem UNIQUE (commission_id) — sem isto a evidência ficava presa para sempre);
+- o guard das claims só permite DELETE quando a fatura dona está void;
+- o validador de recibos da automação recusa uma fatura void como "issued";
+- `calculateWeek`/positions ignoram void na ocupação do slot (a semana volta
+  a "Por emitir"); histórico e Payments do cliente continuam a mostrar a void.
+
+**Procedimento para corrigir uma fatura no futuro:** void na Stripe →
+reconcile (cron) → sync do ledger → "Emitir faturas" (ou janela armada do
+`cron?mode=automatic`). Backup da cirurgia do Daniel em
+`audits/backups/reemissao-daniel-2026-08-18-void-invoice.json`.
+
 ## Regras de trabalho neste repo
 
 - Node ≥22 (a máquina local tem 20 — usar um Node 22 standalone).
