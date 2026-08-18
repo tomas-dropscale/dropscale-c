@@ -808,10 +808,19 @@ async function loadGoogleCampaigns(
       const succeeded = results.flatMap((result) =>
         result.status === "fulfilled" ? [result.value] : []);
       if (succeeded.length === 0) {
+        // Persist the first real provider error (0073) — the generic sentence
+        // cost a deploy round-trip every time this family failed.
+        const firstRejection = results.find(
+          (result): result is PromiseRejectedResult => result.status === "rejected",
+        )?.reason;
+        const cause = firstRejection instanceof Error
+          ? firstRejection.message
+          : String(firstRejection ?? "unknown");
+        console.error("Google campaigns family failed:", firstRejection);
         return {
           ok: false,
           state: "failed",
-          message: "Google Ads could not load campaigns for the selected period.",
+          message: `Google Ads could not load campaigns for the selected period. (${cause.slice(0, 220)})`,
         };
       }
       return {
@@ -880,11 +889,13 @@ async function loadGoogleCampaigns(
         granularity: range.from === range.to ? "hour" : "day",
       },
     };
-  } catch {
+  } catch (error) {
+    console.error("Google campaigns family failed:", error);
+    const cause = error instanceof Error ? error.message : String(error);
     return {
       ok: false,
       state: "failed",
-      message: "Google Ads could not load campaigns for the selected period.",
+      message: `Google Ads could not load campaigns for the selected period. (${cause.slice(0, 220)})`,
     };
   }
 }
