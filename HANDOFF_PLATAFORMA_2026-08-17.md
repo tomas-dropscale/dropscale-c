@@ -179,6 +179,28 @@ final: 13/13 sem erros.
 8. **Miyu Yokohama**: start a 08-15 (`observed_google_counter`) mas conta criada a
    08-04 — 11 dias sem faturação; confirmar se foi intencional.
 
+## Madrugada de 18/08 — a cadeia automática completa (doutrina: 2 cliques)
+
+Ordem do dono: além de Sync e Emitir Faturas não existem cliques. Implementado
+como cadeia no sync horário E em qualquer clique de Sync (global ou por loja):
+`ensureGoogleConnectionMetadata` (moeda/fuso da Windsor — antes só existia no
+botão "Test" e uma falha bloqueava a fila como "EUR-only") →
+`provisionReviewedClientReportingSources` (contas/bindings/emparelhamento) →
+`ensureAutomaticBillingStarts` (start no 1.º dia completo após a ligação) →
+`advanceEligibleClientReportingCutovers` (sync de 90 dias + ativação do portal,
+com os critérios da própria fila; reviewer = admin da sessão). PROVADO em
+produção a 18/08: Guilherme Marques (Jedwabi) convergiu pelo cron e David e
+João (Orivelle) convergiu por um clique de Sync — ambos v2_active com portal
+aceso, zero toques manuais. Botão **Sync global** no chrome do admin (junto ao
+LIVE, todas as páginas; scope all, 7 dias, range calculado no clique).
+
+Moedas (regra do dono): lojas/contas de qualquer moeda europeia; dashboards
+reportam SEMPRE em EUR (conversão BCE diária — já feito na camada de
+analytics/daily_metrics). Billing de contas GOOGLE não-EUR continua bloqueado
+fail-closed por desenho — multi-moeda no billing é mudança estrutural POR
+DESENHAR (taxa/data de conversão do fee, desselar constraints EUR-only das
+migrations 0034+). Não improvisar.
+
 ## Regras de trabalho neste repo
 
 - Node ≥22 (a máquina local tem 20 — usar um Node 22 standalone).
