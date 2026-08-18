@@ -710,6 +710,29 @@ export type AdAccount = {
   revenue_share_enabled: boolean;
 };
 
+export type AppSecret = {
+  key: string;
+  ciphertext: string;
+  hint: string | null;
+  updated_by: string | null;
+  updated_at: string;
+};
+
+export type ResearchComparison = {
+  key: string;
+  concept_id: string;
+  geos: string[];
+  run_id: string | null;
+  pairs: { geo: string; kw: string }[];
+  status: "running" | "done" | "error";
+  payload: Record<string, unknown> | null;
+  cost_usd: string | number | null;
+  error: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type AuditShopifyConnectionStatus = "pending" | "connected" | "revoked";
 
 /**
@@ -2160,6 +2183,40 @@ export type Database = {
             referencedColumns: ["id"];
           },
         ];
+      };
+      app_secrets: {
+        Row: Row<AppSecret>;
+        Insert: Insert<AppSecret, "hint" | "updated_by" | "updated_at">;
+        Update: Partial<Insert<AppSecret, "hint" | "updated_by" | "updated_at">>;
+        Relationships: [];
+      };
+      research_comparisons: {
+        Row: Row<ResearchComparison>;
+        Insert: Insert<
+          ResearchComparison,
+          | "run_id"
+          | "status"
+          | "payload"
+          | "cost_usd"
+          | "error"
+          | "created_by"
+          | "created_at"
+          | "updated_at"
+        >;
+        Update: Partial<
+          Insert<
+            ResearchComparison,
+            | "run_id"
+            | "status"
+            | "payload"
+            | "cost_usd"
+            | "error"
+            | "created_by"
+            | "created_at"
+            | "updated_at"
+          >
+        >;
+        Relationships: [];
       };
       audit_shopify_connections: {
         Row: Row<AuditShopifyConnection>;
@@ -3781,6 +3838,15 @@ export type Database = {
       claim_expired_skipped_billing_automation_items: {
         Args: { p_run_id: string; p_limit?: number };
         Returns: BillingAutomationItem[];
+      };
+      set_app_secret: {
+        Args: {
+          p_key: string;
+          p_ciphertext: string;
+          p_hint: string | null;
+          p_updated_by: string;
+        };
+        Returns: string;
       };
       skip_billing_cycle: {
         Args: {

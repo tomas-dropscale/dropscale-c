@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trends radar</title>
+<link rel="stylesheet" href="/research/hub.css">
+<style>
+  /* The tool owns this document: it lays itself out against a full-height box.
+     Dropscale's palette is redeclared here because the tool runs in its own
+     frame and cannot inherit the admin shell's custom properties. */
+  html, body { height: 100%; margin: 0; }
+  body {
+    --bg-base:#0a0908; --bg-panel:#111010; --bg-panel-hover:#161514; --bg-elevated:#1a1918;
+    --border-subtle:rgba(255,255,255,.06); --border-strong:rgba(255,255,255,.1);
+    --accent-gold:#d4a86a; --accent-gold-dim:rgba(212,168,106,.15); --accent-gold-strong:#e8c088;
+    --text-primary:#f2efe9; --text-secondary:#8a8680; --text-muted:#565350;
+    --success-green:#6fae7a; --danger-red:#c46a5f; --warning-orange:#d98d54;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--bg-base);
+  }
+  /* The sidebar navigates between the three views, so the tool's own tab bar
+     would be a second, competing control. */
+  .hub-tabs { display: none !important; }
+</style>
+<script src="/research/hub-app.js" defer></script>
+</head>
+<body class="research-hub">
+
+<header class="hub-top">
+  <div class="hub-brand"><span class="hub-dot" aria-hidden="true"></span><span>Trends radar</span></div>
+
+  <nav class="hub-tabs" id="tabs" role="tablist" aria-label="Views">
+    <button class="hub-tab" role="tab" data-page="markets" aria-selected="true">Markets Overview</button>
+    <button class="hub-tab" role="tab" data-page="keywords" aria-selected="false">Keywords by Market</button>
+    <button class="hub-tab" role="tab" data-page="compare" aria-selected="false">Market Comparison</button>
+  </nav>
+
+  <div class="hub-ctl" id="ctl">
+    <span class="hub-div" aria-hidden="true"></span>
+    <select class="hub-select" id="market" aria-label="Market"></select>
+    <input class="hub-input" id="search" type="search" placeholder="filter keywords…" aria-label="Filter">
+  </div>
+
+  <div class="hub-right">
+    <span class="hub-fresh" id="fresh">loading…</span>
+  </div>
+</header>
+
+<main class="hub-body">
+  <section class="page" id="page-markets">
+    <div class="kpis" id="kpis"></div>
+    <p class="note" id="note-markets"></p>
+    <div class="tblwrap"><table id="tbl-markets"><thead></thead><tbody></tbody></table></div>
+  </section>
+
+  <section class="page" id="page-compare" hidden>
+    <p class="note" id="note-compare"></p>
+    <div class="cmp-steps">
+      <div class="cmp-step">
+        <div class="cmp-h"><span class="cmp-n">1</span> Pick the keyword</div>
+        <input class="hub-input" id="cmp-search" type="search" placeholder="search concept…" aria-label="Search concept">
+        <div class="cmp-list" id="cmp-concepts" role="listbox" aria-label="Concepts"></div>
+      </div>
+      <div class="cmp-step">
+        <div class="cmp-h"><span class="cmp-n">2</span> Pick up to 5 markets</div>
+        <div class="cmp-geos" id="cmp-geos"></div>
+        <div class="cmp-run">
+          <button class="cmp-btn" id="cmp-go" type="button" disabled>Run comparison</button>
+          <span class="cmp-cost" id="cmp-cost"></span>
+        </div>
+      </div>
+    </div>
+    <div class="cmp-result" id="cmp-result"></div>
+  </section>
+
+  <section class="page" id="page-keywords" hidden>
+    <div class="kpis" id="kpis-kw"></div>
+    <p class="note" id="note-keywords"></p>
+    <div class="tblwrap"><table id="tbl-keywords"><thead></thead><tbody></tbody></table></div>
+  </section>
+</main>
+
+<div class="detail" id="detail" aria-live="polite">
+  <div class="d-head">
+    <span class="d-title" id="d-title"></span>
+    <span class="d-sub" id="d-sub"></span>
+    <button class="d-close" id="d-close" type="button">Close ✕</button>
+  </div>
+  <div class="legend" id="d-legend"></div>
+  <div id="d-chart"></div>
+  <div class="rising" id="d-rising"></div>
+</div>
+
+<div class="colfilter" id="colfilter">
+  <input class="hub-input" id="colfilter-input" type="search" placeholder="type to filter…" aria-label="Filter column">
+  <button type="button" class="cf-clear" id="colfilter-clear" title="Clear filter">clear</button>
+</div>
+
+<div id="tip"></div>
+</body>
+</html>

@@ -1,0 +1,289 @@
+/* Dropscale brand tokens. The token NAMES are the tool's own, so its markup and
+   chart code stay untouched; only the values change — the same radar, wearing
+   the platform's clothes. Scoped so nothing leaks into the admin shell. */
+.research-hub{
+  color-scheme:dark;
+  --ink:var(--bg-base); --panel:var(--bg-panel); --panel-2:var(--bg-elevated);
+  --border:var(--border-subtle); --control-border:var(--border-strong);
+  --text:var(--text-primary); --muted:var(--text-muted); --muted-bright:var(--text-secondary);
+  --live:var(--accent-gold); --focus:var(--accent-gold); --focus-bright:var(--accent-gold-strong);
+  --good:var(--success-green); --warn:var(--warning-orange); --bad:var(--danger-red);
+  --idle:var(--text-muted);
+  --c1:#d4a86a; --c2:#6fae7a; --c3:#d98d54; --c4:#a98cd9; --c5:#c46a5f; --c6:#5fa8b8;
+  --wash-sky:rgba(212,168,106,.12);  --wash-good:rgba(111,174,122,.12);
+  --wash-warn:rgba(217,141,84,.12);  --wash-bad:rgba(196,106,95,.12);
+  --wash-mut:rgba(138,134,128,.12);
+  --mono:ui-monospace,'Cascadia Mono','JetBrains Mono',Consolas,monospace;
+  --sans:inherit;
+  --fs-kpi:20px; --fs-h2:14px; --fs-body:13px; --fs-tbl:12.5px; --fs-ctl:12px;
+  --fs-sub:11.5px; --fs-meta:11px; --fs-th:10.5px; --fs-svg:10px; --fs-arrow:9px;
+  --h-ctl:30px; --h-pill:20px;
+  --r-xs:2px; --r-sm:6px; --r-md:8px; --r-lg:10px;
+}
+
+.research-hub *,.research-hub *::before,.research-hub *::after{box-sizing:border-box}
+
+.research-hub{
+  margin:0;background:var(--ink);color:var(--text);
+  font:400 var(--fs-body)/20px var(--sans);
+  display:flex;flex-direction:column;overflow:hidden;
+}
+.research-hub :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+
+/* ── topbar: 30 (controlo) + 8+8 + 1 hairline = 47, igual ao drop-hub ── */
+.research-hub .hub-top{
+  position:relative;z-index:20;flex:none;display:flex;align-items:center;gap:12px;
+  height:47px;padding:0 14px;background:var(--ink);border-bottom:1px solid var(--border);
+}
+.research-hub .hub-brand{
+  flex:none;display:flex;align-items:center;gap:8px;
+  font:600 var(--fs-meta)/16px var(--mono);letter-spacing:.14em;text-transform:uppercase;
+  color:var(--muted);user-select:none;
+}
+.research-hub .hub-dot{flex:none;width:7px;height:7px;border-radius:50%;background:var(--live);box-shadow:0 0 8px var(--live)}
+.research-hub .hub-tabs{display:flex;align-items:center;gap:4px;min-width:0;flex:0 1 auto;overflow-x:auto;scrollbar-width:none}
+.research-hub .hub-tabs::-webkit-scrollbar{width:0;height:0}
+.research-hub .hub-tab{
+  flex:none;height:var(--h-ctl);padding:0 12px;display:inline-flex;align-items:center;
+  border:1px solid var(--border);border-radius:var(--r-sm);background:none;
+  color:var(--muted-bright);font:500 var(--fs-ctl)/20px var(--mono);letter-spacing:.04em;
+  cursor:pointer;white-space:nowrap;
+}
+.research-hub .hub-tab:hover{border-color:var(--control-border);color:var(--text)}
+.research-hub .hub-tab[aria-selected="true"]{border-color:var(--focus);color:var(--text);background:var(--wash-sky)}
+.research-hub .hub-div{flex:none;width:1px;height:16px;margin:0 4px;background:var(--border)}
+.research-hub .hub-ctl{flex:0 20 auto;min-width:120px;display:flex;align-items:center;gap:8px;overflow-x:auto;scrollbar-width:none}
+.research-hub .hub-ctl::-webkit-scrollbar{width:0;height:0}
+.research-hub .hub-select{
+  flex:none;height:var(--h-ctl);padding:0 28px 0 10px;
+  border:1px solid var(--border);border-radius:var(--r-sm);background:var(--panel);color:var(--text);
+  font:500 var(--fs-ctl)/1 var(--mono);cursor:pointer;appearance:none;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%237d8b9d' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right 8px center;background-size:14px;
+}
+.research-hub .hub-select:hover{border-color:var(--control-border)}
+.research-hub .hub-input{
+  flex:none;height:var(--h-ctl);min-width:190px;padding:0 10px;
+  border:1px solid var(--border);border-radius:var(--r-sm);background:var(--panel);color:var(--text);
+  font:400 var(--fs-ctl)/1 var(--mono);
+}
+.research-hub .hub-input:focus{outline:none;border-color:var(--focus)}
+.research-hub .hub-input::placeholder{color:var(--muted)}
+.research-hub .hub-right{margin-left:auto;display:flex;align-items:center;gap:10px;flex:none}
+.research-hub .hub-fresh{font:400 var(--fs-meta)/1 var(--mono);color:var(--muted);white-space:nowrap}
+
+/* ── corpo ── */
+.research-hub .hub-body{flex:1;min-height:0;overflow-y:auto;padding:16px 14px 40px}
+.research-hub .page[hidden]{display:none}
+
+/* KPIs: um por ecrã é herói; aqui são pares, todos com o mesmo peso */
+.research-hub .kpis{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+.research-hub .kpi{
+  flex:1 1 130px;min-width:130px;background:var(--panel);border:1px solid var(--border);
+  border-radius:var(--r-lg);padding:10px 13px;
+}
+.research-hub .kpi .v{font:700 var(--fs-kpi)/24px var(--mono);color:var(--text)}
+.research-hub .kpi .l{font:400 var(--fs-meta)/15px var(--sans);color:var(--muted);margin-top:2px}
+.research-hub .kpi.good .v{color:var(--live)} .kpi.warn .v{color:var(--warn)} .kpi.sky .v{color:var(--focus)}
+
+/* ── tabela ── */
+.research-hub .tblwrap{border:1px solid var(--border);border-radius:var(--r-lg);background:var(--panel);overflow:auto;max-height:calc(100vh - 200px)}
+.research-hub table{border-collapse:separate;border-spacing:0;width:100%;font:400 var(--fs-tbl)/18px var(--mono)}
+.research-hub thead th{
+  position:sticky;top:0;z-index:2;background:var(--panel-2);
+  font:600 var(--fs-th)/16px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted);
+  text-align:left;padding:8px 12px;border-bottom:1px solid var(--control-border);white-space:nowrap;
+  cursor:pointer;user-select:none;
+}
+.research-hub thead th:hover{color:var(--text)}
+.research-hub thead th .arw{font-size:var(--fs-arrow);color:var(--focus);margin-left:4px}
+.research-hub thead th.num, .research-hub td.num{text-align:right}
+.research-hub tbody td{padding:6px 12px;border-bottom:1px solid var(--border);vertical-align:middle;white-space:nowrap}
+.research-hub tbody tr:last-child td{border-bottom:0}
+.research-hub tbody tr{cursor:pointer}
+.research-hub tbody tr:hover td{background:var(--panel-2)}
+.research-hub tbody tr.sel td{background:var(--wash-good)}
+.research-hub td.kw{font-weight:600;color:var(--text)}
+.research-hub td.en{color:var(--muted-bright);font-family:var(--sans);font-size:var(--fs-body)}
+.research-hub td.cat{color:var(--muted);font-family:var(--sans);font-size:var(--fs-meta)}
+
+/* barra de volume: o dado é a largura, o número fica ao lado em mono */
+.research-hub .volcell{display:flex;align-items:center;gap:8px;justify-content:flex-end}
+.research-hub .volbar{width:64px;height:6px;border-radius:3px;background:var(--panel-2);overflow:hidden;flex:none}
+.research-hub .volbar i{display:block;height:100%;border-radius:3px;background:var(--focus)}
+.research-hub .volnum{width:34px;text-align:right;color:var(--text)}
+
+/* pílulas de estado — cor + forma, nunca só cor */
+.research-hub .pill{display:inline-flex;align-items:center;gap:5px;height:var(--h-pill);padding:0 8px;
+  border:1px solid var(--border);border-radius:999px;font:500 var(--fs-meta)/1 var(--mono);white-space:nowrap}
+.research-hub .pill svg{flex:none}
+.research-hub .p-disparado{color:var(--live);border-color:rgba(184,255,61,.42);background:var(--wash-good)}
+.research-hub .p-a_aquecer{color:var(--warn);border-color:rgba(245,158,11,.4);background:var(--wash-warn)}
+.research-hub .p-em_janela{color:var(--focus);border-color:rgba(56,189,248,.4)}
+.research-hub .p-verao_ativo{color:var(--c4);border-color:rgba(192,132,252,.4)}
+.research-hub .p-neutro, .research-hub .p-sem_dados{color:var(--muted)}
+.research-hub .tag{display:inline-flex;align-items:center;gap:4px;height:18px;padding:0 7px;margin:1px 3px 1px 0;
+  border:1px solid var(--border);border-radius:var(--r-sm);
+  font:600 var(--fs-meta)/1 var(--mono);color:var(--muted-bright);background:var(--panel-2)}
+.research-hub .tag b{font-weight:400;color:var(--muted);font-size:var(--fs-arrow)}
+.research-hub .tag.hot{border-color:rgba(184,255,61,.4);color:var(--live)}
+.research-hub .tag.warm{border-color:rgba(245,158,11,.4);color:var(--warn)}
+.research-hub .flagbv{color:var(--muted);font-size:var(--fs-arrow);margin-left:4px}
+
+/* ── painel de detalhe ── */
+.research-hub .detail{
+  position:fixed;left:0;right:0;bottom:0;z-index:30;
+  background:var(--panel-2);border-top:1px solid var(--control-border);
+  box-shadow:0 -14px 44px rgba(0,0,0,.6);padding:12px 16px 14px;display:none;
+}
+.research-hub .detail.on{display:block}
+.research-hub .d-head{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:2px}
+.research-hub .d-title{font:600 var(--fs-h2)/20px var(--mono);color:var(--text)}
+.research-hub .d-sub{font:400 var(--fs-meta)/16px var(--sans);color:var(--muted)}
+.research-hub .d-close{margin-left:auto;height:var(--h-pill);padding:0 9px;border:1px solid var(--border);border-radius:var(--r-sm);
+  background:none;color:var(--muted);font:500 var(--fs-meta)/1 var(--mono);cursor:pointer}
+.research-hub .d-close:hover{color:var(--text);border-color:var(--control-border)}
+.research-hub .legend{display:flex;flex-wrap:wrap;gap:8px;margin:6px 0 4px}
+.research-hub .lg{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 9px;
+  border:1px solid var(--border);border-radius:var(--r-sm);background:var(--panel);
+  font:500 var(--fs-meta)/1 var(--mono);color:var(--muted-bright);cursor:pointer;user-select:none}
+.research-hub .lg:hover{border-color:var(--control-border);color:var(--text)}
+.research-hub .lg .sw{width:12px;height:3px;border-radius:2px;flex:none;background:var(--muted)}
+.research-hub .lg[data-on="true"]{color:var(--text);border-color:var(--control-border);background:var(--panel-2)}
+/* desligado por COR, nunca por opacity: .45 punha o texto a 2.05:1 e o número ilegível */
+.research-hub .lg[data-on="false"]{color:var(--muted)}
+.research-hub .lg[data-on="false"] .vol{color:var(--idle)}
+.research-hub .lg .vol{color:var(--muted);font-size:var(--fs-arrow)}
+/* O viewBox é 1200 de largura: abaixo de ~760px o texto de 10-11 unidades ficaria com
+   2-3px reais. Prefere-se scroll horizontal a um gráfico ilegível. */
+.research-hub #d-chart{overflow-x:auto}
+.research-hub svg.chart{display:block;width:100%;min-width:760px;height:auto}
+.research-hub .rising{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.research-hub .rq{font:400 var(--fs-meta)/1 var(--mono);border:1px solid var(--border);border-radius:var(--r-sm);
+  padding:3px 8px;color:var(--muted-bright)}
+.research-hub .rq b{color:var(--live);font-weight:600}
+
+.research-hub #tip{
+  position:fixed;z-index:40;pointer-events:none;display:none;
+  background:var(--panel-2);border:1px solid var(--control-border);border-radius:var(--r-md);
+  padding:8px 11px;font:400 var(--fs-meta)/17px var(--mono);color:var(--text);
+  box-shadow:0 10px 30px rgba(0,0,0,.55);white-space:nowrap;
+}
+.research-hub #tip .t-d{color:var(--muted);margin-bottom:4px}
+.research-hub #tip .t-r{display:flex;align-items:center;gap:7px}
+.research-hub #tip .t-r .sw{width:8px;height:8px;border-radius:2px;flex:none}
+.research-hub #tip .t-r b{margin-left:auto;color:var(--text);font-weight:600}
+.research-hub .empty{padding:28px 4px;color:var(--muted);font:400 var(--fs-body)/20px var(--mono)}
+.research-hub .note{font:400 var(--fs-meta)/16px var(--sans);color:var(--muted);margin:0 0 10px}
+
+/* Linhas e cabeçalhos são interativos: o foco tem de ser visível para quem navega por
+   teclado (as linhas são role=button, não links — sem isto o foco fica invisível). */
+.research-hub tbody tr:focus-visible, .research-hub thead th:focus-visible{outline:2px solid var(--focus);outline-offset:-2px}
+.research-hub .hub-fresh[data-busy="1"]{color:var(--focus)}
+.research-hub .hub-fresh[data-busy="1"]::after{content:" · a carregar…"}
+
+/* Durante a troca de mercado a tabela antiga não deve parecer a nova. */
+.research-hub .tblwrap[aria-busy="true"]{opacity:.55;pointer-events:none}
+
+/* ── lupa de coluna ──
+   O ícone vive ao lado do título e não dispara a ordenação (stopPropagation no JS).
+   Quando há filtro ativo fica lime: o estado tem de ser visível sem abrir o popover. */
+.research-hub .lupa{
+  margin-left:6px;padding:2px;vertical-align:-2px;
+  border:0;background:none;color:var(--muted);cursor:pointer;line-height:0;border-radius:var(--r-xs);
+}
+.research-hub .lupa:hover{color:var(--text)}
+.research-hub .lupa.on{color:var(--live)}
+.research-hub .colfilter{
+  position:fixed;z-index:50;display:none;align-items:center;gap:6px;
+  background:var(--panel-2);border:1px solid var(--control-border);border-radius:var(--r-md);
+  padding:7px;box-shadow:0 12px 34px rgba(0,0,0,.6);
+}
+.research-hub .colfilter.on{display:flex}
+.research-hub .colfilter .hub-input{min-width:200px}
+.research-hub .cf-clear{
+  height:var(--h-ctl);padding:0 10px;border:1px solid var(--border);border-radius:var(--r-sm);
+  background:none;color:var(--muted);font:500 var(--fs-meta)/1 var(--mono);cursor:pointer;
+}
+.research-hub .cf-clear:hover{color:var(--text);border-color:var(--control-border)}
+
+/* ── Market Comparison ──
+   Dois passos lado a lado (escolher keyword · escolher mercados) e o resultado por baixo.
+   O botão é a única acção da ferramenta que GASTA DINHEIRO — daí ser o único elemento
+   com preenchimento sólido e ter o custo escrito ao lado, sempre. */
+.research-hub .cmp-steps{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+.research-hub .cmp-step{
+  flex:1 1 340px;min-width:300px;background:var(--panel);border:1px solid var(--border);
+  border-radius:var(--r-lg);padding:12px 14px;
+}
+.research-hub .cmp-h{display:flex;align-items:center;gap:8px;font:600 var(--fs-h2)/20px var(--mono);color:var(--text);margin-bottom:10px}
+.research-hub .cmp-n{
+  flex:none;width:20px;height:20px;border-radius:50%;background:var(--wash-sky);color:var(--focus);
+  display:inline-flex;align-items:center;justify-content:center;font:700 var(--fs-meta)/1 var(--mono);
+}
+.research-hub .cmp-step .hub-input{width:100%;min-width:0;margin-bottom:8px}
+.research-hub .cmp-list{max-height:210px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--panel-2)}
+.research-hub .cmp-opt{
+  display:flex;align-items:center;gap:8px;padding:5px 10px;cursor:pointer;
+  font:400 var(--fs-tbl)/18px var(--mono);color:var(--muted-bright);border-bottom:1px solid var(--border);
+}
+.research-hub .cmp-opt:last-child{border-bottom:0}
+.research-hub .cmp-opt:hover{background:var(--panel);color:var(--text)}
+.research-hub .cmp-opt[aria-selected="true"]{background:var(--wash-good);color:var(--text)}
+.research-hub .cmp-opt .n{margin-left:auto;color:var(--muted);font-size:var(--fs-meta)}
+.research-hub .cmp-geos{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;min-height:30px}
+.research-hub .cmp-geo{
+  height:24px;padding:0 9px;display:inline-flex;align-items:center;gap:5px;
+  border:1px solid var(--border);border-radius:var(--r-sm);background:var(--panel-2);
+  color:var(--muted-bright);font:500 var(--fs-meta)/1 var(--mono);cursor:pointer;
+}
+.research-hub .cmp-geo:hover{border-color:var(--control-border);color:var(--text)}
+.research-hub .cmp-geo[aria-pressed="true"]{background:var(--wash-good);border-color:rgba(184,255,61,.45);color:var(--live)}
+.research-hub .cmp-geo[disabled]{opacity:.4;cursor:not-allowed}
+.research-hub .cmp-geo .v{color:var(--muted);font-size:var(--fs-arrow)}
+.research-hub .cmp-run{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.research-hub .cmp-btn{
+  height:var(--h-ctl);padding:0 16px;border:1px solid var(--live);border-radius:var(--r-sm);
+  background:var(--live);color:var(--ink);font:600 var(--fs-ctl)/1 var(--mono);cursor:pointer;
+}
+.research-hub .cmp-btn:hover:not(:disabled){background:var(--focus);border-color:var(--focus)}
+.research-hub .cmp-btn:disabled{background:none;color:var(--muted);border-color:var(--border);cursor:not-allowed}
+.research-hub .cmp-cost{font:400 var(--fs-meta)/1 var(--mono);color:var(--muted)}
+.research-hub .cmp-result{margin-top:4px}
+.research-hub .cmp-card{background:var(--panel);border:1px solid var(--border);border-radius:var(--r-lg);padding:14px 16px}
+.research-hub .cmp-card h3{font:600 var(--fs-h2)/20px var(--mono);color:var(--text);margin:0 0 2px}
+.research-hub .cmp-meta{font:400 var(--fs-meta)/16px var(--sans);color:var(--muted);margin-bottom:8px}
+.research-hub .cmp-badge{display:inline-flex;align-items:center;height:var(--h-pill);padding:0 8px;border-radius:999px;
+  border:1px solid rgba(184,255,61,.42);background:var(--wash-good);color:var(--live);
+  font:600 var(--fs-meta)/1 var(--mono);margin-left:6px}
+
+/* ── v2: perfil sazonal, época, posição, tendência ── */
+.research-hub .amp{margin-left:6px;color:var(--muted);font-size:var(--fs-arrow)}
+.research-hub .ep{display:inline-flex;align-items:center;gap:5px;height:18px;padding:0 7px;border:1px solid var(--border);
+  border-radius:var(--r-sm);background:var(--panel-2);color:var(--muted-bright);font-size:var(--fs-meta)}
+.research-hub .ep b{font-weight:400;color:var(--muted);font-size:var(--fs-arrow)}
+.research-hub .ep.on{border-color:rgba(184,255,61,.45);color:var(--live);background:var(--wash-good)}
+.research-hub .ep-falta{margin-left:6px;color:var(--muted);font-size:var(--fs-arrow)}
+.research-hub .ep-mais{margin-left:4px;color:var(--focus);font-size:var(--fs-arrow)}
+.research-hub .dir{font-weight:600}
+.research-hub .d-sobe{color:var(--live)} .d-desce{color:var(--bad)} .d-estavel{color:var(--muted)}
+.research-hub .tend{font-size:var(--fs-meta)}
+.research-hub .t-cresce{color:var(--live)} .t-cai{color:var(--bad)} .t-estavel{color:var(--muted)}
+.research-hub .cmp-fora{width:100%;margin-top:6px;font:400 var(--fs-meta)/16px var(--mono);color:var(--muted)}
+
+/* ── tabs internas do gráfico ── */
+.research-hub .ctabs{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:2px 0 8px}
+.research-hub .ctab{height:24px;padding:0 11px;border:1px solid var(--border);border-radius:var(--r-sm);background:none;
+  color:var(--muted-bright);font:500 var(--fs-meta)/1 var(--mono);cursor:pointer}
+.research-hub .ctab:hover{border-color:var(--control-border);color:var(--text)}
+.research-hub .ctab[aria-pressed="true"]{color:var(--text);border-color:var(--focus);background:var(--wash-sky)}
+.research-hub .ctab-help{font:400 var(--fs-meta)/16px var(--sans);color:var(--muted);margin-left:6px}
+/* barras de CPC: o dado é o intervalo, por isso a barra é um segmento e não uma coluna */
+.research-hub .bars{display:flex;flex-direction:column;gap:5px;padding:4px 0}
+.research-hub .bar{display:flex;align-items:center;gap:10px;font:400 var(--fs-tbl)/18px var(--mono)}
+.research-hub .bar .bl{width:34px;color:var(--text);font-weight:600}
+.research-hub .bar .bt{position:relative;flex:1;height:8px;border-radius:4px;background:var(--panel-2)}
+.research-hub .bar .bt i{position:absolute;top:0;height:100%;border-radius:4px;display:block}
+.research-hub .bar .bv{width:104px;text-align:right;color:var(--muted-bright)}
+.research-hub .bar .bx{width:150px;color:var(--muted);font-size:var(--fs-meta)}
+.research-hub .tag.t3{cursor:help}

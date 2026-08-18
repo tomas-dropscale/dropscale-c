@@ -5,6 +5,9 @@ import {
   BarChart3,
   BadgePercent,
   Clapperboard,
+  Globe2,
+  LineChart,
+  Scale,
   FileText,
   LayoutGrid,
   Plug,
@@ -71,6 +74,25 @@ const NAV_GROUPS: Group[] = [
       { href: "/admin/campaigns", icon: Target, label: (d) => d.nav.campaigns },
       { href: "/admin/analytics", icon: BarChart3, label: (d) => d.nav.analytics },
       { href: "/admin/creatives", icon: Clapperboard, label: (d) => d.nav.creatives },
+    ],
+  },
+  {
+    // Demand research: what the market is searching for, before it shows up in
+    // anyone's ad account. Its own group because it answers a different
+    // question from every screen above — what to sell, not how the selling went.
+    label: (d) => d.nav.groupResearch,
+    items: [
+      { href: "/admin/research", icon: Globe2, label: (d) => d.nav.marketsOverview },
+      {
+        href: "/admin/research/keywords",
+        icon: LineChart,
+        label: (d) => d.nav.keywordsByMarket,
+      },
+      {
+        href: "/admin/research/compare",
+        icon: Scale,
+        label: (d) => d.nav.marketComparison,
+      },
     ],
   },
   {
