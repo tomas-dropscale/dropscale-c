@@ -36,7 +36,11 @@ export function CampaignsTable({
       spend: sum.spend + Number(campaign.spend),
       impressions: sum.impressions + campaign.impressions,
       clicks: sum.clicks + campaign.clicks,
-      budget: sum.budget + Number(campaign.daily_budget ?? 0),
+      // Daily budget is today's burn rate: paused and ended campaigns keep
+      // their historical spend in the totals, but their budget is dormant.
+      budget:
+        sum.budget +
+        (campaign.status === "active" ? Number(campaign.daily_budget ?? 0) : 0),
     }),
     { spend: 0, impressions: 0, clicks: 0, budget: 0 },
   );

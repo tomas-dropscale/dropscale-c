@@ -429,8 +429,11 @@ function StoreGroup({
 }) {
   const headingId = React.useId();
   const totals = storeRollup(store);
+  // Daily budget is the store's current burn rate, so only campaigns that can
+  // actually spend today count — a paused campaign's budget is dormant money.
   const dailyBudget = store.campaigns.reduce(
-    (sum, campaign) => sum + campaign.dailyBudget,
+    (sum, campaign) =>
+      campaign.status === "active" ? sum + campaign.dailyBudget : sum,
     0,
   );
 
