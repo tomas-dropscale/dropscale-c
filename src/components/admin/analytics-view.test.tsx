@@ -422,6 +422,10 @@ describe("AnalyticsView", () => {
   });
 
   it("renders materialized ROAS tracking windows without inventing missing ranges", () => {
+    // The hover's Today/Yesterday anchor on the real Lisbon calendar, so the
+    // clock is pinned to the fixture's last day.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-07T12:00:00.000Z"));
     const analytics = storeAnalytics();
     if (!("data" in analytics.campaigns) || !("data" in analytics.collections)) {
       throw new Error("Expected ready ROAS fixtures.");
@@ -462,6 +466,7 @@ describe("AnalyticsView", () => {
     expect(html.match(/aria-label="View real ROAS evolution"/g)).toHaveLength(2);
     expect(html).toContain("d30:—|d14:—|d7:4|d3:6|yesterday:6|today:7");
     expect(html).not.toContain("<polyline");
+    vi.useRealTimers();
   });
 
   it("keeps family errors without rendering redundant top-level freshness banners", () => {

@@ -88,13 +88,29 @@ export function GlobalReportingSyncButton() {
   function sync() {
     setError(null);
     startTransition(async () => {
-      try {
-        await requestReportingSync(
+      // The finance ledger is a separate leg from reporting; one global
+      // button means both, so the overview figures catch up on the same
+      // click that refreshes the stores.
+      const [reporting, ledgers] = await Promise.allSettled([
+        requestReportingSync(
           { scope: "all", range: presetSelection("d7", new Date()) },
           () => router.refresh(),
+        ),
+        fetch("/api/admin/sync-ledgers", { method: "POST" }).then((res) => {
+          if (!res.ok) throw new Error("The finance ledger did not sync.");
+        }),
+      ]);
+      router.refresh();
+      const failure = [reporting, ledgers].find(
+        (outcome): outcome is PromiseRejectedResult =>
+          outcome.status === "rejected",
+      );
+      if (failure) {
+        setError(
+          failure.reason instanceof Error
+            ? failure.reason.message
+            : "Reporting sync failed.",
         );
-      } catch (cause) {
-        setError(cause instanceof Error ? cause.message : "Reporting sync failed.");
       }
     });
   }

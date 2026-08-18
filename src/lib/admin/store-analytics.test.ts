@@ -1298,7 +1298,7 @@ describe("admin store analytics DAL", () => {
 });
 
 describe("collection spend allocation", () => {
-  it("splits an exact collection URL campaign by product revenue and preserves bucket ROAS", () => {
+  it("splits an exact collection URL campaign equally between products (Demand Gen default)", () => {
     const family = {
       state: "ready" as const,
       data: {
@@ -1366,8 +1366,10 @@ describe("collection spend allocation", () => {
 
     if (!("data" in result)) throw new Error("Expected allocated collection data");
     expect(result.data.rows[0]).toMatchObject({ spend: 40, roas: 2.5 });
-    expect(result.data.rows[0].products[0]).toMatchObject({ spend: 30, roas: 2.5 });
-    expect(result.data.rows[0].products[1]).toMatchObject({ spend: 10, roas: 2.5 });
+    // Equal split (owner rule): €40 over two products = €20 each, so each
+    // product's Real ROAS is its own revenue over the equal share.
+    expect(result.data.rows[0].products[0]).toMatchObject({ spend: 20, roas: 3.75 });
+    expect(result.data.rows[0].products[1]).toMatchObject({ spend: 20, roas: 1.25 });
     expect(result.data.rows[0].timeline).toEqual([
       { bucket: "2026-08-14", revenue: 100, units: 4, spend: 40, roas: 2.5 },
     ]);

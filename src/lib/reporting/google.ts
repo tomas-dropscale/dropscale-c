@@ -254,7 +254,9 @@ export async function fetchGoogleReportingDemandGenAds(
       kind: "creative",
       id: row.adId,
       name: row.name,
-      detail: row.type,
+      // The raw field-type enum (SQUARE_MARKETING_IMAGE…) is Google plumbing,
+      // not information — the row already shows the asset name and provider.
+      detail: null,
       spend: row.spend,
       impressions: row.impressions,
       clicks: row.clicks,

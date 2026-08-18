@@ -91,6 +91,22 @@ type RoasTimelinePoint = {
   revenue: number | null | undefined;
 };
 
+const LISBON_TODAY = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Europe/Lisbon",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+/**
+ * The hover's labels are calendar words (Today, Yesterday, 7 days…), so the
+ * windows anchor on the real Lisbon day — never on the selected range's end,
+ * which after midnight would present yesterday's numbers as "Today".
+ */
+function lisbonToday(): string {
+  return LISBON_TODAY.format(new Date());
+}
+
 function offsetUtcDay(day: string, offset: number): string | null {
   const timestamp = Date.parse(`${day}T00:00:00Z`);
   if (!Number.isFinite(timestamp)) return null;
@@ -499,7 +515,7 @@ export function CampaignPerformanceSection({
                               spend: point.spend,
                               revenue: point.googleRevenue,
                             })),
-                            rangeEnd,
+                            lisbonToday(),
                           )}
                         />
                       </td>
@@ -679,7 +695,7 @@ export function CollectionReturnSection({
                               spend: point.spend,
                               revenue: point.revenue,
                             })),
-                            rangeEnd,
+                            lisbonToday(),
                           )}
                         />
                       </td>
@@ -700,7 +716,7 @@ export function CollectionReturnSection({
                                 spend: point.spend,
                                 revenue: point.revenue,
                               })),
-                              rangeEnd,
+                              lisbonToday(),
                             )}
                           />
                         </td>

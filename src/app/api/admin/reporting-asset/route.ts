@@ -64,10 +64,17 @@ export async function GET(request: NextRequest) {
   }
 
   try {
+    // Workers' fetch only supports "follow" and "manual" — "error" throws at
+    // call time, which turned every thumbnail into a 502 in production while
+    // local dev happily served them. "manual" + an explicit 3xx rejection
+    // keeps the same no-redirect guarantee on both runtimes.
     const upstream = await fetch(assetUrl, {
-      redirect: "error",
+      redirect: "manual",
       signal: AbortSignal.timeout(10_000),
     });
+    if (upstream.status >= 300 && upstream.status < 400) {
+      return NextResponse.json({ error: "Asset unavailable." }, { status: 502 });
+    }
     const contentType = upstream.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
     const declaredBytes = Number(upstream.headers.get("content-length") ?? "0");
     if (

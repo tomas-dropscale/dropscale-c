@@ -1663,31 +1663,19 @@ export function attributeCollectionSpend(
     candidates = [...new Map(candidates.map((product) => [product.productId, product])).values()]
       .sort((left, right) => left.productId.localeCompare(right.productId));
     if (candidates.length === 0) continue;
-    const mappedById = new Map(mapped.map((product) => [product.productId, product]));
     for (const point of google.value.timeline) {
       if (
         point.accountId !== campaign.ad_account_id ||
         point.campaignId !== campaign.providerCampaignId ||
         point.spend <= 0
       ) continue;
-      const weights = candidates.map((product) => {
-        const mappedProduct = mappedById.get(product.productId);
-        const mappedPoint = mappedProduct?.timeline.find((entry) => entry.bucket === point.bucket);
-        const salesPoint = product.timeline.find((entry) => entry.bucket === point.bucket);
-        return Math.max(0,
-          mappedPoint?.units ?? 0,
-          mappedProduct?.units ?? 0,
-          salesPoint?.revenue ?? 0,
-          salesPoint?.units ?? 0,
-          product.revenue,
-          product.units,
-        );
-      });
-      const totalWeight = weights.reduce((sum, value) => sum + value, 0);
-      candidates.forEach((product, index) => {
-        const share = totalWeight > 0
-          ? point.spend * weights[index] / totalWeight
-          : point.spend / candidates.length;
+      // Owner rule (2026-08-18): Demand Gen splits the campaign budget EQUALLY
+      // between its products by default, and each product's Real ROAS is its
+      // revenue over that equal share. Weighting by revenue/units made every
+      // product's ROAS identical to the campaign's — mathematically true and
+      // commercially useless.
+      candidates.forEach((product) => {
+        const share = point.spend / candidates.length;
         const key = `${product.productId}\u0000${point.bucket}`;
         spendByProductBucket.set(key, (spendByProductBucket.get(key) ?? 0) + share);
       });
@@ -1753,7 +1741,7 @@ export function attributeCollectionSpend(
     ...family,
     data: { ...family.data, rows: enriched },
     message:
-      "Shopify sales use official collection membership. Ad spend is attributed only by an exact /collections/<handle> campaign URL or exact Google campaign UTM → Shopify product mapping, then deterministically split by attributed units, revenue, or stable product ID. Collection rows remain non-additive when a product belongs to more than one collection.",
+      "Shopify sales use official collection membership. Ad spend is attributed only by an exact /collections/<handle> campaign URL or exact Google campaign UTM → Shopify product mapping, then split equally between the campaign's products (Demand Gen default). Collection rows remain non-additive when a product belongs to more than one collection.",
   };
 }
 
