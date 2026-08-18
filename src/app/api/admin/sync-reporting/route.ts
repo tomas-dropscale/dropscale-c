@@ -6,6 +6,7 @@ import {
 } from "@/lib/client-onboarding/http";
 import { ClientOnboardingError } from "@/lib/client-onboarding/sessions";
 import { ensureAutomaticBillingStarts } from "@/lib/billing/auto-start";
+import { ensureGoogleConnectionMetadata } from "@/lib/client-onboarding/google-metadata";
 import {
   advanceEligibleClientReportingCutovers,
   provisionReviewedClientReportingSources,
@@ -164,6 +165,7 @@ async function refreshStore(request: StoreRequest) {
   // hourly cycle.
   const service = createServiceClient();
   if (service) {
+    await ensureGoogleConnectionMetadata(service).catch(() => undefined);
     await provisionReviewedClientReportingSources(service).catch(() => undefined);
     await ensureAutomaticBillingStarts(service).catch(() => undefined);
     await advanceEligibleClientReportingCutovers(service).catch(() => undefined);
@@ -228,6 +230,7 @@ async function refreshAll(
   const deadline = startedAt + REPORTING_ROUTE_BUDGET_MS;
   const service = createServiceClient();
   if (!service) return response({ error: "Reporting sync is not configured." }, 503);
+  await ensureGoogleConnectionMetadata(service).catch(() => undefined);
   const provisioning = await provisionReviewedClientReportingSources(service).catch(() => ({
     attempted: 0,
     provisioned: 0,
@@ -366,6 +369,7 @@ async function bootstrapReportingAccount(accountId: string) {
 async function refreshMetricHistory(range: RangeSelection) {
   const service = createServiceClient();
   if (!service) return response({ error: "Reporting sync is not configured." }, 503);
+  await ensureGoogleConnectionMetadata(service).catch(() => undefined);
   await provisionReviewedClientReportingSources(service).catch(() => undefined);
   await ensureAutomaticBillingStarts(service).catch(() => undefined);
   await advanceEligibleClientReportingCutovers(service).catch(() => undefined);
@@ -465,6 +469,7 @@ export async function POST(request: NextRequest) {
 
     const service = createServiceClient();
     if (!service) return response({ error: "Reporting sync is not configured." }, 503);
+    await ensureGoogleConnectionMetadata(service).catch(() => undefined);
     await provisionReviewedClientReportingSources(service).catch(() => undefined);
     await ensureAutomaticBillingStarts(service).catch(() => undefined);
     const result = await refreshAdminCampaignSnapshots(body.range, {
