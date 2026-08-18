@@ -325,6 +325,20 @@ function isDay(value: string): boolean {
   return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
 }
 
+const LISBON_CALENDAR = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Europe/Lisbon",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+/** The ROAS tracking window is FIXED: the last 30 Lisbon days, whatever range
+ * the page is showing. Owner rule (2026-08-18): tracking reads the data the
+ * platform already holds — it never depends on the reviewed timeframe. */
+function lisbonToday(): string {
+  return LISBON_CALENDAR.format(new Date());
+}
+
 function offsetDay(value: string, offset: number): string {
   const day = new Date(`${value}T00:00:00.000Z`);
   day.setUTCDate(day.getUTCDate() + offset);
@@ -2286,8 +2300,10 @@ export async function fetchCachedAdminStoreAnalytics(
     "store_campaign_performance",
     "shopify_collection_sales",
   ] as const;
-  const trackingFrom = offsetDay(input.range.to, -29);
-  const needsTrackingSnapshot = input.range.from > trackingFrom;
+  const trackingTo = lisbonToday();
+  const trackingFrom = offsetDay(trackingTo, -29);
+  const needsTrackingSnapshot =
+    input.range.from !== trackingFrom || input.range.to !== trackingTo;
   const [stored, trackingStored, rollup, activity] = await Promise.all([
     readAdminReportingSnapshotFamilySelections({
       client: topology.service,
@@ -2304,7 +2320,7 @@ export async function fetchCachedAdminStoreAnalytics(
           accountId: input.store.accountId,
           authorityKey: topology.authority.key,
           from: trackingFrom,
-          to: input.range.to,
+          to: trackingTo,
         }).catch(() => new Map())
       : Promise.resolve(new Map()),
     rollupFamilies(
@@ -2321,10 +2337,10 @@ export async function fetchCachedAdminStoreAnalytics(
   const [funnelSnapshot, campaignsSnapshot, collectionsSnapshot] = snapshots;
   const [funnelSelection, campaignsSelection, collectionsSelection] = selections;
   const trackingCampaignSelection = needsTrackingSnapshot
-    ? trackingStored.get("store_campaign_performance") ?? missingStoredSelection({ from: trackingFrom, to: input.range.to })
+    ? trackingStored.get("store_campaign_performance") ?? missingStoredSelection({ from: trackingFrom, to: trackingTo })
     : campaignsSelection;
   const trackingCollectionSelection = needsTrackingSnapshot
-    ? trackingStored.get("shopify_collection_sales") ?? missingStoredSelection({ from: trackingFrom, to: input.range.to })
+    ? trackingStored.get("shopify_collection_sales") ?? missingStoredSelection({ from: trackingFrom, to: trackingTo })
     : collectionsSelection;
   const funnel = slicedFunnelFamily(storedFamily<FunnelSnapshotData>(funnelSnapshot, {
     granularity: "day" as const,

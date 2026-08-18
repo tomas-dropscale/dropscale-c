@@ -566,7 +566,8 @@ export async function fetchLiveGoogleDemandGenBreakdowns(
     kind: "creative",
     id: creative.providerAssetId,
     name: creative.name,
-    detail: creative.fieldType,
+    // The raw field-type enum is Google plumbing, not information.
+    detail: null,
     spend: creative.spend,
     impressions: creative.impressions,
     clicks: creative.clicks,

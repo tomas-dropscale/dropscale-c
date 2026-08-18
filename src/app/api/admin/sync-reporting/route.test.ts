@@ -365,7 +365,8 @@ describe("admin exact-range reporting sync route", () => {
     expect(mocks.refreshAdminStoreAnalyticsSnapshots).toHaveBeenCalledTimes(2);
     expect(mocks.refreshAdminStoreAnalyticsSnapshots).toHaveBeenCalledWith(
       expect.objectContaining({
-        range: { key: "custom", from: "2026-07-14", to: "2026-08-12" },
+        // Fixed 30-day tracking window anchored on the (faked) Lisbon today.
+        range: { key: "custom", from: "2026-07-17", to: "2026-08-15" },
       }),
       { authenticate: false },
     );

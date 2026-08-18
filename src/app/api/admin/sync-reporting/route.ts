@@ -177,13 +177,22 @@ async function refreshStore(request: StoreRequest) {
   // refreshed on Sync: it only aged out through the hourly presets, so a
   // failed one looked permanently dead from the page. Sync now settles the
   // tracking range alongside the selected one.
-  const trackingStart = new Date(`${request.range.to}T00:00:00Z`);
+  // Owner rule: the tracking window is FIXED — the last 30 Lisbon days —
+  // whatever range the page is on, so Sync always settles the exact window
+  // the ROAS-evolution hover reads.
+  const trackingTo = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Lisbon",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+  const trackingStart = new Date(`${trackingTo}T00:00:00Z`);
   trackingStart.setUTCDate(trackingStart.getUTCDate() - 29);
   const trackingFrom = trackingStart.toISOString().slice(0, 10);
   const trackingRange: RangeSelection | null =
-    request.range.from > trackingFrom
-      ? { key: "custom", from: trackingFrom, to: request.range.to }
-      : null;
+    request.range.from === trackingFrom && request.range.to === trackingTo
+      ? null
+      : { key: "custom", from: trackingFrom, to: trackingTo };
   const [metricCoverage, result, trackingResult] = await Promise.all([
     ensureAdminAnalyticsRollupCoverage(
       {

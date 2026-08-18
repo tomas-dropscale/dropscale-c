@@ -73,6 +73,7 @@ const worker = {
               name: "hourly refresh",
               paths: [
                 "/api/admin/sync-reporting?range=d7",
+                "/api/admin/sync-reporting?range=d30",
                 "/api/admin/sync-reporting?range=today",
                 "/api/admin/sync-ledgers",
               ],
