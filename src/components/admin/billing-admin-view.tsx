@@ -461,16 +461,21 @@ export function BillingAdminView({
       const issued = body?.summary?.newlyIssued ?? 0;
       const alreadyIssued = body?.summary?.alreadyIssued ?? 0;
       const noCharge = body?.summary?.noCharge ?? 0;
-      const blocked = body?.summary?.blocked ?? 0;
+      // Owner rule: a client with no ad accounts has nothing to invoice —
+      // that is a normal state, not a blocker worth alarming about.
+      const blockedItems = (body?.blocked ?? []).filter(
+        (item) => item.code !== "no_accounts",
+      );
+      const blocked = blockedItems.length;
       const period = body?.period
         ? formatPeriod(body.period.start, body.period.end, intl)
         : "o último ciclo fechado";
-      const blockedDetail = (body?.blocked ?? [])
+      const blockedDetail = blockedItems
         .map((item) => `${item.clientName} (${item.code})`)
         .join(" · ");
       setIssueFeedback({
         tone: blocked > 0 ? "error" : "success",
-        message: `${period}: ${issued} ${issued === 1 ? "fatura emitida agora" : "faturas emitidas agora"}, ${alreadyIssued} já emitidas, ${noCharge} sem cobrança e ${blocked} ${blocked === 1 ? "bloqueio" : "bloqueios"}.${blockedDetail ? ` Bloqueios: ${blockedDetail}.` : ""}`,
+        message: `${period}: ${issued} ${issued === 1 ? "fatura emitida agora" : "faturas emitidas agora"}, ${alreadyIssued} já emitidas e ${noCharge} sem cobrança.${blockedDetail ? ` Bloqueios (${blocked}): ${blockedDetail}.` : ""}`,
       });
       setIssueDialogOpen(false);
       router.refresh();
@@ -511,11 +516,21 @@ export function BillingAdminView({
       </section>
 
       {issueFeedback && (
-        <FormAlert tone={issueFeedback.tone}>{issueFeedback.message}</FormAlert>
+        <FormAlert
+          tone={issueFeedback.tone}
+          onDismiss={() => setIssueFeedback(null)}
+        >
+          {issueFeedback.message}
+        </FormAlert>
       )}
 
       {skipFeedback && (
-        <FormAlert tone={skipFeedback.tone}>{skipFeedback.message}</FormAlert>
+        <FormAlert
+          tone={skipFeedback.tone}
+          onDismiss={() => setSkipFeedback(null)}
+        >
+          {skipFeedback.message}
+        </FormAlert>
       )}
 
       <section

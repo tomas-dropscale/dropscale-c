@@ -1,3 +1,5 @@
+import { X } from "lucide-react";
+
 import { cn } from "@/lib/utils";
 
 export function AuthCard({
@@ -43,9 +45,12 @@ export function AuthCard({
 /** Error/success banner shared by all the auth forms. */
 export function FormAlert({
   tone = "error",
+  onDismiss,
   children,
 }: {
   tone?: "error" | "success";
+  /** When set, the banner renders a close button instead of persisting. */
+  onDismiss?: () => void;
   children: React.ReactNode;
 }) {
   return (
@@ -56,9 +61,24 @@ export function FormAlert({
         tone === "error"
           ? "border-[var(--danger-red)]/30 bg-[var(--danger-red)]/10 text-[#e2a49b]"
           : "border-[var(--success-green)]/30 bg-[var(--success-green)]/10 text-[#a8d4b0]",
+        onDismiss && "flex items-start gap-3",
       )}
     >
-      {children}
+      {onDismiss ? (
+        <>
+          <div className="min-w-0 flex-1">{children}</div>
+          <button
+            type="button"
+            aria-label="Fechar"
+            onClick={onDismiss}
+            className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-[6px] text-current opacity-70 transition-opacity hover:opacity-100"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </>
+      ) : (
+        children
+      )}
     </div>
   );
 }
