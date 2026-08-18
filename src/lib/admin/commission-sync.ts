@@ -2,9 +2,10 @@ import { createClient } from "@/lib/supabase/server";
 import { decryptToken } from "@/lib/google-ads/crypto";
 import { searchGoogleAds } from "@/lib/google-ads/client";
 import {
-  fetchGoogleAdsDailyBreakdown,
+  fetchGoogleAdsDailyBreakdownForStore,
   normalizeGoogleAdsCustomerId,
 } from "@/lib/windsor/client";
+import { storeDomainsForSource } from "@/lib/reporting/store-domain-match";
 import {
   addIsoDays,
   decimalToMicros,
@@ -461,6 +462,52 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
       if (matches[0]) windsorConnectionByAccount.set(account.id, matches[0]);
     }
 
+    // Owner rule (2026-08-18): a shared Google account can host another
+    // store's campaigns, so Windsor ledger evidence only counts campaigns
+    // whose final URLs point at this store's domain. The domain comes from
+    // the account's own active binding, never from a sibling store.
+    const { data: bindingDomainRows, error: bindingDomainRowsError } =
+      await supabase
+        .from("client_reporting_bindings")
+        .select("ad_account_id, shopify_connection_id")
+        .eq("status", "active")
+        .not("shopify_connection_id", "is", null)
+        .in("ad_account_id", billable.map((account) => account.id));
+    if (bindingDomainRowsError) throw bindingDomainRowsError;
+    type BindingDomainRow = {
+      ad_account_id: string;
+      shopify_connection_id: string;
+    };
+    const boundShopifyConnections = (bindingDomainRows ?? []) as unknown as BindingDomainRow[];
+    const shopifyConnectionIds = [
+      ...new Set(boundShopifyConnections.map((row) => row.shopify_connection_id)),
+    ];
+    const storeDomainsByAccount = new Map<string, string[]>();
+    if (shopifyConnectionIds.length > 0) {
+      const { data: shopifyRows, error: shopifyRowsError } = await supabase
+        .from("client_shopify_connections")
+        .select("id, shopify_domain, primary_domain")
+        .in("id", shopifyConnectionIds);
+      if (shopifyRowsError) throw shopifyRowsError;
+      type ShopifyDomainRow = {
+        id: string;
+        shopify_domain: string;
+        primary_domain: string | null;
+      };
+      const domainsByConnection = new Map(
+        ((shopifyRows ?? []) as unknown as ShopifyDomainRow[]).map((row) => [
+          row.id,
+          storeDomainsForSource({
+            shopify: { domain: row.shopify_domain, primaryDomain: row.primary_domain },
+          }),
+        ]),
+      );
+      for (const row of boundShopifyConnections) {
+        const domains = domainsByConnection.get(row.shopify_connection_id) ?? [];
+        if (domains.length > 0) storeDomainsByAccount.set(row.ad_account_id, domains);
+      }
+    }
+
     // Portal login → CRM record, for the finance rows' client attribution.
     //
     // `crm_client_id` is nearly always null: nothing in the product writes it,
@@ -545,10 +592,11 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
             : null;
           const windsorReportedDays = connection
             ? async (windowFrom: string, windowTo: string) => {
-                const rows = await fetchGoogleAdsDailyBreakdown(
+                const rows = await fetchGoogleAdsDailyBreakdownForStore(
                   connection.windsor_account_id,
                   windowFrom,
                   windowTo,
+                  storeDomainsByAccount.get(account.id) ?? [],
                 );
                 return rows.map((row) => {
                   if (

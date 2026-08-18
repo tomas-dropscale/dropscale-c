@@ -8,8 +8,9 @@ import type { GoogleDailyMetric } from "@/lib/reporting/daily-metrics";
 import type { CanonicalReportingSource } from "@/lib/reporting/sources";
 import {
   fetchGoogleAdsCampaignBreakdown,
+  fetchGoogleAdsCampaignFinalUrls,
   fetchGoogleAdsCampaignTimeline,
-  fetchGoogleAdsDailyBreakdown,
+  fetchGoogleAdsDailyBreakdownForStore,
   fetchGoogleAdsDemandGenAdBreakdown,
   fetchGoogleAdsPmaxProductBreakdown,
   type WindsorGoogleAdsCampaignRow,
@@ -18,6 +19,10 @@ import {
   type WindsorGoogleAdsDemandGenAdRow,
   type WindsorGoogleAdsPmaxProductRow,
 } from "../windsor/client";
+import {
+  campaignBelongsToStore,
+  storeDomainsForSource,
+} from "./store-domain-match";
 
 export class GoogleReportingAdapterError extends Error {
   constructor(message: string) {
@@ -55,6 +60,14 @@ type PmaxProductFetcher = (
   from: string,
   to: string,
 ) => Promise<WindsorGoogleAdsPmaxProductRow[]>;
+
+type CampaignFinalUrlsFetcher = (
+  accountId: string,
+  from: string,
+  to: string,
+) => Promise<Map<string, string[]>>;
+
+const NO_FINAL_URLS: Map<string, string[]> = new Map();
 
 export type ReportingCampaign = LiveCampaign & {
   biddingStrategyType: string | null;
@@ -124,14 +137,23 @@ export async function fetchGoogleReportingDailyMetrics(
   source: CanonicalReportingSource,
   from: string,
   to: string,
-  fetcher: DailyFetcher = fetchGoogleAdsDailyBreakdown,
+  fetcher?: DailyFetcher,
 ): Promise<GoogleDailyMetric[]> {
   const google = source.googleAds;
   if (!google) {
     throw new GoogleReportingAdapterError("This reporting source has no Google Ads account.");
   }
 
-  const rows = await fetcher(google.accountId, from, to);
+  // Owner rule: spend only counts for the store its campaigns link to, so the
+  // default read excludes campaigns whose final URLs point at another domain.
+  const rows = await (fetcher
+    ? fetcher(google.accountId, from, to)
+    : fetchGoogleAdsDailyBreakdownForStore(
+        google.accountId,
+        from,
+        to,
+        storeDomainsForSource(source),
+      ));
   for (const row of rows) {
     if (
       row.accountId !== google.accountId ||
@@ -175,7 +197,7 @@ export async function fetchGoogleReportingCampaigns(
     REMOVED: "ended",
   } as const;
   const rows = await fetcher(google.accountId, from, to);
-  return rows.map((row) => {
+  for (const row of rows) {
     if (
       row.accountId !== google.accountId ||
       row.customerId !== google.customerId ||
@@ -186,8 +208,15 @@ export async function fetchGoogleReportingCampaigns(
         "Windsor returned a different Google Ads reporting identity.",
       );
     }
+  }
 
-    return {
+  // Owner rule: a campaign whose final URLs point at another store's domain is
+  // not this store's campaign, no matter which Google account hosts it.
+  const storeDomains = storeDomainsForSource(source);
+  return rows
+    .filter((row) => campaignBelongsToStore(row.finalUrls, storeDomains))
+    .map((row) => {
+      return {
       id: `windsor-${source.adAccountId}-${row.campaignId}`,
       providerCampaignId: row.campaignId,
       ad_account_id: source.adAccountId,
@@ -208,8 +237,8 @@ export async function fetchGoogleReportingCampaigns(
       conversionValue: row.conversionValue,
       googleRoas: row.spend > 0 ? row.conversionValue / row.spend : null,
       ...(row.finalUrls?.length ? { finalUrls: row.finalUrls } : {}),
-    };
-  });
+      };
+    });
 }
 
 export async function fetchGoogleReportingCampaignTimeline(
@@ -217,12 +246,24 @@ export async function fetchGoogleReportingCampaignTimeline(
   from: string,
   to: string,
   fetcher: CampaignTimelineFetcher = fetchGoogleAdsCampaignTimeline,
+  urlsFetcher: CampaignFinalUrlsFetcher = fetchGoogleAdsCampaignFinalUrls,
 ): Promise<ReportingCampaignTimelinePoint[]> {
   const google = verifiedGoogleIdentity(source);
-  const rows = await fetcher(google.accountId, from, to);
-  return rows.map((row) => {
-    assertBreakdownIdentity(row, google);
-    return {
+  const storeDomains = storeDomainsForSource(source);
+  const [rows, finalUrlsByCampaign] = await Promise.all([
+    fetcher(google.accountId, from, to),
+    storeDomains.length > 0
+      ? urlsFetcher(google.accountId, from, to)
+      : Promise.resolve(NO_FINAL_URLS),
+  ]);
+  for (const row of rows) assertBreakdownIdentity(row, google);
+  return rows
+    .filter(
+      (row) =>
+        storeDomains.length === 0 ||
+        campaignBelongsToStore(finalUrlsByCampaign.get(row.campaignId), storeDomains),
+    )
+    .map((row) => ({
       accountId: source.adAccountId,
       campaignId: row.campaignId,
       bucket: row.bucket,
@@ -232,8 +273,7 @@ export async function fetchGoogleReportingCampaignTimeline(
       clicks: row.clicks,
       conversions: row.conversions,
       googleRevenue: row.conversionValue,
-    };
-  });
+    }));
 }
 
 /** Demand Gen ad detail for one exact V2 reporting source. */
@@ -242,11 +282,24 @@ export async function fetchGoogleReportingDemandGenAds(
   from: string,
   to: string,
   fetcher: DemandGenAdFetcher = fetchGoogleAdsDemandGenAdBreakdown,
+  urlsFetcher: CampaignFinalUrlsFetcher = fetchGoogleAdsCampaignFinalUrls,
 ): Promise<GoogleCampaignBreakdownRow[]> {
   const google = verifiedGoogleIdentity(source);
-  const rows = await fetcher(google.accountId, from, to);
-  return rows.map((row): GoogleCampaignBreakdownRow => {
-    assertBreakdownIdentity(row, google);
+  const storeDomains = storeDomainsForSource(source);
+  const [rows, finalUrlsByCampaign] = await Promise.all([
+    fetcher(google.accountId, from, to),
+    storeDomains.length > 0
+      ? urlsFetcher(google.accountId, from, to)
+      : Promise.resolve(NO_FINAL_URLS),
+  ]);
+  for (const row of rows) assertBreakdownIdentity(row, google);
+  return rows
+    .filter(
+      (row) =>
+        storeDomains.length === 0 ||
+        campaignBelongsToStore(finalUrlsByCampaign.get(row.campaignId), storeDomains),
+    )
+    .map((row): GoogleCampaignBreakdownRow => {
     return {
       accountId: source.adAccountId,
       campaignId: row.campaignId,
@@ -274,11 +327,24 @@ export async function fetchGoogleReportingPmaxProducts(
   from: string,
   to: string,
   fetcher: PmaxProductFetcher = fetchGoogleAdsPmaxProductBreakdown,
+  urlsFetcher: CampaignFinalUrlsFetcher = fetchGoogleAdsCampaignFinalUrls,
 ): Promise<GoogleCampaignBreakdownRow[]> {
   const google = verifiedGoogleIdentity(source);
-  const rows = await fetcher(google.accountId, from, to);
-  return rows.map((row): GoogleCampaignBreakdownRow => {
-    assertBreakdownIdentity(row, google);
+  const storeDomains = storeDomainsForSource(source);
+  const [rows, finalUrlsByCampaign] = await Promise.all([
+    fetcher(google.accountId, from, to),
+    storeDomains.length > 0
+      ? urlsFetcher(google.accountId, from, to)
+      : Promise.resolve(NO_FINAL_URLS),
+  ]);
+  for (const row of rows) assertBreakdownIdentity(row, google);
+  return rows
+    .filter(
+      (row) =>
+        storeDomains.length === 0 ||
+        campaignBelongsToStore(finalUrlsByCampaign.get(row.campaignId), storeDomains),
+    )
+    .map((row): GoogleCampaignBreakdownRow => {
     return {
       accountId: source.adAccountId,
       campaignId: row.campaignId,

@@ -9,8 +9,10 @@ import {
   decryptWindsorAccessToken,
   encryptWindsorAccessToken,
   fetchGoogleAdsCampaignBreakdown,
+  fetchGoogleAdsCampaignFinalUrls,
   fetchGoogleAdsCampaignTimeline,
   fetchGoogleAdsDailyBreakdown,
+  fetchGoogleAdsDailyBreakdownForStore,
   fetchGoogleAdsDemandGenAdBreakdown,
   fetchGoogleAdsPmaxProductBreakdown,
   listLinkedGoogleAdsAccounts,
@@ -1369,5 +1371,150 @@ describe("Windsor Google Ads server adapter", () => {
     expect(() => normalizeGoogleAdsCustomerId("abc1234567890")).toThrowError(
       WindsorError,
     );
+  });
+});
+
+describe("Windsor store-scoped daily breakdown", () => {
+  beforeEach(() => {
+    vi.stubEnv("WINDSOR_API_KEY", API_KEY);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  const timelineRow = (
+    campaignId: string,
+    date: string,
+    spend: number,
+  ) => ({
+    date,
+    account_id: "123-456-7890",
+    account_currency_code: "EUR",
+    account_time_zone: "Europe/Lisbon",
+    campaign_id: campaignId,
+    spend,
+    impressions: 100,
+    clicks: 10,
+    conversions: "0.5",
+    conversion_value: spend * 2,
+  });
+
+  it("reads campaign→final-URL pairs as a deduplicated sorted map", async () => {
+    const fetcher = mockFetch(
+      jsonResponse({
+        data: [
+          {
+            account_id: "123-456-7890",
+            campaign_id: "1",
+            final_url: "https://akinikko.com/b",
+          },
+          {
+            account_id: "123-456-7890",
+            campaign_id: "1",
+            final_url: "https://akinikko.com/a",
+          },
+          {
+            account_id: "123-456-7890",
+            campaign_id: "1",
+            final_url: "https://akinikko.com/a",
+          },
+          { account_id: "123-456-7890", campaign_id: "2", final_url: null },
+        ],
+      }),
+    );
+    const urls = await fetchGoogleAdsCampaignFinalUrls(
+      "123-456-7890",
+      "2026-08-10",
+      "2026-08-16",
+      { fetcher: fetcher as typeof fetch },
+    );
+    expect(urls.get("1")).toEqual([
+      "https://akinikko.com/a",
+      "https://akinikko.com/b",
+    ]);
+    expect(urls.has("2")).toBe(false);
+  });
+
+  it("sums only the campaigns that belong to the store's domains", async () => {
+    const fetcher = mockFetch(
+      jsonResponse({
+        data: [
+          timelineRow("1", "2026-08-10", 10.111111),
+          timelineRow("2", "2026-08-10", 99),
+          timelineRow("1", "2026-08-11", 5.25),
+          timelineRow("3", "2026-08-11", 7),
+        ],
+      }),
+      jsonResponse({
+        data: [
+          {
+            account_id: "123-456-7890",
+            campaign_id: "1",
+            final_url: "https://akinikko.com/collections/bags",
+          },
+          {
+            account_id: "123-456-7890",
+            campaign_id: "2",
+            final_url: "https://casa-luna-artesanias.com/en/collections/lamparas",
+          },
+        ],
+      }),
+    );
+
+    const rows = await fetchGoogleAdsDailyBreakdownForStore(
+      "123-456-7890",
+      "2026-08-10",
+      "2026-08-11",
+      ["akinikko.com"],
+      { fetcher: fetcher as typeof fetch },
+    );
+
+    // Campaign 2 is excluded by positive foreign-URL evidence; campaign 3 has
+    // no URL evidence and stays attributed.
+    expect(rows).toEqual([
+      expect.objectContaining({
+        date: "2026-08-10",
+        accountId: "123-456-7890",
+        customerId: "1234567890",
+        spend: 10.111111,
+      }),
+      expect.objectContaining({
+        date: "2026-08-11",
+        spend: 12.25,
+        conversions: 1,
+        conversionValue: 24.5,
+      }),
+    ]);
+  });
+
+  it("stays an exact account-level read when the store has no domains", async () => {
+    const fetcher = mockFetch(
+      jsonResponse({
+        data: [
+          {
+            date: "2026-08-10",
+            account_id: "123-456-7890",
+            account_currency_code: "EUR",
+            account_time_zone: "Europe/Lisbon",
+            spend: "12.34",
+            impressions: 100,
+            clicks: 10,
+            conversions: 1,
+            conversion_value: 20,
+          },
+        ],
+      }),
+    );
+    const rows = await fetchGoogleAdsDailyBreakdownForStore(
+      "123-456-7890",
+      "2026-08-01",
+      "2026-08-10",
+      [],
+      { fetcher: fetcher as typeof fetch },
+    );
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(rows[0]).toMatchObject({ date: "2026-08-10", spend: 12.34 });
   });
 });

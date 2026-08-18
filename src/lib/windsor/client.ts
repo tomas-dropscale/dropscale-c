@@ -1,6 +1,7 @@
 import "server-only";
 
 import { decryptToken, encryptToken } from "../google-ads/crypto";
+import { campaignBelongsToStore } from "../reporting/store-domain-match";
 
 /**
  * Server-only Windsor adapter for Client Onboarding V2.
@@ -1049,35 +1050,20 @@ export async function fetchGoogleAdsDailyBreakdown(
 }
 
 /**
- * Reads one aggregated row per campaign for an exact account and date range.
- * Omitting the date dimension keeps this bounded even for year-long ranges.
+ * Reads the exact campaign→final-URL pairs for one account and range in one
+ * bounded request. `final_url` is an ad-level dimension and Windsor rejects it
+ * when mixed with campaign metrics, so every campaign read that needs URLs
+ * joins this separate read. Returned URL lists are deduplicated and sorted.
  */
-export async function fetchGoogleAdsCampaignBreakdown(
+export async function fetchGoogleAdsCampaignFinalUrls(
   accountId: string,
   from: string,
   to: string,
   options: WindsorRequestOptions = {},
-): Promise<WindsorGoogleAdsCampaignRow[]> {
+): Promise<Map<string, string[]>> {
   const ids = normalizeGoogleAdsCustomerId(accountId);
   reportingRange(from, to);
   const maxRows = 1_001;
-  const url = new URL(`/${WINDSOR_DATASOURCE}`, CONNECTORS_ORIGIN);
-  url.searchParams.set(
-    "fields",
-    "account_id,account_currency_code,account_time_zone,campaign_id,campaign," +
-      "campaign_status,advertising_channel_type,campaign_shopping_setting_merchant_id," +
-      "campaign_budget,bidding_strategy_type," +
-      "start_date,spend,impressions,clicks,conversions,conversion_value",
-  );
-  url.searchParams.set("date_from", from);
-  url.searchParams.set("date_to", to);
-  url.searchParams.set("filter", JSON.stringify([["account_id", "eq", ids.accountId]]));
-  url.searchParams.set("_max_rows", String(maxRows));
-  url.searchParams.set("_renderer", "json");
-
-  // `final_url` is an ad-level dimension and Windsor rejects it when mixed
-  // with the campaign metrics above, so read the exact campaign/url pairs in
-  // one separate bounded request for the same account and reporting range.
   const finalUrlRequest = new URL(`/${WINDSOR_DATASOURCE}`, CONNECTORS_ORIGIN);
   finalUrlRequest.searchParams.set("fields", "account_id,campaign_id,final_url");
   finalUrlRequest.searchParams.set("date_from", from);
@@ -1089,16 +1075,12 @@ export async function fetchGoogleAdsCampaignBreakdown(
   finalUrlRequest.searchParams.set("_max_rows", String(maxRows));
   finalUrlRequest.searchParams.set("_renderer", "json");
 
-  const [campaignPayload, finalUrlPayload] = await Promise.all([
-    requestJson(url, options),
-    requestJson(finalUrlRequest, options),
-  ]);
-  const rawRows = arrayPayload(campaignPayload, ["data", "results", "rows"]);
-  const rawFinalUrlRows = arrayPayload(finalUrlPayload, ["data", "results", "rows"]);
+  const rawFinalUrlRows = arrayPayload(
+    await requestJson(finalUrlRequest, options),
+    ["data", "results", "rows"],
+  );
   // Asking for one sentinel row lets a silently truncated response fail closed.
-  if (rawRows.length >= maxRows || rawFinalUrlRows.length >= maxRows) {
-    throw invalidCampaignResponse();
-  }
+  if (rawFinalUrlRows.length >= maxRows) throw invalidCampaignResponse();
 
   const finalUrlsByCampaign = new Map<string, Set<string>>();
   for (const value of rawFinalUrlRows) {
@@ -1136,6 +1118,111 @@ export async function fetchGoogleAdsCampaignBreakdown(
     urls.add(parsed.toString());
     finalUrlsByCampaign.set(campaignId, urls);
   }
+  return new Map(
+    [...finalUrlsByCampaign].map(([campaignId, urls]) => [campaignId, [...urls].sort()]),
+  );
+}
+
+/**
+ * Daily metrics for one exact account, restricted to campaigns that belong to
+ * the given store domains (destination-URL attribution: a reused Google Ads
+ * account may host another store's campaigns). With no domains this is exactly
+ * the account-level read. A campaign whose ad final URLs all point at another
+ * domain is excluded; a campaign with no usable URL evidence stays attributed.
+ */
+export async function fetchGoogleAdsDailyBreakdownForStore(
+  accountId: string,
+  from: string,
+  to: string,
+  storeDomains: readonly string[],
+  options: WindsorRequestOptions = {},
+): Promise<WindsorGoogleAdsDailyRow[]> {
+  if (storeDomains.length === 0) {
+    return fetchGoogleAdsDailyBreakdown(accountId, from, to, options);
+  }
+  const [timeline, finalUrlsByCampaign] = await Promise.all([
+    fetchGoogleAdsCampaignTimeline(accountId, from, to, options),
+    fetchGoogleAdsCampaignFinalUrls(accountId, from, to, options),
+  ]);
+  const byDay = new Map<string, WindsorGoogleAdsDailyRow>();
+  for (const row of timeline) {
+    if (!campaignBelongsToStore(finalUrlsByCampaign.get(row.campaignId), storeDomains)) {
+      continue;
+    }
+    const current = byDay.get(row.date);
+    if (!current) {
+      byDay.set(row.date, {
+        date: row.date,
+        accountId: row.accountId,
+        customerId: row.customerId,
+        currency: row.currency,
+        timeZone: row.timeZone,
+        spend: row.spend,
+        impressions: row.impressions,
+        clicks: row.clicks,
+        conversions: row.conversions,
+        conversionValue: row.conversionValue,
+      });
+      continue;
+    }
+    if (
+      current.accountId !== row.accountId ||
+      current.customerId !== row.customerId ||
+      current.currency !== row.currency ||
+      current.timeZone !== row.timeZone
+    ) {
+      throw invalidDailyResponse();
+    }
+    current.spend += row.spend;
+    current.impressions += row.impressions;
+    current.clicks += row.clicks;
+    current.conversions += row.conversions;
+    current.conversionValue += row.conversionValue;
+  }
+  // Float sums must stay within the 6-decimal contract of the daily row.
+  const round = (value: number) => Math.round(value * 1e6) / 1e6;
+  for (const row of byDay.values()) {
+    row.spend = round(row.spend);
+    row.conversions = round(row.conversions);
+    row.conversionValue = round(row.conversionValue);
+  }
+  return [...byDay.values()].sort((left, right) => left.date.localeCompare(right.date));
+}
+
+/**
+ * Reads one aggregated row per campaign for an exact account and date range.
+ * Omitting the date dimension keeps this bounded even for year-long ranges.
+ */
+export async function fetchGoogleAdsCampaignBreakdown(
+  accountId: string,
+  from: string,
+  to: string,
+  options: WindsorRequestOptions = {},
+): Promise<WindsorGoogleAdsCampaignRow[]> {
+  const ids = normalizeGoogleAdsCustomerId(accountId);
+  reportingRange(from, to);
+  const maxRows = 1_001;
+  const url = new URL(`/${WINDSOR_DATASOURCE}`, CONNECTORS_ORIGIN);
+  url.searchParams.set(
+    "fields",
+    "account_id,account_currency_code,account_time_zone,campaign_id,campaign," +
+      "campaign_status,advertising_channel_type,campaign_shopping_setting_merchant_id," +
+      "campaign_budget,bidding_strategy_type," +
+      "start_date,spend,impressions,clicks,conversions,conversion_value",
+  );
+  url.searchParams.set("date_from", from);
+  url.searchParams.set("date_to", to);
+  url.searchParams.set("filter", JSON.stringify([["account_id", "eq", ids.accountId]]));
+  url.searchParams.set("_max_rows", String(maxRows));
+  url.searchParams.set("_renderer", "json");
+
+  const [campaignPayload, finalUrlsByCampaign] = await Promise.all([
+    requestJson(url, options),
+    fetchGoogleAdsCampaignFinalUrls(accountId, from, to, options),
+  ]);
+  const rawRows = arrayPayload(campaignPayload, ["data", "results", "rows"]);
+  // Asking for one sentinel row lets a silently truncated response fail closed.
+  if (rawRows.length >= maxRows) throw invalidCampaignResponse();
 
   const campaigns = new Map<string, WindsorGoogleAdsCampaignRow>();
   for (const value of rawRows) {
@@ -1235,7 +1322,7 @@ export async function fetchGoogleAdsCampaignBreakdown(
       clicks: number(raw.clicks),
       conversions: number(raw.conversions),
       conversionValue: number(raw.conversion_value),
-      finalUrls: [...(finalUrlsByCampaign.get(campaignId) ?? [])].sort(),
+      finalUrls: [...(finalUrlsByCampaign.get(campaignId) ?? [])],
     };
     if (campaigns.has(campaignId)) throw invalidCampaignResponse();
     campaigns.set(campaignId, row);
