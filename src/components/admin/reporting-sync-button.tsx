@@ -5,7 +5,7 @@ import { useState, useTransition } from "react";
 import { RefreshCw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import type { RangeSelection } from "@/lib/portal/range";
+import { presetSelection, type RangeSelection } from "@/lib/portal/range";
 
 type ReportingSyncRequest =
   | { scope: "all"; range: RangeSelection }
@@ -72,6 +72,57 @@ export async function requestReportingSync(
     }
     throw new Error(result?.error || "Reporting sync failed.");
   }
+}
+
+/**
+ * The everywhere-Sync in the admin chrome: one click advances the whole
+ * automatic chain (metadata, provisioning, billing starts, cutovers) and
+ * refreshes every store for the last 7 days. The range is computed at click
+ * time so a tab left open overnight still syncs the right window.
+ */
+export function GlobalReportingSyncButton() {
+  const router = useRouter();
+  const [pending, startTransition] = useTransition();
+  const [error, setError] = useState<string | null>(null);
+
+  function sync() {
+    setError(null);
+    startTransition(async () => {
+      try {
+        await requestReportingSync(
+          { scope: "all", range: presetSelection("d7", new Date()) },
+          () => router.refresh(),
+        );
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : "Reporting sync failed.");
+      }
+    });
+  }
+
+  return (
+    <span className="flex min-w-0 items-center gap-2">
+      {error && (
+        <span
+          role="alert"
+          title={error}
+          className="max-w-40 truncate text-[11px] text-[var(--danger-red)]"
+        >
+          {error}
+        </span>
+      )}
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        loading={pending}
+        onClick={sync}
+        aria-label="Sync"
+      >
+        <RefreshCw aria-hidden />
+        Sync
+      </Button>
+    </span>
+  );
 }
 
 export function ReportingSyncButton({ request }: { request: ReportingSyncRequest }) {

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("next/navigation", () => ({ useRouter: vi.fn() }));
 vi.mock("@/components/ui/button", () => ({ Button: () => null }));
+vi.mock("@/lib/portal/range", async () => import("../../lib/portal/range"));
 
 import { requestReportingSync } from "./reporting-sync-button";
 

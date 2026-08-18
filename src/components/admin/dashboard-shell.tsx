@@ -6,6 +6,7 @@ import { Menu } from "lucide-react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 
 import { BrowserChrome, LiveIndicator } from "@/components/portal/browser-chrome";
+import { GlobalReportingSyncButton } from "@/components/admin/reporting-sync-button";
 import { Sidebar } from "@/components/admin/sidebar";
 import { UserMenu } from "@/components/admin/user-menu";
 import { NotificationsMenu } from "@/components/admin/notifications-menu";
@@ -34,6 +35,7 @@ export function DashboardShell({
         address={`dropscale.app${pathname}`}
         right={
           <>
+            <GlobalReportingSyncButton />
             <LiveIndicator />
             <span className="h-4 w-px bg-[var(--border-subtle)]" aria-hidden />
             <NotificationsMenu counts={pending} />
