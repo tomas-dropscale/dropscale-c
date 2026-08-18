@@ -271,6 +271,23 @@ reconcile (cron) → sync do ledger → "Emitir faturas" (ou janela armada do
 `cron?mode=automatic`). Backup da cirurgia do Daniel em
 `audits/backups/reemissao-daniel-2026-08-18-void-invoice.json`.
 
+### Rollover de atrasos (0079, regra do dono 18/08)
+
+Uma fatura nova de semana pagável **absorve o saldo em atraso** do cliente:
+cada fatura EUR ainda `open` de período anterior entra como linha
+`kind='arrears'` (montante = saldo por pagar, label determinística), e o RPC
+de criação **retira as absorvidas na mesma transação** (status `waived`,
+`amount_remaining=0` — única transição open→waived permitida, dentro do RPC);
+o `pushToStripe` anula as absorvidas na Stripe ANTES de enviar a acumulada
+(`voidStripeInvoice`, idempotente). Semana sem fee não absorve nada (os
+atrasos esperam pela próxima pagável). Executado para os 3 afetados do ciclo
+08-10: Alexandre €9,43 (6,65+2,78), Diogo Barbosa €127,63 (99,99+27,64),
+Edgar e Rodrigo €154,84 (112,70+42,14) — antigas absorvidas waived+void na
+Stripe, primeiras tentativas void. Backup:
+`audits/backups/rollover-atrasos-2026-08-18.json`. Nota: se o run bloquear
+com `ledger_missing`, recapturar com `sync-ledgers?billingWeek=latest` e
+repetir.
+
 ## Regras de trabalho neste repo
 
 - Node ≥22 (a máquina local tem 20 — usar um Node 22 standalone).
