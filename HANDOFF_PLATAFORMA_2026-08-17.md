@@ -201,6 +201,28 @@ fail-closed por desenho — multi-moeda no billing é mudança estrutural POR
 DESENHAR (taxa/data de conversão do fee, desselar constraints EUR-only das
 migrations 0034+). Não improvisar.
 
+## Research restaurado (18/08 ~01:45) + afinações de analytics
+
+O **Research** (trends-radar: Markets Overview, Keywords by Market, Market
+Comparison via Apify) vivia no branch nunca-merged
+`feat/reviewed-full-day-rollover` e desapareceu quando o main foi reconstruído
+pela linha v2. Restaurado do tip do branch (páginas, APIs, 344 datasets,
+sidebar em 5 línguas) + migration **0074** (recria `app_secrets` e
+`research_comparisons`, aplicada live; a comparação em backup foi reinserida).
+Token Apify: fallback para o secret `APIFY_TOKEN` do Worker — funciona sem
+setup. Lição: antes de dar features por perdidas, verificar branches
+não-merged (`git branch -a --contains`).
+
+Afinações da mesma madrugada: thumbnails de criativos (o proxy usava
+`redirect:"error"`, que os Workers não suportam — 502 permanente só em
+produção; agora "manual"+rejeição de 3xx); enum cru `SQUARE_MARKETING_IMAGE`
+removido das linhas de criativos; **split igualitário de spend por produto em
+Demand Gen** (regra do dono — o split proporcional à receita igualava o ROAS de
+todos os produtos ao da campanha); hover ROAS ancora Today/Yesterday no
+calendário real de Lisboa; UM só botão Sync (global, no chrome, que também
+sincroniza o ledger financeiro — o "Sync now" da overview e os botões por
+página foram removidos).
+
 ## Regras de trabalho neste repo
 
 - Node ≥22 (a máquina local tem 20 — usar um Node 22 standalone).
