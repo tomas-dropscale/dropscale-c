@@ -1518,3 +1518,45 @@ describe("Windsor store-scoped daily breakdown", () => {
     expect(rows[0]).toMatchObject({ date: "2026-08-10", spend: 12.34 });
   });
 });
+
+describe("Single-day hourly aggregation money contract", () => {
+  beforeEach(() => {
+    vi.stubEnv("WINDSOR_API_KEY", API_KEY);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it("rounds hourly float sums to at most six decimals", async () => {
+    // 4.121 + 9.212 in IEEE 754 is 13.332999999999998 — exactly the artifact
+    // that poisoned daily_metrics and crashed the billing dashboard.
+    const hour = (hour_of_day: number, spend: number) => ({
+      date: "2026-08-18",
+      hour_of_day,
+      account_id: "123-456-7890",
+      account_currency_code: "EUR",
+      account_time_zone: "Europe/Lisbon",
+      campaign_id: "1",
+      spend,
+      impressions: 10,
+      clicks: 1,
+      conversions: 0.1,
+      conversion_value: spend,
+    });
+    const fetcher = mockFetch(
+      jsonResponse({ data: [hour(1, 4.121), hour(2, 9.212)] }),
+    );
+    const rows = await fetchGoogleAdsDailyBreakdown(
+      "123-456-7890",
+      "2026-08-18",
+      "2026-08-18",
+      { fetcher: fetcher as typeof fetch },
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].spend).toBe(13.333);
+    expect(rows[0].conversionValue).toBe(13.333);
+    expect(rows[0].conversions).toBe(0.2);
+  });
+});

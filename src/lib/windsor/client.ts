@@ -958,17 +958,21 @@ export async function fetchGoogleAdsDailyBreakdown(
     ) {
       throw invalidDailyResponse();
     }
+    // Float sums must stay within the six-decimal money contract: an IEEE
+    // artifact like 13.332999999999998 poisons daily_metrics and billing.
+    const total = (read: (row: WindsorGoogleAdsCampaignTimelineRow) => number) =>
+      Math.round(hourly.reduce((sum, row) => sum + read(row), 0) * 1e6) / 1e6;
     return [{
       date: from,
       accountId: first.accountId,
       customerId: first.customerId,
       currency: first.currency,
       timeZone: first.timeZone,
-      spend: hourly.reduce((sum, row) => sum + row.spend, 0),
-      impressions: hourly.reduce((sum, row) => sum + row.impressions, 0),
-      clicks: hourly.reduce((sum, row) => sum + row.clicks, 0),
-      conversions: hourly.reduce((sum, row) => sum + row.conversions, 0),
-      conversionValue: hourly.reduce((sum, row) => sum + row.conversionValue, 0),
+      spend: total((row) => row.spend),
+      impressions: total((row) => row.impressions),
+      clicks: total((row) => row.clicks),
+      conversions: total((row) => row.conversions),
+      conversionValue: total((row) => row.conversionValue),
     }];
   }
   const ids = normalizeGoogleAdsCustomerId(accountId);
