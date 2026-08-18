@@ -23,6 +23,7 @@ import {
   stripeInvoiceStatusDecision,
   type StripeInvoiceRecipientExpectation,
   updateCustomerBilling,
+  voidStripeInvoice,
 } from "@/lib/stripe/client";
 import {
   acquireBillingIssueLease,
@@ -756,6 +757,29 @@ async function calculateWeek(
     ]),
   );
 
+  // Owner rule (2026-08-18): a payable week absorbs the client's overdue
+  // balance — every EUR invoice still open for an OLDER period rides the new
+  // invoice as an exact 'arrears' line, and the creation RPC retires those
+  // invoices in the same transaction.
+  const { data: overdueRows, error: overdueError } = await supabase
+    .from("invoices")
+    .select("*")
+    .in("client_id", clientIds)
+    .eq("status", "open")
+    .lt("period_start", week.start)
+    .not("issued_at", "is", null);
+  if (overdueError)
+    throw new Error(
+      `Could not load overdue invoices: ${overdueError.message}`,
+    );
+  const overdueByClient = new Map<string, Invoice[]>();
+  for (const invoice of (overdueRows ?? []) as Invoice[]) {
+    if (invoice.currency.toUpperCase() !== BILLING_CURRENCY) continue;
+    const current = overdueByClient.get(invoice.client_id) ?? [];
+    current.push(invoice);
+    overdueByClient.set(invoice.client_id, current);
+  }
+
   const accountsByClient = new Map<string, BillingAccount[]>();
   for (const account of accounts) {
     const current = accountsByClient.get(account.client_id) ?? [];
@@ -1150,6 +1174,29 @@ async function calculateWeek(
     );
     const retryableInvoice = existingDraft || pendingStripeDelivery;
     const alreadyIssued = Boolean(existingInvoice && !retryableInvoice);
+
+    // A payable week carries the client's accumulated overdue balance; a week
+    // with no fee lines keeps its arrears on the still-open invoices until the
+    // next payable one.
+    if (lines.length > 0) {
+      const overdueInvoices = [...(overdueByClient.get(client.id) ?? [])].sort(
+        (a, b) => a.period_start.localeCompare(b.period_start),
+      );
+      for (const overdueInvoice of overdueInvoices) {
+        const outstanding = round2(
+          Number(overdueInvoice.amount_remaining ?? overdueInvoice.amount),
+        );
+        lines.push({
+          label: `Overdue balance carried over (week ${overdueInvoice.period_start} - ${overdueInvoice.period_end})`,
+          amount: outstanding,
+          accountId: null,
+          kind: "arrears",
+          absorbedInvoiceId: overdueInvoice.id,
+          absorbedPeriodStart: overdueInvoice.period_start,
+          absorbedPeriodEnd: overdueInvoice.period_end,
+        });
+      }
+    }
 
     let displayStores = stores;
     let amount = round2(lines.reduce((sum, line) => sum + line.amount, 0));
@@ -2181,6 +2228,32 @@ async function pushToStripe(
       "A Stripe invoice must contain at least one payable fee line.",
     );
   }
+
+  // Arrears absorption: the balances this invoice carries were already
+  // retired locally by the creation RPC; their Stripe invoices must be voided
+  // BEFORE the accumulated invoice reaches the client, or the same balance
+  // would be payable twice. Runs before every send so retries converge.
+  const absorbedIds = invoice.line_items
+    .filter((line) => line.kind === "arrears" && line.absorbedInvoiceId)
+    .map((line) => line.absorbedInvoiceId!);
+  if (absorbedIds.length > 0) {
+    const { data: absorbedRows, error: absorbedError } = await supabase
+      .from("invoices")
+      .select("id, stripe_invoice_id, status")
+      .in("id", absorbedIds);
+    if (absorbedError) {
+      throw new Error(
+        `Could not load the absorbed overdue invoices: ${absorbedError.message}`,
+      );
+    }
+    await assertLeaseOwnership();
+    for (const absorbed of absorbedRows ?? []) {
+      if (absorbed.stripe_invoice_id && absorbed.status === "waived") {
+        await voidStripeInvoice(absorbed.stripe_invoice_id);
+      }
+    }
+  }
+
   const recipient = requireBillingRecipientSnapshot(invoice.billing_recipient);
   const stripeRecipient = stripeRecipientExpectation(recipient);
 

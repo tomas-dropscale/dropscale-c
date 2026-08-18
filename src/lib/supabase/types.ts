@@ -223,7 +223,7 @@ export type InvoiceStatus =
   "draft" | "open" | "paid" | "void" | "uncollectible" | "waived";
 
 /** Legacy invoices may contain spend/revenue-share lines; new invoices use fee only. */
-export type InvoiceLineKind = "spend" | "fee" | "rev_share";
+export type InvoiceLineKind = "spend" | "fee" | "rev_share" | "arrears";
 
 /**
  * One line of what an invoice is made of — a snapshot, never re-derived.
@@ -241,6 +241,10 @@ export type InvoiceLine = {
   kind?: InvoiceLineKind;
   /** Store name at billing time; a later rename must not rewrite history. */
   store?: string;
+  /** 'arrears' lines: the retired overdue invoice this balance came from. */
+  absorbedInvoiceId?: string;
+  absorbedPeriodStart?: string;
+  absorbedPeriodEnd?: string;
   /** Percentage the line was computed at — blended over the week. Spend: null. */
   rate?: number | null;
   /** V4 chooses exactly one source per store; manual and referral never stack. */

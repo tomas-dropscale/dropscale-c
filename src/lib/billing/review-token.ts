@@ -130,6 +130,9 @@ function stableLines(lines: InvoiceLine[]) {
       billingEndDate: line.billingEndDate ?? null,
       billingEndedAt: line.billingEndedAt ?? null,
       billingEndTimeZone: line.billingEndTimeZone ?? null,
+      absorbedInvoiceId: line.absorbedInvoiceId ?? null,
+      absorbedPeriodStart: line.absorbedPeriodStart ?? null,
+      absorbedPeriodEnd: line.absorbedPeriodEnd ?? null,
       label: line.label,
       amount: Number(line.amount),
     }))

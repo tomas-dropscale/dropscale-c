@@ -85,6 +85,10 @@ function lineLabel(line: InvoiceLine, d: Dictionary): string {
         line.rate != null ? d.payments.lineRevShareRated : d.payments.lineRevShare,
         values,
       );
+    case "arrears":
+      // Store-less by construction; the guard above already returned the
+      // stored label, this case only completes the union.
+      return line.label;
   }
 }
 

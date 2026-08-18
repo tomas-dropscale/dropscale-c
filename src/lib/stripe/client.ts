@@ -1293,6 +1293,27 @@ export async function getInvoice(
   );
 }
 
+/**
+ * Void one Stripe invoice, converging on retries: a second void of the same
+ * invoice reports the already-void state as success instead of failing the
+ * arrears absorption it belongs to. Any other failure (already paid, deleted)
+ * propagates so the caller fails closed.
+ */
+export async function voidStripeInvoice(
+  stripeInvoiceId: string,
+): Promise<StripeInvoice> {
+  try {
+    return await stripeFetch<StripeInvoice>(
+      `/invoices/${encodeURIComponent(stripeInvoiceId)}/void`,
+      { idempotencyKey: `void:${stripeInvoiceId}` },
+    );
+  } catch (error) {
+    const current = await getInvoice(stripeInvoiceId).catch(() => null);
+    if (current?.status === "void") return current;
+    throw error;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Webhook signatures
 // ---------------------------------------------------------------------------
