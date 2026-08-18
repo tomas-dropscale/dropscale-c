@@ -16,7 +16,6 @@ import {
   StoreSpendSection,
 } from "@/components/admin/store-analytics-sections";
 import { AnalyticsScopeControls } from "./analytics-scope-controls";
-import { ReportingSyncButton } from "./reporting-sync-button";
 import { RangePicker } from "@/components/portal/range-picker";
 import { Badge } from "@/components/ui/badge";
 import { PageContainer } from "@/components/ui/page-container";
@@ -500,12 +499,7 @@ export function AnalyticsView({
     <PageContainer
       title="Analytics"
       description={`Store-first performance · ${range.from} → ${range.to}`}
-      actions={
-        <>
-          <ReportingSyncButton request={{ scope: "all", range }} />
-          <RangePicker current={range} />
-        </>
-      }
+      actions={<RangePicker current={range} />}
     >
       <div className="space-y-4">
         <AnalyticsScopeSelector

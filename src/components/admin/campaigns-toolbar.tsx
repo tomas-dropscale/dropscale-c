@@ -3,7 +3,6 @@
 import { Plus } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { ReportingSyncButton } from "@/components/admin/reporting-sync-button";
 import {
   Dialog,
   DialogClose,
@@ -47,8 +46,6 @@ export function CampaignsToolbar({ range }: { range: RangeSelection }) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-
-      <ReportingSyncButton request={{ scope: "campaigns", range }} />
     </>
   );
 }
