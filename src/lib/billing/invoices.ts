@@ -741,7 +741,10 @@ async function calculateWeek(
     .from("invoices")
     .select("*")
     .eq("period_start", week.start)
-    .in("client_id", clientIds);
+    .in("client_id", clientIds)
+    // A voided invoice is a cancelled charge: it never occupies the period
+    // slot, so the week stays issuable with the corrected amount.
+    .neq("status", "void");
   if (invoicesError)
     throw new Error(
       `Could not load existing invoices: ${invoicesError.message}`,
@@ -2014,7 +2017,9 @@ export async function fetchAdminBillingDashboard(
     (invoice) => invoice.period_start === selectedWeek.start,
   );
   const selectedSettlements = issued.filter(
-    (invoice) => invoice.period_start === selectedWeek.start,
+    (invoice) =>
+      invoice.period_start === selectedWeek.start &&
+      invoice.status !== "void",
   );
   const month = isoDay(new Date()).slice(0, 7);
   const issuedThisMonth = billed.filter(
@@ -3117,7 +3122,13 @@ export async function fetchClientInvoices(
     const page = (data ?? []) as Invoice[];
     rows.push(...page);
     if (page.length < pageSize) {
-      return rows.sort((a, b) => b.period_start.localeCompare(a.period_start));
+      // A corrected week holds a void row plus its replacement: newest issue
+      // first keeps the live invoice above its cancelled predecessor.
+      return rows.sort(
+        (a, b) =>
+          b.period_start.localeCompare(a.period_start) ||
+          (b.issued_at ?? b.created_at).localeCompare(a.issued_at ?? a.created_at),
+      );
     }
     afterId = page.at(-1)?.id ?? null;
     if (!afterId) return rows;

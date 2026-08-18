@@ -273,13 +273,10 @@ function euroNumber(micros: bigint): number {
 }
 
 function activeCommercialInvoice(invoice: BillingPositionInvoice): boolean {
-  // The v3 cutover deliberately kept never-issued legacy drafts as void audit
-  // rows. They are not settlements and must not hide a still-unbilled week.
-  return !(
-    invoice.status === "void" &&
-    invoice.calculationVersion === "legacy" &&
-    invoice.issuedAt === null
-  );
+  // A void invoice is a cancelled charge — legacy audit row or a corrected
+  // week's cancelled issue alike. It never settles the period, so a void-only
+  // week must return to "Por emitir" until its replacement exists.
+  return invoice.status !== "void";
 }
 
 function currentWeek(now: Date): { start: string; end: string } {

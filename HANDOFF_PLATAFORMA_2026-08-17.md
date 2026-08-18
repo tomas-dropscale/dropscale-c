@@ -223,6 +223,34 @@ calendário real de Lisboa; UM só botão Sync (global, no chrome, que também
 sincroniza o ledger financeiro — o "Sync now" da overview e os botões por
 página foram removidos).
 
+## Manhã de 18/08 — atribuição campanha↔loja por final URL (regra do dono, commit `b2f3542`)
+
+Uma conta Google partilhada pode alojar campanhas de outra loja (a do Daniel
+Azevedo corre as "Lamparas Artesanales" da Casa Luna ao lado das "JP -
+TOTTEBAGS" da Aki Nikko). **Regra: uma campanha só conta para uma loja se os
+final URLs dos anúncios apontarem para o domínio dessa loja** — em billing,
+analytics, campaigns e portal do cliente. Exclusão só com evidência positiva:
+campanha sem URL utilizável mantém-se atribuída.
+
+- Predicado central: `src/lib/reporting/store-domain-match.ts`.
+- Windsor: `fetchGoogleAdsCampaignFinalUrls` (extraída do campaign breakdown) e
+  `fetchGoogleAdsDailyBreakdownForStore` (agrega o timeline por campanha,
+  excluindo as estrangeiras). As 5 leituras de `reporting/google.ts`
+  (daily/campaigns/timeline/DGEN/PMax) filtram pelos domínios da source
+  (`shopify.primaryDomain`/`domain`).
+- Ledger: o caminho Windsor do commission-sync usa a leitura filtrada; o
+  domínio vem da binding ativa da própria conta (nunca de uma loja irmã).
+  **GAP conhecido:** o caminho OAuth legacy continua account-level — todas as
+  contas legacy estavam mono-loja no sweep de 18/08.
+- Sweep Windsor (ago 2026): só 2 contas contaminadas — Aki (Casa Luna ~€585)
+  e Aya Osaka (lumirovaniemi.com ~€366). A conta "Yumi Kyoto" aponta 100%
+  para `zatisimorava.com` (sinalizado ao Bruno). A fatura open do Daniel
+  (€24,24, ciclo 08-10) inclui €8,78 de fee sobre spend da Casa Luna —
+  decisão pendente (manter, anular ou ajustar).
+- Nota operacional: o `refreshAll` devolve 502 "degraded" sempre que uma
+  família falha (a Yumi suspensa na Google garante isso em todos os runs) —
+  alarme falso conhecido; o Bruno mandou deixar a Yumi `active` como está.
+
 ## Regras de trabalho neste repo
 
 - Node ≥22 (a máquina local tem 20 — usar um Node 22 standalone).
