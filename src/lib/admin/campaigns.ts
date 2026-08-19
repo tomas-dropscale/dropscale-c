@@ -435,6 +435,7 @@ async function adminAccountInventory(
     }));
 
   let v2Sources: CanonicalReportingSource[] = [];
+  const unresolvedV2ClientIds = new Set<string>();
   if (v2ClientIds.length > 0) {
     try {
       v2Sources = await resolveReportingSources({
@@ -458,6 +459,7 @@ async function adminAccountInventory(
       );
       settled.forEach((result, index) => {
         if (result.status === "rejected") {
+          unresolvedV2ClientIds.add(v2ClientIds[index]);
           console.error(
             `Admin campaigns: sources unavailable for client ${v2ClientIds[index]}:`,
             result.reason instanceof Error ? result.reason.message : result.reason,
@@ -582,7 +584,11 @@ async function adminAccountInventory(
 
   if (
     v2ClientIds.some(
-      (clientId) => !sources.some((source) => source.clientId === clientId),
+      (clientId) =>
+        // A client whose sources failed to verify is deliberately degraded to
+        // absent (see the tolerant resolve above) — never fatal for the rest.
+        !unresolvedV2ClientIds.has(clientId) &&
+        !sources.some((source) => source.clientId === clientId),
     ) ||
     usedSourceIds.size !== sources.length
   ) {
