@@ -8,6 +8,7 @@ import { PageContainer } from "@/components/ui/page-container";
 import { RangePicker } from "@/components/portal/range-picker";
 import { listCampaignActionViewState } from "@/lib/admin/campaign-actions";
 import { fetchAdminCampaigns } from "@/lib/admin/campaigns";
+import { createServiceClient } from "@/lib/supabase/service";
 import {
   campaignActionBindingIds,
   projectAdminCampaignsView,
@@ -35,12 +36,40 @@ export default async function AdminCampaignsPage({
 }) {
   const params = await searchParams;
   const range = parseRange(params);
-  const overviewPromise = fetchAdminCampaigns(range, { campaignSource: "snapshot" });
+  // Production hides the exception behind a digest, so a failing load
+  // persists its cause first — diagnosis stays one SELECT away.
+  const loadOrPersistFailure = async <T,>(work: Promise<T>): Promise<T> => {
+    try {
+      return await work;
+    } catch (error) {
+      const service = createServiceClient();
+      if (service) {
+        await service
+          .from("admin_server_errors")
+          .insert({
+            scope: "admin_campaigns",
+            message:
+              error instanceof Error ? error.message : String(error ?? "unknown"),
+            stack: error instanceof Error ? (error.stack ?? null) : null,
+          })
+          .then(
+            () => undefined,
+            () => undefined,
+          );
+      }
+      throw error;
+    }
+  };
+  const overviewPromise = loadOrPersistFailure(
+    fetchAdminCampaigns(range, { campaignSource: "snapshot" }),
+  );
   const dictionaryPromise = getServerDictionary();
   const overview = await overviewPromise;
   const [{ d, locale }, actionState] = await Promise.all([
     dictionaryPromise,
-    listCampaignActionViewState(campaignActionBindingIds(overview)),
+    loadOrPersistFailure(
+      listCampaignActionViewState(campaignActionBindingIds(overview)),
+    ),
   ]);
   const campaignView = projectAdminCampaignsView(overview, actionState);
   const intl = intlLocale(locale);

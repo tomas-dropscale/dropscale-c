@@ -42,6 +42,10 @@ vi.mock("@/components/ui/page-container", () => ({
   ),
 }));
 
+vi.mock("@/lib/supabase/service", () => ({
+  createServiceClient: () => null,
+}));
+
 vi.mock("@/lib/admin/campaign-actions", () => ({
   listCampaignActionViewState: mocks.listCampaignActionViewState,
 }));
