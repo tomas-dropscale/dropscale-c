@@ -456,3 +456,24 @@ export async function archivePortalClient(clientId: string, adminId: string) {
   if (error) throw identityWriteError(error);
   if (data !== clientId) throw databaseError("The client archive could not be verified.");
 }
+
+/**
+ * Owner decision (2026-08-19): "Remove client" is a FULL delete — the client
+ * and every row of theirs leaves the platform. Stripe keeps its own invoice
+ * records; nothing recoverable remains here.
+ */
+export async function deletePortalClientCompletely(
+  clientId: string,
+  adminId: string,
+) {
+  const service = serviceOrThrow();
+  const { data, error } = await service.rpc(
+    "delete_portal_client_completely",
+    {
+      p_client_id: clientId,
+      p_admin_id: adminId,
+    },
+  );
+  if (error) throw identityWriteError(error);
+  if (data !== clientId) throw databaseError("The client deletion could not be verified.");
+}

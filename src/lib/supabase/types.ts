@@ -3306,6 +3306,10 @@ export type Database = {
         Args: { p_client_id: string; p_admin_id: string };
         Returns: string;
       };
+      delete_portal_client_completely: {
+        Args: { p_client_id: string; p_admin_id: string };
+        Returns: string;
+      };
       disconnect_legacy_shopify_connection: {
         Args: { p_account_id: string; p_admin_id: string };
         Returns: string;

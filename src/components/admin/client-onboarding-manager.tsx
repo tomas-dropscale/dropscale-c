@@ -994,7 +994,7 @@ export function ClientOnboardingManager({
       showNotice(
         "success",
         "Client removed",
-        `${target.name} was archived. Connections, billing and history were preserved.`,
+        `${target.name} and all their data were permanently deleted. Stripe keeps its own copies of issued invoices.`,
       );
     } catch (error) {
       setDialogError(
@@ -1452,13 +1452,13 @@ export function ClientOnboardingManager({
           {removeTarget && (
             <>
               <DialogHeader>
-                <DialogTitle>Remove {removeTarget.name} from Clients?</DialogTitle>
+                <DialogTitle>Delete {removeTarget.name} completely?</DialogTitle>
                 <DialogDescription>
-                  This archives the client, removes them from this list and revokes their portal and onboarding access.
+                  This permanently deletes the client and everything of theirs: accounts, connections, metrics, invoices, billing evidence and portal access. It cannot be undone.
                 </DialogDescription>
               </DialogHeader>
-              <div className="rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3 text-[12px] leading-relaxed text-[var(--text-secondary)]">
-                Shopify and Google Ads connections, billing and account history are preserved.
+              <div className="rounded-[10px] border border-[var(--danger-red)]/30 bg-[var(--danger-red)]/10 p-3 text-[12px] leading-relaxed text-[#e2a49b]">
+                Stripe keeps its own copies of issued invoices; everything on Dropscale is removed for good.
               </div>
               {dialogError && <p role="alert" className="text-[12px] text-[var(--danger-red)]">{dialogError}</p>}
               <DialogFooter>

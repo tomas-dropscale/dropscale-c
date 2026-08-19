@@ -1,7 +1,7 @@
 import type { NextRequest } from "next/server";
 
 import {
-  archivePortalClient,
+  deletePortalClientCompletely,
   sendPortalClientPasswordReset,
   updatePortalClientIdentity,
 } from "@/lib/client-onboarding/client-admin";
@@ -97,12 +97,12 @@ export async function DELETE(request: NextRequest, { params }: Context) {
       );
     }
 
-    await archivePortalClient(id, admin.id);
+    await deletePortalClientCompletely(id, admin.id);
     return clientOnboardingResponse({ ok: true });
   } catch (error) {
     return clientOnboardingErrorResponse(
       error,
-      "The client could not be archived.",
+      "The client could not be removed.",
     );
   }
 }

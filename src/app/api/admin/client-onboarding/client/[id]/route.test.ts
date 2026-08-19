@@ -17,7 +17,7 @@ const mocks = vi.hoisted(() => {
     isClientOnboardingId: vi.fn(),
     updatePortalClientIdentity: vi.fn(),
     sendPortalClientPasswordReset: vi.fn(),
-    archivePortalClient: vi.fn(),
+    deletePortalClientCompletely: vi.fn(),
   };
 });
 
@@ -31,7 +31,7 @@ vi.mock("@/lib/client-onboarding/invitations", () => ({
 vi.mock("@/lib/client-onboarding/client-admin", () => ({
   updatePortalClientIdentity: mocks.updatePortalClientIdentity,
   sendPortalClientPasswordReset: mocks.sendPortalClientPasswordReset,
-  archivePortalClient: mocks.archivePortalClient,
+  deletePortalClientCompletely: mocks.deletePortalClientCompletely,
 }));
 vi.mock("@/lib/client-onboarding/http", () => ({
   clientOnboardingResponse: (body: unknown, status = 200) =>
@@ -119,7 +119,7 @@ describe("admin portal client identity route", () => {
     mocks.sendPortalClientPasswordReset.mockResolvedValue(
       "owner@northwind.example",
     );
-    mocks.archivePortalClient.mockResolvedValue(undefined);
+    mocks.deletePortalClientCompletely.mockResolvedValue(undefined);
   });
 
   it("re-authorises the admin before any client operation", async () => {
@@ -217,11 +217,11 @@ describe("admin portal client identity route", () => {
     expect(mocks.sendPortalClientPasswordReset).not.toHaveBeenCalled();
   });
 
-  it("archives with no body and preserves the service contract", async () => {
+  it("deletes completely with no body and preserves the service contract", async () => {
     const response = await DELETE(remove(), context());
 
     expect(response.status).toBe(200);
-    expect(mocks.archivePortalClient).toHaveBeenCalledWith(CLIENT_ID, ADMIN_ID);
+    expect(mocks.deletePortalClientCompletely).toHaveBeenCalledWith(CLIENT_ID, ADMIN_ID);
     await expect(response.json()).resolves.toEqual({ ok: true });
   });
 
@@ -229,7 +229,7 @@ describe("admin portal client identity route", () => {
     const response = await DELETE(remove({ hardDelete: true }), context());
 
     expect(response.status).toBe(400);
-    expect(mocks.archivePortalClient).not.toHaveBeenCalled();
+    expect(mocks.deletePortalClientCompletely).not.toHaveBeenCalled();
   });
 
   it("does not expose the client helpers for an invalid identifier", async () => {
@@ -238,6 +238,6 @@ describe("admin portal client identity route", () => {
     const response = await DELETE(remove(), context("not-a-client"));
 
     expect(response.status).toBe(404);
-    expect(mocks.archivePortalClient).not.toHaveBeenCalled();
+    expect(mocks.deletePortalClientCompletely).not.toHaveBeenCalled();
   });
 });
