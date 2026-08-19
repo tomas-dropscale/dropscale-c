@@ -434,13 +434,41 @@ async function adminAccountInventory(
       };
     }));
 
-  const v2Sources = v2ClientIds.length === 0
-    ? []
-    : await resolveReportingSources({
+  let v2Sources: CanonicalReportingSource[] = [];
+  if (v2ClientIds.length > 0) {
+    try {
+      v2Sources = await resolveReportingSources({
         service,
         clientIds: v2ClientIds,
         includeShopifyCredentials: false,
       });
+    } catch {
+      // One client's broken source — e.g. a revoked Shopify credential when a
+      // client leaves — must not take down every other client's campaigns
+      // (2026-08-19: FITTED's invalid_credentials killed the whole page).
+      // Resolve independently and keep the clients that still verify.
+      const settled = await Promise.allSettled(
+        v2ClientIds.map((clientId) =>
+          resolveReportingSources({
+            service,
+            clientIds: [clientId],
+            includeShopifyCredentials: false,
+          }),
+        ),
+      );
+      settled.forEach((result, index) => {
+        if (result.status === "rejected") {
+          console.error(
+            `Admin campaigns: sources unavailable for client ${v2ClientIds[index]}:`,
+            result.reason instanceof Error ? result.reason.message : result.reason,
+          );
+        }
+      });
+      v2Sources = settled.flatMap((result) =>
+        result.status === "fulfilled" ? result.value : [],
+      );
+    }
+  }
   const sources = [...preCutoverSources, ...v2Sources];
   if (sources.length === 0) return legacy;
   const baseById = new Map(accounts.map((account) => [account.id, account]));
