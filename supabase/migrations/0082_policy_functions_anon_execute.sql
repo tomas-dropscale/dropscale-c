@@ -10,4 +10,4 @@
 -- is null for anon, so they return false and the policies deny as intended.
 
 grant execute on function public.is_admin() to anon;
-grant execute on function public.legacy_asset_writes_allowed() to anon;
+grant execute on function public.legacy_asset_writes_allowed(uuid) to anon;
