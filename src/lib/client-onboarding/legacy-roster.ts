@@ -15,7 +15,7 @@ import type {
 } from "@/lib/supabase/types";
 
 const SAFE_CLIENT_COLUMNS =
-  "id, full_name, email, discord_handle, approval_status, created_at" as const;
+  "id, full_name, email, discord_handle, approval_status, access_blocked, created_at" as const;
 const SAFE_PROFILE_COLUMNS = "id, role" as const;
 const SAFE_MEMBER_COLUMNS = "client_id, member_id" as const;
 const SAFE_ACCOUNT_COLUMNS =
@@ -28,6 +28,7 @@ type LegacyClientRow = Pick<
   | "email"
   | "discord_handle"
   | "approval_status"
+  | "access_blocked"
   | "created_at"
 >;
 type LegacyProfileRow = Pick<Profile, "id" | "role">;
@@ -62,6 +63,8 @@ export type ExistingClientRosterDTO = {
   email: string;
   discordHandle: string | null;
   approvalStatus: ClientApprovalStatus;
+  /** Reversible portal lockout (migration 0083); orthogonal to approvalStatus. */
+  accessBlocked: boolean;
   createdAt: string;
   partnerOf?: string[];
   shopify: LegacyShopifyAssetDTO[];
@@ -204,6 +207,7 @@ export async function listExistingClientRoster(): Promise<ExistingClientRosterDT
       email: client.email,
       discordHandle: client.discord_handle,
       approvalStatus: client.approval_status,
+      accessBlocked: client.access_blocked === true,
       createdAt: client.created_at,
       partnerOf: (partnerOf.get(client.id) ?? []).sort(compareText),
       shopify:

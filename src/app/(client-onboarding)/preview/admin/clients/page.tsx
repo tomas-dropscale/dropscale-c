@@ -22,6 +22,7 @@ const PREVIEW_ROSTER: ExistingClientRosterDTO[] = [
     email: "owner@northwind.example",
     discordHandle: "northwind.home",
     approvalStatus: "approved",
+    accessBlocked: false,
     createdAt: "2026-01-10T09:00:00.000Z",
     shopify: [
       {
@@ -41,6 +42,7 @@ const PREVIEW_ROSTER: ExistingClientRosterDTO[] = [
     email: "team@atlas.example",
     discordHandle: "atlas.studio",
     approvalStatus: "approved",
+    accessBlocked: false,
     createdAt: "2026-02-01T09:00:00.000Z",
     shopify: [
       {
@@ -60,6 +62,7 @@ const PREVIEW_ROSTER: ExistingClientRosterDTO[] = [
     email: "hello@cedar.example",
     discordHandle: null,
     approvalStatus: "pending",
+    accessBlocked: false,
     createdAt: "2026-08-11T09:00:00.000Z",
     shopify: [],
   },

@@ -458,6 +458,31 @@ export async function archivePortalClient(clientId: string, adminId: string) {
 }
 
 /**
+ * Block is the reversible middle ground between "approved" and "archived":
+ * the client cannot open the portal, but nothing about their billing, spend or
+ * reporting changes. Archiving (above) is the one-way door; this is the switch.
+ */
+export async function setPortalClientAccessBlock(
+  clientId: string,
+  adminId: string,
+  blocked: boolean,
+) {
+  const service = serviceOrThrow();
+  const { data, error } = await service.rpc(
+    "set_portal_client_access_block",
+    {
+      p_client_id: clientId,
+      p_admin_id: adminId,
+      p_blocked: blocked,
+    },
+  );
+  if (error) throw identityWriteError(error);
+  if (data !== clientId) {
+    throw databaseError("The client access change could not be verified.");
+  }
+}
+
+/**
  * Owner decision (2026-08-19): "Remove client" is a FULL delete — the client
  * and every row of theirs leaves the platform. Stripe keeps its own invoice
  * records; nothing recoverable remains here.

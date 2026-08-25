@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { Clock, LogOut, RefreshCw, ShieldOff } from "lucide-react";
+import { Clock, Lock, LogOut, RefreshCw, ShieldOff } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/brand/logo";
@@ -11,30 +11,43 @@ import { useI18n } from "@/lib/i18n/provider";
 
 /**
  * Shown to a signed-in user who has no way in yet: staff whose role is not
- * 'admin', or a portal client the team has not approved.
+ * 'admin', a portal client the team has not approved, or a client the team has
+ * blocked (migration 0083).
  *
  * This is a courtesy screen, not a security boundary — the data itself is
  * protected by RLS, so someone who bypasses this sees nothing either way.
+ *
+ * `blocked` and `rejected` differ in the one way the reader cares about:
+ * blocked is reversible, so the re-check button stays. Rejected is final, so
+ * it does not.
  */
 export function PendingApproval({
   email,
   audience = "staff",
   rejected = false,
+  blocked = false,
 }: {
   email: string;
   audience?: "staff" | "client";
   rejected?: boolean;
+  blocked?: boolean;
 }) {
   const router = useRouter();
   const { d } = useI18n();
   const [busy, setBusy] = React.useState(false);
 
-  const title = rejected ? d.pending.rejectedTitle : d.pending.title;
-  const body = rejected
-    ? d.pending.rejectedBody
-    : audience === "client"
-      ? d.pending.clientBody
-      : d.pending.body;
+  const title = blocked
+    ? d.pending.blockedTitle
+    : rejected
+      ? d.pending.rejectedTitle
+      : d.pending.title;
+  const body = blocked
+    ? d.pending.blockedBody
+    : rejected
+      ? d.pending.rejectedBody
+      : audience === "client"
+        ? d.pending.clientBody
+        : d.pending.body;
 
   async function signOut() {
     setBusy(true);
@@ -50,7 +63,9 @@ export function PendingApproval({
         <Logo size="lg" />
 
         <div className="mt-6 flex size-10 items-center justify-center rounded-full bg-[var(--accent-gold-dim)]">
-          {rejected ? (
+          {blocked ? (
+            <Lock className="size-5 text-[var(--accent-gold)]" aria-hidden />
+          ) : rejected ? (
             <ShieldOff className="size-5 text-[var(--accent-gold)]" aria-hidden />
           ) : (
             <Clock className="size-5 text-[var(--accent-gold)]" aria-hidden />

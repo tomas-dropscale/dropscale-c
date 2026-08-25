@@ -9,6 +9,8 @@ import {
   Clipboard,
   Clock3,
   Link2,
+  Lock,
+  LockOpen,
   Mail,
   Megaphone,
   Pencil,
@@ -86,6 +88,8 @@ type ClientManagementTarget = {
   name: string;
   email: string;
   discordHandle: string;
+  /** Current portal lockout, so the button can offer the opposite action. */
+  accessBlocked: boolean;
 };
 type ClientIdentityDraft = Pick<
   ClientManagementTarget,
@@ -172,6 +176,7 @@ function clientManagementTarget(card: ClientCard): ClientManagementTarget | null
     name: cardClientName(card),
     email: cardEmail(card) ?? "",
     discordHandle: cardDiscordHandle(card),
+    accessBlocked: card.roster.accessBlocked === true,
   };
 }
 
@@ -492,6 +497,7 @@ export function ClientOnboardingManager({
   });
   const [passwordResetSent, setPasswordResetSent] = React.useState(false);
   const [removeTarget, setRemoveTarget] = React.useState<ClientManagementTarget | null>(null);
+  const [blockTarget, setBlockTarget] = React.useState<ClientManagementTarget | null>(null);
   const editDialogBusy = Boolean(
     editTarget &&
       (busy === `edit-client:${editTarget.clientId}` ||
@@ -963,6 +969,64 @@ export function ClientOnboardingManager({
     }
   }
 
+  /**
+   * Blocking is reversible and touches nothing but the way in — no billing, no
+   * syncs, no connections. That is exactly why it gets its own endpoint rather
+   * than riding along with the identity PATCH.
+   */
+  async function setClientAccessBlock(target: ClientManagementTarget) {
+    if (readOnlyPreview) return;
+    const blocked = !target.accessBlocked;
+    const busyKey = `block-client:${target.clientId}`;
+    setBusy(busyKey);
+    setDialogError("");
+    try {
+      const response = await fetch(
+        `/api/admin/client-onboarding/client/${encodeURIComponent(target.clientId)}/access`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ blocked }),
+        },
+      );
+      const body = await readJson(response);
+      if (!response.ok) {
+        throw new Error(
+          errorMessage(body, "The client's portal access could not be changed."),
+        );
+      }
+      try {
+        await refreshClients();
+      } catch (refreshError) {
+        setBlockTarget(null);
+        showNotice(
+          "error",
+          blocked ? "Client blocked, but the list is stale" : "Client unblocked, but the list is stale",
+          refreshError instanceof Error
+            ? refreshError.message
+            : "Refresh the page before taking another action.",
+        );
+        return;
+      }
+      setBlockTarget(null);
+      showNotice(
+        "success",
+        blocked ? "Client blocked" : "Client unblocked",
+        blocked
+          ? `${target.name} can no longer open the dashboard. Billing and reporting are unchanged.`
+          : `${target.name} can open the dashboard again.`,
+      );
+    } catch (error) {
+      setDialogError(
+        error instanceof Error
+          ? error.message
+          : "The client's portal access could not be changed.",
+      );
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function removeClient(target: ClientManagementTarget) {
     if (readOnlyPreview) return;
     const busyKey = `remove-client:${target.clientId}`;
@@ -1105,6 +1169,7 @@ export function ClientOnboardingManager({
                       <div className="flex flex-wrap items-center gap-2">
                         <h3 className="text-[14px] font-semibold text-[var(--text-primary)]">{cardClientName(card)}</h3>
                         {clientStatusBadge(status)}
+                        {card.roster?.accessBlocked && <Badge variant="danger">Portal blocked</Badge>}
                         {hasVisibleIssue(card) && <Badge variant="danger">Connection needs attention</Badge>}
                       </div>
                       <p className="mt-1 break-all text-[12px] text-[var(--text-secondary)]">{cardEmail(card) ?? "Waiting for client details"}</p>
@@ -1121,6 +1186,13 @@ export function ClientOnboardingManager({
                         <>
                           <Button type="button" size="sm" disabled={disabled} onClick={() => openEditClient(card)}>
                             <Pencil aria-hidden /> Edit client
+                          </Button>
+                          <Button type="button" size="sm" disabled={disabled} onClick={() => setBlockTarget(clientManagementTarget(card))}>
+                            {card.roster.accessBlocked ? (
+                              <><LockOpen aria-hidden /> Unblock access</>
+                            ) : (
+                              <><Lock aria-hidden /> Block access</>
+                            )}
                           </Button>
                           <Button type="button" size="sm" variant="danger" disabled={disabled} onClick={() => setRemoveTarget(clientManagementTarget(card))}>
                             <Archive aria-hidden /> Remove client
@@ -1470,6 +1542,48 @@ export function ClientOnboardingManager({
                   onClick={() => void removeClient(removeTarget)}
                 >
                   <Archive aria-hidden /> Remove client
+                </Button>
+              </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(blockTarget)} onOpenChange={(open) => { if (!open) { setBlockTarget(null); setDialogError(""); } }}>
+        <DialogContent>
+          {blockTarget && (
+            <>
+              <DialogHeader>
+                <DialogTitle>
+                  {blockTarget.accessBlocked
+                    ? `Restore access for ${blockTarget.name}?`
+                    : `Block ${blockTarget.name} from the dashboard?`}
+                </DialogTitle>
+                <DialogDescription>
+                  {blockTarget.accessBlocked
+                    ? "They will be able to open the portal again on their next visit — no re-approval and no reconnection needed."
+                    : "They stay signed in but cannot open the dashboard. Instead they see a screen telling them their account is blocked and to contact the team."}
+                </DialogDescription>
+              </DialogHeader>
+              {!blockTarget.accessBlocked && (
+                <div className="rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3 text-[12px] leading-relaxed text-[var(--text-secondary)]">
+                  Billing, syncs and connected stores keep running exactly as they are — this only closes the door. Reversible at any time from this same button.
+                </div>
+              )}
+              {dialogError && <p role="alert" className="text-[12px] text-[var(--danger-red)]">{dialogError}</p>}
+              <DialogFooter>
+                <Button type="button" onClick={() => { setBlockTarget(null); setDialogError(""); }}>Cancel</Button>
+                <Button
+                  type="button"
+                  variant={blockTarget.accessBlocked ? "primary" : "danger"}
+                  loading={busy === `block-client:${blockTarget.clientId}`}
+                  onClick={() => void setClientAccessBlock(blockTarget)}
+                >
+                  {blockTarget.accessBlocked ? (
+                    <><LockOpen aria-hidden /> Unblock access</>
+                  ) : (
+                    <><Lock aria-hidden /> Block access</>
+                  )}
                 </Button>
               </DialogFooter>
             </>

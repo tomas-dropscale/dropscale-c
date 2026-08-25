@@ -31,6 +31,7 @@ function roster(): ExistingClientRosterDTO {
     email: "owner@northwind.example",
     discordHandle: "northwind.demo",
     approvalStatus: "approved",
+    accessBlocked: false,
     createdAt: "2026-01-01T00:00:00.000Z",
     shopify: [
       {

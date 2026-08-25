@@ -183,6 +183,14 @@ export type Client = {
   approved_at: string | null;
   approved_by: string | null;
   created_at: string;
+  /**
+   * Reversible portal lockout (migration 0083). Independent of
+   * approval_status: a blocked client stays approved, billable and syncing —
+   * they simply cannot open the portal until the team unblocks them.
+   */
+  access_blocked: boolean;
+  access_blocked_at: string | null;
+  access_blocked_by: string | null;
   /** Stripe customer, created on this client's first invoice (migration 0013). */
   stripe_customer_id: string | null;
   /** This client's affiliate code — theirs to share (migration 0022). */
@@ -3304,6 +3312,10 @@ export type Database = {
       };
       archive_portal_client: {
         Args: { p_client_id: string; p_admin_id: string };
+        Returns: string;
+      };
+      set_portal_client_access_block: {
+        Args: { p_client_id: string; p_admin_id: string; p_blocked: boolean };
         Returns: string;
       };
       delete_portal_client_completely: {
