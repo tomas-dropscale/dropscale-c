@@ -175,6 +175,17 @@ function cardDiscordHandle(card: ClientCard) {
   );
 }
 
+/** The store a Google Ads account currently belongs to, across the client's sessions. */
+function mappedStoreFor(card: ClientCard, googleAdsConnectionId: string): string | null {
+  for (const session of card.sessions) {
+    const mapping = session.mappings.find(
+      (item) => item.googleAdsConnectionId === googleAdsConnectionId,
+    );
+    if (mapping) return mapping.shopifyConnectionId;
+  }
+  return null;
+}
+
 function clientManagementTarget(card: ClientCard): ClientManagementTarget | null {
   if (!card.clientId || !card.roster) return null;
   return {
@@ -495,6 +506,11 @@ export function ClientOnboardingManager({
   const [invitation, setInvitation] = React.useState<Invitation | null>(null);
   const [actionTarget, setActionTarget] = React.useState<ActionTarget | null>(null);
   const [disconnectTarget, setDisconnectTarget] = React.useState<DisconnectTarget | null>(null);
+  const [stopCountingTarget, setStopCountingTarget] = React.useState<{
+    connectionId: string;
+    name: string;
+    clientName: string;
+  } | null>(null);
   const [loadedBinding, setLoadedBinding] = React.useState<BindingCoverage | null>(null);
   const [loadedBindingFor, setLoadedBindingFor] = React.useState<string | null>(null);
   const [editTarget, setEditTarget] = React.useState<ClientManagementTarget | null>(null);
@@ -884,6 +900,103 @@ export function ClientOnboardingManager({
     }
     setBusy(null);
     await disconnectAsset(target);
+  }
+
+  /**
+   * Close a Google account's commercial billing without removing it.
+   *
+   * This is what "swap the account" actually needs on the old side: the
+   * account keeps every euro it counted and its whole history, and simply
+   * stops accruing from now on. Removing it is refused for a live client by
+   * design — and would be the wrong thing anyway, because removal is about the
+   * connection while this is about the money.
+   *
+   * The billing endpoint works on the ad account, so the reporting binding is
+   * read first to find which one this connection feeds.
+   */
+  async function stopCounting(connectionId: string, name: string) {
+    if (readOnlyPreview) return;
+    setBusy(`stop-counting:${connectionId}`);
+    setDialogError("");
+    try {
+      const lookup = await fetch(
+        `/api/admin/client-onboarding/reporting-binding?kind=google_ads&id=${encodeURIComponent(connectionId)}`,
+        { cache: "no-store" },
+      );
+      const lookupBody = await readJson(lookup);
+      if (!lookup.ok) {
+        throw new Error(
+          errorMessage(lookupBody, "This account's reporting binding could not be read."),
+        );
+      }
+      const accountId = (
+        lookupBody as { binding?: { adAccountId?: string } } | null
+      )?.binding?.adAccountId;
+      if (!accountId) {
+        throw new Error(
+          `${name} does not feed reporting, so it has no billing to close.`,
+        );
+      }
+      const response = await fetch("/api/admin/google-ads/terminate", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ accountId }),
+      });
+      const body = await readJson(response);
+      if (!response.ok) {
+        throw new Error(errorMessage(body, `${name} could not stop counting.`));
+      }
+      setStopCountingTarget(null);
+      showNotice(
+        "success",
+        `${name} stopped counting`,
+        "Its spend up to now is kept and stays attributed to it. Nothing else changed.",
+      );
+    } catch (error) {
+      setDialogError(
+        error instanceof Error ? error.message : `${name} could not stop counting.`,
+      );
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  /**
+   * Say which store a Google Ads account belongs to.
+   *
+   * The client-facing step that used to do this is skipped in practice: the
+   * session submits a second after the account connects, and submitting clears
+   * the token that step needs. Without this control an account arrives unmapped
+   * and stays that way.
+   */
+  async function mapAccountToStore(googleAdsConnectionId: string, shopifyConnectionId: string) {
+    if (readOnlyPreview || !shopifyConnectionId) return;
+    setBusy(`map:${googleAdsConnectionId}`);
+    try {
+      const response = await fetch("/api/admin/client-onboarding/asset-mapping", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ googleAdsConnectionId, shopifyConnectionId }),
+      });
+      const body = await readJson(response);
+      if (!response.ok) {
+        throw new Error(errorMessage(body, "The store mapping could not be saved."));
+      }
+      await refreshClients();
+      showNotice(
+        "success",
+        "Store linked",
+        "This account's spend now belongs to the selected store.",
+      );
+    } catch (error) {
+      showNotice(
+        "error",
+        "The store could not be linked",
+        error instanceof Error ? error.message : "Try again.",
+      );
+    } finally {
+      setBusy(null);
+    }
   }
 
   async function disconnectAsset(target: DisconnectTarget) {
@@ -1390,11 +1503,60 @@ export function ClientOnboardingManager({
                                   <p className="truncate text-[12.5px] font-medium text-[var(--text-primary)]">{account.accountName}</p>
                                   <p className="mt-0.5 break-all text-[11px] text-[var(--text-secondary)]">{account.customerId}</p>
                                   {state.status === "failed" && state.message && <p className="mt-2 text-[11px] leading-relaxed text-[var(--danger-red)]">{state.message}</p>}
+                                  {/*
+                                    Only reporting stores can be mapped. A legacy
+                                    store lives on the ad account with an old
+                                    token and has no reporting connection to
+                                    point at, so offering it here would promise
+                                    something the database has to refuse.
+                                  */}
+                                  {(() => {
+                                    const linkableStores = card.shopify.filter(
+                                      (storeItem) => storeItem.source === "onboarding",
+                                    );
+                                    if (linkableStores.length === 0) {
+                                      return card.shopify.length > 0 ? (
+                                        <p className="mt-2 text-[11px] text-[var(--text-muted)]">
+                                          This client&apos;s store is a legacy connection, so it cannot be linked yet. Use Reconnect on the store first.
+                                        </p>
+                                      ) : null;
+                                    }
+                                    return (
+                                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                                        <label htmlFor={`${account.id}-store`} className="text-[11px] text-[var(--text-muted)]">
+                                          Store
+                                        </label>
+                                        <select
+                                          id={`${account.id}-store`}
+                                          disabled={disabled || busy === `map:${account.id}`}
+                                          value={mappedStoreFor(card, account.id) ?? ""}
+                                          onChange={(event) => void mapAccountToStore(account.id, event.target.value)}
+                                          className="h-8 rounded-[8px] border border-[var(--border-subtle)] bg-[var(--bg-panel)] px-2 text-[11.5px] text-[var(--text-primary)]"
+                                        >
+                                          {/*
+                                            Placeholder only. There is no path
+                                            to unlink an account once mapped, so
+                                            offering it as a choice would be a
+                                            button that silently does nothing.
+                                          */}
+                                          <option value="" disabled>
+                                            Not linked to a store
+                                          </option>
+                                          {linkableStores.map((storeItem) => (
+                                            <option key={storeItem.id} value={storeItem.id}>
+                                              {storeItem.name}
+                                            </option>
+                                          ))}
+                                        </select>
+                                      </div>
+                                    );
+                                  })()}
                                 </div>
                                 <div className="shrink-0 space-y-2 sm:text-right">
                                   <ConnectionStatus state={state} />
                                   <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto sm:justify-end">
                                     <Button type="button" size="sm" loading={state.status === "testing"} disabled={disabled || !target} aria-label={`Test ${account.accountName} Google Ads connection`} onClick={() => target && void testConnectionTargets(card, [target])}>Test</Button>
+                                    <Button type="button" size="sm" disabled={disabled} aria-label={`Stop counting ${account.accountName}`} onClick={() => { setStopCountingTarget({ connectionId: account.id, name: account.accountName, clientName: cardClientName(card) }); setDialogError(""); }}>Stop counting</Button>
                                     <Button type="button" size="sm" variant="danger" disabled={disabled} aria-label={`Remove ${account.accountName} Google Ads connection`} onClick={() => { setDisconnectTarget({ kind: "google_ads", id: account.id, name: account.accountName, clientName: cardClientName(card) }); setDialogError(""); }}>Remove</Button>
                                   </div>
                                 </div>
@@ -1721,6 +1883,46 @@ export function ClientOnboardingManager({
                   ) : (
                     <><Lock aria-hidden /> Block access</>
                   )}
+                </Button>
+              </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(stopCountingTarget)} onOpenChange={(open) => { if (!open) { setStopCountingTarget(null); setDialogError(""); } }}>
+        <DialogContent>
+          {stopCountingTarget && (
+            <>
+              <DialogHeader>
+                <DialogTitle>Stop counting {stopCountingTarget.name}?</DialogTitle>
+                <DialogDescription>
+                  This closes the account&apos;s commercial billing from now on. Everything it
+                  already counted is kept and stays attributed to it — spend, history and
+                  invoices are untouched.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3 text-[12px] leading-relaxed text-[var(--text-secondary)]">
+                <strong className="font-medium text-[var(--text-primary)]">
+                  {stopCountingTarget.clientName}
+                </strong>
+                <br />
+                Google Ads · {stopCountingTarget.name}
+                <p className="mt-2">
+                  Use this when a store moves to a different Google Ads account: the old one
+                  stops here, the new one starts its own count in Reporting sources.
+                </p>
+              </div>
+              {dialogError && <p role="alert" className="text-[12px] text-[var(--danger-red)]">{dialogError}</p>}
+              <DialogFooter>
+                <Button type="button" onClick={() => { setStopCountingTarget(null); setDialogError(""); }}>Cancel</Button>
+                <Button
+                  type="button"
+                  variant="danger"
+                  loading={busy === `stop-counting:${stopCountingTarget.connectionId}`}
+                  onClick={() => void stopCounting(stopCountingTarget.connectionId, stopCountingTarget.name)}
+                >
+                  Stop counting
                 </Button>
               </DialogFooter>
             </>

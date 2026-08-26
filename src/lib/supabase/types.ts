@@ -3314,6 +3314,14 @@ export type Database = {
         Args: { p_client_id: string; p_admin_id: string };
         Returns: string;
       };
+      map_client_google_ads_to_store: {
+        Args: {
+          p_google_ads_connection_id: string;
+          p_shopify_connection_id: string;
+          p_admin_id: string;
+        };
+        Returns: string;
+      };
       set_portal_client_access_block: {
         Args: { p_client_id: string; p_admin_id: string; p_blocked: boolean };
         Returns: string;

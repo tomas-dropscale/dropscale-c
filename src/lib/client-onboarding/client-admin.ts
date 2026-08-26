@@ -483,6 +483,31 @@ export async function setPortalClientAccessBlock(
 }
 
 /**
+ * Say which store a Google Ads account's spend belongs to.
+ *
+ * The client-facing step that used to do this is unreachable: the Windsor poll
+ * submits the session a second after the account connects, and submitting
+ * clears the invite token the client-side RPC requires. An account connected
+ * today therefore arrives unmapped with no way to fix it.
+ */
+export async function mapGoogleAdsAccountToStore(input: {
+  googleAdsConnectionId: string;
+  shopifyConnectionId: string;
+  adminId: string;
+}) {
+  const service = serviceOrThrow();
+  const { data, error } = await service.rpc("map_client_google_ads_to_store", {
+    p_google_ads_connection_id: input.googleAdsConnectionId,
+    p_shopify_connection_id: input.shopifyConnectionId,
+    p_admin_id: input.adminId,
+  });
+  if (error) throw identityWriteError(error);
+  if (data !== input.googleAdsConnectionId) {
+    throw databaseError("The store mapping could not be verified.");
+  }
+}
+
+/**
  * Owner decision (2026-08-19): "Remove client" is a FULL delete — the client
  * and every row of theirs leaves the platform. Stripe keeps its own invoice
  * records; nothing recoverable remains here.
