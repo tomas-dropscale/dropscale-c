@@ -490,6 +490,42 @@ export async function setPortalClientAccessBlock(
  * clears the invite token the client-side RPC requires. An account connected
  * today therefore arrives unmapped with no way to fix it.
  */
+/**
+ * A mapping refusal is a statement about reporting, not about the client's
+ * identity. Borrowing identityWriteError here answered a failed link with
+ * "The client identity could not be updated." — and a duplicate would have
+ * claimed the email was taken. The database already explains these refusals
+ * precisely ("A staged Google Ads source is reserved for another Shopify
+ * mapping"), and this route is admin-only, so its wording is carried through
+ * instead of being replaced by a guess.
+ */
+function assetMappingWriteError(error: unknown) {
+  const code = errorCode(error);
+  if (code === "42501") {
+    return new ClientOnboardingError("forbidden", "Forbidden.", 403);
+  }
+  if (code === "P0002") {
+    return new ClientOnboardingError(
+      "not_found",
+      "That store or Google Ads account is no longer connected.",
+      404,
+    );
+  }
+  if (code === "23514" || code === "23503" || code === "23505") {
+    const explanation = errorMessage(error);
+    const stated =
+      typeof explanation === "string" && explanation.trim().length > 0
+        ? explanation.trim().slice(0, 300)
+        : null;
+    return new ClientOnboardingError(
+      "invalid_state",
+      stated ?? "This account cannot be linked to that store yet.",
+      409,
+    );
+  }
+  return databaseError("The store mapping could not be saved.");
+}
+
 export async function mapGoogleAdsAccountToStore(input: {
   googleAdsConnectionId: string;
   shopifyConnectionId: string;
@@ -501,7 +537,7 @@ export async function mapGoogleAdsAccountToStore(input: {
     p_shopify_connection_id: input.shopifyConnectionId,
     p_admin_id: input.adminId,
   });
-  if (error) throw identityWriteError(error);
+  if (error) throw assetMappingWriteError(error);
   if (data !== input.googleAdsConnectionId) {
     throw databaseError("The store mapping could not be verified.");
   }

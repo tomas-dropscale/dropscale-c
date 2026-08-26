@@ -37,12 +37,15 @@ vi.mock("@/lib/supabase/service", () => ({
 
 import {
   archivePortalClient,
+  mapGoogleAdsAccountToStore,
   setPortalClientAccessBlock,
   sendPortalClientPasswordReset,
   updatePortalClientIdentity,
 } from "./client-admin";
 
 const CLIENT_ID = "40000000-0000-4000-8000-000000000001";
+const GOOGLE_ID = "40000000-0000-4000-8000-00000000000a";
+const SHOPIFY_ID = "40000000-0000-4000-8000-00000000000b";
 const ADMIN_ID = "40000000-0000-4000-8000-000000000002";
 const OLD_EMAIL = "owner@northwind.example";
 const NEW_EMAIL = "team@northwind.example";
@@ -486,6 +489,46 @@ describe("admin portal client persistence", () => {
     ).rejects.toMatchObject({
       code: "database_error",
       status: 500,
+    });
+  });
+
+  it("states why a store could not be linked instead of blaming the client identity", async () => {
+    mocks.rpc.mockResolvedValue({
+      data: null,
+      error: {
+        code: "23514",
+        message: "A staged Google Ads source is reserved for another Shopify mapping.",
+      },
+    });
+
+    await expect(
+      mapGoogleAdsAccountToStore({
+        googleAdsConnectionId: GOOGLE_ID,
+        shopifyConnectionId: SHOPIFY_ID,
+        adminId: ADMIN_ID,
+      }),
+    ).rejects.toMatchObject({
+      code: "invalid_state",
+      status: 409,
+      message: "A staged Google Ads source is reserved for another Shopify mapping.",
+    });
+  });
+
+  it("answers an unrecognised mapping failure in mapping terms, never identity ones", async () => {
+    mocks.rpc.mockResolvedValue({
+      data: null,
+      error: { code: "XX000", message: "Internal detail." },
+    });
+
+    await expect(
+      mapGoogleAdsAccountToStore({
+        googleAdsConnectionId: GOOGLE_ID,
+        shopifyConnectionId: SHOPIFY_ID,
+        adminId: ADMIN_ID,
+      }),
+    ).rejects.toMatchObject({
+      code: "database_error",
+      message: "The store mapping could not be saved.",
     });
   });
 });
