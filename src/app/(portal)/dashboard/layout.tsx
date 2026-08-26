@@ -3,6 +3,7 @@ import { hasSupabaseEnv } from "@/lib/supabase/env";
 import { getSessionProfile } from "@/lib/supabase/server";
 import { acceptPendingInvites, getWorkspaceContext } from "@/lib/portal/workspace";
 import { SetupNotice } from "@/components/setup-notice";
+import { AccessWatcher } from "@/components/portal/access-watcher";
 import { NotAClient } from "@/components/portal/not-a-client";
 import { PendingApproval } from "@/components/auth/pending-approval";
 
@@ -74,5 +75,12 @@ export default async function PortalGate({ children }: { children: React.ReactNo
     );
   }
 
-  return <>{children}</>;
+  // Mounted only for a client who is currently allowed in — the one person
+  // whose tab needs to react to being blocked.
+  return (
+    <>
+      <AccessWatcher clientId={client.id} />
+      {children}
+    </>
+  );
 }
