@@ -9,6 +9,7 @@ import {
   LineChart,
   Scale,
   FileText,
+  Layers,
   LayoutGrid,
   Plug,
   Receipt,
@@ -66,6 +67,7 @@ const NAV_GROUPS: Group[] = [
         label: (d) => d.nav.clients,
       },
       { href: "/admin/referrals", icon: BadgePercent, label: () => "Referrals" },
+      { href: "/admin/reporting", icon: Layers, label: () => "Reporting sources" },
     ],
   },
   {

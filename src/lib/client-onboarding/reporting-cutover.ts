@@ -168,6 +168,14 @@ export type ReportingCutoverCandidate = {
 
 export type ReportingStagedSource = {
   bindingId: string;
+  /** The account whose Google billing baseline has to exist before promotion. */
+  adAccountId: string;
+  /**
+   * A staged Google source cannot be promoted until its billing baseline is
+   * captured, and the automatic path only looks at active bindings — so a
+   * staged one waits for something that never arrives unless an admin starts it.
+   */
+  needsBillingBaseline: boolean;
   sourceLabel: string;
   syncedSourceCount: number;
   sourceCount: number;
@@ -1015,6 +1023,8 @@ async function buildClientReportingCutoverQueue(
                 : "The staged source has complete receipts and billing evidence. It is still non-operational until Promote succeeds.";
       stagedSources.push({
         bindingId: binding.id,
+        adAccountId: binding.ad_account_id,
+        needsBillingBaseline: Boolean(google && !billingStart),
         sourceLabel,
         syncedSourceCount: stagedSyncedSourceCount,
         sourceCount: stagedSourceCount,
