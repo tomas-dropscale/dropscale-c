@@ -167,12 +167,32 @@ export async function DELETE(_request: NextRequest, { params }: Context) {
       p_admin_id: admin.id,
     });
     if (error || data !== id) {
+      if (error?.code === "P0002") {
+        throw new ClientOnboardingError(
+          "not_found",
+          "Connected Google Ads asset not found.",
+          404,
+        );
+      }
+      // guard_bound_google_ads_connection_identity (0054) refuses any status
+      // change while an active reporting binding still points at this account.
+      // That is the common case by far, and reporting it as a 500 leaves the
+      // admin with a dead end: the database already said what has to happen
+      // first, so say it.
+      if (
+        error?.code === "23514" &&
+        /reporting binding/i.test(error.message ?? "")
+      ) {
+        throw new ClientOnboardingError(
+          "invalid_state",
+          "This Google Ads account still feeds the client's reporting. Revoke its reporting binding before removing the account.",
+          409,
+        );
+      }
       throw new ClientOnboardingError(
-        error?.code === "P0002" ? "not_found" : "database_error",
-        error?.code === "P0002"
-          ? "Connected Google Ads asset not found."
-          : "The Google Ads connection could not be disconnected.",
-        error?.code === "P0002" ? 404 : 500,
+        "database_error",
+        "The Google Ads connection could not be disconnected.",
+        500,
       );
     }
     return clientOnboardingResponse({

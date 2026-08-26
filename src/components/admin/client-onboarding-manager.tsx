@@ -95,6 +95,12 @@ type ClientIdentityDraft = Pick<
   ClientManagementTarget,
   "name" | "email" | "discordHandle"
 >;
+/** What an asset's reporting binding covers; a pair carries both sides. */
+type BindingCoverage = {
+  bindingId: string;
+  covers: Array<{ kind: "shopify" | "google_ads"; id: string; name: string }>;
+  blockingChildren: Array<{ bindingId: string; name: string }>;
+};
 type AssetConnectionState = {
   status: "testing" | "connected" | "failed";
   message?: string;
@@ -489,6 +495,8 @@ export function ClientOnboardingManager({
   const [invitation, setInvitation] = React.useState<Invitation | null>(null);
   const [actionTarget, setActionTarget] = React.useState<ActionTarget | null>(null);
   const [disconnectTarget, setDisconnectTarget] = React.useState<DisconnectTarget | null>(null);
+  const [loadedBinding, setLoadedBinding] = React.useState<BindingCoverage | null>(null);
+  const [loadedBindingFor, setLoadedBindingFor] = React.useState<string | null>(null);
   const [editTarget, setEditTarget] = React.useState<ClientManagementTarget | null>(null);
   const [editDraft, setEditDraft] = React.useState<ClientIdentityDraft>({
     name: "",
@@ -796,6 +804,86 @@ export function ClientOnboardingManager({
       return;
     }
     await testConnectionTargets(card, targets);
+  }
+
+  /**
+   * Which asset the open dialog needs binding information for. A legacy
+   * Shopify asset is bound through its ad account rather than a reporting
+   * connection, so there is nothing to look up for one.
+   */
+  const bindingLookup =
+    disconnectTarget &&
+    !(disconnectTarget.kind === "shopify" && disconnectTarget.source === "legacy")
+      ? `${disconnectTarget.kind === "google_ads" ? "google_ads" : "shopify"}:${disconnectTarget.id}`
+      : null;
+
+  React.useEffect(() => {
+    if (!bindingLookup) return;
+    const separator = bindingLookup.indexOf(":");
+    const kind = bindingLookup.slice(0, separator);
+    const id = bindingLookup.slice(separator + 1);
+    let cancelled = false;
+    void fetch(
+      `/api/admin/client-onboarding/reporting-binding?kind=${kind}&id=${encodeURIComponent(id)}`,
+      { cache: "no-store" },
+    )
+      .then((response) => (response.ok ? response.json() : null))
+      .then((body) => {
+        if (cancelled) return;
+        setLoadedBinding((body?.binding as BindingCoverage | null) ?? null);
+        setLoadedBindingFor(bindingLookup);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setLoadedBinding(null);
+        setLoadedBindingFor(bindingLookup);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [bindingLookup]);
+
+  // Derived rather than stored, so a stale answer from a previously opened
+  // dialog can never be shown against a different asset.
+  const bindingInfo: BindingCoverage | "loading" | null = !bindingLookup
+    ? null
+    : loadedBindingFor === bindingLookup
+      ? loadedBinding
+      : "loading";
+
+  /**
+   * Unbind, then remove. Two calls rather than one endpoint doing both,
+   * because the binding revocation is the consequential half and the admin has
+   * just read on screen exactly which assets it stops feeding.
+   */
+  async function unbindAndDisconnect(target: DisconnectTarget) {
+    if (readOnlyPreview) return;
+    setBusy(`unbind:${target.kind}:${target.id}`);
+    setDialogError("");
+    try {
+      const kind = target.kind === "google_ads" ? "google_ads" : "shopify";
+      const response = await fetch("/api/admin/client-onboarding/reporting-binding", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ kind, connectionId: target.id }),
+      });
+      const body = await readJson(response);
+      if (!response.ok) {
+        throw new Error(
+          errorMessage(body, "The reporting binding could not be revoked."),
+        );
+      }
+    } catch (error) {
+      setDialogError(
+        error instanceof Error
+          ? error.message
+          : "The reporting binding could not be revoked.",
+      );
+      setBusy(null);
+      return;
+    }
+    setBusy(null);
+    await disconnectAsset(target);
   }
 
   async function disconnectAsset(target: DisconnectTarget) {
@@ -1409,10 +1497,52 @@ export function ClientOnboardingManager({
                 <strong className="font-medium text-[var(--text-primary)]">{disconnectTarget.clientName}</strong><br />
                 {disconnectTarget.kind === "shopify" ? "Shopify" : "Google Ads"} · {disconnectTarget.name}
               </div>
+              {bindingInfo && bindingInfo !== "loading" && bindingInfo.covers.length > 0 && (
+                <div className="rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3 text-[12px] leading-relaxed text-[var(--text-secondary)]">
+                  <p className="flex items-center gap-1.5 font-medium text-[var(--text-primary)]">
+                    <Link2 className="size-3.5 text-[var(--accent-gold-strong)]" aria-hidden />
+                    This asset feeds the client&apos;s reporting
+                  </p>
+                  <p className="mt-1.5">
+                    {bindingInfo.covers.length > 1
+                      ? "Removing it unbinds a reporting pair, so BOTH of these stop feeding the dashboard:"
+                      : "Removing it unbinds this reporting source:"}
+                  </p>
+                  <ul className="mt-1.5 space-y-1">
+                    {bindingInfo.covers.map((asset) => (
+                      <li key={asset.id} className="text-[var(--text-primary)]">
+                        · {asset.kind === "shopify" ? "Shopify" : "Google Ads"} — {asset.name}
+                      </li>
+                    ))}
+                  </ul>
+                  {bindingInfo.blockingChildren.length > 0 && (
+                    <p className="mt-2 text-[var(--danger-red)]">
+                      Revoke the linked sources first:{" "}
+                      {bindingInfo.blockingChildren.map((child) => child.name).join(", ")}.
+                    </p>
+                  )}
+                  <p className="mt-2">Billing, history and the client&apos;s other assets are unchanged.</p>
+                </div>
+              )}
               {dialogError && <p role="alert" className="text-[12px] text-[var(--danger-red)]">{dialogError}</p>}
               <DialogFooter>
                 <Button type="button" onClick={() => { setDisconnectTarget(null); setDialogError(""); }}>Cancel</Button>
-                <Button type="button" variant="danger" loading={busy === `disconnect:${disconnectTarget.kind}:${disconnectTarget.id}`} onClick={() => void disconnectAsset(disconnectTarget)}><Unplug aria-hidden /> Remove asset</Button>
+                {bindingInfo && bindingInfo !== "loading" && bindingInfo.covers.length > 0 ? (
+                  <Button
+                    type="button"
+                    variant="danger"
+                    disabled={bindingInfo.blockingChildren.length > 0}
+                    loading={
+                      busy === `unbind:${disconnectTarget.kind}:${disconnectTarget.id}` ||
+                      busy === `disconnect:${disconnectTarget.kind}:${disconnectTarget.id}`
+                    }
+                    onClick={() => void unbindAndDisconnect(disconnectTarget)}
+                  >
+                    <Unplug aria-hidden /> Unbind &amp; remove
+                  </Button>
+                ) : (
+                  <Button type="button" variant="danger" loading={bindingInfo === "loading" || busy === `disconnect:${disconnectTarget.kind}:${disconnectTarget.id}`} onClick={() => void disconnectAsset(disconnectTarget)}><Unplug aria-hidden /> Remove asset</Button>
+                )}
               </DialogFooter>
             </>
           )}

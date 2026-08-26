@@ -265,6 +265,17 @@ async function revoke(
         404,
       );
     }
+    // Two different guards raise 23514 here, and telling the admin the wrong
+    // one sends them looking for a reconnect link that does not exist.
+    // guard_bound_shopify_connection_identity (0054) blocks the revoke while an
+    // active reporting binding still points at the store.
+    if (error?.code === "23514" && /reporting binding/i.test(error.message ?? "")) {
+      throw new ClientShopifyConnectionError(
+        "reconnect_in_progress",
+        "This store still feeds the client's reporting. Revoke its reporting binding before removing it.",
+        409,
+      );
+    }
     if (error?.code === "23514") {
       throw new ClientShopifyConnectionError(
         "reconnect_in_progress",
