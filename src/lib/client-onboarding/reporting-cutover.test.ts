@@ -357,6 +357,23 @@ describe("Phase 2 admin reporting cutover workflow", () => {
     });
   });
 
+  it("names an account still waiting for its Windsor metadata instead of blaming its currency", async () => {
+    const data = snapshot();
+    data.googleConnections[0].currency = null;
+    data.googleConnections[0].time_zone = null;
+    data.googleConnections[0].account_name = "Yuna Kamakura";
+
+    const queue = await projectClientReportingCutover(data);
+
+    // Unusable is unusable: it must still never be offered as a source.
+    expect(queue.candidates.some((candidate) => candidate.sourceLabel.includes("1234567890"))).toBe(
+      false,
+    );
+    expect(queue.clients[0].message).toContain("Yuna Kamakura");
+    expect(queue.clients[0].message).toContain("once an account has spend");
+    expect(queue.clients[0].message).not.toContain("EUR-only");
+  });
+
   it("does not offer restage for an abandoned identity with terminal billing history", async () => {
     const data = snapshot({
       adAccounts: [

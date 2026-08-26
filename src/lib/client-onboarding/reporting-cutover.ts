@@ -866,8 +866,16 @@ async function buildClientReportingCutoverQueue(
     const healthy =
       shopifySources.every((source) => validShopify(source, credentials)) &&
       googleSources.every(validGoogle);
+    // Windsor publishes an account's currency and time zone only once it has
+    // reported data, so an account that has never spent arrives with neither.
+    // That is a source waiting to become usable, not a currency the immutable
+    // billing baseline cannot support: reporting it as "EUR-only" sends the
+    // reader chasing a currency problem that does not exist.
+    const metadataPending = googleSources.filter(
+      (source) => !source.last_error_code && !source.currency && !source.time_zone?.trim(),
+    );
     const billingCurrencySupported = googleSources.every(
-      (source) => source.currency === "EUR",
+      (source) => !source.currency || source.currency === "EUR",
     );
     const sourceCoverageExact =
       healthy &&
@@ -1122,7 +1130,11 @@ async function buildClientReportingCutoverQueue(
             ? "An authoritative reporting binding no longer has its exact healthy connected source. Reporting remains blocked until that authority is repaired."
           : !billingCurrencySupported
             ? "Google staged reporting currently requires EUR because the immutable billing baseline is EUR-only. No staging or activation action is available."
-            : validCutover && !exactCoverage && !healthy
+            : metadataPending.length > 0
+              ? `Google has reported no currency or time zone for ${metadataPending
+                  .map((source) => source.account_name || source.windsor_account_id)
+                  .join(", ")}. That metadata only arrives once an account has spend, so the source stays unusable — and unstageable — until it runs. Disconnect it, or leave it and it enriches on its own within the hour after its first spend.`
+              : validCutover && !exactCoverage && !healthy
               ? "The existing reporting authority remains active, but a new connected source is blocked until it is verified and healthy; then it can be staged explicitly."
             : shopifyRequired
               ? "Reporting activation requires at least one connected Shopify store anchor."
