@@ -576,6 +576,19 @@ async function buildClientReportingCutoverQueue(
 
   const addBundleCandidates = async (bundle: SourceBundle) => {
     if (!bundleCurrency(bundle)) return;
+    // Only Shopify anchors become portal stores, so a Google source with no
+    // store of its own reports as unallocated: its spend reaches no store the
+    // client can see. That is the right shape for a client who has no store at
+    // all, and a mistake for a client who has one. Once staged the mapping is
+    // frozen until the source is abandoned again, so the warning belongs on
+    // the candidate, before the click, not in the refusal afterwards.
+    const unallocated =
+      !bundle.shopify &&
+      !bundle.anchorBinding &&
+      connectedShopify.some((connection) => connection.client_id === bundle.clientId);
+    const allocationNote = unallocated
+      ? " This account is not linked to a store, so its spend will report as unallocated. Link it to a store in Clients first if it belongs to one."
+      : "";
     const clientAccounts = snapshot.adAccounts.filter(
       (account) => account.client_id === bundle.clientId,
     );
@@ -621,7 +634,7 @@ async function buildClientReportingCutoverQueue(
           },
           account.store_name,
           true,
-          "Explicitly reuse this exact abandoned normalized identity after revalidating its current connections and mapping.",
+          `Explicitly reuse this exact abandoned normalized identity after revalidating its current connections and mapping.${allocationNote}`,
         );
       }
       return;
@@ -638,7 +651,7 @@ async function buildClientReportingCutoverQueue(
       },
       null,
       false,
-      "Create a purpose-bound reporting identity without changing financial history.",
+      `Create a purpose-bound reporting identity without changing financial history.${allocationNote}`,
     );
 
     // Empty legacy shells are never inferred from a display name. They remain

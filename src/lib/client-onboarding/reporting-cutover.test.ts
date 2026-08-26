@@ -357,6 +357,32 @@ describe("Phase 2 admin reporting cutover workflow", () => {
     });
   });
 
+  it("warns that an unmapped Google source will report outside every store", async () => {
+    const data = snapshot({ mappings: [] });
+
+    const queue = await projectClientReportingCutover(data);
+    const googleOnly = queue.candidates.find(
+      (candidate) => candidate.sourceLabel === "1234567890",
+    );
+
+    expect(googleOnly?.message).toContain("report as unallocated");
+    // The store's own candidate is allocated by definition and must stay clean.
+    expect(
+      queue.candidates.find((candidate) =>
+        candidate.sourceLabel.includes("northwind.myshopify.com"),
+      )?.message,
+    ).not.toContain("unallocated");
+  });
+
+  it("does not warn about allocation when the client has no store to allocate to", async () => {
+    const data = snapshot({ mappings: [], shopifyConnections: [], shopifyCredentials: [] });
+
+    const queue = await projectClientReportingCutover(data);
+
+    expect(queue.candidates).toHaveLength(1);
+    expect(queue.candidates[0].message).not.toContain("unallocated");
+  });
+
   it("names an account still waiting for its Windsor metadata instead of blaming its currency", async () => {
     const data = snapshot();
     data.googleConnections[0].currency = null;
