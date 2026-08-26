@@ -1187,14 +1187,21 @@ export function ClientOnboardingManager({
                           <Button type="button" size="sm" disabled={disabled} onClick={() => openEditClient(card)}>
                             <Pencil aria-hidden /> Edit client
                           </Button>
-                          <Button type="button" size="sm" disabled={disabled} onClick={() => setBlockTarget(clientManagementTarget(card))}>
+                          <Button type="button" size="sm" variant="danger" disabled={disabled} onClick={() => setBlockTarget(clientManagementTarget(card))}>
                             {card.roster.accessBlocked ? (
                               <><LockOpen aria-hidden /> Unblock access</>
                             ) : (
                               <><Lock aria-hidden /> Block access</>
                             )}
                           </Button>
-                          <Button type="button" size="sm" variant="danger" disabled={disabled} onClick={() => setRemoveTarget(clientManagementTarget(card))}>
+                          {/*
+                            Deliberately inert. Removing a client is a full,
+                            irreversible delete of every row they own, and
+                            blocking now covers the case it was reached for by
+                            mistake. Kept visible so the capability is not
+                            forgotten — re-enable by restoring the onClick.
+                          */}
+                          <Button type="button" size="sm" disabled title="Removing a client is disabled — block their access instead.">
                             <Archive aria-hidden /> Remove client
                           </Button>
                         </>
