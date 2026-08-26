@@ -193,23 +193,53 @@ describe("admin Google billing activation", () => {
     expect(mocks.rpc).not.toHaveBeenCalled();
   });
 
-  it("fails closed before Google when the account has no stored refresh token", async () => {
+  it("reads an account with no stored refresh token through the agency", async () => {
+    // A V2 reporting account never holds a Google grant of its own, so
+    // demanding one here refused every staged source outright. The agency read
+    // proves the same identity through the manager account instead.
     mocks.createClient.mockResolvedValue(
       session({
         account: {
           id: ACCOUNT_ID,
-          store_name: "Lisbon Store",
+          store_name: "760-812-4103",
           google_ads_customer_id: "1234567890",
           status: "pending",
         },
       }),
     );
     mocks.createServiceClient.mockReturnValue(serviceClient(null));
+    mocks.capture.mockResolvedValue(captured);
+    mocks.rpc.mockResolvedValue({
+      data: [{ id: ACCOUNT_ID, store_name: "760-812-4103", status: "active" }],
+      error: null,
+    });
 
     const response = await POST(request({ accountId: ACCOUNT_ID }));
 
+    expect(response.status).toBe(200);
+    expect(mocks.capture).toHaveBeenCalledWith("1234567890", {});
+    expect(mocks.decryptToken).not.toHaveBeenCalled();
+  });
+
+  it("names the account the agency could not reach", async () => {
+    mocks.createClient.mockResolvedValue(
+      session({
+        account: {
+          id: ACCOUNT_ID,
+          store_name: "760-812-4103",
+          google_ads_customer_id: "7608124103",
+          status: "pending",
+        },
+      }),
+    );
+    mocks.createServiceClient.mockReturnValue(serviceClient(null));
+    mocks.capture.mockRejectedValue(new Error("PERMISSION_DENIED"));
+
+    const response = await POST(request({ accountId: ACCOUNT_ID }));
+    const payload = await response.json();
+
     expect(response.status).toBe(502);
-    expect(mocks.capture).not.toHaveBeenCalled();
+    expect(payload.error).toContain("760-812-4103");
     expect(mocks.rpc).not.toHaveBeenCalled();
   });
 

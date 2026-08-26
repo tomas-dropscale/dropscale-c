@@ -201,12 +201,17 @@ export async function POST(request: NextRequest) {
         .eq("id", target.id)
         .maybeSingle();
       if (secretError) throw secretError;
-      if (!secret?.google_ads_refresh_token) {
-        throw new Error("Google Ads must be reconnected before tracking can start.");
+      // A legacy account carries the client's own Google grant, and reading
+      // through it is exact. A V2 reporting account never does — that grant
+      // lives on the reporting connection, and these accounts are read through
+      // the agency manager. Requiring a per-account token here made this
+      // unreachable for every staged V2 source, and the failure was reported
+      // as Google refusing an account it was never asked about.
+      if (secret?.google_ads_refresh_token) {
+        const refreshToken = await decryptToken(secret.google_ads_refresh_token);
+        search = (customerId: string, query: string) =>
+          searchGoogleAds(customerId, refreshToken, query);
       }
-      const refreshToken = await decryptToken(secret.google_ads_refresh_token);
-      search = (customerId: string, query: string) =>
-        searchGoogleAds(customerId, refreshToken, query);
     }
     captured = await captureGoogleBillingStartAsAgency(
       googleAdsCustomerId,
@@ -220,8 +225,7 @@ export async function POST(request: NextRequest) {
     });
     return NextResponse.json(
       {
-        error:
-          "Google Ads could not verify this account. Confirm the agency has access and try again; tracking has not started.",
+        error: `Google Ads could not verify ${googleAdsCustomerId.slice(0, 3)}-${googleAdsCustomerId.slice(3, 6)}-${googleAdsCustomerId.slice(6)}. Confirm the agency manager account has access to it, then try again; tracking has not started.`,
       },
       { status: 502 },
     );
