@@ -659,6 +659,9 @@ export const en = {
     rejectedTitle: "Access not approved",
     rejectedBody:
       "Your account was not approved for portal access. If you think this is a mistake, reply to your onboarding email and the team will take another look.",
+    blockedTitle: "Account access blocked",
+    blockedBody:
+      "Your account is currently blocked, so the dashboard is unavailable. Your data, reporting and connected stores are untouched — contact the team and access can be restored right away.",
     signedInAs: "Signed in as",
     signOut: "Sign out",
     recheck: "Check again",
@@ -1922,6 +1925,9 @@ export const pt: Dictionary = {
     rejectedTitle: "Acesso não aprovado",
     rejectedBody:
       "A tua conta não foi aprovada para acesso ao portal. Se achas que é um engano, responde ao email de onboarding e a equipa volta a analisar.",
+    blockedTitle: "Acesso à conta bloqueado",
+    blockedBody:
+      "A tua conta está bloqueada de momento, por isso a dashboard não está disponível. Os teus dados, relatórios e lojas ligadas ficam intactos — fala com a equipa e o acesso é reposto de imediato.",
     signedInAs: "Sessão iniciada como",
     signOut: "Terminar sessão",
     recheck: "Verificar de novo",
@@ -3168,6 +3174,9 @@ export const ptBR: Dictionary = {
     rejectedTitle: "Acesso não aprovado",
     rejectedBody:
       "Sua conta não foi aprovada para acessar o portal. Se você acha que houve um engano, responda ao e-mail de onboarding que o time analisa de novo.",
+    blockedTitle: "Acesso à conta bloqueado",
+    blockedBody:
+      "Sua conta está bloqueada no momento, então o dashboard não está disponível. Seus dados, relatórios e lojas conectadas continuam intactos — fale com o time e o acesso é liberado na hora.",
     signedInAs: "Conectado como",
     signOut: "Sair",
     recheck: "Verificar de novo",
@@ -4414,6 +4423,9 @@ export const es: Dictionary = {
     rejectedTitle: "Acceso no aprobado",
     rejectedBody:
       "Tu cuenta no se aprobó para acceder al portal. Si crees que es un error, responde al correo de bienvenida y el equipo lo revisará de nuevo.",
+    blockedTitle: "Acceso a la cuenta bloqueado",
+    blockedBody:
+      "Tu cuenta está bloqueada ahora mismo, así que el panel no está disponible. Tus datos, informes y tiendas conectadas siguen intactos — escribe al equipo y el acceso se restablece enseguida.",
     signedInAs: "Sesión iniciada como",
     signOut: "Cerrar sesión",
     recheck: "Comprobar de nuevo",
@@ -5661,6 +5673,9 @@ export const fr: Dictionary = {
     rejectedTitle: "Accès refusé",
     rejectedBody:
       "Votre compte n'a pas été validé pour l'accès au portail. Si vous pensez qu'il s'agit d'une erreur, répondez à votre e-mail d'accueil et l'équipe réexaminera.",
+    blockedTitle: "Accès au compte bloqué",
+    blockedBody:
+      "Votre compte est actuellement bloqué, le tableau de bord n'est donc pas accessible. Vos données, vos rapports et vos boutiques connectées restent intacts — contactez l'équipe et l'accès sera rétabli aussitôt.",
     signedInAs: "Connecté en tant que",
     signOut: "Se déconnecter",
     recheck: "Vérifier à nouveau",

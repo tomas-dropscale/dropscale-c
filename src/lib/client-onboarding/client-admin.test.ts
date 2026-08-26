@@ -37,6 +37,7 @@ vi.mock("@/lib/supabase/service", () => ({
 
 import {
   archivePortalClient,
+  setPortalClientAccessBlock,
   sendPortalClientPasswordReset,
   updatePortalClientIdentity,
 } from "./client-admin";
@@ -459,4 +460,32 @@ describe("admin portal client persistence", () => {
       ).rejects.toMatchObject(expected);
     },
   );
+
+  it.each([true, false])(
+    "sets the portal access block to %s through the service-only RPC alone",
+    async (blocked) => {
+      await setPortalClientAccessBlock(CLIENT_ID, ADMIN_ID, blocked);
+
+      expect(mocks.rpc).toHaveBeenCalledWith("set_portal_client_access_block", {
+        p_client_id: CLIENT_ID,
+        p_admin_id: ADMIN_ID,
+        p_blocked: blocked,
+      });
+      // Blocking is portal-only: it must never reach auth, billing or any
+      // table directly. The RPC is the whole operation.
+      expect(mocks.from).not.toHaveBeenCalled();
+      expect(mocks.updateUserById).not.toHaveBeenCalled();
+    },
+  );
+
+  it("refuses to report success when the RPC does not confirm the client", async () => {
+    mocks.rpc.mockResolvedValue({ data: null, error: null });
+
+    await expect(
+      setPortalClientAccessBlock(CLIENT_ID, ADMIN_ID, true),
+    ).rejects.toMatchObject({
+      code: "database_error",
+      status: 500,
+    });
+  });
 });

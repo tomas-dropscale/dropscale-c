@@ -118,7 +118,7 @@ describe("existing client roster", () => {
     expect(mocks.select.mock.calls).toEqual([
       [
         "portal_clients",
-        "id, full_name, email, discord_handle, approval_status, created_at",
+        "id, full_name, email, discord_handle, approval_status, access_blocked, created_at",
       ],
       ["profiles", "id, role"],
       ["client_members", "client_id, member_id"],

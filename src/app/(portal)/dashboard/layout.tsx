@@ -3,6 +3,7 @@ import { hasSupabaseEnv } from "@/lib/supabase/env";
 import { getSessionProfile } from "@/lib/supabase/server";
 import { acceptPendingInvites, getWorkspaceContext } from "@/lib/portal/workspace";
 import { SetupNotice } from "@/components/setup-notice";
+import { AccessWatcher } from "@/components/portal/access-watcher";
 import { NotAClient } from "@/components/portal/not-a-client";
 import { PendingApproval } from "@/components/auth/pending-approval";
 
@@ -14,11 +15,16 @@ import { PendingApproval } from "@/components/auth/pending-approval";
  * refreshes the session cookie before this runs — it grants nothing.
  *
  * Who lands where:
+ *   blocked client row           → account-blocked screen (migration 0083)
  *   at least one open workspace   → the portal (regardless of any staff role)
  *   archived client row          → blocked screen
  *   no client row + role 'admin'  → /admin
  *   no client row + role 'member' → staff awaiting approval screen
  *   no client row + no profile    → generic "no client account"
+ *
+ * The block is checked before the workspace list because it is a decision
+ * about the person, not about what they own: a blocked client with a perfectly
+ * healthy workspace must still be turned away, and told why.
  *
  * "A workspace" is their own non-archived account OR one they were invited into
  * as a sócio (migration 0015). Pending remains available for audit, but it no
@@ -47,6 +53,13 @@ export default async function PortalGate({ children }: { children: React.ReactNo
     return <NotAClient email={user.email ?? ""} />;
   }
 
+  // A blocked client keeps their approval, their data and their billing. The
+  // only thing they lose is the way in, and they get told so plainly rather
+  // than being shown an empty dashboard they cannot explain.
+  if (client.access_blocked) {
+    return <PendingApproval email={user.email ?? ""} audience="client" blocked />;
+  }
+
   if (workspaces.length === 0) {
     // Staff who are also clients keep their own way in when their client row
     // was archived.
@@ -62,5 +75,12 @@ export default async function PortalGate({ children }: { children: React.ReactNo
     );
   }
 
-  return <>{children}</>;
+  // Mounted only for a client who is currently allowed in — the one person
+  // whose tab needs to react to being blocked.
+  return (
+    <>
+      <AccessWatcher clientId={client.id} />
+      {children}
+    </>
+  );
 }
