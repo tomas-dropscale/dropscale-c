@@ -1,5 +1,6 @@
 "use client";
 
+import * as React from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
@@ -27,6 +28,22 @@ export function Topbar({
   const { d } = useI18n();
 
   const onCreatives = pathname.endsWith("/creatives");
+
+  /**
+   * Creatives without a store used to be a dead tab: a title attribute, which
+   * a touch screen never shows and a click never triggers, so the tab simply
+   * did nothing and left the one thing the client DOES here unexplained. The
+   * click now says why, out loud.
+   */
+  // Held against the page it was asked on, so navigating away retires it
+  // without an effect that would have to chase the route.
+  const [noticeFor, setNoticeFor] = React.useState<string | null>(null);
+  const storeNeeded = noticeFor === pathname;
+  React.useEffect(() => {
+    if (!storeNeeded) return;
+    const timer = setTimeout(() => setNoticeFor(null), 6_000);
+    return () => clearTimeout(timer);
+  }, [storeNeeded]);
 
   /**
    * The switch belongs to the dashboard and the store views it moves between —
@@ -66,7 +83,7 @@ export function Topbar({
 
       <div className="flex flex-1 justify-center">
         {showTabs && (
-          <div className="flex items-center gap-1 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-panel)] p-1">
+          <div className="relative flex items-center gap-1 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-panel)] p-1">
             <Link href={performanceHref} className={cn(TAB, !onCreatives ? TAB_ACTIVE : TAB_IDLE)}>
               {d.portal.performance}
             </Link>
@@ -76,12 +93,23 @@ export function Topbar({
                 {d.portal.creatives}
               </Link>
             ) : (
-              <span
-                className={cn(TAB, "cursor-not-allowed text-[var(--text-muted)]")}
-                title={d.portal.creativesNeedStore}
+              <button
+                type="button"
+                aria-disabled
+                onClick={() => setNoticeFor(pathname)}
+                className={cn(TAB, "text-[var(--text-muted)] hover:text-[var(--text-secondary)]")}
               >
                 {d.portal.creatives}
-              </span>
+              </button>
+            )}
+
+            {storeNeeded && (
+              <p
+                role="status"
+                className="absolute left-1/2 top-full z-30 mt-2 w-max max-w-[min(22rem,90vw)] -translate-x-1/2 rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-panel)] px-3 py-2 text-center text-[12px] leading-relaxed text-[var(--text-secondary)] shadow-lg"
+              >
+                {d.portal.creativesNeedStore}
+              </p>
             )}
           </div>
         )}
