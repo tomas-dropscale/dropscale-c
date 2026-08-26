@@ -20,6 +20,9 @@ vi.mock("@/lib/portal/workspace", () => ({
 }));
 vi.mock("@/lib/portal/client-rollout", () => ({
   clientReportingAuthority: mocks.clientReportingAuthority,
+  // The portal reads through the store surface, which returns the authority
+  // unchanged for every client that owns a legacy account.
+  portalStoreSurface: mocks.clientReportingAuthority,
 }));
 vi.mock("@/lib/supabase/server", () => ({ createClient: mocks.createClient }));
 vi.mock("@/lib/supabase/service", () => ({

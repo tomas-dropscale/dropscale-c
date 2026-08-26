@@ -36,7 +36,7 @@ import {
   type CreativeAsset,
 } from "@/lib/google-ads/portal";
 import { markIfAuthRevoked } from "@/lib/google-ads/revoked";
-import { clientReportingAuthority } from "@/lib/portal/client-rollout";
+import { portalStoreSurface } from "@/lib/portal/client-rollout";
 import {
   resolveReportingSources,
   type CanonicalReportingSource,
@@ -380,7 +380,7 @@ export async function fetchAccounts(): Promise<PortalAccount[]> {
   const clientId = await activeWorkspaceId();
   if (!clientId) return [];
 
-  const reporting = await clientReportingAuthority(clientId);
+  const reporting = await portalStoreSurface(clientId);
   if (reporting === "unavailable") return [];
   if (reporting === "v2") {
     return (await v2ProjectionOrNull(clientId))?.accounts ?? [];
@@ -403,7 +403,7 @@ export async function fetchAccount(accountId: string): Promise<PortalAccount | n
   const clientId = await activeWorkspaceId();
   if (!clientId) return null;
 
-  const reporting = await clientReportingAuthority(clientId);
+  const reporting = await portalStoreSurface(clientId);
   if (reporting === "unavailable") return null;
   if (reporting === "v2") {
     const projection = await v2ProjectionOrNull(clientId);
@@ -436,7 +436,7 @@ export async function reportingMetricAccountIds(
 
   const clientId = await activeWorkspaceId();
   if (!clientId) return [];
-  const reporting = await clientReportingAuthority(clientId);
+  const reporting = await portalStoreSurface(clientId);
   if (reporting === "unavailable") return [];
   if (reporting !== "v2") return [...new Set(requested)];
 
@@ -467,7 +467,7 @@ export async function reportingMetricScope(
 
   const clientId = await activeWorkspaceId();
   if (!clientId || accounts.some((account) => account.client_id !== clientId)) return empty();
-  const reporting = await clientReportingAuthority(clientId);
+  const reporting = await portalStoreSurface(clientId);
   if (reporting === "unavailable") return empty();
   if (reporting !== "v2") {
     return {
@@ -552,7 +552,7 @@ export async function fetchCampaigns(account: AdAccount, range: RangeSelection):
   const clientId = await activeWorkspaceId();
   if (!clientId || account.client_id !== clientId) return [];
 
-  const reporting = await clientReportingAuthority(clientId);
+  const reporting = await portalStoreSurface(clientId);
   if (reporting === "unavailable") return [];
   if (reporting === "v2") {
     const projection = await v2ProjectionOrNull(clientId);
@@ -597,7 +597,7 @@ export async function fetchCampaigns(account: AdAccount, range: RangeSelection):
 }
 
 export async function fetchAccountMetrics(account: AdAccount, range: RangeSelection): Promise<MetricSet> {
-  const reporting = await clientReportingAuthority(account.client_id);
+  const reporting = await portalStoreSurface(account.client_id);
   if (reporting !== "legacy") return aggregateMetrics([]);
 
   if (isGoogleAdsConnected(account)) {
@@ -626,7 +626,7 @@ export async function fetchAccountMetrics(account: AdAccount, range: RangeSelect
  * query) returns an empty list: honest nothing, never fake creatives.
  */
 export async function fetchCreativeAssets(account: AdAccount): Promise<CreativeAsset[] | null> {
-  const reporting = await clientReportingAuthority(account.client_id);
+  const reporting = await portalStoreSurface(account.client_id);
   if (reporting !== "legacy") return [];
 
   if (!hasGoogleAdsEnv()) return null;

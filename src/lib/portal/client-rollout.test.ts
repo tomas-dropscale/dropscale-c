@@ -17,7 +17,39 @@ vi.mock("@/lib/supabase/service", () => ({
 import {
   clientReportingAuthority,
   legacyAssetActionsBlocked,
+  portalStoreSurface,
 } from "./client-rollout";
+
+/** A rollout read plus the two narrow list reads the store surface makes. */
+function surfaceService(options: {
+  rollout: unknown;
+  legacyAccounts?: unknown[];
+  boundStores?: unknown[];
+}) {
+  const rollout = { select: vi.fn(), eq: vi.fn(), maybeSingle: vi.fn() };
+  rollout.select.mockReturnValue(rollout);
+  rollout.eq.mockReturnValue(rollout);
+  rollout.maybeSingle.mockResolvedValue({ data: options.rollout, error: null });
+
+  const list = (data: unknown[]) => {
+    const query: Record<string, ReturnType<typeof vi.fn>> = {};
+    query.select = vi.fn(() => query);
+    query.eq = vi.fn(() => query);
+    query.not = vi.fn(() => query);
+    query.limit = vi.fn(async () => ({ data, error: null }));
+    return query;
+  };
+
+  const from = vi.fn((table: string) =>
+    table === "client_rollout_states"
+      ? rollout
+      : table === "ad_accounts"
+        ? list(options.legacyAccounts ?? [])
+        : list(options.boundStores ?? []),
+  );
+  mocks.createServiceClient.mockReturnValue({ from });
+  return from;
+}
 
 function serviceResult(data: unknown, error: unknown = null) {
   const query = {
@@ -117,6 +149,81 @@ describe("portal client rollout guard", () => {
       "client rollout lookup failed:",
       "temporary_failure",
     );
+    consoleError.mockRestore();
+  });
+});
+
+describe("portal store surface", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.getWorkspaceContext.mockResolvedValue({ active: { id: "client-1" } });
+  });
+
+  it("serves the projection to a V2-only client whose store is already audited", async () => {
+    // The cutover boundary protects a legacy surface. This client has none, and
+    // waiting for cutover left the store bound, syncing and invisible.
+    surfaceService({
+      rollout: { operational_surface: "v2_ready_for_cutover", reporting_cutover_at: null },
+      legacyAccounts: [],
+      boundStores: [{ id: "binding-1" }],
+    });
+
+    await expect(portalStoreSurface("surface-v2-only")).resolves.toBe("v2");
+  });
+
+  it("keeps the legacy surface while the client still owns a legacy account", async () => {
+    surfaceService({
+      rollout: { operational_surface: "v2_ready_for_cutover", reporting_cutover_at: null },
+      legacyAccounts: [{ id: "account-1" }],
+      boundStores: [{ id: "binding-1" }],
+    });
+
+    await expect(portalStoreSurface("surface-mixed")).resolves.toBe("legacy");
+  });
+
+  it("keeps the legacy surface when there is no audited store to project yet", async () => {
+    surfaceService({
+      rollout: { operational_surface: "v2_onboarding", reporting_cutover_at: null },
+      legacyAccounts: [],
+      boundStores: [],
+    });
+
+    await expect(portalStoreSurface("surface-empty")).resolves.toBe("legacy");
+  });
+
+  it("leaves a client past cutover on the authority it already had", async () => {
+    const from = surfaceService({
+      rollout: {
+        operational_surface: "v2_active",
+        reporting_cutover_at: "2026-08-14T00:00:00.000Z",
+      },
+    });
+
+    await expect(portalStoreSurface("surface-live")).resolves.toBe("v2");
+    // Already v2: the extra reads must not happen at all.
+    expect(from).not.toHaveBeenCalledWith("ad_accounts");
+    expect(from).not.toHaveBeenCalledWith("client_reporting_bindings");
+  });
+
+  it("falls back to the legacy surface when the extra reads fail", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const rollout = { select: vi.fn(), eq: vi.fn(), maybeSingle: vi.fn() };
+    rollout.select.mockReturnValue(rollout);
+    rollout.eq.mockReturnValue(rollout);
+    rollout.maybeSingle.mockResolvedValue({
+      data: { operational_surface: "v2_ready_for_cutover", reporting_cutover_at: null },
+      error: null,
+    });
+    const broken: Record<string, ReturnType<typeof vi.fn>> = {};
+    broken.select = vi.fn(() => broken);
+    broken.eq = vi.fn(() => broken);
+    broken.not = vi.fn(() => broken);
+    broken.limit = vi.fn(async () => ({ data: null, error: { code: "42501" } }));
+    mocks.createServiceClient.mockReturnValue({
+      from: vi.fn((table: string) => (table === "client_rollout_states" ? rollout : broken)),
+    });
+
+    await expect(portalStoreSurface("surface-broken")).resolves.toBe("legacy");
     consoleError.mockRestore();
   });
 });

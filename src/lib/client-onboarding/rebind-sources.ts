@@ -89,6 +89,7 @@ type GoogleRow = {
   id: string;
   windsor_account_id: string;
   account_name: string | null;
+  admin_label: string | null;
   currency: string | null;
   time_zone: string | null;
   last_verified_at: string | null;
@@ -194,7 +195,7 @@ export async function rebindClientReportingSources(input: {
       service
         .from("client_google_ads_connections")
         .select(
-          "id, windsor_account_id, account_name, currency, time_zone, last_verified_at, last_error_code, status",
+          "id, windsor_account_id, account_name, admin_label, currency, time_zone, last_verified_at, last_error_code, status",
         )
         .eq("client_id", input.clientId),
       service
@@ -286,7 +287,7 @@ export async function rebindClientReportingSources(input: {
     let googleOwner: AccountRow | null = null;
     if (google && !usableGoogle(google)) {
       outcome.skipped.push({
-        reason: `${google.account_name ?? google.windsor_account_id} is not a usable reporting source yet; it needs a verified EUR identity, so only ${domain} was rebound.`,
+        reason: `${google.admin_label?.trim() || google.account_name || google.windsor_account_id} is not a usable reporting source yet; it needs a verified EUR identity, so ${domain} keeps its store source alone.`,
       });
       google = null;
     }
@@ -427,7 +428,7 @@ export async function rebindClientReportingSources(input: {
 
     outcome.rebound.push({
       store: domain,
-      googleAccount: google ? google.account_name ?? google.windsor_account_id : null,
+      googleAccount: google ? google.admin_label?.trim() || google.account_name || google.windsor_account_id : null,
       shape:
         commits.length === 1
           ? `paired on ${storeOwner.store_name}`

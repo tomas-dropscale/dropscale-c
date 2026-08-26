@@ -94,6 +94,64 @@ export const clientReportingAuthority = cache(async function clientReportingAuth
 });
 
 /**
+ * Which surface serves this workspace's stores in the portal.
+ *
+ * The cutover marker decides which numbers are authoritative, and that boundary
+ * exists to protect a client who already has legacy history from being switched
+ * mid-flight. A client onboarded entirely through V2 has no such history.
+ *
+ * 0055 hid the normalized accounts from the legacy portal on the stated
+ * understanding that "the V2 portal projects only active audited bindings" —
+ * but the V2 portal starts at cutover, and cutover waits on a Google billing
+ * baseline that can be weeks away for an account that has not spent yet.
+ * Between the two, nothing served these clients at all: their dashboard said
+ * "No stores linked yet" while the store was bound, syncing, and invisible to
+ * its own owner, and the creatives page 404'd because the account would not
+ * resolve.
+ *
+ * So a client with no legacy account to protect is served by the projection as
+ * soon as there is something audited to project. The projection is unchanged
+ * and still shows only active audited bindings; a client who does hold legacy
+ * accounts keeps the legacy surface until cutover exactly as before.
+ */
+export const portalStoreSurface = cache(async function portalStoreSurface(
+  clientId: string,
+): Promise<PortalReportingAuthority> {
+  const authority = await clientReportingAuthority(clientId);
+  if (authority !== "legacy") return authority;
+
+  const service = createServiceClient();
+  if (!service) return authority;
+  try {
+    // The client's own RLS cannot see a normalized account, so this asks the
+    // service client one narrow question: is there a legacy account to serve?
+    const [legacy, bound] = await Promise.all([
+      service
+        .from("ad_accounts")
+        .select("id")
+        .eq("client_id", clientId)
+        .eq("reporting_role", "legacy_hybrid")
+        .limit(1),
+      service
+        .from("client_reporting_bindings")
+        .select("id")
+        .eq("client_id", clientId)
+        .eq("status", "active")
+        .not("shopify_connection_id", "is", null)
+        .limit(1),
+    ]);
+    if (legacy.error || bound.error) return authority;
+    const hasLegacy = (legacy.data ?? []).length > 0;
+    const hasAuditedStore = (bound.data ?? []).length > 0;
+    return !hasLegacy && hasAuditedStore ? "v2" : authority;
+  } catch {
+    // Failing closed here only restores today's behaviour, never widens it.
+    console.error("portal store surface lookup failed unexpectedly");
+    return authority;
+  }
+});
+
+/**
  * Whether this workspace must no longer expose the legacy asset write paths.
  *
  * `client_rollout_states` is deliberately service-role-only. We first resolve
