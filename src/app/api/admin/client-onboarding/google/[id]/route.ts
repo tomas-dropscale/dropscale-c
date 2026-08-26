@@ -1,5 +1,6 @@
 import type { NextRequest } from "next/server";
 
+import { renameClientGoogleAdsAccount } from "@/lib/client-onboarding/client-admin";
 import {
   clientOnboardingErrorResponse,
   clientOnboardingResponse,
@@ -41,8 +42,28 @@ export async function PATCH(request: NextRequest, { params }: Context) {
       return clientOnboardingResponse({ error: "Not found." }, 404);
     }
     const body = await readSmallJson(request, 1_024);
+    // Naming an account touches no reporting fact, so it runs before the test
+    // path's Windsor call and its connected-only lookup: a revoked account is
+    // still listed, and still worth being able to tell apart.
+    if (isExactRecord(body, ["action", "label"]) && body.action === "rename") {
+      if (typeof body.label !== "string" && body.label !== null) {
+        return clientOnboardingResponse(
+          { error: "Send label as text, or null to use the name Google reports." },
+          400,
+        );
+      }
+      await renameClientGoogleAdsAccount({
+        googleAdsConnectionId: id,
+        label: body.label,
+        adminId: admin.id,
+      });
+      return clientOnboardingResponse({ ok: true });
+    }
     if (!isExactRecord(body, ["action"]) || body.action !== "test") {
-      return clientOnboardingResponse({ error: "Send exactly action: test." }, 400);
+      return clientOnboardingResponse(
+        { error: "Send exactly action: test, or action: rename with a label." },
+        400,
+      );
     }
     const service = createServiceClient();
     if (!service) {

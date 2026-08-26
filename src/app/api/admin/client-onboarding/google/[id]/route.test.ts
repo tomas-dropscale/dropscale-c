@@ -40,9 +40,13 @@ const mocks = vi.hoisted(() => {
     maybeSingle,
     rpc,
     checkGoogleAdsAccountHealth: vi.fn(),
+    renameClientGoogleAdsAccount: vi.fn(),
   };
 });
 
+vi.mock("@/lib/client-onboarding/client-admin", () => ({
+  renameClientGoogleAdsAccount: mocks.renameClientGoogleAdsAccount,
+}));
 vi.mock("@/lib/client-onboarding/invitations", () => ({
   isClientOnboardingId: mocks.isClientOnboardingId,
 }));
@@ -258,6 +262,56 @@ describe("admin client Google Ads disconnect", () => {
       p_tested_at: "2026-08-14T01:30:00.000Z",
       p_error_code: null,
     });
+  });
+
+  it("names an account without asking Windsor anything", async () => {
+    const response = await PATCH(
+      new NextRequest(`http://localhost/api/admin/client-onboarding/google/${ID}`, {
+        method: "PATCH",
+        body: JSON.stringify({ action: "rename", label: "Casa Luna" }),
+      }),
+      { params: Promise.resolve({ id: ID }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(mocks.renameClientGoogleAdsAccount).toHaveBeenCalledWith({
+      googleAdsConnectionId: ID,
+      label: "Casa Luna",
+      adminId: ADMIN,
+    });
+    // Naming is cosmetic: it must reach neither Google nor the connection row.
+    expect(mocks.checkGoogleAdsAccountHealth).not.toHaveBeenCalled();
+    expect(mocks.createServiceClient).not.toHaveBeenCalled();
+  });
+
+  it("passes an emptied name through as a clear, not as text", async () => {
+    const response = await PATCH(
+      new NextRequest(`http://localhost/api/admin/client-onboarding/google/${ID}`, {
+        method: "PATCH",
+        body: JSON.stringify({ action: "rename", label: null }),
+      }),
+      { params: Promise.resolve({ id: ID }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(mocks.renameClientGoogleAdsAccount).toHaveBeenCalledWith({
+      googleAdsConnectionId: ID,
+      label: null,
+      adminId: ADMIN,
+    });
+  });
+
+  it("refuses a name that is not text", async () => {
+    const response = await PATCH(
+      new NextRequest(`http://localhost/api/admin/client-onboarding/google/${ID}`, {
+        method: "PATCH",
+        body: JSON.stringify({ action: "rename", label: 12 }),
+      }),
+      { params: Promise.resolve({ id: ID }) },
+    );
+
+    expect(response.status).toBe(400);
+    expect(mocks.renameClientGoogleAdsAccount).not.toHaveBeenCalled();
   });
 
   it("requires admin auth before service-role access", async () => {

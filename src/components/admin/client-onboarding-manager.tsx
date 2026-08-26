@@ -511,6 +511,10 @@ export function ClientOnboardingManager({
     name: string;
     clientName: string;
   } | null>(null);
+  const [renameTarget, setRenameTarget] = React.useState<{
+    id: string;
+    draft: string;
+  } | null>(null);
   const [loadedBinding, setLoadedBinding] = React.useState<BindingCoverage | null>(null);
   const [loadedBindingFor, setLoadedBindingFor] = React.useState<string | null>(null);
   const [editTarget, setEditTarget] = React.useState<ClientManagementTarget | null>(null);
@@ -969,6 +973,45 @@ export function ClientOnboardingManager({
    * the token that step needs. Without this control an account arrives unmapped
    * and stays that way.
    */
+  /**
+   * Google only reports a name once it has one to report, so accounts that
+   * have never run arrive named after their own customer id and the list
+   * prints the same ten digits twice. An empty name puts Google's back.
+   */
+  async function renameGoogleAccount(connectionId: string, draft: string) {
+    if (readOnlyPreview) return;
+    const label = draft.trim() || null;
+    setBusy(`rename:${connectionId}`);
+    try {
+      const response = await fetch(`/api/admin/client-onboarding/google/${connectionId}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "rename", label }),
+      });
+      const body = await readJson(response);
+      if (!response.ok) {
+        throw new Error(errorMessage(body, "The account name could not be saved."));
+      }
+      setRenameTarget(null);
+      await refreshClients();
+      showNotice(
+        "success",
+        label ? "Account renamed" : "Name cleared",
+        label
+          ? `This account now shows as ${label}.`
+          : "This account shows the name Google reports again.",
+      );
+    } catch (error) {
+      showNotice(
+        "error",
+        "The account could not be renamed",
+        error instanceof Error ? error.message : "Try again.",
+      );
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function mapAccountToStore(googleAdsConnectionId: string, shopifyConnectionId: string) {
     if (readOnlyPreview || !shopifyConnectionId) return;
     setBusy(`map:${googleAdsConnectionId}`);
@@ -1500,7 +1543,54 @@ export function ClientOnboardingManager({
                             return (
                               <li key={key} aria-busy={state.status === "testing"} className="flex flex-col gap-3 border-t border-[var(--border-subtle)] py-3 first:border-t-0 first:pt-0 last:pb-0 sm:flex-row sm:items-start sm:justify-between">
                                 <div className="min-w-0">
-                                  <p className="truncate text-[12.5px] font-medium text-[var(--text-primary)]">{account.accountName}</p>
+                                  {renameTarget?.id === account.id ? (
+                                    <form
+                                      className="flex flex-wrap items-center gap-1.5"
+                                      onSubmit={(event) => {
+                                        event.preventDefault();
+                                        void renameGoogleAccount(account.id, renameTarget.draft);
+                                      }}
+                                    >
+                                      <Input
+                                        autoFocus
+                                        maxLength={80}
+                                        value={renameTarget.draft}
+                                        aria-label="Account name"
+                                        placeholder={account.customerId}
+                                        onChange={(event) =>
+                                          setRenameTarget({ id: account.id, draft: event.target.value })
+                                        }
+                                        className="h-8 w-[220px] text-[12.5px]"
+                                      />
+                                      <Button type="submit" size="sm" loading={busy === `rename:${account.id}`}>
+                                        Save
+                                      </Button>
+                                      <Button
+                                        type="button"
+                                        size="sm"
+                                        variant="ghost"
+                                        onClick={() => setRenameTarget(null)}
+                                      >
+                                        Cancel
+                                      </Button>
+                                    </form>
+                                  ) : (
+                                    <div className="flex items-center gap-1.5">
+                                      <p className="truncate text-[12.5px] font-medium text-[var(--text-primary)]">{account.accountName}</p>
+                                      {!readOnlyPreview && (
+                                        <button
+                                          type="button"
+                                          aria-label={`Rename ${account.accountName}`}
+                                          onClick={() =>
+                                            setRenameTarget({ id: account.id, draft: account.adminLabel ?? "" })
+                                          }
+                                          className="shrink-0 text-[var(--text-muted)] transition-colors hover:text-[var(--text-primary)]"
+                                        >
+                                          <Pencil className="size-3" aria-hidden />
+                                        </button>
+                                      )}
+                                    </div>
+                                  )}
                                   <p className="mt-0.5 break-all text-[11px] text-[var(--text-secondary)]">{account.customerId}</p>
                                   {state.status === "failed" && state.message && <p className="mt-2 text-[11px] leading-relaxed text-[var(--danger-red)]">{state.message}</p>}
                                   {/*

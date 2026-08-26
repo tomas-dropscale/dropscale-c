@@ -526,6 +526,52 @@ function assetMappingWriteError(error: unknown) {
   return databaseError("The store mapping could not be saved.");
 }
 
+/**
+ * Name a Google Ads account, or clear the name back to Windsor's.
+ *
+ * The name is stored beside Windsor's rather than over it: every reconnect
+ * rewrites account_name from what Windsor just reported, so a name written
+ * there would disappear the next time the client reconnects.
+ */
+export async function renameClientGoogleAdsAccount(input: {
+  googleAdsConnectionId: string;
+  label: string | null;
+  adminId: string;
+}) {
+  const service = serviceOrThrow();
+  const { data, error } = await service.rpc("set_client_google_ads_admin_label", {
+    p_connection_id: input.googleAdsConnectionId,
+    p_label: input.label,
+    p_admin_id: input.adminId,
+  });
+  if (error) throw googleAdsLabelWriteError(error);
+  if (data !== input.googleAdsConnectionId) {
+    throw databaseError("The account name could not be saved.");
+  }
+}
+
+function googleAdsLabelWriteError(error: unknown) {
+  const code = errorCode(error);
+  if (code === "42501") {
+    return new ClientOnboardingError("forbidden", "Forbidden.", 403);
+  }
+  if (code === "P0002") {
+    return new ClientOnboardingError(
+      "not_found",
+      "That Google Ads account no longer exists.",
+      404,
+    );
+  }
+  if (code === "22023" || code === "23514") {
+    return new ClientOnboardingError(
+      "invalid_request",
+      "Enter a name of 80 characters or fewer, without line breaks.",
+      400,
+    );
+  }
+  return databaseError("The account name could not be saved.");
+}
+
 export async function mapGoogleAdsAccountToStore(input: {
   googleAdsConnectionId: string;
   shopifyConnectionId: string;

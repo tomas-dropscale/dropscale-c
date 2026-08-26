@@ -1177,7 +1177,12 @@ export type ClientGoogleAdsConnection = {
   client_id: string;
   status: "connected" | "revoked";
   windsor_account_id: string;
+  /** What Windsor reported. Empty for an account it has no name for. */
   account_name: string;
+  /** The name the team gave it, which wins over Windsor's wherever it shows. */
+  admin_label: string | null;
+  admin_label_set_by: string | null;
+  admin_label_set_at: string | null;
   currency: string | null;
   time_zone: string | null;
   data_source_id: string | null;
@@ -1863,6 +1868,9 @@ export type Database = {
           ClientGoogleAdsConnection,
           | "id"
           | "status"
+          | "admin_label"
+          | "admin_label_set_by"
+          | "admin_label_set_at"
           | "currency"
           | "time_zone"
           | "data_source_id"
@@ -3320,6 +3328,10 @@ export type Database = {
           p_shopify_connection_id: string;
           p_admin_id: string;
         };
+        Returns: string;
+      };
+      set_client_google_ads_admin_label: {
+        Args: { p_connection_id: string; p_label: string | null; p_admin_id: string };
         Returns: string;
       };
       set_portal_client_access_block: {

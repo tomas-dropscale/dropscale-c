@@ -136,6 +136,7 @@ const PREVIEW_SESSIONS: ClientOnboardingSessionDTO[] = [
         sessionId: "af1814df-e3a8-44d6-bdb9-aa7f2ff01a43",
         customerId: "123-456-7890",
         accountName: "Atlas Studio Ads",
+        adminLabel: null,
         currency: "EUR",
         timeZone: "Europe/Lisbon",
         connectedAt: "2026-08-12T08:40:00.000Z",

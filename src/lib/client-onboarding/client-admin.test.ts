@@ -38,6 +38,7 @@ vi.mock("@/lib/supabase/service", () => ({
 import {
   archivePortalClient,
   mapGoogleAdsAccountToStore,
+  renameClientGoogleAdsAccount,
   setPortalClientAccessBlock,
   sendPortalClientPasswordReset,
   updatePortalClientIdentity,
@@ -490,6 +491,50 @@ describe("admin portal client persistence", () => {
       code: "database_error",
       status: 500,
     });
+  });
+
+  it("names a Google Ads account through the service-only RPC alone", async () => {
+    mocks.rpc.mockResolvedValue({ data: GOOGLE_ID, error: null });
+
+    await renameClientGoogleAdsAccount({
+      googleAdsConnectionId: GOOGLE_ID,
+      label: "Casa Luna",
+      adminId: ADMIN_ID,
+    });
+
+    expect(mocks.rpc).toHaveBeenCalledWith("set_client_google_ads_admin_label", {
+      p_connection_id: GOOGLE_ID,
+      p_label: "Casa Luna",
+      p_admin_id: ADMIN_ID,
+    });
+    expect(mocks.from).not.toHaveBeenCalled();
+  });
+
+  it("asks for a shorter name when the database rejects the shape", async () => {
+    mocks.rpc.mockResolvedValue({
+      data: null,
+      error: { code: "22023", message: "Enter a name of 80 characters or fewer." },
+    });
+
+    await expect(
+      renameClientGoogleAdsAccount({
+        googleAdsConnectionId: GOOGLE_ID,
+        label: "x".repeat(200),
+        adminId: ADMIN_ID,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_request", status: 400 });
+  });
+
+  it("refuses to report a rename the RPC did not confirm", async () => {
+    mocks.rpc.mockResolvedValue({ data: null, error: null });
+
+    await expect(
+      renameClientGoogleAdsAccount({
+        googleAdsConnectionId: GOOGLE_ID,
+        label: "Casa Luna",
+        adminId: ADMIN_ID,
+      }),
+    ).rejects.toMatchObject({ code: "database_error", status: 500 });
   });
 
   it("states why a store could not be linked instead of blaming the client identity", async () => {

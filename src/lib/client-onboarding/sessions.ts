@@ -26,7 +26,7 @@ const AUTH_SESSION_COLUMNS = `${SAFE_SESSION_COLUMNS}, invite_token_hash, create
 const SAFE_SHOPIFY_COLUMNS =
   "id, session_id, client_id, status, shopify_name, shopify_domain, primary_domain, shopify_currency, granted_scopes, connected_at, last_verified_at, last_error_code" as const;
 const SAFE_GOOGLE_COLUMNS =
-  "id, session_id, client_id, status, windsor_account_id, account_name, currency, time_zone, connected_at, last_verified_at, last_error_code" as const;
+  "id, session_id, client_id, status, windsor_account_id, account_name, admin_label, currency, time_zone, connected_at, last_verified_at, last_error_code" as const;
 
 export type ClientOnboardingPublicStatus =
   | "waiting"
@@ -53,7 +53,10 @@ export type ClientOnboardingGoogleDTO = {
   id: string;
   sessionId: string;
   customerId: string;
+  /** What to show: the team's name when they gave one, else Windsor's. */
   accountName: string;
+  /** The team's name alone, so an editor can offer to clear it. */
+  adminLabel: string | null;
   currency: string | null;
   timeZone: string | null;
   connectedAt: string;
@@ -191,7 +194,8 @@ function asGoogleDTO(row: ClientGoogleAdsConnection): ClientOnboardingGoogleDTO 
     id: row.id,
     sessionId: row.session_id,
     customerId: row.windsor_account_id,
-    accountName: row.account_name,
+    accountName: row.admin_label?.trim() || row.account_name,
+    adminLabel: row.admin_label,
     currency: row.currency,
     timeZone: row.time_zone,
     connectedAt: row.connected_at,
