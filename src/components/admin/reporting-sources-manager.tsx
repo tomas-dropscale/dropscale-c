@@ -7,6 +7,7 @@ import {
   CircleCheck,
   Clock3,
   Layers,
+  Link2,
   RefreshCw,
   Rocket,
   Trash2,
@@ -173,6 +174,62 @@ export function ReportingSourcesManager({
     }
   }
 
+  /**
+   * A store bound on its own with a mapped Google account waiting outside is a
+   * dead end the queue cannot describe: the account's identity already belongs
+   * to the client's own legacy row, so no candidate is offered and no reason is
+   * given. This rebuilds the pair onto that same row.
+   */
+  async function rebindSources(clientId: string, clientName: string) {
+    setBusy(`rebind:${clientId}`);
+    setFeedback(null);
+    try {
+      const response = await fetch("/api/admin/client-onboarding/rebind-sources", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ clientId }),
+      });
+      const body = await readJson(response);
+      if (!response.ok) {
+        throw new Error(
+          errorMessage(body, `${clientName}'s sources could not be rebound.`),
+        );
+      }
+      const result = body as {
+        rebound?: { store: string; googleAccount: string | null; shape: string }[];
+        skipped?: { reason: string }[];
+      };
+      const rebound = result.rebound ?? [];
+      const bound = rebound
+        .map((item) =>
+          item.googleAccount
+            ? `${item.store} + ${item.googleAccount} — ${item.shape}`
+            : `${item.store} — ${item.shape}`,
+        )
+        .join("; ");
+      setFeedback({
+        tone: rebound.length > 0 ? "success" : "error",
+        message: [
+          rebound.length > 0
+            ? `Rebound for ${clientName}: ${bound}.`
+            : `Nothing was rebound for ${clientName}.`,
+          ...(result.skipped ?? []).map((item) => item.reason),
+        ].join(" "),
+      });
+      await refresh();
+    } catch (error) {
+      setFeedback({
+        tone: "error",
+        message:
+          error instanceof Error
+            ? error.message
+            : `${clientName}'s sources could not be rebound.`,
+      });
+    } finally {
+      setBusy(null);
+    }
+  }
+
   if (loadFailed || !queue.available) {
     return (
       <div className="panel p-5 text-[13px] text-[var(--text-secondary)]">
@@ -286,6 +343,16 @@ export function ReportingSourcesManager({
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
+                  {client.status === "bindings_required" && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      loading={busy === `rebind:${client.id}`}
+                      onClick={() => void rebindSources(client.id, client.name)}
+                    >
+                      <Link2 aria-hidden /> Rebind sources
+                    </Button>
+                  )}
                   {client.syncActionId && (
                     <Button
                       type="button"
