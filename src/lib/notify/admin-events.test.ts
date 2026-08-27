@@ -106,13 +106,40 @@ describe("approval queue", () => {
     const message = formatAdminEvent(
       payload({
         table: "ad_accounts",
-        record: { status: "pending", store_name: "Casa Bonita", google_ads_customer_id: null },
+        record: {
+          status: "pending",
+          reporting_role: "legacy_hybrid",
+          store_name: "Casa Bonita",
+          google_ads_customer_id: null,
+        },
       }),
     )!;
     expect(message).toContain("Loja por ativar");
     expect(message).toContain("sem ID Google");
     expect(message).toContain("https://dropscale.app/admin/billing#financial-operations");
   });
+
+  it.each(["shopify_anchor", "google_spend"])(
+    "stays quiet for a %s account, which no one can activate by hand",
+    (reportingRole) => {
+      // These are provisioned pending by the V2 reporting lifecycle and leave
+      // that state when billing starts. Announcing them called the team to
+      // work that was never theirs.
+      expect(
+        formatAdminEvent(
+          payload({
+            table: "ad_accounts",
+            record: {
+              status: "pending",
+              reporting_role: reportingRole,
+              store_name: "avigail-atelier",
+              google_ads_customer_id: null,
+            },
+          }),
+        ),
+      ).toBeNull();
+    },
+  );
 
   it("distinguishes a Google Ads request from a Shopify one", () => {
     const google = formatAdminEvent(

@@ -241,6 +241,12 @@ export function formatAdminEvent(
 
     case "ad_accounts": {
       if (!isInsert || str(record, "status") !== "pending") return null;
+      // A normalized reporting account is provisioned pending by the V2
+      // lifecycle and leaves that state when its billing baseline starts, not
+      // when a person acts. Announcing it as a store to activate interrupted
+      // the team for work that was never theirs, and pointed them at a page
+      // with nothing on it to click.
+      if (str(record, "reporting_role") !== "legacy_hybrid") return null;
       const store = str(record, "store_name");
       const customerId = str(record, "google_ads_customer_id");
       return compose({

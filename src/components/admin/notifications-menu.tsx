@@ -48,10 +48,14 @@ export function NotificationsMenu({ counts }: { counts: PendingCounts }) {
         .from("portal_clients")
         .select("id")
         .eq("approval_status", "pending"),
+      // Only accounts a person can actually approve. The normalized reporting
+      // rows are pending until billing starts, not until someone clicks; see
+      // the note in fetchPendingCounts, which this must agree with exactly.
       supabase
         .from("ad_accounts")
         .select("id")
-        .eq("status", "pending"),
+        .eq("status", "pending")
+        .eq("reporting_role", "legacy_hybrid"),
       supabase
         .from("account_requests")
         .select("id")
