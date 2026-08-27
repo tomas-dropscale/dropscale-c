@@ -9,6 +9,8 @@ import {
   type WebhookPayload,
 } from "./admin-events";
 
+const ADMIN_ID = "aaaaaaaa-0000-4000-8000-000000000001";
+
 function payload(overrides: Partial<WebhookPayload> = {}): WebhookPayload {
   return {
     type: "INSERT",
@@ -79,12 +81,42 @@ describe("approval queue", () => {
     expect(message).toContain("ana@loja.pt");
   });
 
-  it("ignores a client row inserted already approved", () => {
-    expect(
-      formatAdminEvent(
-        payload({ record: { approval_status: "approved", full_name: "Ana", email: "a@b.pt" } }),
-      ),
-    ).toBeNull();
+  it("announces a client auto-approved by their own connection, and points at the work", () => {
+    // 0063 made a verified connection the approval, so this is how a client
+    // arrives now. It used to be silent, which meant onboarding told nobody.
+    const message = formatAdminEvent(
+      payload({ record: { approval_status: "approved", full_name: "Ana", email: "a@b.pt" } }),
+    )!;
+    expect(message).toContain("Cliente entrou");
+    expect(message).toContain("automaticamente");
+    expect(message).toContain("https://dropscale.app/admin/reporting");
+    // Never an approval prompt: there is nothing left to approve.
+    expect(message).not.toContain("Aprovar");
+  });
+
+  it("does not dress an automatic approval as a colleague's decision", () => {
+    const message = formatAdminEvent(
+      payload({
+        type: "UPDATE",
+        record: { approval_status: "approved", approved_by: null, full_name: "Ana" },
+        old_record: { approval_status: "pending", full_name: "Ana" },
+      }),
+    )!;
+    expect(message).toContain("Cliente entrou");
+    expect(message).not.toContain("Cliente aprovado");
+  });
+
+  it("still names the colleague when a person approved", () => {
+    const message = formatAdminEvent(
+      payload({
+        type: "UPDATE",
+        record: { approval_status: "approved", approved_by: ADMIN_ID, full_name: "Ana" },
+        old_record: { approval_status: "pending", full_name: "Ana" },
+      }),
+      { profiles: { [ADMIN_ID]: "Tomás" } },
+    )!;
+    expect(message).toContain("Cliente aprovado");
+    expect(message).toContain("Tomás");
   });
 
   it("escapes client-supplied text so Telegram does not reject the message", () => {

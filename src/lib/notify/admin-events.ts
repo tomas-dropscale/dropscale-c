@@ -190,12 +190,28 @@ export function formatAdminEvent(
       const name = str(record, "full_name");
 
       if (isInsert) {
-        if (str(record, "approval_status") !== "pending") return null;
         const email = str(record, "email");
+        const facts = [name ? escapeHtml(name) : null, email ? escapeHtml(email) : null];
+
+        // 0063 made a verified reporting connection the approval and took the
+        // manual review hop out of onboarding, so a client now arrives already
+        // approved and this branch went silent — the single most important
+        // event of the day reached nobody. It is still worth saying; what
+        // changed is that the work waiting is the reporting queue, not a
+        // decision. The pending case survives for the rare manual path.
+        if (str(record, "approval_status") !== "pending") {
+          return compose({
+            emoji: "👤",
+            title: "Cliente entrou",
+            facts: [...facts, "ligação verificada, aprovado automaticamente"],
+            action: { label: "Ver fontes", href: "/admin/reporting" },
+          });
+        }
+
         return compose({
           emoji: "👤",
           title: "Cliente novo",
-          facts: [name ? escapeHtml(name) : null, email ? escapeHtml(email) : null],
+          facts,
           action: { label: "Aprovar", href: "/admin/client-onboarding" },
         });
       }
@@ -204,14 +220,25 @@ export function formatAdminEvent(
       // about the team's OWN action earns its keep: it tells everyone else the
       // item is handled and by whom, which is what stops two people working the
       // same queue.
-      const actor = by(str(record, "approved_by"), names);
+      const approvedBy = str(record, "approved_by");
+      const actor = by(approvedBy, names);
 
       if (became(payload, "approval_status", "approved")) {
-        return compose({
-          emoji: "✅",
-          title: "Cliente aprovado",
-          facts: [name ? escapeHtml(name) : null, actor],
-        });
+        // Auto-approval leaves approved_by null. Saying "Cliente aprovado"
+        // with no name reads as though a colleague handled it, so the two
+        // cases are told apart rather than dressed the same.
+        return approvedBy
+          ? compose({
+              emoji: "✅",
+              title: "Cliente aprovado",
+              facts: [name ? escapeHtml(name) : null, actor],
+            })
+          : compose({
+              emoji: "👤",
+              title: "Cliente entrou",
+              facts: [name ? escapeHtml(name) : null, "ligação verificada, aprovado automaticamente"],
+              action: { label: "Ver fontes", href: "/admin/reporting" },
+            });
       }
 
       if (became(payload, "approval_status", "rejected")) {

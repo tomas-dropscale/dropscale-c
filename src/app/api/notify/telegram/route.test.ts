@@ -122,12 +122,18 @@ describe("POST /api/notify/telegram", () => {
   });
 
   it("skips a row that is not actually waiting on anybody", async () => {
+    // A normalized reporting account: provisioned pending by the V2 lifecycle
+    // and activated by billing, so no message would name work anyone owns.
     const response = await POST(
       post(
         {
           type: "INSERT",
-          table: "portal_clients",
-          record: { approval_status: "approved", full_name: "Ana", email: "a@b.pt" },
+          table: "ad_accounts",
+          record: {
+            status: "pending",
+            reporting_role: "shopify_anchor",
+            store_name: "avigail-atelier",
+          },
         },
         authed,
       ),
