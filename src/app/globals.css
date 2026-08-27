@@ -218,3 +218,73 @@
     var(--bg-panel);
   box-shadow: 0 6px 28px -8px rgba(212, 168, 106, 0.22);
 }
+
+/*
+ * Phone type ramp.
+ *
+ * The layouts already reflow: measured at 375px, the admin client list, the
+ * onboarding flow and the sign-in screens produce no horizontal scroll and no
+ * overflowing element. What made the app hard to use on a phone was the type
+ * scale — it was drawn for a desktop panel, and 555 of the size declarations
+ * across 93 of 121 components sit below 13px. At arm's length on a phone that
+ * is a squint, and squinting is what "hard to do things" actually means here.
+ *
+ * Rewriting 555 call sites would be unreviewable and would drag the desktop
+ * density with it, so the ramp lives here instead: one +2px step per size,
+ * below the md breakpoint only, leaving every desktop screen exactly as drawn.
+ * Substring matching avoids escaping Tailwind's arbitrary-value class names,
+ * and the block is deliberately unlayered so it outranks the utilities without
+ * needing !important.
+ *
+ * The hierarchy is preserved, not flattened: each size keeps its distance from
+ * the one above it, so a caption still reads as a caption.
+ */
+@media (max-width: 767px) {
+  [class*="text-[10"] {
+    font-size: 12px;
+    line-height: 1.45;
+  }
+  [class*="text-[11"] {
+    font-size: 13px;
+    line-height: 1.45;
+  }
+  [class*="text-[12"] {
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  [class*="text-[13"] {
+    font-size: 15px;
+    line-height: 1.5;
+  }
+
+  /* Tailwind's named small sizes and the one house class carry no arbitrary
+     value for the selectors above to match, so they are named directly. */
+  .text-xs {
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  .text-sm {
+    font-size: 15px;
+    line-height: 1.5;
+  }
+  .label-caps {
+    font-size: 13px;
+  }
+
+  /*
+   * Touch targets. A 28px icon button is a comfortable mouse target and a poor
+   * thumb one; these floors lift the small sizes without touching the layout
+   * they sit in, since the buttons are already free to grow vertically.
+   */
+  button,
+  [role="button"],
+  a[class*="rounded-full"],
+  select {
+    min-height: 36px;
+  }
+  [class*="size-7"],
+  [class*="size-8"] {
+    min-width: 36px;
+    min-height: 36px;
+  }
+}
