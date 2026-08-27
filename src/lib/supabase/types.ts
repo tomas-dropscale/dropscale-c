@@ -717,6 +717,8 @@ export type AdAccount = {
   payment_fee_pct: number;
   payment_fee_fixed: number;
   shipping_cost_per_order: number;
+  /** The supplier's own id for this shop in the HST ERP, when it has one. */
+  hst_shop_id: string | null;
   // Agency revenue share (migration 0010); admin-only via the same guard.
   // Rate is not stored here — it lives in the Google Ads campaign name.
   revenue_share_enabled: boolean;
@@ -1068,7 +1070,18 @@ export type ProductCost = {
   cost: number;
   currency: string;
   effective_from: string;
+  /** Who decided this cost: the merchant, or the HST supplier feed. */
+  source: "manual" | "hst";
   created_at: string;
+};
+
+export type HstOrderCharge = {
+  ad_account_id: string;
+  platform_order_id: string;
+  order_day: string;
+  tariff: number;
+  currency: string;
+  synced_at: string;
 };
 
 export type ProductCostTier = {
@@ -2826,6 +2839,7 @@ export type Database = {
           | "payment_fee_pct"
           | "payment_fee_fixed"
           | "shipping_cost_per_order"
+          | "hst_shop_id"
           | "revenue_share_enabled"
         >;
         Update: Partial<AdAccount>;
@@ -3064,11 +3078,17 @@ export type Database = {
           },
         ];
       };
+      hst_order_charges: {
+        Row: Row<HstOrderCharge>;
+        Insert: Insert<HstOrderCharge, "order_day" | "tariff" | "currency" | "synced_at">;
+        Update: Partial<HstOrderCharge>;
+        Relationships: [];
+      };
       product_costs: {
         Row: Row<ProductCost>;
         Insert: Insert<
           ProductCost,
-          "id" | "currency" | "effective_from" | "created_at"
+          "id" | "currency" | "effective_from" | "created_at" | "source"
         >;
         Update: Partial<ProductCost>;
         Relationships: [

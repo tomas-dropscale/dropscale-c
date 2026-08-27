@@ -117,6 +117,7 @@ function account(id: string, overrides: Partial<AdAccount> = {}): AdAccount {
     payment_fee_pct: 0,
     payment_fee_fixed: 0,
     shipping_cost_per_order: 0,
+    hst_shop_id: null,
     revenue_share_enabled: false,
     ...overrides,
   };

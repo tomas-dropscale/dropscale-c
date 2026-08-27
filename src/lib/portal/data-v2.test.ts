@@ -88,6 +88,7 @@ function account(overrides: Partial<AdAccount> = {}): AdAccount {
     payment_fee_pct: 2.9,
     payment_fee_fixed: 0.3,
     shipping_cost_per_order: 5,
+    hst_shop_id: null,
     revenue_share_enabled: false,
     ...overrides,
   };
