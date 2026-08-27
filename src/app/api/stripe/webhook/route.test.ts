@@ -38,6 +38,19 @@ describe("Stripe webhook invoice state", () => {
     );
   });
 
+  it("acknowledges a waived invoice instead of asking Stripe to retry forever", () => {
+    // Three invoice.voided events landed on locally waived invoices on
+    // 2026-08-18. Each threw, each answered 500, and Stripe retried them for
+    // nine days before disabling the endpoint — which took every other event
+    // down with it. Waived is terminal: no retry can ever get past it, so it
+    // belongs with the stale-terminal-state race that is already acknowledged.
+    expect(WEBHOOK_ROUTE).not.toContain("cannot be updated from a Stripe invoice");
+    expect(WEBHOOK_ROUTE).toContain('if (current.status !== "waived")');
+    // The states a retry CAN resolve must still fail, so Stripe redelivers.
+    expect(WEBHOOK_ROUTE).toContain("changed concurrently during webhook update");
+    expect(WEBHOOK_ROUTE).toContain("conflicts with Stripe status");
+  });
+
   it("maps only Stripe's supported invoice states", () => {
     expect(localInvoiceStatus("draft")).toBe("draft");
     expect(localInvoiceStatus("open")).toBe("open");

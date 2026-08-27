@@ -309,28 +309,31 @@ export async function POST(request: NextRequest) {
               `Local invoice ${local.id} was linked to a different Stripe invoice.`,
             );
           }
-          if (current.status === "waived") {
-            throw new Error(
-              `Waived invoice ${local.id} cannot be updated from a Stripe invoice.`,
+          // Waived is a terminal decision the team made, so the remote
+          // snapshot must not be written — and, unlike a conflict, it is a
+          // state no retry can ever get past. Throwing asked Stripe to try
+          // again forever: it did, for nine days, then disabled the endpoint
+          // and took every other event down with it. Acknowledged instead,
+          // exactly as the stale-terminal-state race below already is.
+          if (current.status !== "waived") {
+            const decision = stripeInvoiceStatusDecision(
+              current.status,
+              update.status,
             );
+            if (decision === "conflict") {
+              throw new Error(
+                `Local status ${current.status} conflicts with Stripe status ${update.status}.`,
+              );
+            }
+            if (decision === "apply") {
+              throw new Error(
+                `Invoice ${local.id} changed concurrently during webhook update.`,
+              );
+            }
+            // A newer local terminal state won the race. The stale event is
+            // safe to acknowledge because its remote snapshot must not be
+            // written.
           }
-
-          const decision = stripeInvoiceStatusDecision(
-            current.status,
-            update.status,
-          );
-          if (decision === "conflict") {
-            throw new Error(
-              `Local status ${current.status} conflicts with Stripe status ${update.status}.`,
-            );
-          }
-          if (decision === "apply") {
-            throw new Error(
-              `Invoice ${local.id} changed concurrently during webhook update.`,
-            );
-          }
-          // A newer local terminal state won the race. The stale event is safe
-          // to acknowledge because its remote snapshot must not be written.
         }
       }
     }
