@@ -1,0 +1,24 @@
+# The repository stores text with LF, and several guards read files back off
+# disk and compare them byte for byte: the migration lineage hashes every SQL
+# file installed live, and the commission-terms test asserts on exact SQL
+# fragments. On a Windows checkout core.autocrlf rewrote those same files to
+# CRLF on their way to the working tree, so the bytes on disk stopped matching
+# the bytes that were committed and both guards failed for a difference that
+# does not exist in the repository.
+#
+# Pinning the working tree to LF makes what a test reads the same as what was
+# committed, on every machine.
+* text=auto eol=lf
+
+# Binary formats must never be touched.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.pdf binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
