@@ -29,43 +29,44 @@ export function DashboardShell({
   const [mobileNavOpen, setMobileNavOpen] = React.useState(false);
 
   return (
-    <div className="flex h-svh flex-col p-2.5 md:p-5">
+    <div className="flex h-svh flex-col p-0 md:p-5">
       <RoleWatcher userId={profile.id} />
       <BrowserChrome
         address={`dropscale.app${pathname}`}
+        left={
+          <DialogPrimitive.Root open={mobileNavOpen} onOpenChange={setMobileNavOpen}>
+            <DialogPrimitive.Trigger
+              aria-label={d.nav.openMenu}
+              className="-ml-1 rounded-md p-2 text-[var(--text-secondary)] transition-smooth hover:bg-[var(--bg-panel)] hover:text-[var(--text-primary)]"
+            >
+              <Menu className="size-5" />
+            </DialogPrimitive.Trigger>
+
+            <DialogPrimitive.Portal>
+              <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/70 backdrop-blur-[2px] data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:animate-in data-[state=open]:fade-in-0 md:hidden" />
+              <DialogPrimitive.Content
+                className="fixed inset-y-0 left-0 z-50 w-[240px] outline-none data-[state=closed]:animate-out data-[state=closed]:slide-out-to-left data-[state=open]:animate-in data-[state=open]:slide-in-from-left md:hidden"
+                aria-describedby={undefined}
+              >
+                <DialogPrimitive.Title className="sr-only">
+                  {d.nav.navigation}
+                </DialogPrimitive.Title>
+                <Sidebar
+                  pendingClients={pending.clients}
+                  newCreatives={pending.creatives}
+                  onNavigate={() => setMobileNavOpen(false)}
+                />
+              </DialogPrimitive.Content>
+            </DialogPrimitive.Portal>
+          </DialogPrimitive.Root>
+        }
         right={
           <>
             <GlobalReportingSyncButton />
             <LiveIndicator />
-            <span className="h-4 w-px bg-[var(--border-subtle)]" aria-hidden />
+            <span className="hidden h-4 w-px bg-[var(--border-subtle)] sm:block" aria-hidden />
             <NotificationsMenu counts={pending} />
             <UserMenu profile={profile} />
-
-            <DialogPrimitive.Root open={mobileNavOpen} onOpenChange={setMobileNavOpen}>
-              <DialogPrimitive.Trigger
-                aria-label={d.nav.openMenu}
-                className="rounded-md p-1.5 text-[var(--text-secondary)] transition-smooth hover:bg-[var(--bg-panel)] hover:text-[var(--text-primary)] md:hidden"
-              >
-                <Menu className="size-4" />
-              </DialogPrimitive.Trigger>
-
-              <DialogPrimitive.Portal>
-                <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/70 backdrop-blur-[2px] data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:animate-in data-[state=open]:fade-in-0 md:hidden" />
-                <DialogPrimitive.Content
-                  className="fixed inset-y-0 left-0 z-50 w-[240px] outline-none data-[state=closed]:animate-out data-[state=closed]:slide-out-to-left data-[state=open]:animate-in data-[state=open]:slide-in-from-left md:hidden"
-                  aria-describedby={undefined}
-                >
-                  <DialogPrimitive.Title className="sr-only">
-                    {d.nav.navigation}
-                  </DialogPrimitive.Title>
-                  <Sidebar
-                    pendingClients={pending.clients}
-                    newCreatives={pending.creatives}
-                    onNavigate={() => setMobileNavOpen(false)}
-                  />
-                </DialogPrimitive.Content>
-              </DialogPrimitive.Portal>
-            </DialogPrimitive.Root>
           </>
         }
       >

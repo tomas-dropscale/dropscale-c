@@ -43,7 +43,7 @@ export function PerformancePrototype({
   analyticsTarget?: AnalyticsTarget;
 }) {
   return (
-    <div className="flex h-svh flex-col p-2.5 md:p-5">
+    <div className="flex h-svh flex-col p-0 md:p-5">
       <BrowserChrome
         address={`localhost · ${view} visual review`}
         right={

@@ -174,7 +174,7 @@ export default async function AdminCreativesVisualPreviewPage({
     : "all";
 
   return (
-    <div className="flex h-svh flex-col p-2.5 md:p-5">
+    <div className="flex h-svh flex-col p-0 md:p-5">
       <BrowserChrome
         address="localhost/admin/creatives · visual preview"
         right={

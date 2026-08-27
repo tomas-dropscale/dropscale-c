@@ -19,7 +19,7 @@ export default async function SettingsLayout({ children }: { children: React.Rea
   const pending = profile?.role === "admin" ? await fetchPendingCounts() : null;
 
   return (
-    <div className="flex h-svh flex-col p-2.5 md:p-5">
+    <div className="flex h-svh flex-col p-0 md:p-5">
       <BrowserChrome
         address="dropscale.app/dashboard/settings"
         right={

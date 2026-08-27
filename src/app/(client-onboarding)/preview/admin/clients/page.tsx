@@ -158,7 +158,7 @@ export default function AdminClientsVisualPreviewPage() {
   if (process.env.NODE_ENV !== "development") notFound();
 
   return (
-    <div className="flex h-svh flex-col p-2.5 md:p-5">
+    <div className="flex h-svh flex-col p-0 md:p-5">
       <BrowserChrome
         address="localhost/admin/client-onboarding · visual preview"
         right={
