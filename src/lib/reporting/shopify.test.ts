@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   resolveAdminToken: vi.fn(),
   fxDailyRates: vi.fn(),
   rateOn: vi.fn(),
+  createServiceClient: vi.fn(),
 }));
 
 vi.mock("../google-ads/crypto", () => ({
@@ -34,6 +35,9 @@ vi.mock("../shopify/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../shopify/client")>();
   return { ...actual, resolveAdminToken: mocks.resolveAdminToken };
 });
+vi.mock("../supabase/service", () => ({
+  createServiceClient: mocks.createServiceClient,
+}));
 vi.mock("../shopify/fx", () => ({
   fxDailyRates: mocks.fxDailyRates,
   rateOn: mocks.rateOn,
@@ -1479,5 +1483,111 @@ describe("V2 Shopify reporting adapter", () => {
       "2026-08-13",
       "2026-08-13",
     );
+  });
+});
+
+describe("keeping a store's labels in step with Shopify", () => {
+  /** Records what the adapter writes back to client_shopify_connections. */
+  function serviceDouble() {
+    const writes: Array<{ id: unknown; patch: Record<string, unknown> }> = [];
+    const query: Record<string, unknown> = {};
+    query.update = (patch: Record<string, unknown>) => {
+      writes.push({ id: null, patch });
+      return query;
+    };
+    query.eq = async (_column: string, value: unknown) => {
+      writes[writes.length - 1].id = value;
+      return { error: null };
+    };
+    return { client: { from: vi.fn(() => query) }, writes };
+  }
+
+  beforeEach(() => {
+    mocks.decryptToken.mockResolvedValue(CLIENT_SECRET);
+    mocks.exchangeReportingClientCredentials.mockResolvedValue("shpat_token");
+  });
+
+  it("writes the new name and domain when the merchant rebrands", async () => {
+    // Edgar e Rodrigo renamed Miyu Yokohama to Yuna Kamakura and moved the
+    // domain. miyuyokohama.com stopped resolving, and every screen went on
+    // labelling the store with it — which reads as a store gone missing.
+    const { client, writes } = serviceDouble();
+    mocks.createServiceClient.mockReturnValue(client);
+    mocks.verifyReportingShop.mockResolvedValue(
+      verifiedShop({ name: "Yuna Kamakura", primaryDomain: "yunakamakura.com" }),
+    );
+
+    await createShopifyReportingAdapter(source());
+
+    expect(writes).toHaveLength(1);
+    expect(writes[0].id).toBe("70000000-0000-4000-8000-000000000004");
+    expect(writes[0].patch).toMatchObject({
+      shopify_name: "Yuna Kamakura",
+      primary_domain: "yunakamakura.com",
+    });
+  });
+
+  it("never touches the identity columns", async () => {
+    // shopId and myshopifyDomain are what the mismatch guard compares. Only
+    // the labels may move.
+    const { client, writes } = serviceDouble();
+    mocks.createServiceClient.mockReturnValue(client);
+    mocks.verifyReportingShop.mockResolvedValue(
+      verifiedShop({ primaryDomain: "yunakamakura.com" }),
+    );
+
+    await createShopifyReportingAdapter(source());
+
+    expect(Object.keys(writes[0].patch).sort()).toEqual(["primary_domain", "updated_at"]);
+  });
+
+  it("stays quiet when nothing changed", async () => {
+    // This runs for every source on every sync; a statement per store per hour
+    // that rewrites a row to what it already holds is pure noise.
+    const { client, writes } = serviceDouble();
+    mocks.createServiceClient.mockReturnValue(client);
+    mocks.verifyReportingShop.mockResolvedValue(verifiedShop());
+
+    await createShopifyReportingAdapter(source());
+
+    expect(writes).toHaveLength(0);
+  });
+
+  it("records a domain the merchant removed altogether", async () => {
+    const { client, writes } = serviceDouble();
+    mocks.createServiceClient.mockReturnValue(client);
+    mocks.verifyReportingShop.mockResolvedValue(verifiedShop({ primaryDomain: null }));
+
+    await createShopifyReportingAdapter(source());
+
+    expect(writes[0].patch).toMatchObject({ primary_domain: null });
+  });
+
+  it("still opens the store when the label write fails", async () => {
+    // A store's whole rollup must not be lost over the spelling of its name.
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    mocks.createServiceClient.mockReturnValue({
+      from: () => ({
+        update: () => ({ eq: async () => ({ error: { message: "denied" } }) }),
+      }),
+    });
+    mocks.verifyReportingShop.mockResolvedValue(
+      verifiedShop({ primaryDomain: "yunakamakura.com" }),
+    );
+
+    const adapter = await createShopifyReportingAdapter(source());
+
+    expect(adapter).toBeTruthy();
+    expect(spy).toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it("opens the store even with no service role configured", async () => {
+    mocks.createServiceClient.mockReturnValue(null);
+    mocks.verifyReportingShop.mockResolvedValue(
+      verifiedShop({ primaryDomain: "yunakamakura.com" }),
+    );
+
+    await expect(createShopifyReportingAdapter(source())).resolves.toBeTruthy();
   });
 });

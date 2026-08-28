@@ -53,6 +53,11 @@ export function HstStoreCogs(props: HstStoreCogsProps) {
   const [notice, setNotice] = React.useState<string | null>(null);
   const [outcome, setOutcome] = React.useState<SyncOutcome | null>(null);
 
+  // Pick from the list while there is one, and only fall back to typing when
+  // the supplier could not be reached or the shop is genuinely not listed.
+  const [manual, setManual] = React.useState(false);
+  const picking = props.shops.length > 0 && !manual;
+
   const saved = props.hstShopId ?? "";
   const dirty = code.trim() !== saved;
 
@@ -166,28 +171,41 @@ export function HstStoreCogs(props: HstStoreCogsProps) {
 
       {props.connected ? (
         <div className="space-y-2">
-          <Label htmlFor="hst-code">Your shop code in HST</Label>
+          <Label htmlFor="hst-code">
+            {picking ? "Which of your HST shops is this store?" : "Shop code in HST"}
+          </Label>
           <div className="flex flex-wrap items-center gap-2">
-            <Input
-              id="hst-code"
-              list="hst-shop-suggestions"
-              inputMode="numeric"
-              autoComplete="off"
-              placeholder="2021639129"
-              className="min-w-[12rem] flex-1"
-              value={code}
-              disabled={busy !== null}
-              onChange={(event) => setCode(event.target.value)}
-            />
-            {/* Suggestions, not a menu: the list needs a live call to HST, and
-                a code must stay typeable on the day that call fails. */}
-            <datalist id="hst-shop-suggestions">
-              {props.shops.map((shop) => (
-                <option key={shop.id} value={shop.id}>
-                  {shop.name}
-                </option>
-              ))}
-            </datalist>
+            {/* Chosen by NAME. The code is an internal id of the supplier's
+                that is shown nowhere in their own interface, so asking for it
+                is asking for something nobody has. The list comes from this
+                client's own login, so it can only ever contain their shops. */}
+            {picking ? (
+              <select
+                id="hst-code"
+                className="min-h-10 min-w-[12rem] flex-1 rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] px-3 text-[13px] text-[var(--text-primary)] outline-none focus-visible:border-[var(--accent-gold)]/40 disabled:opacity-60"
+                value={code}
+                disabled={busy !== null}
+                onChange={(event) => setCode(event.target.value)}
+              >
+                <option value="">Not supplied by HST</option>
+                {props.shops.map((shop) => (
+                  <option key={shop.id} value={shop.id}>
+                    {shop.name}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <Input
+                id="hst-code"
+                inputMode="numeric"
+                autoComplete="off"
+                placeholder="The numeric id of your shop"
+                className="min-w-[12rem] flex-1"
+                value={code}
+                disabled={busy !== null}
+                onChange={(event) => setCode(event.target.value)}
+              />
+            )}
             <Button
               variant={dirty ? "primary" : "secondary"}
               size="sm"
@@ -209,11 +227,19 @@ export function HstStoreCogs(props: HstStoreCogsProps) {
             </Button>
           </div>
 
-          {props.shopsError && (
+          {props.shopsError ? (
             <p className="text-[12px] text-[var(--text-muted)]">
-              Couldn&rsquo;t list your shops ({props.shopsError}) — type the code by hand.
+              Couldn&rsquo;t list your shops ({props.shopsError}) — enter the code by hand.
             </p>
-          )}
+          ) : props.shops.length > 0 ? (
+            <button
+              type="button"
+              className="text-[12px] text-[var(--text-muted)] underline underline-offset-2 hover:text-[var(--text-secondary)]"
+              onClick={() => setManual((on) => !on)}
+            >
+              {manual ? "Choose from my shops instead" : "My shop is not listed — enter a code"}
+            </button>
+          ) : null}
 
           {outcome && (
             <p className="text-[12px] leading-relaxed text-[var(--text-secondary)]">

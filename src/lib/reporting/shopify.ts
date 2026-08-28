@@ -7,6 +7,7 @@ import {
   verifyReportingShop,
 } from "../client-onboarding/shopify";
 import { decryptToken } from "../google-ads/crypto";
+import { createServiceClient } from "../supabase/service";
 import { fxDailyRates, rateOn } from "../shopify/fx";
 import type { CanonicalReportingSource } from "./sources";
 import {
@@ -1229,6 +1230,60 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
 }
 
 /**
+ * Keep the stored shop NAME and PRIMARY DOMAIN in step with Shopify.
+ *
+ * Both are written once, when the store is connected, and never read again —
+ * so a merchant who rebrands keeps the old name on every screen that shows
+ * their store. Edgar e Rodrigo renamed Miyu Yokohama to Yuna Kamakura and
+ * pointed it at a new domain; miyuyokohama.com stopped resolving entirely, and
+ * the campaigns page went on labelling the store with it, which reads as a
+ * store gone missing and a new one that never arrived.
+ *
+ * Every sync already verifies the shop and is handed the current values, so the
+ * fresh answer was in hand and being discarded. Written only when it actually
+ * differs — this runs on every source, every sync.
+ *
+ * Deliberately narrow: never `shopify_domain` or `shopify_shop_id`. Those are
+ * identity, the caller has just proven them unchanged, and they are what the
+ * mismatch guard above compares. Only the labels move.
+ *
+ * Failure is logged and swallowed. A store's whole rollup must not be lost over
+ * the spelling of its name.
+ */
+async function refreshShopLabels(input: {
+  connectionId: string;
+  storedName: string;
+  storedPrimaryDomain: string | null;
+  verifiedName: string;
+  verifiedPrimaryDomain: string | null;
+}): Promise<void> {
+  const name = input.verifiedName.trim();
+  const primaryDomain = input.verifiedPrimaryDomain?.trim().toLowerCase() || null;
+
+  const patch: { shopify_name?: string; primary_domain?: string | null } = {};
+  if (name && name !== input.storedName) patch.shopify_name = name;
+  if (primaryDomain !== (input.storedPrimaryDomain?.trim().toLowerCase() || null)) {
+    patch.primary_domain = primaryDomain;
+  }
+  if (Object.keys(patch).length === 0) return;
+
+  try {
+    const service = createServiceClient();
+    if (!service) return;
+    const { error } = await service
+      .from("client_shopify_connections")
+      .update({ ...patch, updated_at: new Date().toISOString() })
+      .eq("id", input.connectionId);
+    if (error) throw error;
+  } catch (cause) {
+    console.error(
+      `Shopify labels not refreshed for connection ${input.connectionId}:`,
+      cause instanceof Error ? cause.message : cause,
+    );
+  }
+}
+
+/**
  * Opens one purpose-bound V2 Shopify source. The access token remains inside
  * the returned method closures and is never included in their results.
  */
@@ -1273,6 +1328,15 @@ export async function createShopifyReportingAdapter(
       "The Shopify credential no longer matches the store currency.",
     );
   }
+
+  // Identity is proven; only the labels can have moved since it was connected.
+  await refreshShopLabels({
+    connectionId: shopify.connectionId,
+    storedName: shopify.shopifyName,
+    storedPrimaryDomain: shopify.primaryDomain,
+    verifiedName: verified.name,
+    verifiedPrimaryDomain: verified.primaryDomain,
+  });
 
   return boundAdapter({
     shopDomain: shopify.domain,

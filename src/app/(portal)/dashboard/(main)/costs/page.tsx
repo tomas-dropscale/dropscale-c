@@ -41,7 +41,7 @@ async function loadHstPanel(
   clientId: string,
   adAccountId: string,
   storeName: string,
-): Promise<HstStoreCogsProps> {
+): Promise<HstStoreCogsProps | null> {
   const base: HstStoreCogsProps = {
     adAccountId,
     storeName,
@@ -62,6 +62,10 @@ async function loadHstPanel(
       clientHstStatus(service, clientId),
       service.from("ad_accounts").select("hst_shop_id").eq("id", adAccountId).maybeSingle(),
     ]);
+
+    // Not provisioned here yet: show nothing rather than a button that can
+    // only fail.
+    if (!status.available) return null;
 
     let shops: HstStoreCogsProps["shops"] = [];
     let shopsError: string | null = null;

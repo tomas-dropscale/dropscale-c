@@ -28,6 +28,15 @@ export type ClientHstStatus = {
   /** HST's own words about the last failure, or null. */
   lastError: string | null;
   connectedAt: string | null;
+  /**
+   * False until migration 0089 has been applied.
+   *
+   * Code and migrations do not land at the same instant, and the panel this
+   * feeds is on every client's cost page. Offering a "Connect" button whose
+   * only possible outcome is a database error is worse than not offering it,
+   * so the surface hides itself until the table it needs exists.
+   */
+  available: boolean;
 };
 
 type Row = {
@@ -114,17 +123,25 @@ export async function clientHstStatus(
   service: Service,
   clientId: string,
 ): Promise<ClientHstStatus> {
-  const { data } = await service
+  const { data, error } = await service
     .from("client_hst_credentials")
     .select("last_error, connected_at")
     .eq("client_id", clientId)
     .maybeSingle();
+
+  // 42P01 is "relation does not exist" — 0089 has not been applied here yet.
+  // Any other error is a real failure and still leaves the surface available,
+  // so it can say so rather than vanish.
+  if (error?.code === "42P01") {
+    return { connected: false, lastError: null, connectedAt: null, available: false };
+  }
 
   const row = data as { last_error: string | null; connected_at: string } | null;
   return {
     connected: Boolean(row),
     lastError: row?.last_error ?? null,
     connectedAt: row?.connected_at ?? null,
+    available: true,
   };
 }
 
