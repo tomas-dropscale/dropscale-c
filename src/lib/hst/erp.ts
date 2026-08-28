@@ -10,6 +10,16 @@
 const LOGIN_URL = "https://hsterp.com/login";
 const REFRESH_URL = "https://hsterp.com/refresh-token";
 
+/**
+ * How long any one ERP call may take before we give up on it.
+ *
+ * Without this a slow or hanging hsterp.com stalled whatever awaited it — and
+ * the costs page loads a shop list live on render, so a bad minute at the
+ * supplier became a page that would not paint. A bounded wait turns that into a
+ * fast, handled failure: the caller falls back rather than hangs.
+ */
+const REQUEST_TIMEOUT_MS = 15_000;
+
 /** Renew a little before the token actually dies, not at the last second. */
 export const EXPIRY_MARGIN_MS = 5 * 60 * 1000;
 
@@ -88,6 +98,7 @@ export async function hstLogin(credentials: {
         captcha_code: credentials.captchaCode ?? "",
         captcha_key: "",
       }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
   } catch {
     throw new HstError("Couldn't reach HST to sign in.");
@@ -116,7 +127,12 @@ export async function hstLogin(credentials: {
 export async function hstRefresh(refreshToken: string): Promise<HstSession | null> {
   let res: Response;
   try {
-    res = await fetch(REFRESH_URL, { method: "POST", headers: erpHeaders(), body: JSON.stringify({ refreshToken }) });
+    res = await fetch(REFRESH_URL, {
+      method: "POST",
+      headers: erpHeaders(),
+      body: JSON.stringify({ refreshToken }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
   } catch {
     return null;
   }
@@ -131,9 +147,17 @@ export async function hstRefresh(refreshToken: string): Promise<HstSession | nul
  * and res.json() would fail on "<" while saying nothing about why.
  */
 export async function hstGet(url: string, token: string): Promise<unknown> {
-  const res = await fetch(url, {
-    headers: erpHeaders({ Authorization: `Bearer ${token}` }),
-  });
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      headers: erpHeaders({ Authorization: `Bearer ${token}` }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch {
+    // A network refusal or a timeout — never a token problem, so not flagged
+    // unauthorized: retrying with a fresh token would not help.
+    throw new HstError("Couldn't reach HST.");
+  }
 
   if (res.status === 401 || res.status === 403) {
     throw new HstError("HST rejected the token — the session likely expired.", true);

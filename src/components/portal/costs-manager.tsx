@@ -10,6 +10,7 @@ import {
   Plus,
   RefreshCw,
   Trash2,
+  Truck,
   X,
 } from "lucide-react";
 
@@ -34,6 +35,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { createClient } from "@/lib/supabase/client";
+import { useCogsFill } from "@/components/portal/cogs-fill";
 import { money } from "@/lib/format";
 import { fmt, type Dictionary } from "@/lib/i18n";
 import { useI18n } from "@/lib/i18n/provider";
@@ -49,6 +51,9 @@ import { cn } from "@/lib/utils";
  */
 
 const DEBOUNCE_MS = 800;
+/** Fill animation: how long one cell takes, and the gap between rows. */
+const FILL_MS = 620;
+const STAGGER_MS = 45;
 
 type Props = {
   account: AdAccount;
@@ -75,10 +80,20 @@ export function CostsManager({
 }: Props) {
   const router = useRouter();
   const { d } = useI18n();
+  const { nonce } = useCogsFill();
   const supabase = () => createClient();
   const [error, setError] = React.useState<string | null>(null);
   const [syncing, setSyncing] = React.useState(false);
   const [expanded, setExpanded] = React.useState<string | null>(null);
+
+  // The supplier "fill in": while a pull is in flight the cost cells shimmer,
+  // and when the fresh costs land each newcomer cascades in. `filled` maps a
+  // product to its place in that cascade and is empty at rest.
+  const [filling, setFilling] = React.useState(false);
+  const [filled, setFilled] = React.useState<Map<string, number>>(new Map());
+  const pendingRef = React.useRef(false);
+  const prevCostRef = React.useRef<Map<string, number>>(new Map());
+  const firstNonce = React.useRef(nonce);
 
   // Debounced inline edits: productId → pending timer.
   const timers = React.useRef(new Map<string, ReturnType<typeof setTimeout>>());
@@ -113,12 +128,86 @@ export function CostsManager({
     [members],
   );
 
-  /** Manual record in force today, or null. */
-  function currentCost(productId: string): ProductCost | null {
-    const history = costsByProduct.get(productId) ?? [];
+  /**
+   * The cost actually in force today, per product — the SAME one the profit
+   * engine resolves. That means the most recent record effective on or before
+   * today and, on a same-day tie, the supplier's figure over a manual one
+   * (loadCostContext.preferred). Reading it any other way let the grid show a
+   * number the client's profit was not computed from.
+   */
+  const currentByProduct = React.useMemo(() => {
     const now = today();
-    return history.find((record) => record.effective_from <= now) ?? null;
-  }
+    const map = new Map<string, ProductCost | null>();
+    for (const [productId, history] of costsByProduct) {
+      let best: ProductCost | null = null;
+      for (const record of history) {
+        if (record.effective_from > now) continue;
+        if (!best) {
+          best = record;
+          continue;
+        }
+        if (record.effective_from < best.effective_from) break;
+        if (record.source === "hst" && best.source !== "hst") best = record;
+      }
+      map.set(productId, best);
+    }
+    return map;
+  }, [costsByProduct]);
+
+  const currentCost = (productId: string): ProductCost | null =>
+    currentByProduct.get(productId) ?? null;
+
+  // A supplier pull began (nonce bumped by the panel above): shimmer until the
+  // refreshed costs arrive. A safety timer clears it if the pull failed or
+  // changed nothing, so the table never shimmers forever.
+  React.useEffect(() => {
+    if (nonce === firstNonce.current) return;
+    pendingRef.current = true;
+    setFilling(true);
+    const safety = setTimeout(() => {
+      pendingRef.current = false;
+      setFilling(false);
+    }, 8000);
+    return () => clearTimeout(safety);
+  }, [nonce]);
+
+  // Fresh costs landed. If a pull is pending, cascade every cost that newly
+  // appeared or changed, in table order; otherwise just keep the baseline the
+  // next diff compares against.
+  React.useEffect(() => {
+    const snapshot = new Map<string, number>();
+    for (const product of products) {
+      const record = currentByProduct.get(product.id);
+      if (record) snapshot.set(product.id, Number(record.cost));
+    }
+
+    if (!pendingRef.current) {
+      prevCostRef.current = snapshot;
+      return;
+    }
+
+    const stagger = new Map<string, number>();
+    let step = 0;
+    for (const product of products) {
+      const next = snapshot.get(product.id);
+      if (next === undefined) continue;
+      const prev = prevCostRef.current.get(product.id);
+      if (prev === undefined || Math.abs(prev - next) > 1e-6) {
+        stagger.set(product.id, step);
+        step += 1;
+      }
+    }
+    prevCostRef.current = snapshot;
+    pendingRef.current = false;
+    setFilling(false);
+    setFilled(stagger);
+    if (step === 0) return;
+    const clear = setTimeout(
+      () => setFilled(new Map()),
+      (step - 1) * STAGGER_MS + FILL_MS + 150,
+    );
+    return () => clearTimeout(clear);
+  }, [costs, products, currentByProduct]);
 
   async function resync() {
     try {
@@ -199,7 +288,15 @@ export function CostsManager({
       {/* ---- products ------------------------------------------------------ */}
       <section className="space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <h2 className="label-caps">{fmt(d.costs.products, { count: products.length })}</h2>
+          <div className="flex items-center gap-2">
+            <h2 className="label-caps">{fmt(d.costs.products, { count: products.length })}</h2>
+            {filling && (
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--accent-gold)]/30 bg-[var(--accent-gold-dim)] px-2.5 py-0.5 text-[11px] font-medium text-[var(--accent-gold-strong)]">
+                <RefreshCw className="size-3 animate-spin" />
+                {d.costs.supplierFilling}
+              </span>
+            )}
+          </div>
           <Button variant="secondary" size="sm" loading={syncing} onClick={syncProducts}>
             <RefreshCw />
             {d.costs.syncProducts}
@@ -231,6 +328,13 @@ export function CostsManager({
                     const isOpen = expanded === product.id;
                     const fallback =
                       (Number(product.price) * Number(account.default_product_cost_pct)) / 100;
+                    // Supplier costs update hourly and win the day, so the cell
+                    // shows the figure rather than an input that could not
+                    // override it. During a pull, cells cascade or shimmer.
+                    const isHst = record?.source === "hst";
+                    const fillIndex = filled.get(product.id);
+                    const isFilling = fillIndex !== undefined;
+                    const isShimmer = filling && !isFilling;
 
                     return (
                       <React.Fragment key={product.id}>
@@ -266,18 +370,49 @@ export function CostsManager({
                             className="px-4 py-2.5 text-right"
                             onClick={(event) => event.stopPropagation()}
                           >
-                            <Input
-                              value={drafts[product.id] ?? (record ? String(record.cost) : "")}
-                              onChange={(event) => scheduleCostSave(product.id, event.target.value)}
-                              placeholder={fallback.toFixed(2)}
-                              inputMode="decimal"
-                              className="ml-auto h-8 w-24 text-right"
-                              aria-label={fmt(d.costs.costOf, { product: product.title })}
-                            />
+                            <div
+                              className={cn(
+                                "ml-auto w-24",
+                                isFilling && "cost-fill",
+                                isShimmer && "cost-shimmer",
+                              )}
+                              style={
+                                isFilling
+                                  ? ({
+                                      "--fill-delay": `${(fillIndex ?? 0) * STAGGER_MS}ms`,
+                                    } as React.CSSProperties)
+                                  : undefined
+                              }
+                            >
+                              {isHst && record ? (
+                                <div
+                                  className="flex h-8 items-center justify-end gap-1 rounded-[8px] border border-[var(--accent-gold)]/25 bg-[var(--accent-gold-dim)] px-2 text-[13px] font-medium text-[var(--text-primary)]"
+                                  title={d.costs.supplierManagedHint}
+                                >
+                                  {money(record.cost, record.currency)}
+                                </div>
+                              ) : (
+                                <Input
+                                  value={drafts[product.id] ?? (record ? String(record.cost) : "")}
+                                  onChange={(event) =>
+                                    scheduleCostSave(product.id, event.target.value)
+                                  }
+                                  placeholder={fallback.toFixed(2)}
+                                  inputMode="decimal"
+                                  className="h-8 w-full text-right"
+                                  aria-label={fmt(d.costs.costOf, { product: product.title })}
+                                />
+                              )}
+                            </div>
                           </td>
                           <td className="px-4 py-2.5">
                             {inCollection ? (
                               <Badge variant="gold">{d.costs.sourceBundle}</Badge>
+                            ) : isHst ? (
+                              <Badge variant="gold">
+                                <Truck className="size-3" />
+                                {d.costs.sourceSupplier}
+                              </Badge>
                             ) : record ? (
                               <Badge variant="success">{d.costs.sourceManual}</Badge>
                             ) : (

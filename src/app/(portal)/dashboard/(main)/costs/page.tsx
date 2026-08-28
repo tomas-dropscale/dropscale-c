@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { Suspense } from "react";
 import { PackageOpen } from "lucide-react";
 
 import { fetchAccounts } from "@/lib/portal/data";
@@ -8,6 +9,7 @@ import { clientHstStatus } from "@/lib/portal/client-hst";
 import { activeWorkspaceId } from "@/lib/portal/workspace";
 import { fetchHstShops } from "@/lib/admin/hst-cost-sync";
 import { HstStoreCogs, type HstStoreCogsProps } from "@/components/portal/hst-store-cogs";
+import { CogsFillProvider } from "@/components/portal/cogs-fill";
 import { CostsManager } from "@/components/portal/costs-manager";
 import { StoreSelector } from "@/components/portal/store-selector";
 import { PageContainer } from "@/components/ui/page-container";
@@ -94,6 +96,44 @@ async function loadHstPanel(
 }
 
 /**
+ * The supplier panel, resolved off the page's critical path.
+ *
+ * loadHstPanel makes a live call to HST for a connected client's shop list;
+ * awaiting it in the page body held the whole Costs screen behind that network
+ * round-trip. Here it sits inside its own Suspense boundary, so the grid paints
+ * at once and the panel streams in after.
+ */
+async function HstPanel({
+  clientId,
+  adAccountId,
+  storeName,
+}: {
+  clientId: string;
+  adAccountId: string;
+  storeName: string;
+}) {
+  const panel = await loadHstPanel(clientId, adAccountId, storeName);
+  if (!panel) return null;
+  return <HstStoreCogs {...panel} />;
+}
+
+/** The panel's silhouette while its shop list loads — same frame, no content. */
+function HstPanelSkeleton() {
+  return (
+    <section className="panel space-y-4 p-4 md:p-5">
+      <div className="flex animate-pulse items-start gap-3">
+        <div className="size-9 shrink-0 rounded-[10px] bg-[var(--bg-elevated)]" />
+        <div className="min-w-0 flex-1 space-y-2">
+          <div className="h-4 w-44 rounded bg-[var(--bg-elevated)]" />
+          <div className="h-3 w-3/4 rounded bg-[var(--bg-elevated)]" />
+        </div>
+      </div>
+      <div className="h-10 w-full max-w-md animate-pulse rounded-[10px] bg-[var(--bg-elevated)]" />
+    </section>
+  );
+}
+
+/**
  * COGS — product costs, tiers and bundles for ONE store at a time (costs are
  * per-store config; a ?store= param picks which, defaulting to the first).
  */
@@ -162,9 +202,6 @@ export default async function CostsPage({
   // The panel belongs to whoever owns the store, which on this page is always
   // the active workspace — the page would not have rendered otherwise.
   const clientId = await activeWorkspaceId();
-  const hstPanel = clientId
-    ? await loadHstPanel(clientId, selected.id, selected.store_name ?? selected.id)
-    : null;
 
   return (
     <PageContainer
@@ -172,20 +209,35 @@ export default async function CostsPage({
       description={d.portal.cogsSubtitle}
       actions={<StoreSelector accounts={accounts} current={selected.id} />}
     >
-      {hstPanel && (
-        <div className="mb-4">
-          <HstStoreCogs {...hstPanel} />
-        </div>
-      )}
-      <CostsManager
-        account={selected}
-        products={products}
-        costs={costsRes.data ?? []}
-        tiers={tiersRes.data ?? []}
-        collections={collections}
-        members={membersRes.data ?? []}
-        collectionTiers={cTiersRes.data ?? []}
-      />
+      {/* One provider around both halves so choosing a shop in the panel can
+          drive the fill animation down in the grid — they are siblings with no
+          prop path between them otherwise. */}
+      <CogsFillProvider>
+        {/* Streamed on its own: the panel loads its shop list live from the
+            supplier, and the grid below must not wait on that network call. The
+            page paints immediately with a placeholder; the panel swaps in when
+            HST answers (or falls back to manual entry if it does not). */}
+        {clientId && (
+          <div className="mb-4">
+            <Suspense fallback={<HstPanelSkeleton />}>
+              <HstPanel
+                clientId={clientId}
+                adAccountId={selected.id}
+                storeName={selected.store_name ?? selected.id}
+              />
+            </Suspense>
+          </div>
+        )}
+        <CostsManager
+          account={selected}
+          products={products}
+          costs={costsRes.data ?? []}
+          tiers={tiersRes.data ?? []}
+          collections={collections}
+          members={membersRes.data ?? []}
+          collectionTiers={cTiersRes.data ?? []}
+        />
+      </CogsFillProvider>
     </PageContainer>
   );
 }

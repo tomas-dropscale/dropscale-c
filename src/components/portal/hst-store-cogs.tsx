@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
 import { FormAlert } from "@/components/auth/auth-card";
 import { HstCaptcha, randomHstCaptcha } from "@/components/portal/hst-captcha";
+import { useCogsFill } from "@/components/portal/cogs-fill";
 
 export type HstStoreCogsProps = {
   adAccountId: string;
@@ -43,6 +44,7 @@ type SyncOutcome = {
  */
 export function HstStoreCogs(props: HstStoreCogsProps) {
   const router = useRouter();
+  const { begin } = useCogsFill();
   const [username, setUsername] = React.useState("");
   const [password, setPassword] = React.useState("");
   const [captcha, setCaptcha] = React.useState("");
@@ -130,8 +132,57 @@ export function HstStoreCogs(props: HstStoreCogsProps) {
   async function syncNow() {
     setBusy("sync");
     setNotice(null);
-    // A first pull looks further back than the hourly one: three days of orders
-    // would price only the handful of products that happened to sell.
+    setOutcome(null);
+    // Tell the grid below to start filling, then pull. A first pull looks
+    // further back than the hourly one: three days of orders would price only
+    // the handful of products that happened to sell.
+    begin();
+    const result = await call<SyncOutcome>(
+      "/api/hst/sync-costs",
+      json({ adAccountId: props.adAccountId, sinceDays: 30 }),
+    );
+    if (result) {
+      setOutcome(result);
+      router.refresh();
+    }
+    setBusy(null);
+  }
+
+  /**
+   * Choosing a shop is the whole gesture: it saves the mapping and pulls that
+   * shop's costs in one motion, so the grid below fills in without a second
+   * click. Only a real change to a listed shop does this — reselecting the
+   * current one, or clearing to "not supplied", never triggers a pull.
+   */
+  async function selectShop(next: string) {
+    setCode(next);
+    const trimmed = next.trim();
+    if (trimmed === saved) return;
+
+    setBusy("sync");
+    setError(null);
+    setNotice(null);
+    setOutcome(null);
+
+    // The sync reads the shop code from the store row, so it has to be saved
+    // before the pull — not just held in this input.
+    const savedCode = await call(
+      "/api/hst/store-code",
+      json({ adAccountId: props.adAccountId, shopId: trimmed || null }),
+    );
+    if (!savedCode) {
+      setBusy(null);
+      return;
+    }
+
+    if (!trimmed) {
+      setNotice("Shop code cleared.");
+      router.refresh();
+      setBusy(null);
+      return;
+    }
+
+    begin();
     const result = await call<SyncOutcome>(
       "/api/hst/sync-costs",
       json({ adAccountId: props.adAccountId, sinceDays: 30 }),
@@ -185,7 +236,7 @@ export function HstStoreCogs(props: HstStoreCogsProps) {
                 className="min-h-10 min-w-[12rem] flex-1 rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] px-3 text-[13px] text-[var(--text-primary)] outline-none focus-visible:border-[var(--accent-gold)]/40 disabled:opacity-60"
                 value={code}
                 disabled={busy !== null}
-                onChange={(event) => setCode(event.target.value)}
+                onChange={(event) => selectShop(event.target.value)}
               >
                 <option value="">Not supplied by HST</option>
                 {props.shops.map((shop) => (
