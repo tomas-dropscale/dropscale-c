@@ -1,7 +1,12 @@
 import { NextResponse, type NextRequest } from "next/server";
 
-import { captureGoogleBillingStartAsAgency } from "@/lib/google-ads/billing-start";
+import {
+  captureBillingStartFromConnection,
+  captureGoogleBillingStartAsAgency,
+  type CapturedGoogleBillingStart,
+} from "@/lib/google-ads/billing-start";
 import { searchGoogleAds } from "@/lib/google-ads/client";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { decryptToken } from "@/lib/google-ads/crypto";
 import { createServiceClient } from "@/lib/supabase/service";
 import { createClient } from "@/lib/supabase/server";
@@ -36,6 +41,69 @@ function canonicalCustomerId(value: unknown): string | null {
   if (typeof value !== "string" || !/^[0-9\s-]+$/.test(value)) return null;
   const digits = value.replace(/[^0-9]/g, "");
   return /^\d{10}$/.test(digits) ? digits : null;
+}
+
+/**
+ * A zero baseline drawn from the Google reporting connection this account is
+ * bound to, for when the live agency read cannot reach it.
+ *
+ * The connection must be the healthy EUR source for exactly this customer id —
+ * the same identity, currency and time-zone gates ensureAutomaticBillingStarts
+ * proves before it writes its own zero baseline. Anything short of that returns
+ * null, and the caller keeps the original "could not verify" failure rather
+ * than inventing a baseline for an account we cannot stand behind.
+ */
+async function captureFromReportingConnection(
+  service: SupabaseClient,
+  adAccountId: string,
+  customerId: string,
+): Promise<CapturedGoogleBillingStart | null> {
+  // Any failure here means "no fallback", never a crash: the live read already
+  // failed, and the caller's own 502 is the right answer if this cannot stand
+  // in for it.
+  try {
+    const { data: binding } = await service
+      .from("client_reporting_bindings")
+      .select("google_ads_connection_id")
+      .eq("ad_account_id", adAccountId)
+      .in("status", ["active", "staged"])
+      .not("google_ads_connection_id", "is", null)
+      .maybeSingle();
+    const connectionId = (binding as { google_ads_connection_id?: string } | null)
+      ?.google_ads_connection_id;
+    if (!connectionId) return null;
+
+    const { data: connection } = await service
+      .from("client_google_ads_connections")
+      .select("status, currency, time_zone, windsor_account_id")
+      .eq("id", connectionId)
+      .maybeSingle();
+    const row = connection as
+      | {
+          status: string;
+          currency: string | null;
+          time_zone: string | null;
+          windsor_account_id: string;
+        }
+      | null;
+    if (
+      !row ||
+      row.status !== "connected" ||
+      canonicalCustomerId(row.windsor_account_id) !== customerId ||
+      (row.currency ?? "").toUpperCase() !== "EUR" ||
+      !row.time_zone?.trim()
+    ) {
+      return null;
+    }
+
+    return captureBillingStartFromConnection({
+      customerId,
+      currency: row.currency ?? "",
+      timeZone: row.time_zone,
+    });
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -218,17 +286,29 @@ export async function POST(request: NextRequest) {
       search ? { search } : {},
     );
   } catch (error) {
-    console.error("Google billing-start capture failed:", {
-      targetKind: target.kind,
-      targetId: target.id,
-      message: error instanceof Error ? error.message : "Unknown Google Ads error",
-    });
-    return NextResponse.json(
-      {
-        error: `Google Ads could not verify ${googleAdsCustomerId.slice(0, 3)}-${googleAdsCustomerId.slice(3, 6)}-${googleAdsCustomerId.slice(6)}. Confirm the agency manager account has access to it, then try again; tracking has not started.`,
-      },
-      { status: 502 },
-    );
+    // The live read failed: no per-account grant and the agency manager cannot
+    // see this account. For a source connected through Windsor that is the
+    // normal case, not an error — the grant is Windsor's, never ours. Fall back
+    // to the zero baseline the automatic path already writes for such accounts,
+    // built from the reporting connection this account is bound to.
+    const fallback =
+      target.kind === "account"
+        ? await captureFromReportingConnection(service, target.id, googleAdsCustomerId)
+        : null;
+    if (!fallback) {
+      console.error("Google billing-start capture failed:", {
+        targetKind: target.kind,
+        targetId: target.id,
+        message: error instanceof Error ? error.message : "Unknown Google Ads error",
+      });
+      return NextResponse.json(
+        {
+          error: `Google Ads could not verify ${googleAdsCustomerId.slice(0, 3)}-${googleAdsCustomerId.slice(3, 6)}-${googleAdsCustomerId.slice(6)}, and it has no connected reporting source to take a zero baseline from; tracking has not started.`,
+        },
+        { status: 502 },
+      );
+    }
+    captured = fallback;
   }
 
   if (captured.google_ads_customer_id !== googleAdsCustomerId) {

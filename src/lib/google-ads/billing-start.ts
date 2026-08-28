@@ -262,6 +262,60 @@ export async function fetchGoogleDailyCostMicrosAsAgency(
  * be described as proof that every event before that instant had already been
  * incorporated into Google's reporting counter.
  */
+/**
+ * A zero baseline taken from the reporting connection instead of a live Google
+ * read.
+ *
+ * The immutable capture above reads Google's counter through the agency manager
+ * account. That is the right anchor when the manager account can see the ad
+ * account — and impossible when it cannot, which is every account connected
+ * through Windsor, where the OAuth grant lives with Windsor and never with us.
+ * For a platform whose spend of record already comes from Windsor, refusing a
+ * billing start on those accounts means they can never go live at all.
+ *
+ * So this mirrors, exactly, the zero baseline that ensureAutomaticBillingStarts
+ * already writes for a freshly connected account (owner policy, 2026-08-17):
+ * baseline zero, an `observed_google_counter` basis, dated the capture day, so
+ * nothing before it is ever billed and commission counts spend from here on.
+ * It reads no network and asserts no live counter — a zero baseline is the
+ * honest floor, and it matches what the automatic path has been writing all
+ * along, so the two are indistinguishable to invoicing because they mean the
+ * same thing.
+ *
+ * Same shape and same `source` as the agency capture, because the commit path,
+ * the constraint and the invoice arithmetic all already accept exactly this.
+ */
+export function captureBillingStartFromConnection(
+  input: { customerId: string; currency: string; timeZone: string },
+  dependencies: Pick<CaptureDependencies, "now" | "randomUUID"> = {},
+): CapturedGoogleBillingStart {
+  const now = dependencies.now ?? (() => new Date());
+  const randomUUID = dependencies.randomUUID ?? (() => crypto.randomUUID());
+  const customerId = input.customerId.replace(/\D/g, "");
+  if (!/^\d{10}$/.test(customerId)) {
+    throw new Error("A billing start needs a 10-digit Google customer id.");
+  }
+  if (input.currency.trim().toUpperCase() !== "EUR") {
+    throw new Error(`The reporting connection currency is ${input.currency}, not EUR.`);
+  }
+  const timeZone = input.timeZone.trim();
+  if (!timeZone) throw new Error("The reporting connection has no time zone.");
+
+  const at = now();
+  const localDate = googleLocalDate(at, timeZone);
+  return {
+    google_ads_customer_id: customerId,
+    google_local_date: localDate,
+    google_time_zone: timeZone,
+    currency: "EUR",
+    baseline_cost_micros: "0",
+    capture_started_at: at.toISOString(),
+    captured_at: at.toISOString(),
+    capture_id: randomUUID(),
+    source: "agency",
+  };
+}
+
 export async function captureGoogleBillingStartAsAgency(
   customerId: string,
   dependencies: CaptureDependencies = {},

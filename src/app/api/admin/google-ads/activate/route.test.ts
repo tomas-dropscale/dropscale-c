@@ -3,6 +3,7 @@ import { NextRequest } from "next/server";
 
 const mocks = vi.hoisted(() => ({
   capture: vi.fn(),
+  captureFromConnection: vi.fn(),
   createServiceClient: vi.fn(),
   createClient: vi.fn(),
   rpc: vi.fn(),
@@ -11,8 +12,12 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("server-only", () => ({}));
+// The connection fallback's pure capture is covered in billing-start.test.ts;
+// here it is a spy so the route's own connection lookup and wiring are what's
+// under test.
 vi.mock("@/lib/google-ads/billing-start", () => ({
   captureGoogleBillingStartAsAgency: mocks.capture,
+  captureBillingStartFromConnection: mocks.captureFromConnection,
 }));
 vi.mock("@/lib/google-ads/client", () => ({
   searchGoogleAds: mocks.searchGoogleAds,
@@ -366,5 +371,154 @@ describe("admin Google billing activation", () => {
         p_google_ads_customer_id: "1234567890",
       }),
     );
+  });
+});
+
+/**
+ * A service client whose fallback tables are populated, so the connection-based
+ * zero baseline can be exercised. Every builder method chains; maybeSingle
+ * returns the row set for that table.
+ */
+function serviceWithConnection(rows: {
+  secretToken?: string | null;
+  binding?: Record<string, unknown> | null;
+  connection?: Record<string, unknown> | null;
+}) {
+  const dataFor = (table: string) =>
+    table === "ad_accounts"
+      ? { google_ads_refresh_token: rows.secretToken ?? null }
+      : table === "client_reporting_bindings"
+        ? rows.binding ?? null
+        : table === "client_google_ads_connections"
+          ? rows.connection ?? null
+          : null;
+
+  return {
+    rpc: mocks.rpc,
+    from: vi.fn((table: string) => {
+      const chain: Record<string, unknown> = {};
+      for (const method of ["select", "eq", "in", "not"]) {
+        chain[method] = vi.fn(() => chain);
+      }
+      chain.maybeSingle = vi.fn(async () => ({ data: dataFor(table), error: null }));
+      return chain;
+    }),
+  };
+}
+
+describe("Windsor connection billing fallback", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.createClient.mockResolvedValue(
+      session({
+        account: {
+          id: ACCOUNT_ID,
+          store_name: "Yuna Kamakura",
+          google_ads_customer_id: "3104501594",
+          status: "pending",
+        },
+      }),
+    );
+    // No per-account grant, and the agency read cannot see the account.
+    mocks.capture.mockRejectedValue(new Error("PERMISSION_DENIED"));
+    mocks.captureFromConnection.mockReturnValue({
+      google_ads_customer_id: "3104501594",
+      google_local_date: "2026-08-28",
+      google_time_zone: "Europe/Lisbon",
+      currency: "EUR",
+      baseline_cost_micros: "0",
+      capture_started_at: "2026-08-28T22:30:00.000Z",
+      captured_at: "2026-08-28T22:30:00.000Z",
+      capture_id: "conn-capture-1",
+      source: "agency",
+    });
+    mocks.rpc.mockResolvedValue({
+      data: [{ id: ACCOUNT_ID, store_name: "Yuna Kamakura", status: "active" }],
+      error: null,
+    });
+  });
+
+  it("takes a zero baseline from the bound reporting connection when the agency can't read it", async () => {
+    mocks.createServiceClient.mockReturnValue(
+      serviceWithConnection({
+        secretToken: null,
+        binding: { google_ads_connection_id: "conn-1" },
+        connection: {
+          status: "connected",
+          currency: "EUR",
+          time_zone: "Europe/Lisbon",
+          windsor_account_id: "310-450-1594",
+        },
+      }),
+    );
+
+    const response = await POST(request({ accountId: ACCOUNT_ID }));
+
+    expect(response.status).toBe(200);
+    // Committed through the same RPC, with a zero baseline and the agency
+    // source the automatic path already writes.
+    expect(mocks.rpc).toHaveBeenCalledWith(
+      "commit_google_ads_billing_start",
+      expect.objectContaining({
+        p_account_id: ACCOUNT_ID,
+        p_google_ads_customer_id: "3104501594",
+        p_baseline_cost_micros: "0",
+        p_currency: "EUR",
+        p_google_time_zone: "Europe/Lisbon",
+        p_source: "agency",
+        p_reviewed_by: ADMIN_ID,
+      }),
+    );
+  });
+
+  it("does not fall back when the connection is a different customer", async () => {
+    mocks.createServiceClient.mockReturnValue(
+      serviceWithConnection({
+        secretToken: null,
+        binding: { google_ads_connection_id: "conn-1" },
+        connection: {
+          status: "connected",
+          currency: "EUR",
+          time_zone: "Europe/Lisbon",
+          windsor_account_id: "9999999999",
+        },
+      }),
+    );
+
+    const response = await POST(request({ accountId: ACCOUNT_ID }));
+
+    expect(response.status).toBe(502);
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+
+  it("does not fall back on a non-EUR connection", async () => {
+    mocks.createServiceClient.mockReturnValue(
+      serviceWithConnection({
+        secretToken: null,
+        binding: { google_ads_connection_id: "conn-1" },
+        connection: {
+          status: "connected",
+          currency: "HUF",
+          time_zone: "Europe/Budapest",
+          windsor_account_id: "310-450-1594",
+        },
+      }),
+    );
+
+    const response = await POST(request({ accountId: ACCOUNT_ID }));
+
+    expect(response.status).toBe(502);
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+
+  it("does not fall back when the account has no connected reporting source", async () => {
+    mocks.createServiceClient.mockReturnValue(
+      serviceWithConnection({ secretToken: null, binding: null, connection: null }),
+    );
+
+    const response = await POST(request({ accountId: ACCOUNT_ID }));
+
+    expect(response.status).toBe(502);
+    expect(mocks.rpc).not.toHaveBeenCalled();
   });
 });

@@ -6,6 +6,7 @@ vi.mock("./client", () => ({ searchGoogleAdsAsAgency: vi.fn() }));
 import {
   billableMicrosSinceBaseline,
   captureGoogleBillingEndAsAgency,
+  captureBillingStartFromConnection,
   captureGoogleBillingStartAsAgency,
   decimalToMicros,
   fetchGoogleDailyCostMicrosAsAgency,
@@ -278,5 +279,66 @@ describe("agency Google billing reads", () => {
       captureGoogleBillingStartAsAgency("1234567890", { search }),
     ).rejects.toThrow(/USD, not EUR/i);
     expect(search).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("zero baseline from a reporting connection", () => {
+  const NOW = new Date("2026-08-28T22:30:00.000Z"); // 23:30 in Lisbon (summer, UTC+1)
+  const deps = { now: () => NOW, randomUUID: () => "conn-capture-1" };
+
+  it("writes a zero baseline dated the capture day in the account's zone", () => {
+    const start = captureBillingStartFromConnection(
+      { customerId: "310-450-1594", currency: "EUR", timeZone: "Europe/Lisbon" },
+      deps,
+    );
+
+    expect(start).toEqual({
+      google_ads_customer_id: "3104501594",
+      google_local_date: "2026-08-28",
+      google_time_zone: "Europe/Lisbon",
+      currency: "EUR",
+      baseline_cost_micros: "0",
+      capture_started_at: NOW.toISOString(),
+      captured_at: NOW.toISOString(),
+      capture_id: "conn-capture-1",
+      source: "agency",
+    });
+  });
+
+  it("dates it by the account's zone, not UTC — the instant that is next-day in Tokyo", () => {
+    // 22:30 UTC is already 07:30 the next day in Tokyo. The billing day must be
+    // the account's local day, or a whole day of spend lands on the wrong side.
+    const start = captureBillingStartFromConnection(
+      { customerId: "3104501594", currency: "EUR", timeZone: "Asia/Tokyo" },
+      deps,
+    );
+    expect(start.google_local_date).toBe("2026-08-29");
+  });
+
+  it("refuses a non-EUR connection, because the baseline and invoices are EUR-only", () => {
+    expect(() =>
+      captureBillingStartFromConnection(
+        { customerId: "3104501594", currency: "HUF", timeZone: "Europe/Budapest" },
+        deps,
+      ),
+    ).toThrow(/EUR/);
+  });
+
+  it("refuses a connection with no time zone", () => {
+    expect(() =>
+      captureBillingStartFromConnection(
+        { customerId: "3104501594", currency: "EUR", timeZone: "  " },
+        deps,
+      ),
+    ).toThrow(/time zone/i);
+  });
+
+  it("refuses anything that is not a 10-digit customer id", () => {
+    expect(() =>
+      captureBillingStartFromConnection(
+        { customerId: "123", currency: "EUR", timeZone: "Europe/Lisbon" },
+        deps,
+      ),
+    ).toThrow(/10-digit/);
   });
 });
