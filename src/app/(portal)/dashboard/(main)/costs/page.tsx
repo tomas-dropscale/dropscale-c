@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { Suspense } from "react";
-import { PackageOpen } from "lucide-react";
+import { Loader2, PackageOpen } from "lucide-react";
 
 import { fetchAccounts } from "@/lib/portal/data";
 import { createClient } from "@/lib/supabase/server";
@@ -9,6 +9,8 @@ import { clientHstStatus } from "@/lib/portal/client-hst";
 import { activeWorkspaceId } from "@/lib/portal/workspace";
 import { fetchHstShops } from "@/lib/admin/hst-cost-sync";
 import { HstStoreCogs, type HstStoreCogsProps } from "@/components/portal/hst-store-cogs";
+import { HstOrderList } from "@/components/portal/hst-order-list";
+import { NotHstMemberLink } from "@/components/portal/not-hst-member-link";
 import { CogsFillProvider } from "@/components/portal/cogs-fill";
 import { CostsManager } from "@/components/portal/costs-manager";
 import { StoreSelector } from "@/components/portal/store-selector";
@@ -52,6 +54,7 @@ async function loadHstPanel(
     lastError: null,
     shops: [],
     shopsError: null,
+    duty: null,
   };
 
   const service = createServiceClient();
@@ -71,11 +74,44 @@ async function loadHstPanel(
 
     let shops: HstStoreCogsProps["shops"] = [];
     let shopsError: string | null = null;
+    let duty: HstStoreCogsProps["duty"] = null;
     if (status.connected) {
-      try {
-        shops = await fetchHstShops({ service, clientId });
-      } catch (cause) {
-        shopsError = cause instanceof Error ? cause.message : String(cause);
+      const DUTY_DAYS = 30;
+      const since = new Date(Date.now() - DUTY_DAYS * 24 * 60 * 60 * 1000)
+        .toISOString()
+        .slice(0, 10);
+
+      // The live shop list is slow (it is an HST round-trip); the duty total is
+      // a quick local read. Run them together, and let either fail on its own —
+      // a supplier that will not list shops should not also hide the duty.
+      const [shopList, charges] = await Promise.allSettled([
+        fetchHstShops({ service, clientId }),
+        service
+          .from("hst_order_charges")
+          .select("tariff, currency")
+          .eq("ad_account_id", adAccountId)
+          .gte("order_day", since),
+      ]);
+
+      if (shopList.status === "fulfilled") {
+        shops = shopList.value;
+      } else {
+        shopsError =
+          shopList.reason instanceof Error ? shopList.reason.message : String(shopList.reason);
+      }
+
+      if (charges.status === "fulfilled") {
+        const rows = (charges.value.data ?? []) as Array<{ tariff: number; currency: string }>;
+        const billed = rows.filter((row) => Number(row.tariff) > 0);
+        const total = billed.reduce((sum, row) => sum + Number(row.tariff), 0);
+        if (billed.length > 0) {
+          duty = {
+            total,
+            orders: billed.length,
+            currency: billed[0].currency || "EUR",
+            days: DUTY_DAYS,
+          };
+        }
       }
     }
 
@@ -86,6 +122,7 @@ async function loadHstPanel(
       lastError: status.lastError,
       shops,
       shopsError,
+      duty,
     };
   } catch (cause) {
     return {
@@ -117,20 +154,56 @@ async function HstPanel({
   return <HstStoreCogs {...panel} />;
 }
 
-/** The panel's silhouette while its shop list loads — same frame, no content. */
+/**
+ * The panel's silhouette while its shop list loads.
+ *
+ * It carries an explicit line rather than a bare shimmer: the list is a live
+ * call to the supplier and can take a few seconds, and a client who clicked in
+ * should be told that is what the wait is, not left guessing at a frozen frame.
+ */
 function HstPanelSkeleton() {
   return (
     <section className="panel space-y-4 p-4 md:p-5">
-      <div className="flex animate-pulse items-start gap-3">
-        <div className="size-9 shrink-0 rounded-[10px] bg-[var(--bg-elevated)]" />
-        <div className="min-w-0 flex-1 space-y-2">
-          <div className="h-4 w-44 rounded bg-[var(--bg-elevated)]" />
-          <div className="h-3 w-3/4 rounded bg-[var(--bg-elevated)]" />
+      <div className="flex items-start gap-3">
+        <div className="flex size-9 shrink-0 items-center justify-center rounded-[10px] bg-[var(--accent-gold-dim)]">
+          <Loader2 className="size-4 animate-spin text-[var(--accent-gold)]" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <h2 className="text-[15px] font-semibold text-[var(--text-primary)]">
+            Supplier costs (HST)
+          </h2>
+          <p className="mt-1 text-[12.5px] leading-relaxed text-[var(--text-muted)]">
+            Loading your HST connection — this reads live from the supplier and can take a few
+            seconds.
+          </p>
         </div>
       </div>
       <div className="h-10 w-full max-w-md animate-pulse rounded-[10px] bg-[var(--bg-elevated)]" />
     </section>
   );
+}
+
+/**
+ * Is this an HST store — the client connected and this store mapped to a shop?
+ *
+ * A fast, DB-only check (no live supplier call), so the page can decide up front
+ * whether the bottom half is the per-order list or the per-product grid. A store
+ * whose client is connected but which is not yet mapped stays on the grid, so
+ * its costs remain editable until a shop is chosen.
+ */
+async function isHstStore(clientId: string, adAccountId: string): Promise<boolean> {
+  const service = createServiceClient();
+  if (!service) return false;
+  try {
+    const [status, mapping] = await Promise.all([
+      clientHstStatus(service, clientId),
+      service.from("ad_accounts").select("hst_shop_id").eq("id", adAccountId).maybeSingle(),
+    ]);
+    const shopId = (mapping.data as { hst_shop_id?: string | null } | null)?.hst_shop_id;
+    return status.available && status.connected && Boolean(shopId);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -203,11 +276,25 @@ export default async function CostsPage({
   // the active workspace — the page would not have rendered otherwise.
   const clientId = await activeWorkspaceId();
 
+  // An HST store prices its goods per order, so its lower half is the order
+  // list rather than the per-product grid; every other store keeps the grid and
+  // its percentage fallback exactly as before.
+  const hstStore = clientId ? await isHstStore(clientId, selected.id) : false;
+
   return (
     <PageContainer
       title={d.portal.cogs}
       description={d.portal.cogsSubtitle}
-      actions={<StoreSelector accounts={accounts} current={selected.id} />}
+      actions={
+        <div className="flex items-center gap-2">
+          {/* An HST store's page leads with the order list; this is the way down
+              to the plain cost settings for anyone who would rather price by the
+              percentage than through the supplier — it scrolls there and flashes
+              the section. */}
+          {hstStore && <NotHstMemberLink />}
+          <StoreSelector accounts={accounts} current={selected.id} />
+        </div>
+      }
     >
       {/* One provider around both halves so choosing a shop in the panel can
           drive the fill animation down in the grid — they are siblings with no
@@ -228,15 +315,31 @@ export default async function CostsPage({
             </Suspense>
           </div>
         )}
-        <CostsManager
-          account={selected}
-          products={products}
-          costs={costsRes.data ?? []}
-          tiers={tiersRes.data ?? []}
-          collections={collections}
-          members={membersRes.data ?? []}
-          collectionTiers={cTiersRes.data ?? []}
-        />
+        {/* HST stores lead with the per-order list, read live and animated in
+            on connect and sync; it carries its own loading notice. */}
+        {hstStore && (
+          <HstOrderList
+            adAccountId={selected.id}
+            storeName={selected.store_name ?? selected.id}
+          />
+        )}
+
+        {/* Cost settings sit at the foot of the page — always the store-level
+            fees and shipping, plus the per-product grid and bundles for a store
+            that prices per product. The anchor is where "I am not an HST member"
+            scrolls to; scroll-mt keeps the heading clear of the top. */}
+        <div id="cost-settings" className={hstStore ? "mt-8 scroll-mt-6" : undefined}>
+          <CostsManager
+            account={selected}
+            products={products}
+            costs={costsRes.data ?? []}
+            tiers={tiersRes.data ?? []}
+            collections={collections}
+            members={membersRes.data ?? []}
+            collectionTiers={cTiersRes.data ?? []}
+            showProducts={!hstStore}
+          />
+        </div>
       </CogsFillProvider>
     </PageContainer>
   );

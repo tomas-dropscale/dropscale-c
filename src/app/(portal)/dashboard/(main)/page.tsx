@@ -124,6 +124,15 @@ export default async function DashboardPage({
     uncostedCount = products.filter((product) => !costed.has(product.id)).length;
   }
 
+  // An uncosted product falls back to the store's cost percentage — which is a
+  // costing method the owner chose, not a gap, once one is in effect. HST stores
+  // price per order and every store carries a percentage, so with one saved on
+  // each visible store the nudge is noise; it is only for a store still meaning
+  // to type exact per-product costs.
+  const costingHandled =
+    visible.length > 0 &&
+    visible.every((account) => Number(account.default_product_cost_pct) > 0);
+
   // A Monday referral decision changes that Monday onward only. Standard 10%
   // accounts use the sealed history. Legacy/custom contracts keep their own
   // current cache, and every portal fee display is explicitly an estimate;
@@ -209,9 +218,10 @@ export default async function DashboardPage({
         </div>
       ) : (
         <div className="space-y-4">
-          {/* While any product has no cost, nudge — those sales use the default
-              percentage, so profit isn't exact until they're filled in. */}
-          {uncostedCount > 0 && (
+          {/* Nudge only when a product has no cost AND no costing method is in
+              effect — a store on HST or with a saved percentage has already
+              chosen how those sales are priced, so the warning would be noise. */}
+          {uncostedCount > 0 && !costingHandled && (
             <Link
               href="/dashboard/costs"
               className="transition-smooth flex items-center gap-3 rounded-[var(--radius-card)] border border-[#5b93d6]/30 bg-[#5b93d6]/12 px-4 py-3.5 hover:border-[#5b93d6]/55"

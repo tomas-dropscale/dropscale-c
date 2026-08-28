@@ -7,6 +7,7 @@ import { HstError, hstGet } from "@/lib/hst/erp";
 import { clientHstToken, noteClientHstError } from "@/lib/portal/client-hst";
 import { applyHstCosts, type HstOrderCost } from "./hst-costs";
 import { parseHstOrderPage, type HstShop } from "./hst-orders";
+import { parseHstOrderDisplay, type HstOrderDisplay } from "./hst-order-display";
 import type { Database } from "@/lib/supabase/types";
 
 /**
@@ -261,4 +262,52 @@ export async function fetchHstShops(input: {
   // Any shop id works here; the response carries the whole list regardless.
   const payload = await hstGet(ordersUrl("", 1), token);
   return parseHstOrderPage(payload, { shopId: "", timeZone: "UTC" }).shops;
+}
+
+/**
+ * One store's recent orders, as HST bills them, for the per-order view.
+ *
+ * Read live and returned as-is — nothing here is stored. The supplier ignores
+ * the shop filter and answers with every shop the login can see, so a wide page
+ * is fetched and narrowed to this store's rows afterwards; the display cap keeps
+ * that from becoming a wall. One renewal on a refused token, then it gives up —
+ * the same restraint the cost sync uses.
+ */
+export async function fetchHstStoreOrders(input: {
+  service: Supabase;
+  adAccountId: string;
+  limit?: number;
+}): Promise<HstOrderDisplay[]> {
+  const { data } = await input.service
+    .from("ad_accounts")
+    .select("client_id, hst_shop_id")
+    .eq("id", input.adAccountId)
+    .maybeSingle();
+  const account = data as { client_id: string; hst_shop_id: string | null } | null;
+  const shopId = account?.hst_shop_id;
+  if (!account || !shopId) return [];
+
+  const cap = Math.min(120, Math.max(1, input.limit ?? 60));
+  // Fetch more rows than we show: the login's other shops are interleaved, so a
+  // page of `cap` could hold only a handful of this store's orders.
+  const url =
+    `${ORDERS_URL}?search_field=platformOrderId` +
+    `&shopIds=${encodeURIComponent(shopId)}&page=1&limit=${Math.min(200, cap * 3)}`;
+
+  const run = async (forceRenew: boolean): Promise<HstOrderDisplay[]> => {
+    const token = await clientHstToken(
+      input.service,
+      account.client_id,
+      forceRenew ? { forceRenew: true } : undefined,
+    );
+    const payload = await hstGet(url, token);
+    return parseHstOrderDisplay(payload, { shopId, limit: cap });
+  };
+
+  try {
+    return await run(false);
+  } catch (error) {
+    if (error instanceof HstError && error.unauthorized) return run(true);
+    throw error;
+  }
 }

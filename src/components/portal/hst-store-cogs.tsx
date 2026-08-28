@@ -2,10 +2,11 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { RefreshCw, Truck } from "lucide-react";
+import { Coins, RefreshCw, Truck } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
+import { money } from "@/lib/format";
 import { FormAlert } from "@/components/auth/auth-card";
 import { HstCaptcha, randomHstCaptcha } from "@/components/portal/hst-captcha";
 import { useCogsFill } from "@/components/portal/cogs-fill";
@@ -22,6 +23,12 @@ export type HstStoreCogsProps = {
   /** Shops this login can see — suggestions, never a limit on what can be typed. */
   shops: Array<{ id: string; name: string }>;
   shopsError: string | null;
+  /**
+   * The supplier's per-order import duty over a recent window, so the client
+   * can see it is counted — it rides in the day's costs, not in any product's
+   * unit cost, and it would otherwise be invisible next to the product COGS.
+   */
+  duty: { total: number; orders: number; currency: string; days: number } | null;
 };
 
 type SyncOutcome = {
@@ -313,6 +320,25 @@ export function HstStoreCogs(props: HstStoreCogsProps) {
                 </span>
               )}
             </p>
+          )}
+
+          {/* The per-order import duty, shown on its own so it is legible next
+              to the product costs rather than hidden inside them. It is billed
+              per order, not per article, so it rides in the day's costs — it is
+              already counted; this is where the client can see that it is. */}
+          {props.duty && (
+            <div className="flex items-start gap-2.5 rounded-[10px] border border-[var(--accent-gold)]/20 bg-[var(--accent-gold-dim)] px-3 py-2.5">
+              <Coins className="mt-0.5 size-4 shrink-0 text-[var(--accent-gold)]" />
+              <p className="text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
+                <span className="font-semibold text-[var(--text-primary)]">
+                  Import duty: {money(props.duty.total, props.duty.currency)}
+                </span>{" "}
+                over the last {props.duty.days} days, across {props.duty.orders} order
+                {props.duty.orders === 1 ? "" : "s"}. HST bills this per order, on top of each
+                product&rsquo;s cost — it is added to this store&rsquo;s costs automatically, never
+                typed and never folded into a unit price.
+              </p>
+            </div>
           )}
 
           <button

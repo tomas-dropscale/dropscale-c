@@ -340,9 +340,58 @@
   border-radius: 8px;
 }
 
+/* Per-order list (HST stores): rows sweep up and settle, cascading down the
+ * table when the orders (re)load on connect or sync. Delay set inline. */
+@keyframes order-row-in {
+  0% {
+    opacity: 0;
+    transform: translateY(10px);
+    background-color: rgba(212, 168, 106, 0.18);
+  }
+  60% {
+    opacity: 1;
+    background-color: rgba(212, 168, 106, 0.07);
+  }
+  100% {
+    opacity: 1;
+    transform: none;
+    background-color: transparent;
+  }
+}
+
+.order-row-in {
+  animation: order-row-in 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation-delay: var(--row-delay, 0ms);
+}
+
+/* "I am not an HST member" jumps to the cost settings and flashes them, so the
+ * destination announces itself — a gold ring that swells and fades once. */
+@keyframes settings-glow {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 0 rgba(212, 168, 106, 0),
+      0 0 0 0 rgba(212, 168, 106, 0);
+  }
+  50% {
+    box-shadow:
+      0 0 0 3px rgba(212, 168, 106, 0.5),
+      0 0 30px 6px rgba(212, 168, 106, 0.24);
+  }
+}
+
+/* Four slow swells, so the section clearly says "here" — unhurried enough to
+ * follow, rather than a fast flicker that is missed. */
+.settings-glow {
+  border-radius: var(--radius-card);
+  animation: settings-glow 0.9s ease-in-out 4;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .cost-fill,
-  .cost-shimmer {
+  .cost-shimmer,
+  .order-row-in,
+  .settings-glow {
     animation: none;
     background-color: transparent;
     opacity: 1;

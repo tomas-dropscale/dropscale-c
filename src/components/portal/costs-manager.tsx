@@ -63,6 +63,12 @@ type Props = {
   collections: CogsCollectionRow[];
   members: CogsCollectionMember[];
   collectionTiers: CogsCollectionTier[];
+  /**
+   * Whether to show the per-product grid and bundles. An HST store prices its
+   * goods per order instead (see HstOrderList), so it keeps only the store-level
+   * settings here — payment fees and shipping, which HST does not report.
+   */
+  showProducts?: boolean;
 };
 
 function today(): string {
@@ -77,6 +83,7 @@ export function CostsManager({
   collections,
   members,
   collectionTiers,
+  showProducts = true,
 }: Props) {
   const router = useRouter();
   const { d } = useI18n();
@@ -285,6 +292,8 @@ export function CostsManager({
       {/* ---- store cost settings ------------------------------------------ */}
       <CostSettings account={account} d={d} onSaved={resync} onError={setError} />
 
+      {showProducts && (
+        <>
       {/* ---- products ------------------------------------------------------ */}
       <section className="space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -492,6 +501,8 @@ export function CostsManager({
         memberProductIds={memberProductIds}
         run={run}
       />
+        </>
+      )}
     </div>
   );
 }
