@@ -1012,6 +1012,9 @@ export type HstIntegration = {
   access_token: string | null;
   refresh_token: string | null;
   token_expires_at: string | null;
+  /** AES-GCM credentials, so an expired refresh token is not the end (0088). */
+  username_enc: string | null;
+  password_enc: string | null;
   /** Last sync that actually landed rows. Drives the cross-instance throttle. */
   last_synced_at: string | null;
   // Sync health (migration 0017). last_attempt_at moves on every attempt, so
@@ -3207,6 +3210,8 @@ export type Database = {
           | "access_token"
           | "refresh_token"
           | "token_expires_at"
+          | "username_enc"
+          | "password_enc"
           | "last_synced_at"
           | "last_attempt_at"
           | "last_error"

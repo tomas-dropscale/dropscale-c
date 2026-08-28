@@ -2,7 +2,10 @@ import type { Metadata } from "next";
 import { PackageOpen } from "lucide-react";
 
 import { fetchAccounts } from "@/lib/portal/data";
-import { createClient } from "@/lib/supabase/server";
+import { createClient, getSessionProfile } from "@/lib/supabase/server";
+import { getHstStatus } from "@/lib/admin/hst";
+import { fetchHstShops } from "@/lib/admin/hst-cost-sync";
+import { HstStoreCogs, type HstStoreCogsProps } from "@/components/admin/hst-store-cogs";
 import { CostsManager } from "@/components/portal/costs-manager";
 import { StoreSelector } from "@/components/portal/store-selector";
 import { PageContainer } from "@/components/ui/page-container";
@@ -12,6 +15,49 @@ import { getServerDictionary } from "@/lib/i18n/server";
 export async function generateMetadata(): Promise<Metadata> {
   const { d } = await getServerDictionary();
   return { title: d.portal.cogs };
+}
+
+/**
+ * The supplier panel, for admins only, and never at a client's expense.
+ *
+ * Every failure here returns null rather than throwing: the HST account is the
+ * agency's own side-concern, and a dead ERP session must not be able to take
+ * down a client's cost page. Listing the shops needs a live call, so it is only
+ * attempted once there is a session to make it with.
+ */
+async function loadHstPanel(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  adAccountId: string,
+  storeName: string,
+): Promise<HstStoreCogsProps | null> {
+  try {
+    const [status, mapping] = await Promise.all([
+      getHstStatus(),
+      supabase.from("ad_accounts").select("hst_shop_id").eq("id", adAccountId).maybeSingle(),
+    ]);
+
+    let shops: HstStoreCogsProps["shops"] = [];
+    let shopsError: string | null = null;
+    if (status.hasSession || status.hasCredentials) {
+      try {
+        shops = await fetchHstShops({ client: supabase });
+      } catch (cause) {
+        shopsError = cause instanceof Error ? cause.message : String(cause);
+      }
+    }
+
+    return {
+      adAccountId,
+      storeName,
+      hstShopId: (mapping.data as { hst_shop_id?: string | null } | null)?.hst_shop_id ?? null,
+      connected: status.hasSession || status.hasCredentials,
+      selfHealing: status.hasCredentials,
+      shops,
+      shopsError,
+    };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -80,12 +126,23 @@ export default async function CostsPage({
       : Promise.resolve({ data: [] }),
   ]);
 
+  const { profile } = await getSessionProfile();
+  const hstPanel =
+    profile?.role === "admin"
+      ? await loadHstPanel(supabase, selected.id, selected.store_name ?? selected.id)
+      : null;
+
   return (
     <PageContainer
       title={d.portal.cogs}
       description={d.portal.cogsSubtitle}
       actions={<StoreSelector accounts={accounts} current={selected.id} />}
     >
+      {hstPanel && (
+        <div className="mb-4">
+          <HstStoreCogs {...hstPanel} />
+        </div>
+      )}
       <CostsManager
         account={selected}
         products={products}

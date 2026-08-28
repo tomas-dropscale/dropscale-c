@@ -23,6 +23,7 @@ type Supabase = SupabaseClient<Database>;
 
 const COMMISSION_URL = "https://hsterp.com/commission-salesman-mingxi";
 const REFRESH_URL = "https://hsterp.com/refresh-token";
+const LOGIN_URL = "https://hsterp.com/login";
 const HST_SOURCE = "HST";
 // HST commission currency. Change here if HST bills in another currency.
 const HST_CURRENCY = "EUR";
@@ -122,6 +123,126 @@ export async function saveHstSession(input: string): Promise<void> {
   });
 }
 
+/**
+ * Sign in with the account's own credentials.
+ *
+ * The ERP's login form carries a captcha field. Whatever it is passed is what
+ * the operator typed — this function ships no canned answer to it, and none
+ * belongs here: if HST is checking the code, the person connecting can read it
+ * off the screen, and if HST is not, an empty field is the truthful thing to
+ * send. A hardcoded value would be a claim to have passed a check nobody made.
+ */
+async function loginToHst(credentials: {
+  username: string;
+  password: string;
+  captchaCode?: string;
+}): Promise<Session> {
+  let res: Response;
+  try {
+    res = await fetch(LOGIN_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json, text/plain, */*",
+        "X-Requested-With": "XMLHttpRequest",
+        lang: "en",
+      },
+      body: JSON.stringify({
+        username: credentials.username,
+        password: credentials.password,
+        captcha_code: credentials.captchaCode ?? "",
+        captcha_key: "",
+      }),
+    });
+  } catch {
+    throw new HstError("Couldn't reach HST to sign in.");
+  }
+
+  if (res.status === 401 || res.status === 403) {
+    throw new HstError("HST refused those credentials.");
+  }
+  if (!res.ok) throw new HstError(`HST returned ${res.status} when signing in.`);
+
+  const body = (await res.json().catch(() => null)) as
+    | { data?: Record<string, unknown>; message?: string; success?: boolean }
+    | null;
+  const data = (body?.data ?? {}) as Record<string, unknown>;
+  const accessToken = (data.accessToken ?? data.token) as string | undefined;
+  if (!accessToken) {
+    // The ERP answers 200 with success:false for a bad password or a captcha it
+    // did check. Its own message is the only thing that says which.
+    throw new HstError(
+      body?.message
+        ? `HST did not sign in: ${body.message}`
+        : "HST did not return a token for those credentials.",
+    );
+  }
+
+  const fault = tokenFault(accessToken);
+  if (fault) throw new HstError(`HST returned an access token we can't use: ${fault}`);
+
+  return {
+    accessToken,
+    refreshToken: (data.refreshToken as string) ?? null,
+    expires: (data.expires as string) ?? null,
+  };
+}
+
+/** Write a session to the single config row, encrypted. */
+async function storeSession(
+  supabase: Supabase,
+  session: Session,
+  extra: Record<string, unknown> = {},
+): Promise<void> {
+  await supabase
+    .from("hst_integration")
+    .upsert({
+      id: true,
+      access_token: await encryptToken(session.accessToken),
+      refresh_token: session.refreshToken ? await encryptToken(session.refreshToken) : null,
+      token_expires_at: session.expires
+        ? new Date(parseExpiry(session.expires) || Date.now()).toISOString()
+        : null,
+      updated_at: new Date().toISOString(),
+      ...extra,
+    });
+}
+
+/**
+ * Connect HST from a username and password instead of a pasted response.
+ *
+ * The credentials are proven before they are kept: a pair that cannot sign in
+ * is refused rather than stored, so "Connected" never means "we wrote down
+ * something that has never worked".
+ */
+export async function connectHstWithCredentials(credentials: {
+  username: string;
+  password: string;
+  captchaCode?: string;
+}): Promise<void> {
+  const username = credentials.username.trim();
+  const password = credentials.password;
+  if (!username || !password) {
+    throw new HstError("Enter the HST username and password.");
+  }
+
+  const session = await loginToHst({ ...credentials, username });
+  const supabase = await createClient();
+  await storeSession(supabase, session, {
+    username_enc: await encryptToken(username),
+    password_enc: await encryptToken(password),
+  });
+}
+
+/** Forget the stored credentials, leaving any live session alone. */
+export async function forgetHstCredentials(): Promise<void> {
+  const supabase = await createClient();
+  await supabase
+    .from("hst_integration")
+    .update({ username_enc: null, password_enc: null, updated_at: new Date().toISOString() })
+    .eq("id", true);
+}
+
 /** Swap the refresh token for a new session via POST /refresh-token. */
 async function refreshSession(refreshToken: string): Promise<Session | null> {
   let res: Response;
@@ -176,11 +297,34 @@ async function ensureFreshToken(
 
   const { data } = await supabase
     .from("hst_integration")
-    .select("access_token, refresh_token, token_expires_at")
+    .select("access_token, refresh_token, token_expires_at, username_enc, password_enc")
     .maybeSingle();
 
+  /**
+   * The last resort: sign in again from the stored credentials.
+   *
+   * This is what turns "renews itself until the refresh token also expires"
+   * into an integration that stays up. Every other branch below ends in asking
+   * a human to paste something, and that ask is invisible — it surfaces as a
+   * supplier who suddenly reports nothing.
+   *
+   * Returns null when there are no credentials, so the caller keeps whatever
+   * more specific complaint it already had.
+   */
+  const signInAgain = async (): Promise<string | null> => {
+    if (!data?.username_enc || !data?.password_enc) return null;
+    const session = await loginToHst({
+      username: await decryptToken(data.username_enc),
+      password: await decryptToken(data.password_enc),
+    });
+    await storeSession(supabase, session);
+    return session.accessToken;
+  };
+
   if (!data?.access_token && !data?.refresh_token) {
-    throw new HstError("No HST session saved yet — paste the login response.");
+    const signedIn = await signInAgain();
+    if (signedIn) return signedIn;
+    throw new HstError("No HST session saved yet — sign in to HST.");
   }
 
   // A token stored before the paste-time check may still be unusable; treat
@@ -199,16 +343,20 @@ async function ensureFreshToken(
     // the only option left — unless HST has just refused it, in which case
     // there is genuinely nothing to do but ask for a fresh login.
     if (stored && !storedFault && !forceRenew) return stored;
+    const signedIn = await signInAgain();
+    if (signedIn) return signedIn;
     throw new HstError(
       storedFault
         ? `The saved HST access token can't be used: ${storedFault}`
-        : "HST session expired and no refresh token — paste a fresh login.",
+        : "HST session expired and no refresh token — sign in to HST again.",
     );
   }
 
   const refreshToken = await decryptToken(data.refresh_token);
   const refreshFault = tokenFault(refreshToken);
   if (refreshFault) {
+    const signedIn = await signInAgain();
+    if (signedIn) return signedIn;
     throw new HstError(`The saved HST refresh token can't be used: ${refreshFault}`);
   }
 
@@ -219,8 +367,10 @@ async function ensureFreshToken(
     // unavailable must not break setups that were working before this function
     // started attempting renewal on unknown expiries.
     if (stored && !storedFault && !forceRenew) return stored;
+    const signedIn = await signInAgain();
+    if (signedIn) return signedIn;
     throw new HstError(
-      "Couldn't renew the HST token (the refresh endpoint may differ) — paste a fresh login.",
+      "Couldn't renew the HST token (the refresh endpoint may differ) — sign in to HST again.",
     );
   }
 
@@ -262,16 +412,27 @@ export async function hstAccessToken(
 
 export async function getHstStatus(): Promise<{
   hasSession: boolean;
+  /** Credentials stored, so the session can rebuild itself without a human. */
+  hasCredentials: boolean;
   lastSyncedAt: string | null;
   tokenExpiresAt: string | null;
 }> {
   const supabase = await createClient();
+  // username_enc arrives with 0088. Asking for it on a database that does not
+  // have it yet would fail the whole select and make a working integration
+  // report itself as disconnected, so the column is probed separately.
   const { data } = await supabase
     .from("hst_integration")
     .select("access_token, refresh_token, last_synced_at, token_expires_at")
     .maybeSingle();
+  const { data: credentials } = await supabase
+    .from("hst_integration")
+    .select("username_enc")
+    .maybeSingle();
+
   return {
     hasSession: Boolean(data?.access_token || data?.refresh_token),
+    hasCredentials: Boolean(credentials?.username_enc),
     lastSyncedAt: data?.last_synced_at ?? null,
     tokenExpiresAt: data?.token_expires_at ?? null,
   };

@@ -157,6 +157,8 @@ async function collectOrders(
  */
 export async function syncHstCosts(opts?: {
   client?: Supabase;
+  /** Narrow to specific stores — the per-store "Sync now" button. */
+  adAccountIds?: string[];
   sinceDays?: number;
   /** Overrides the day-attribution zone; see hst_order_charges.paid_at in 0087. */
   timeZone?: string;
@@ -172,10 +174,11 @@ export async function syncHstCosts(opts?: {
   // instant is kept alongside so the day can be corrected without re-fetching.
   const timeZone = opts?.timeZone ?? "UTC";
 
-  const { data: accounts, error: accountsError } = await supabase
-    .from("ad_accounts")
-    .select("id, hst_shop_id")
-    .not("hst_shop_id", "is", null);
+  const wanted = opts?.adAccountIds;
+  const query = supabase.from("ad_accounts").select("id, hst_shop_id").not("hst_shop_id", "is", null);
+  const { data: accounts, error: accountsError } = await (wanted
+    ? query.in("id", wanted)
+    : query);
   if (accountsError) {
     return { ...result, ok: false, error: accountsError.message };
   }
