@@ -3,22 +3,23 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { createClient } from "@/lib/supabase/server";
-import { HstError, hstAccessToken } from "./hst";
+import { HstError, hstGet } from "@/lib/hst/erp";
+import { clientHstToken, noteClientHstError } from "@/lib/portal/client-hst";
 import { applyHstCosts, type HstOrderCost } from "./hst-costs";
 import { parseHstOrderPage, type HstShop } from "./hst-orders";
 import type { Database } from "@/lib/supabase/types";
 
 /**
- * COGS that arrive by themselves, for the stores HST supplies.
+ * COGS that arrive by themselves, for the stores their owner buys from HST.
  *
  * The supplier's Order List already carries what every line cost and what the
- * import tariff was. This walks it, newest first, for each store that has been
- * mapped to an HST shop, and hands the result to applyHstCosts — which owns
- * what gets written and what is left alone.
+ * import tariff was. This walks it, newest first, and hands the result to
+ * applyHstCosts — which owns what gets written and what is left alone.
  *
- * Nothing here runs for a store that has not been mapped. `hst_shop_id` is the
- * whole opt-in: one HST login sees ten shops, and guessing which one a client
- * is would write another client's costs onto their products.
+ * Two conditions, and both belong to the client. Their own HST session, because
+ * a supplier account sees its owner's shop and nobody else's; and a supplier
+ * code on the store, because one HST login can still see several shops and
+ * guessing between them would write one store's costs onto another's products.
  */
 
 type Supabase = SupabaseClient<Database>;
@@ -41,7 +42,7 @@ const DEFAULT_SINCE_DAYS = 3;
 
 export type HstCostSyncResult = {
   ok: boolean;
-  /** Stores mapped to an HST shop. Zero is a valid, quiet outcome. */
+  /** Stores with both a connected owner and a supplier code. */
   accounts: number;
   written: number;
   unchanged: number;
@@ -51,7 +52,7 @@ export type HstCostSyncResult = {
   unquotedLines: number;
   pages: number;
   error?: string;
-  /** Per store, so a single broken mapping is legible in the cron log. */
+  /** Per store, so one broken connection is legible in the cron log. */
   stores: Array<{
     adAccountId: string;
     shopId: string;
@@ -76,44 +77,22 @@ function emptyResult(): HstCostSyncResult {
   };
 }
 
-async function fetchOrdersPage(token: string, shopId: string, page: number): Promise<unknown> {
+function ordersUrl(shopId: string, page: number): string {
   // `shopIds` is the filter name the commission endpoint on this same ERP
   // takes. Correctness does not rest on it: every row is checked against the
   // shop id after parsing, so the parameter being ignored costs pages, not
   // accuracy.
-  const url =
+  return (
     `${ORDERS_URL}?search_field=platformOrderId` +
-    `&shopIds=${encodeURIComponent(shopId)}&page=${page}&limit=${PAGE_SIZE}`;
-
-  const res = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/json",
-      "X-Requested-With": "XMLHttpRequest",
-      lang: "en",
-    },
-  });
-
-  if (res.status === 401 || res.status === 403) {
-    throw new HstError("HST rejected the token — the session likely expired.", true);
-  }
-  if (!res.ok) throw new HstError(`HST returned ${res.status} for the order list.`);
-
-  const contentType = res.headers.get("content-type") ?? "";
-  if (!contentType.includes("json")) {
-    throw new HstError(
-      `HST answered ${ORDERS_URL} with "${contentType || "no content-type"}" instead of JSON.`,
-    );
-  }
-  return res.json();
+    `&shopIds=${encodeURIComponent(shopId)}&page=${page}&limit=${PAGE_SIZE}`
+  );
 }
 
 /**
  * Every order for one shop back to `since`, newest first.
  *
  * Stops at the first page whose oldest order predates the window rather than
- * reading to the end of a 221-page list, and reports the shops it saw so the
- * admin picker has something to offer without a second request.
+ * reading to the end of a 221-page list.
  */
 async function collectOrders(
   token: string,
@@ -127,7 +106,7 @@ async function collectOrders(
   let unquotedLines = 0;
 
   for (let page = 1; page <= MAX_PAGES; page += 1) {
-    const payload = await fetchOrdersPage(token, shopId, page);
+    const payload = await hstGet(ordersUrl(shopId, page), token);
     const parsed = parseHstOrderPage(payload, { shopId, timeZone });
     pages += 1;
     if (parsed.shops.length > 0) shops = parsed.shops;
@@ -148,12 +127,13 @@ async function collectOrders(
 }
 
 /**
- * Pull supplier costs for every mapped store.
+ * Pull supplier costs for every store whose owner has connected HST.
  *
  * Never throws: the caller is an hourly cron whose other work must not be lost
- * because a third-party ERP session expired. Failures travel in the result so
- * the log says which store stopped and why — a sync that reports "ok" over
- * nothing is the failure mode this whole integration was already bitten by.
+ * because one client's ERP session expired. Failures travel in the result AND
+ * are written against that client, so the next thing they see on their own
+ * cost page says why — a sync that reports "ok" over nothing is the failure
+ * mode this whole integration was already bitten by.
  */
 export async function syncHstCosts(opts?: {
   client?: Supabase;
@@ -165,7 +145,7 @@ export async function syncHstCosts(opts?: {
   now?: Date;
 }): Promise<HstCostSyncResult> {
   const result = emptyResult();
-  const supabase = opts?.client ?? (await createClient());
+  const service = opts?.client ?? (await createClient());
   const now = opts?.now ?? new Date();
   const sinceDays = Math.max(1, Math.floor(opts?.sinceDays ?? DEFAULT_SINCE_DAYS));
   const since = new Date(now.getTime() - sinceDays * 24 * 60 * 60 * 1000);
@@ -175,32 +155,29 @@ export async function syncHstCosts(opts?: {
   const timeZone = opts?.timeZone ?? "UTC";
 
   const wanted = opts?.adAccountIds;
-  const query = supabase.from("ad_accounts").select("id, hst_shop_id").not("hst_shop_id", "is", null);
-  const { data: accounts, error: accountsError } = await (wanted
-    ? query.in("id", wanted)
-    : query);
+  const query = service
+    .from("ad_accounts")
+    .select("id, client_id, hst_shop_id")
+    .not("hst_shop_id", "is", null);
+  const { data: accounts, error: accountsError } = await (wanted ? query.in("id", wanted) : query);
   if (accountsError) {
     return { ...result, ok: false, error: accountsError.message };
   }
 
-  const mapped = ((accounts ?? []) as Array<{ id: string; hst_shop_id: string | null }>).filter(
-    (row): row is { id: string; hst_shop_id: string } => !!row.hst_shop_id,
+  const mapped = (
+    (accounts ?? []) as Array<{ id: string; client_id: string; hst_shop_id: string | null }>
+  ).filter((row): row is { id: string; client_id: string; hst_shop_id: string } =>
+    Boolean(row.hst_shop_id),
   );
   result.accounts = mapped.length;
   if (mapped.length === 0) return result;
 
-  let token: string;
-  try {
-    token = await hstAccessToken(supabase);
-  } catch (error) {
-    return {
-      ...result,
-      ok: false,
-      error: error instanceof Error ? error.message : String(error),
-    };
-  }
+  // One session per client, not per store: a client with three stores signs in
+  // once, and a client whose session is dead does not have it re-attempted for
+  // every store they own.
+  const tokens = new Map<string, string>();
+  const renewed = new Set<string>();
 
-  let renewed = false;
   for (const account of mapped) {
     const store = {
       adAccountId: account.id,
@@ -211,16 +188,28 @@ export async function syncHstCosts(opts?: {
     } as HstCostSyncResult["stores"][number];
 
     try {
+      let token = tokens.get(account.client_id);
+      if (!token) {
+        token = await clientHstToken(service, account.client_id);
+        tokens.set(account.client_id, token);
+      }
+
       let collected;
       try {
         collected = await collectOrders(token, account.hst_shop_id, timeZone, since);
       } catch (error) {
-        // One retry on a refusal, and only one: the second store must not pay
-        // for the first one's expired session, and a renewal that does not help
-        // would otherwise be attempted once per store.
-        if (!(error instanceof HstError) || !error.unauthorized || renewed) throw error;
-        renewed = true;
-        token = await hstAccessToken(supabase, { forceRenew: true });
+        // One retry per client on a refusal, and only one: a renewal that does
+        // not help must not be attempted once per store they own.
+        if (
+          !(error instanceof HstError) ||
+          !error.unauthorized ||
+          renewed.has(account.client_id)
+        ) {
+          throw error;
+        }
+        renewed.add(account.client_id);
+        token = await clientHstToken(service, account.client_id, { forceRenew: true });
+        tokens.set(account.client_id, token);
         collected = await collectOrders(token, account.hst_shop_id, timeZone, since);
       }
 
@@ -228,7 +217,7 @@ export async function syncHstCosts(opts?: {
       result.unquotedLines += collected.unquotedLines;
 
       const outcome = await applyHstCosts({
-        service: supabase,
+        service,
         adAccountId: account.id,
         orders: collected.orders,
         now,
@@ -241,10 +230,14 @@ export async function syncHstCosts(opts?: {
       result.unchanged += outcome.unchanged;
       result.unknownProducts += outcome.unknownProducts;
       result.charges += outcome.charges;
+      await noteClientHstError(service, account.client_id, null);
     } catch (error) {
       store.error = error instanceof Error ? error.message : String(error);
       result.ok = false;
       result.error = result.error ?? store.error;
+      // The client is the only one who can fix their own login, and their cost
+      // page is the only place they would look.
+      await noteClientHstError(service, account.client_id, store.error).catch(() => {});
     }
 
     result.stores.push(store);
@@ -254,16 +247,18 @@ export async function syncHstCosts(opts?: {
 }
 
 /**
- * The shops this HST login can see, for mapping a store to one.
+ * The shops one client's HST login can see, for choosing which is their store.
  *
  * The list rides on the order list's own response, so asking costs a single
- * page and never needs a shop to be mapped first — which is what makes the
- * mapping possible at all.
+ * page and never needs a shop to be chosen first — which is what makes the
+ * choice possible at all.
  */
-export async function fetchHstShops(opts?: { client?: Supabase }): Promise<HstShop[]> {
-  const supabase = opts?.client ?? (await createClient());
-  const token = await hstAccessToken(supabase);
+export async function fetchHstShops(input: {
+  service: Supabase;
+  clientId: string;
+}): Promise<HstShop[]> {
+  const token = await clientHstToken(input.service, input.clientId);
   // Any shop id works here; the response carries the whole list regardless.
-  const payload = await fetchOrdersPage(token, "", 1);
+  const payload = await hstGet(ordersUrl("", 1), token);
   return parseHstOrderPage(payload, { shopId: "", timeZone: "UTC" }).shops;
 }

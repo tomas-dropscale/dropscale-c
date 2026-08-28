@@ -2,10 +2,12 @@ import type { Metadata } from "next";
 import { PackageOpen } from "lucide-react";
 
 import { fetchAccounts } from "@/lib/portal/data";
-import { createClient, getSessionProfile } from "@/lib/supabase/server";
-import { getHstStatus } from "@/lib/admin/hst";
+import { createClient } from "@/lib/supabase/server";
+import { createServiceClient } from "@/lib/supabase/service";
+import { clientHstStatus } from "@/lib/portal/client-hst";
+import { activeWorkspaceId } from "@/lib/portal/workspace";
 import { fetchHstShops } from "@/lib/admin/hst-cost-sync";
-import { HstStoreCogs, type HstStoreCogsProps } from "@/components/admin/hst-store-cogs";
+import { HstStoreCogs, type HstStoreCogsProps } from "@/components/portal/hst-store-cogs";
 import { CostsManager } from "@/components/portal/costs-manager";
 import { StoreSelector } from "@/components/portal/store-selector";
 import { PageContainer } from "@/components/ui/page-container";
@@ -18,45 +20,72 @@ export async function generateMetadata(): Promise<Metadata> {
 }
 
 /**
- * The supplier panel, for admins only, and never at a client's expense.
+ * This store's own supplier connection.
  *
- * Every failure here returns null rather than throwing: the HST account is the
- * agency's own side-concern, and a dead ERP session must not be able to take
- * down a client's cost page. Listing the shops needs a live call, so it is only
- * attempted once there is a session to make it with.
+ * The credentials belong to the client, so this belongs on the client's cost
+ * page: their HST account sees their shop, prices their goods, and is theirs to
+ * connect and disconnect. The agency's separate HST session — the one that
+ * reads the commission HST pays the agency — is not this and is not reachable
+ * from here.
+ *
+ * Read through the SERVICE role for two reasons: client_hst_credentials denies
+ * everyone under RLS by design, and 0055 hides a shopify_anchor ad_account from
+ * its own owner, so a viewer-scoped read reports a client's own store code as
+ * unset with nothing to say it was hidden rather than empty.
+ *
+ * Nothing throws and nothing returns nothing: a panel that disappears when its
+ * own query fails leaves whoever is looking unable to tell "not connected" from
+ * "the migration is not applied".
  */
 async function loadHstPanel(
-  supabase: Awaited<ReturnType<typeof createClient>>,
+  clientId: string,
   adAccountId: string,
   storeName: string,
-): Promise<HstStoreCogsProps | null> {
+): Promise<HstStoreCogsProps> {
+  const base: HstStoreCogsProps = {
+    adAccountId,
+    storeName,
+    hstShopId: null,
+    connected: false,
+    lastError: null,
+    shops: [],
+    shopsError: null,
+  };
+
+  const service = createServiceClient();
+  if (!service) {
+    return { ...base, shopsError: "The server is missing its service role key." };
+  }
+
   try {
     const [status, mapping] = await Promise.all([
-      getHstStatus(),
-      supabase.from("ad_accounts").select("hst_shop_id").eq("id", adAccountId).maybeSingle(),
+      clientHstStatus(service, clientId),
+      service.from("ad_accounts").select("hst_shop_id").eq("id", adAccountId).maybeSingle(),
     ]);
 
     let shops: HstStoreCogsProps["shops"] = [];
     let shopsError: string | null = null;
-    if (status.hasSession || status.hasCredentials) {
+    if (status.connected) {
       try {
-        shops = await fetchHstShops({ client: supabase });
+        shops = await fetchHstShops({ service, clientId });
       } catch (cause) {
         shopsError = cause instanceof Error ? cause.message : String(cause);
       }
     }
 
     return {
-      adAccountId,
-      storeName,
+      ...base,
       hstShopId: (mapping.data as { hst_shop_id?: string | null } | null)?.hst_shop_id ?? null,
-      connected: status.hasSession || status.hasCredentials,
-      selfHealing: status.hasCredentials,
+      connected: status.connected,
+      lastError: status.lastError,
       shops,
       shopsError,
     };
-  } catch {
-    return null;
+  } catch (cause) {
+    return {
+      ...base,
+      shopsError: cause instanceof Error ? cause.message : String(cause),
+    };
   }
 }
 
@@ -126,11 +155,12 @@ export default async function CostsPage({
       : Promise.resolve({ data: [] }),
   ]);
 
-  const { profile } = await getSessionProfile();
-  const hstPanel =
-    profile?.role === "admin"
-      ? await loadHstPanel(supabase, selected.id, selected.store_name ?? selected.id)
-      : null;
+  // The panel belongs to whoever owns the store, which on this page is always
+  // the active workspace — the page would not have rendered otherwise.
+  const clientId = await activeWorkspaceId();
+  const hstPanel = clientId
+    ? await loadHstPanel(clientId, selected.id, selected.store_name ?? selected.id)
+    : null;
 
   return (
     <PageContainer

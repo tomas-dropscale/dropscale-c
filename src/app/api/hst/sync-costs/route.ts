@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 
-import { getSessionProfile } from "@/lib/supabase/server";
+import { mayManageStoreSupplier } from "@/lib/portal/hst-store-access";
 import { createServiceClient } from "@/lib/supabase/service";
 import { syncHstCosts } from "@/lib/admin/hst-cost-sync";
 
@@ -17,11 +17,6 @@ import { syncHstCosts } from "@/lib/admin/hst-cost-sync";
  * would price only a handful of products.
  */
 export async function POST(request: NextRequest) {
-  const { profile } = await getSessionProfile();
-  if (profile?.role !== "admin") {
-    return NextResponse.json({ error: "Forbidden." }, { status: 403 });
-  }
-
   const body = (await request.json().catch(() => null)) as
     | { adAccountId?: unknown; sinceDays?: unknown }
     | null;
@@ -29,6 +24,9 @@ export async function POST(request: NextRequest) {
   const adAccountId = typeof body?.adAccountId === "string" ? body.adAccountId.trim() : "";
   if (!adAccountId) {
     return NextResponse.json({ error: "Send the store's id." }, { status: 422 });
+  }
+  if (!(await mayManageStoreSupplier(adAccountId))) {
+    return NextResponse.json({ error: "Forbidden." }, { status: 403 });
   }
 
   const sinceDays =

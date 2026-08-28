@@ -1078,6 +1078,26 @@ export type ProductCost = {
   created_at: string;
 };
 
+/**
+ * One client's own HST login (migration 0089).
+ *
+ * Distinct from hst_integration, which is the AGENCY's session for reading the
+ * commission HST pays it. This one prices a client's own goods, sees only their
+ * shop, and is reachable exclusively by the service role — the table has RLS on
+ * and no policies at all.
+ */
+export type ClientHstCredentials = {
+  client_id: string;
+  username_enc: string;
+  password_enc: string;
+  access_token_enc: string | null;
+  refresh_token_enc: string | null;
+  token_expires_at: string | null;
+  last_error: string | null;
+  connected_at: string;
+  updated_at: string;
+};
+
 export type HstOrderCharge = {
   ad_account_id: string;
   platform_order_id: string;
@@ -3082,6 +3102,20 @@ export type Database = {
             referencedColumns: ["id"];
           },
         ];
+      };
+      client_hst_credentials: {
+        Row: Row<ClientHstCredentials>;
+        Insert: Insert<
+          ClientHstCredentials,
+          | "access_token_enc"
+          | "refresh_token_enc"
+          | "token_expires_at"
+          | "last_error"
+          | "connected_at"
+          | "updated_at"
+        >;
+        Update: Partial<ClientHstCredentials>;
+        Relationships: [];
       };
       hst_order_charges: {
         Row: Row<HstOrderCharge>;

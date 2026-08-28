@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
 
@@ -15,31 +15,38 @@ const { FakeHstError } = vi.hoisted(() => ({
 
 const mocks = vi.hoisted(() => ({
   createClient: vi.fn(),
-  hstAccessToken: vi.fn(),
+  hstGet: vi.fn(),
+  clientHstToken: vi.fn(),
+  noteClientHstError: vi.fn(),
   applyHstCosts: vi.fn(),
 }));
 
 vi.mock("@/lib/supabase/server", () => ({ createClient: mocks.createClient }));
-vi.mock("./hst", () => ({
-  HstError: FakeHstError,
-  hstAccessToken: mocks.hstAccessToken,
+vi.mock("@/lib/hst/erp", () => ({ HstError: FakeHstError, hstGet: mocks.hstGet }));
+vi.mock("@/lib/portal/client-hst", () => ({
+  clientHstToken: mocks.clientHstToken,
+  noteClientHstError: mocks.noteClientHstError,
 }));
 vi.mock("./hst-costs", () => ({ applyHstCosts: mocks.applyHstCosts }));
 
 import { syncHstCosts } from "./hst-cost-sync";
 
 const SHOP = "2021639129";
+const CLIENT = "aa000000-0000-4000-8000-000000000001";
+const OTHER_CLIENT = "aa000000-0000-4000-8000-000000000002";
 const ACCOUNT = "cc000000-0000-4000-8000-000000000001";
 const NOW = new Date("2026-08-28T09:00:00.000Z");
+
+type Account = { id: string; client_id: string; hst_shop_id: string | null };
 
 /**
  * A Supabase double answering the one account query this module makes.
  *
  * `.not(...)` is awaited directly when every mapped store is wanted, and
- * followed by `.in(ids)` when only some are — so the object it returns has to
- * be both a thenable and a builder.
+ * followed by `.in(ids)` when only some are — so what it returns has to be both
+ * a thenable and a builder.
  */
-function service(accounts: Array<{ id: string; hst_shop_id: string | null }>) {
+function service(accounts: Account[]) {
   const narrowed: { ids?: string[] } = {};
   const answer = { data: accounts, error: null };
 
@@ -83,19 +90,14 @@ function payload(orders: Array<{ id: string; paidTime: string; shopId?: string }
   };
 }
 
-function jsonResponse(body: unknown, status = 200) {
-  return {
-    ok: status >= 200 && status < 300,
-    status,
-    headers: { get: () => "application/json" },
-    json: async () => body,
-  } as unknown as Response;
-}
+const ONE_PAGE = () => payload([{ id: "8004536729939", paidTime: "2026-08-28 06:00:00" }]);
 
 describe("HST cost sync", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.hstAccessToken.mockResolvedValue("token-1");
+    mocks.clientHstToken.mockResolvedValue("token-1");
+    mocks.noteClientHstError.mockResolvedValue(undefined);
+    mocks.hstGet.mockResolvedValue(ONE_PAGE());
     mocks.applyHstCosts.mockResolvedValue({
       written: 1,
       unchanged: 0,
@@ -103,46 +105,72 @@ describe("HST cost sync", () => {
       charges: 1,
     });
   });
-  afterEach(() => vi.unstubAllGlobals());
 
-  it("asks the supplier nothing when no store is mapped to a shop", async () => {
-    // One HST login sees ten shops. Without a mapping there is no way to know
-    // which is this client's, and guessing writes another client's costs.
-    const fetchSpy = vi.fn();
-    vi.stubGlobal("fetch", fetchSpy);
-
+  it("asks the supplier nothing when no store has a shop code", async () => {
     const result = await syncHstCosts({ client: service([]).client, now: NOW });
 
     expect(result).toMatchObject({ ok: true, accounts: 0, written: 0 });
-    expect(fetchSpy).not.toHaveBeenCalled();
-    expect(mocks.hstAccessToken).not.toHaveBeenCalled();
+    expect(mocks.hstGet).not.toHaveBeenCalled();
+    expect(mocks.clientHstToken).not.toHaveBeenCalled();
   });
 
-  it("passes the mapped store's orders through to the cost writer", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => jsonResponse(payload([{ id: "8004536729939", paidTime: "2026-08-28 06:00:00" }]))),
-    );
-
+  it("prices a store with the session of the client who owns it", async () => {
+    // The whole point of the per-client model: a supplier account sees its
+    // owner's shop, so it is the only credential that may price these goods.
     const result = await syncHstCosts({
-      client: service([{ id: ACCOUNT, hst_shop_id: SHOP }]).client,
+      client: service([{ id: ACCOUNT, client_id: CLIENT, hst_shop_id: SHOP }]).client,
       now: NOW,
     });
 
+    expect(mocks.clientHstToken).toHaveBeenCalledWith(expect.anything(), CLIENT);
     expect(result).toMatchObject({ ok: true, accounts: 1, written: 1, charges: 1 });
     const call = mocks.applyHstCosts.mock.calls[0][0];
     expect(call.adAccountId).toBe(ACCOUNT);
-    expect(call.orders).toHaveLength(1);
     expect(call.orders[0]).toMatchObject({ platformOrderId: "8004536729939", tariff: 3 });
+  });
+
+  it("signs a client in once however many stores they own", async () => {
+    const second = "cc000000-0000-4000-8000-000000000009";
+    await syncHstCosts({
+      client: service([
+        { id: ACCOUNT, client_id: CLIENT, hst_shop_id: SHOP },
+        { id: second, client_id: CLIENT, hst_shop_id: "2021640421" },
+      ]).client,
+      now: NOW,
+    });
+
+    expect(mocks.clientHstToken).toHaveBeenCalledTimes(1);
+    expect(mocks.applyHstCosts).toHaveBeenCalledTimes(2);
+  });
+
+  it("never lets one client's session price another client's store", async () => {
+    mocks.clientHstToken.mockImplementation(async (_service: unknown, clientId: string) =>
+      clientId === CLIENT ? "token-a" : "token-b",
+    );
+    const seen: string[] = [];
+    mocks.hstGet.mockImplementation(async (_url: string, token: string) => {
+      seen.push(token);
+      return ONE_PAGE();
+    });
+
+    await syncHstCosts({
+      client: service([
+        { id: ACCOUNT, client_id: CLIENT, hst_shop_id: SHOP },
+        { id: "cc000000-0000-4000-8000-000000000003", client_id: OTHER_CLIENT, hst_shop_id: "2021640421" },
+      ]).client,
+      now: NOW,
+    });
+
+    expect(seen).toEqual(["token-a", "token-b"]);
   });
 
   it("stops paging once the list reaches past the window", async () => {
     // The list is 221 pages and newest-first. Reading to the end every hour
-    // would be thousands of requests for orders whose costs are already known.
-    const fetchSpy = vi.fn(async (url: string) => {
+    // would be thousands of requests for costs already known.
+    mocks.hstGet.mockImplementation(async (url: string) => {
       const page = Number(new URL(url).searchParams.get("page"));
-      return jsonResponse(
-        payload([
+      return payload(
+        [
           {
             id: `order-${page}`,
             // Page 1 is inside the 3-day window; page 2 is well outside it.
@@ -150,85 +178,95 @@ describe("HST cost sync", () => {
           },
         ],
         5,
-      ),
       );
     });
-    vi.stubGlobal("fetch", fetchSpy);
 
     const result = await syncHstCosts({
-      client: service([{ id: ACCOUNT, hst_shop_id: SHOP }]).client,
+      client: service([{ id: ACCOUNT, client_id: CLIENT, hst_shop_id: SHOP }]).client,
       now: NOW,
     });
 
-    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(mocks.hstGet).toHaveBeenCalledTimes(2);
     expect(result.pages).toBe(2);
-    // The out-of-window page contributes nothing.
-    expect(mocks.applyHstCosts.mock.calls[0][0].orders.map((o: { platformOrderId: string }) => o.platformOrderId)).toEqual([
-      "order-1",
-    ]);
+    expect(
+      mocks.applyHstCosts.mock.calls[0][0].orders.map(
+        (order: { platformOrderId: string }) => order.platformOrderId,
+      ),
+    ).toEqual(["order-1"]);
   });
 
   it("renews a refused session once and carries on", async () => {
     let calls = 0;
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => {
-        calls += 1;
-        if (calls === 1) return jsonResponse({ error: "expired" }, 401);
-        return jsonResponse(payload([{ id: "8004536729939", paidTime: "2026-08-28 06:00:00" }]));
-      }),
-    );
-    mocks.hstAccessToken.mockResolvedValueOnce("token-1").mockResolvedValueOnce("token-2");
+    mocks.hstGet.mockImplementation(async () => {
+      calls += 1;
+      if (calls === 1) throw new FakeHstError("refused", true);
+      return ONE_PAGE();
+    });
 
     const result = await syncHstCosts({
-      client: service([{ id: ACCOUNT, hst_shop_id: SHOP }]).client,
+      client: service([{ id: ACCOUNT, client_id: CLIENT, hst_shop_id: SHOP }]).client,
       now: NOW,
     });
 
-    expect(mocks.hstAccessToken).toHaveBeenLastCalledWith(expect.anything(), { forceRenew: true });
+    expect(mocks.clientHstToken).toHaveBeenLastCalledWith(expect.anything(), CLIENT, {
+      forceRenew: true,
+    });
     expect(result).toMatchObject({ ok: true, written: 1 });
   });
 
-  it("lets one broken store fail without taking the others with it", async () => {
-    const other = "cc000000-0000-4000-8000-000000000002";
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (url: string) =>
-        url.includes("shopIds=broken")
-          ? jsonResponse({ error: "nope" }, 500)
-          : jsonResponse(payload([{ id: "8004536729939", paidTime: "2026-08-28 06:00:00" }])),
-      ),
+  it("writes the reason against the client, who is the only one who can fix it", async () => {
+    // Their cost page is the only place they would look, and a sync that fails
+    // silently is indistinguishable from a supplier with nothing to report.
+    mocks.clientHstToken.mockRejectedValue(new FakeHstError("HST refused those credentials."));
+
+    const result = await syncHstCosts({
+      client: service([{ id: ACCOUNT, client_id: CLIENT, hst_shop_id: SHOP }]).client,
+      now: NOW,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(mocks.noteClientHstError).toHaveBeenCalledWith(
+      expect.anything(),
+      CLIENT,
+      expect.stringMatching(/refused/),
     );
+  });
+
+  it("clears a previous failure once a store syncs cleanly", async () => {
+    await syncHstCosts({
+      client: service([{ id: ACCOUNT, client_id: CLIENT, hst_shop_id: SHOP }]).client,
+      now: NOW,
+    });
+
+    expect(mocks.noteClientHstError).toHaveBeenCalledWith(expect.anything(), CLIENT, null);
+  });
+
+  it("lets one broken client fail without taking the others with it", async () => {
+    const other = "cc000000-0000-4000-8000-000000000002";
+    mocks.clientHstToken.mockImplementation(async (_service: unknown, clientId: string) => {
+      if (clientId === CLIENT) throw new FakeHstError("no session");
+      return "token-b";
+    });
 
     const result = await syncHstCosts({
       client: service([
-        { id: ACCOUNT, hst_shop_id: "broken" },
-        { id: other, hst_shop_id: SHOP },
+        { id: ACCOUNT, client_id: CLIENT, hst_shop_id: SHOP },
+        { id: other, client_id: OTHER_CLIENT, hst_shop_id: "2021640421" },
       ]).client,
       now: NOW,
     });
 
     expect(result.ok).toBe(false);
-    expect(result.accounts).toBe(2);
-    // The healthy store still had its costs written, and the log names the sick one.
     expect(result.written).toBe(1);
-    expect(result.stores[0]).toMatchObject({ adAccountId: ACCOUNT });
-    expect(result.stores[0].error).toMatch(/500/);
+    expect(result.stores[0].error).toMatch(/no session/);
     expect(result.stores[1]).toMatchObject({ adAccountId: other, written: 1 });
   });
 
   it("pulls one store on its own when asked", async () => {
-    // The per-store "Sync now" button: whoever just typed a supplier code needs
-    // to know whether it was the right one, without waiting an hour or dragging
-    // every other store through the supplier's API.
     const other = "cc000000-0000-4000-8000-000000000002";
-    const fetchSpy = vi.fn(async () =>
-      jsonResponse(payload([{ id: "8004536729939", paidTime: "2026-08-28 06:00:00" }])),
-    );
-    vi.stubGlobal("fetch", fetchSpy);
     const { client, narrowed } = service([
-      { id: ACCOUNT, hst_shop_id: SHOP },
-      { id: other, hst_shop_id: "2021640421" },
+      { id: ACCOUNT, client_id: CLIENT, hst_shop_id: SHOP },
+      { id: other, client_id: OTHER_CLIENT, hst_shop_id: "2021640421" },
     ]);
 
     const result = await syncHstCosts({ client, adAccountIds: [ACCOUNT], now: NOW });
@@ -238,36 +276,23 @@ describe("HST cost sync", () => {
     expect(result.stores.map((store) => store.adAccountId)).toEqual([ACCOUNT]);
   });
 
-  it("reports a session it could not obtain instead of throwing", async () => {
-    vi.stubGlobal("fetch", vi.fn());
-    mocks.hstAccessToken.mockRejectedValue(new FakeHstError("No HST session saved yet."));
+  it("takes only the mapped shop's rows out of a shared page", async () => {
+    mocks.hstGet.mockResolvedValue(
+      payload([
+        { id: "mine", paidTime: "2026-08-28 06:00:00" },
+        { id: "theirs", paidTime: "2026-08-28 06:00:00", shopId: "2021635417" },
+      ]),
+    );
 
-    const result = await syncHstCosts({
-      client: service([{ id: ACCOUNT, hst_shop_id: SHOP }]).client,
+    await syncHstCosts({
+      client: service([{ id: ACCOUNT, client_id: CLIENT, hst_shop_id: SHOP }]).client,
       now: NOW,
     });
 
-    expect(result.ok).toBe(false);
-    expect(result.error).toMatch(/No HST session/);
-  });
-
-  it("takes only the mapped shop's rows out of a shared page", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        jsonResponse(
-          payload([
-            { id: "mine", paidTime: "2026-08-28 06:00:00" },
-            { id: "theirs", paidTime: "2026-08-28 06:00:00", shopId: "2021635417" },
-          ]),
-        ),
-      ),
-    );
-
-    await syncHstCosts({ client: service([{ id: ACCOUNT, hst_shop_id: SHOP }]).client, now: NOW });
-
     expect(
-      mocks.applyHstCosts.mock.calls[0][0].orders.map((o: { platformOrderId: string }) => o.platformOrderId),
+      mocks.applyHstCosts.mock.calls[0][0].orders.map(
+        (order: { platformOrderId: string }) => order.platformOrderId,
+      ),
     ).toEqual(["mine"]);
   });
 });
