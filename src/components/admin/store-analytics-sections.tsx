@@ -199,7 +199,7 @@ function FamilyNotice({
   );
 }
 
-function ShopifyFunnel({
+export function ShopifyFunnel({
   funnel,
 }: {
   funnel: AdminStoreAnalytics["funnel"];

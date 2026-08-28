@@ -4,6 +4,7 @@ import { notFound } from "next/navigation";
 import { CircleCheck, FileBarChart } from "lucide-react";
 
 import { fetchAccount, fetchCampaigns, reportingMetricAccountIds } from "@/lib/portal/data";
+import { fetchClientStoreFunnel } from "@/lib/admin/store-analytics";
 import {
   fetchDailyMetrics,
   freshness,
@@ -20,6 +21,7 @@ import { MetricsGrid } from "@/components/portal/metric-card";
 import { RangePicker } from "@/components/portal/range-picker";
 import { SuspendedBanner } from "@/components/portal/suspended-banner";
 import { CampaignsTable } from "@/components/portal/campaigns-table";
+import { ShopifyFunnel } from "@/components/admin/store-analytics-sections";
 import { PageContainer } from "@/components/ui/page-container";
 
 import { getServerDictionary } from "@/lib/i18n/server";
@@ -48,10 +50,20 @@ export default async function AccountPage({
   if (!account) notFound();
 
   const metricAccountIds = await reportingMetricAccountIds(account.id);
-  const [physicalRows, campaigns, referralRateSchedule, { d }] = await Promise.all([
+  const [physicalRows, campaigns, referralRateSchedule, funnel, { d }] = await Promise.all([
     fetchDailyMetrics(metricAccountIds, range.from, range.to),
     fetchCampaigns(account, range),
     fetchManualReferralRateSchedule(account.client_id),
+    // The same stored Shopify funnel the admin analytics screen shows, for the
+    // client's own store. Never throws: a failure renders as the funnel's own
+    // notice rather than taking the page down.
+    fetchClientStoreFunnel({
+      clientId: account.client_id,
+      accountId: account.id,
+      activityAccountIds: metricAccountIds,
+      currency: account.currency,
+      range: { from: range.from, to: range.to },
+    }).catch(() => null),
     getServerDictionary(),
   ]);
   const rows = rekeyDailyMetricRows(
@@ -140,6 +152,8 @@ export default async function AccountPage({
             orders={totals.orders}
           />
         </section>
+
+        {funnel && <ShopifyFunnel funnel={funnel} />}
 
         <CampaignsTable campaigns={campaigns} currency={account.currency} />
       </div>

@@ -2415,6 +2415,72 @@ export async function fetchCachedAdminStoreAnalytics(
   };
 }
 
+/**
+ * Just the Shopify funnel for one store, for the client's own view of it.
+ *
+ * The admin analytics screen owns the full store picture; a client only needs
+ * to see the same funnel for a store that is theirs. This reads the exact same
+ * stored `shopify_funnel` snapshot the admin path reads — one query, no live
+ * provider call — so the two never disagree, and reuses loadTopology, which
+ * re-proves through the service role that the account belongs to input.clientId
+ * before touching a snapshot.
+ *
+ * Authorisation is the caller's to enforce: the portal has already RLS-scoped
+ * the account to the signed-in workspace before it gets here, and passes that
+ * workspace as clientId. loadTopology's own client/currency check is the
+ * fail-closed backstop, so a mismatched pair reads nothing rather than another
+ * store's numbers.
+ */
+export async function fetchClientStoreFunnel(input: {
+  clientId: string;
+  accountId: string;
+  activityAccountIds: string[];
+  currency: string;
+  range: { from: string; to: string };
+}): Promise<AdminStoreAnalytics["funnel"]> {
+  // `days` is the admin overview's own spend series and the funnel snapshot
+  // read ignores it (loadTopology never reads it), so the client caller need
+  // not carry it — an empty series stands in.
+  const scoped: FetchAdminStoreAnalyticsInput = {
+    clientId: input.clientId,
+    store: {
+      accountId: input.accountId,
+      activityAccountIds: input.activityAccountIds,
+      currency: input.currency,
+      days: [],
+    },
+    range: input.range,
+  };
+  assertInput(scoped);
+  let topology: StoreTopology;
+  try {
+    topology = await loadTopology(scoped);
+  } catch (error) {
+    console.error("Client store funnel topology failed:", error);
+    return failed("The store funnel could not be loaded.");
+  }
+
+  const stored = await readAdminReportingSnapshotFamilySelections({
+    client: topology.service,
+    families: ["shopify_funnel"],
+    accountId: input.accountId,
+    authorityKey: topology.authority.key,
+    from: input.range.from,
+    to: input.range.to,
+  }).catch(() => new Map());
+  const funnelSelection =
+    stored.get("shopify_funnel") ?? missingStoredSelection(input.range);
+
+  return slicedFunnelFamily(
+    storedFamily<FunnelSnapshotData>(funnelSelection.snapshot, {
+      granularity: "day" as const,
+      daily: [],
+      totals: { sessions: 0, addedToCart: 0, reachedCheckout: 0, completedCheckout: 0 },
+    }),
+    funnelSelection,
+  );
+}
+
 function snapshotFamilyResult<T>(family: AdminAnalyticsFamily<T>) {
   if (family.state === "failed" || family.state === "not_synced") {
     // Carry the provider's own message: the refresh's failure path persists
