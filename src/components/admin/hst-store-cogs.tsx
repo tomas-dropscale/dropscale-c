@@ -39,11 +39,8 @@ type SyncOutcome = {
  */
 export function HstStoreCogs(props: HstStoreCogsProps) {
   const router = useRouter();
-  const [username, setUsername] = React.useState("");
-  const [password, setPassword] = React.useState("");
-  const [captcha, setCaptcha] = React.useState("");
   const [code, setCode] = React.useState(props.hstShopId ?? "");
-  const [busy, setBusy] = React.useState<"login" | "save" | "sync" | null>(null);
+  const [busy, setBusy] = React.useState<"save" | "sync" | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [notice, setNotice] = React.useState<string | null>(null);
   const [outcome, setOutcome] = React.useState<SyncOutcome | null>(null);
@@ -66,23 +63,6 @@ export function HstStoreCogs(props: HstStoreCogsProps) {
       setError(cause instanceof Error ? cause.message : String(cause));
       return null;
     }
-  }
-
-  async function signIn() {
-    setBusy("login");
-    setNotice(null);
-    const ok = await call("/api/hst/login", {
-      username,
-      password,
-      captchaCode: captcha || undefined,
-    });
-    if (ok) {
-      // Nothing left to do with the password here once it is a session.
-      setPassword("");
-      setNotice("Signed in to HST.");
-      router.refresh();
-    }
-    setBusy(null);
   }
 
   async function saveCode() {
@@ -126,9 +106,20 @@ export function HstStoreCogs(props: HstStoreCogsProps) {
             Supplier costs (HST)
           </h2>
           <p className="mt-1 text-[12.5px] leading-relaxed text-[var(--text-muted)]">
-            {props.connected
-              ? `Give ${props.storeName} its code in the supplier's ERP. Its product costs and import duty then arrive on their own, every hour.`
-              : "Sign in once with the agency's HST account. One login covers every shop it buys through."}
+            {props.connected ? (
+              `Give ${props.storeName} its code in the supplier's ERP. Its product costs and import duty then arrive on their own, every hour.`
+            ) : (
+              <>
+                HST is not connected yet. Sign in once under{" "}
+                <a
+                  className="underline underline-offset-2 hover:text-[var(--text-secondary)]"
+                  href="/admin/settings"
+                >
+                  admin settings
+                </a>{" "}
+                — one login covers every shop the agency buys through.
+              </>
+            )}
           </p>
         </div>
       </header>
@@ -215,60 +206,22 @@ export function HstStoreCogs(props: HstStoreCogsProps) {
             </p>
           )}
 
-          <p className="text-[12px] leading-relaxed text-[var(--text-muted)]">
-            {props.selfHealing
-              ? "The session signs itself back in when it expires."
-              : "This session was pasted, not signed in — it will stop when its refresh token expires. Sign in below to make it renew itself."}
-          </p>
+          {!props.selfHealing && (
+            <p className="text-[12px] leading-relaxed text-[var(--text-muted)]">
+              This session was pasted, not signed in — it stops when its refresh token expires, and
+              nothing on screen will say so. Sign in under{" "}
+              <a
+                className="underline underline-offset-2 hover:text-[var(--text-secondary)]"
+                href="/admin/settings"
+              >
+                admin settings
+              </a>{" "}
+              to make it renew itself.
+            </p>
+          )}
         </div>
       )}
 
-      {(!props.connected || !props.selfHealing) && (
-        <div className="space-y-3 border-t border-[var(--border-subtle)] pt-4">
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div className="space-y-1.5">
-              <Label htmlFor="hst-username">HST username</Label>
-              <Input
-                id="hst-username"
-                autoComplete="off"
-                value={username}
-                onChange={(event) => setUsername(event.target.value)}
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="hst-password">Password</Label>
-              <Input
-                id="hst-password"
-                type="password"
-                autoComplete="off"
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-              />
-            </div>
-          </div>
-
-          <div className="space-y-1.5">
-            <Label htmlFor="hst-captcha">Captcha code (only if HST asks for one)</Label>
-            <Input
-              id="hst-captcha"
-              autoComplete="off"
-              value={captcha}
-              placeholder="Leave empty unless the HST login shows a code"
-              onChange={(event) => setCaptcha(event.target.value)}
-            />
-          </div>
-
-          <Button
-            variant="primary"
-            size="sm"
-            loading={busy === "login"}
-            disabled={busy !== null || username.trim() === "" || password === ""}
-            onClick={signIn}
-          >
-            Sign in to HST
-          </Button>
-        </div>
-      )}
     </section>
   );
 }

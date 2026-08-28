@@ -46,6 +46,7 @@ export default async function SettingsPage() {
 
           <HstCommissionCard
             hasSession={hst.hasSession}
+            hasCredentials={hst.hasCredentials}
             lastSyncedAt={hst.lastSyncedAt}
             tokenExpiresAt={hst.tokenExpiresAt}
           />

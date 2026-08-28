@@ -6,29 +6,64 @@ import { RefreshCw, Truck } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Label } from "@/components/ui/input";
+import { Input, Label } from "@/components/ui/input";
 import { FormAlert } from "@/components/auth/auth-card";
 
 /**
- * Admin card to bootstrap and run the HST commission sync. The admin logs in to
- * HST once (past the captcha), pastes the login RESPONSE here (which carries the
- * refresh token), and from then on the sync renews itself — no re-pasting until
- * the refresh token itself expires. No captcha is ever automated.
+ * The one place HST is connected: signing in, and what the session is doing.
+ *
+ * Two ways in, because they fail differently. Signing in with the account's own
+ * username and password is the one to use — the credentials are kept encrypted
+ * and every later expiry is repaired without anybody being asked, which is what
+ * the pasted route could never do. Pasting a login response still works and is
+ * kept for the day the login endpoint changes shape, but it ends when its
+ * refresh token does, silently.
+ *
+ * The captcha field is passed through exactly as typed. Nothing here invents a
+ * value for it.
  */
 export function HstCommissionCard({
   hasSession,
+  hasCredentials,
   lastSyncedAt,
   tokenExpiresAt,
 }: {
   hasSession: boolean;
+  /** Credentials stored, so the session can rebuild itself unattended. */
+  hasCredentials: boolean;
   lastSyncedAt: string | null;
   tokenExpiresAt: string | null;
 }) {
   const router = useRouter();
   const [session, setSession] = React.useState("");
-  const [busy, setBusy] = React.useState<"save" | "sync" | null>(null);
+  const [username, setUsername] = React.useState("");
+  const [password, setPassword] = React.useState("");
+  const [captcha, setCaptcha] = React.useState("");
+  const [showPaste, setShowPaste] = React.useState(false);
+  const [busy, setBusy] = React.useState<"save" | "sync" | "login" | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [notice, setNotice] = React.useState<string | null>(null);
+
+  async function signIn() {
+    setBusy("login");
+    setError(null);
+    setNotice(null);
+    const res = await fetch("/api/hst/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password, captchaCode: captcha || undefined }),
+    });
+    setBusy(null);
+    if (!res.ok) {
+      const body = (await res.json().catch(() => null)) as { error?: string } | null;
+      setError(body?.error ?? "Couldn't sign in to HST.");
+      return;
+    }
+    // Nothing left to do with the password here once it is a session.
+    setPassword("");
+    setNotice("Signed in. The session will renew itself from now on.");
+    router.refresh();
+  }
 
   async function saveSession() {
     setBusy("save");
@@ -97,39 +132,97 @@ export function HstCommissionCard({
       {notice && <FormAlert tone="success">{notice}</FormAlert>}
 
       <p className="text-[12.5px] leading-relaxed text-[var(--text-muted)]">
-        Sign in to HST once. In F12 → Network, click the{" "}
-        <span className="font-mono">login</span> request → <span className="text-[var(--text-secondary)]">Response</span>{" "}
-        → copy it all and paste below. It carries the refresh token, so the sync renews itself —
-        you only repeat this if the refresh token expires (weeks). Stored encrypted.
-      </p>
-      <p className="text-[12.5px] leading-relaxed text-[var(--text-muted)]">
-        Use the <span className="text-[var(--text-secondary)]">Response</span> tab, not{" "}
-        <span className="text-[var(--text-secondary)]">Preview</span>: Preview shortens long values
-        with a <span className="font-mono">…</span>, and a token cut that way can never be sent.
+        {hasCredentials
+          ? "Signed in with the agency's HST account. The session renews itself, and signs back in on its own when the refresh token expires too — nothing here needs repeating."
+          : "Sign in with the agency's HST account. One login covers every shop it buys through, and the credentials are kept encrypted so the session can rebuild itself instead of dying quietly."}
       </p>
 
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div className="space-y-1.5">
+          <Label htmlFor="hst-username">HST username</Label>
+          <Input
+            id="hst-username"
+            autoComplete="off"
+            value={username}
+            onChange={(event) => setUsername(event.target.value)}
+          />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="hst-password">Password</Label>
+          <Input
+            id="hst-password"
+            type="password"
+            autoComplete="off"
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+          />
+        </div>
+      </div>
+
       <div className="space-y-1.5">
-        <Label htmlFor="hst-session">HST login response</Label>
-        <textarea
-          id="hst-session"
-          value={session}
-          onChange={(event) => setSession(event.target.value)}
-          rows={4}
-          placeholder='{ "code": 0, "data": { "accessToken": "…", "refreshToken": "…", "expires": "…" } }'
-          className="w-full rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] px-3 py-2 font-mono text-[12px] text-[var(--text-primary)] outline-none focus-visible:border-[var(--accent-gold)]/40"
+        <Label htmlFor="hst-captcha">Captcha code (only if HST asks for one)</Label>
+        <Input
+          id="hst-captcha"
+          autoComplete="off"
+          value={captcha}
+          placeholder="Leave empty unless the HST login shows a code"
+          onChange={(event) => setCaptcha(event.target.value)}
         />
       </div>
+
+      {/* The pasted route is the fallback for the day the login endpoint
+          changes shape, not the way in. It is folded away so it stops reading
+          as the normal thing to do. */}
+      <button
+        type="button"
+        className="text-left text-[12px] text-[var(--text-muted)] underline underline-offset-2 hover:text-[var(--text-secondary)]"
+        onClick={() => setShowPaste((open) => !open)}
+      >
+        {showPaste ? "Hide" : "Or paste a login response instead"}
+      </button>
+
+      {showPaste && (
+        <div className="space-y-1.5">
+          <p className="text-[12px] leading-relaxed text-[var(--text-muted)]">
+            F12 → Network → the <span className="font-mono">login</span> request →{" "}
+            <span className="text-[var(--text-secondary)]">Response</span> tab, not{" "}
+            <span className="text-[var(--text-secondary)]">Preview</span>: Preview shortens long
+            values with a <span className="font-mono">…</span>, and a token cut that way can never
+            be sent. A session saved this way ends when its refresh token does.
+          </p>
+          <Label htmlFor="hst-session">HST login response</Label>
+          <textarea
+            id="hst-session"
+            value={session}
+            onChange={(event) => setSession(event.target.value)}
+            rows={4}
+            placeholder='{ "code": 0, "data": { "accessToken": "…", "refreshToken": "…", "expires": "…" } }'
+            className="w-full rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] px-3 py-2 font-mono text-[12px] text-[var(--text-primary)] outline-none focus-visible:border-[var(--accent-gold)]/40"
+          />
+        </div>
+      )}
 
       <div className="flex flex-wrap items-center gap-3">
         <Button
           variant="primary"
           size="sm"
-          disabled={session.trim() === ""}
-          loading={busy === "save"}
-          onClick={saveSession}
+          disabled={username.trim() === "" || password === ""}
+          loading={busy === "login"}
+          onClick={signIn}
         >
-          Save session
+          Sign in to HST
         </Button>
+        {showPaste && (
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={session.trim() === ""}
+            loading={busy === "save"}
+            onClick={saveSession}
+          >
+            Save pasted session
+          </Button>
+        )}
         <Button
           variant="secondary"
           size="sm"
