@@ -22,16 +22,25 @@ import type { Database } from "@/lib/supabase/types";
 export type HstOrderCost = {
   /** The platform (Shopify) order id — what the metrics sync sees too. */
   platformOrderId: string;
-  /** YYYY-MM-DD, the day the order belongs to. */
+  /** YYYY-MM-DD in the account's reporting zone, the day the order belongs to. */
   orderDay: string;
+  /** When the customer paid, as a real instant — the day above is derived. */
+  paidAt: string;
   /** EU/US import tariff for the whole order; 0 when the supplier sends "-". */
   tariff: number;
   currency: string;
   items: Array<{
-    /** store_products.platform_key — the variant id where there is one. */
-    platformKey: string;
+    /**
+     * Candidate store_products.platform_key values, best first.
+     *
+     * The Shopify sync keys products on `sku || title`, so which of the two a
+     * store uses is the store's choice, not ours. HST reports both back and
+     * the first that resolves against this store wins.
+     */
+    keys: string[];
     /** Cost of ONE unit, not the line total. */
     unitCost: number;
+    currency: string;
     quantity: number;
   }>;
 };
@@ -56,25 +65,46 @@ function isoDay(now: Date): string {
   return now.toISOString().slice(0, 10);
 }
 
+type Wanted = { unitCost: number; currency: string; day: string };
+
 /**
  * The supplier reports a cost per order line, and the same product appears in
  * many orders. The most recent order wins: a price list that changed last week
  * should not be outvoted by the twenty orders that preceded it.
+ *
+ * Resolution happens against keys the store actually has, so a line only counts
+ * as unknown once every name HST offered for it has failed.
  */
 function latestCostByProduct(
   orders: HstOrderCost[],
-): Map<string, { unitCost: number; day: string }> {
-  const latest = new Map<string, { unitCost: number; day: string }>();
+  idByKey: Map<string, string>,
+): { wanted: Map<string, Wanted>; unknown: Set<string> } {
+  const wanted = new Map<string, Wanted>();
+  const unknown = new Set<string>();
+
   for (const order of orders) {
     for (const item of order.items) {
       if (!Number.isFinite(item.unitCost) || item.unitCost < 0) continue;
-      const seen = latest.get(item.platformKey);
+      const key = item.keys.find((candidate) => idByKey.has(candidate));
+      if (!key) {
+        // A product the store has never sold has no row yet. The Shopify sync
+        // creates it from the line item; skipping is not a loss, only a wait.
+        if (item.keys[0]) unknown.add(item.keys[0]);
+        continue;
+      }
+      const productId = idByKey.get(key) as string;
+      const seen = wanted.get(productId);
       if (!seen || order.orderDay >= seen.day) {
-        latest.set(item.platformKey, { unitCost: item.unitCost, day: order.orderDay });
+        wanted.set(productId, {
+          unitCost: item.unitCost,
+          currency: item.currency,
+          day: order.orderDay,
+        });
       }
     }
   }
-  return latest;
+
+  return { wanted, unknown };
 }
 
 /**
@@ -101,13 +131,15 @@ export async function applyHstCosts(input: {
   };
   if (orders.length === 0) return outcome;
 
-  const wanted = latestCostByProduct(orders);
-  if (wanted.size > 0) {
+  const allKeys = [
+    ...new Set(orders.flatMap((order) => order.items.flatMap((item) => item.keys))),
+  ];
+  if (allKeys.length > 0) {
     const { data: products, error: productsError } = await service
       .from("store_products")
       .select("id, platform_key")
       .eq("ad_account_id", adAccountId)
-      .in("platform_key", [...wanted.keys()]);
+      .in("platform_key", allKeys);
     if (productsError) throw productsError;
 
     const idByKey = new Map(
@@ -116,11 +148,11 @@ export async function applyHstCosts(input: {
         row.id,
       ]),
     );
-    // A product the store has never sold has no row yet. The Shopify sync
-    // creates it from the line item; skipping is not a loss, only a wait.
-    outcome.unknownProducts = [...wanted.keys()].filter((key) => !idByKey.has(key)).length;
 
-    const productIds = [...idByKey.values()];
+    const { wanted, unknown } = latestCostByProduct(orders, idByKey);
+    outcome.unknownProducts = unknown.size;
+
+    const productIds = [...wanted.keys()];
     if (productIds.length > 0) {
       const { data: existing, error: existingError } = await service
         .from("product_costs")
@@ -139,12 +171,11 @@ export async function applyHstCosts(input: {
       const inserts: Array<{
         product_id: string;
         cost: number;
+        currency: string;
         effective_from: string;
         source: "hst";
       }> = [];
-      for (const [key, value] of wanted) {
-        const productId = idByKey.get(key);
-        if (!productId) continue;
+      for (const [productId, value] of wanted) {
         const current = currentByProduct.get(productId);
         // The supplier returns the same window every run. Rewriting a row to
         // the value it already holds is a statement per product per hour that
@@ -156,7 +187,7 @@ export async function applyHstCosts(input: {
         if (current) {
           const { error } = await service
             .from("product_costs")
-            .update({ cost: value.unitCost })
+            .update({ cost: value.unitCost, currency: value.currency })
             .eq("id", current.id);
           if (error) throw error;
           outcome.written += 1;
@@ -165,6 +196,7 @@ export async function applyHstCosts(input: {
         inserts.push({
           product_id: productId,
           cost: value.unitCost,
+          currency: value.currency,
           effective_from: today,
           source: "hst",
         });
@@ -186,6 +218,7 @@ export async function applyHstCosts(input: {
       ad_account_id: adAccountId,
       platform_order_id: order.platformOrderId,
       order_day: order.orderDay,
+      paid_at: order.paidAt,
       tariff: order.tariff,
       currency: order.currency,
       synced_at: new Date().toISOString(),

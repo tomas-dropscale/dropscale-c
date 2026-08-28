@@ -70,6 +70,13 @@ create table if not exists public.hst_order_charges (
   -- metrics sync sees on its own orders.
   platform_order_id text not null,
   order_day date not null,
+  -- The instant the customer paid, kept next to the day derived from it.
+  -- The supplier writes its whole ERP in UTC+8 and says so nowhere, and the
+  -- day an order belongs to is a question about the STORE's timezone, which
+  -- this sync learns from Shopify rather than owning. Keeping the instant
+  -- means a store whose zone is corrected later can have its days recomputed
+  -- from what was recorded, instead of re-fetching a year of orders.
+  paid_at timestamptz,
   tariff numeric not null default 0 check (tariff >= 0),
   currency text not null default 'EUR',
   synced_at timestamptz not null default now(),

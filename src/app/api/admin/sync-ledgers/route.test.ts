@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   purgeAdminAccountRevenue: vi.fn(),
   syncCommissionLedger: vi.fn(),
   syncHstCommission: vi.fn(),
+  syncHstCosts: vi.fn().mockResolvedValue({ ok: true, accounts: 0, written: 0, unchanged: 0, unknownProducts: 0, charges: 0, unquotedLines: 0, pages: 0, stores: [] }),
   syncRevenueShareLedger: vi.fn(),
 }));
 
@@ -20,6 +21,9 @@ vi.mock("@/lib/admin/commission-sync", () => ({
   purgeAdminAccountRevenue: mocks.purgeAdminAccountRevenue,
   syncCommissionLedger: mocks.syncCommissionLedger,
   syncRevenueShareLedger: mocks.syncRevenueShareLedger,
+}));
+vi.mock("@/lib/admin/hst-cost-sync", () => ({
+  syncHstCosts: mocks.syncHstCosts,
 }));
 vi.mock("@/lib/admin/hst", () => ({
   syncHstCommission: mocks.syncHstCommission,

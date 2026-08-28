@@ -72,9 +72,10 @@ function order(overrides: Partial<HstOrderCost> = {}): HstOrderCost {
   return {
     platformOrderId: "8004536729939",
     orderDay: "2026-08-26",
+    paidAt: "2026-08-26T14:50:04.000Z",
     tariff: 3,
     currency: "EUR",
-    items: [{ platformKey: "44551122", unitCost: 20.99, quantity: 1 }],
+    items: [{ keys: ["44551122"], unitCost: 20.99, currency: "EUR", quantity: 1 }],
     ...overrides,
   };
 }
@@ -96,7 +97,7 @@ describe("HST supplier costs", () => {
 
     expect(outcome).toMatchObject({ written: 1, unchanged: 0, unknownProducts: 0 });
     expect(writes.inserted).toEqual([
-      { product_id: "p1", cost: 20.99, effective_from: TODAY, source: "hst" },
+      { product_id: "p1", cost: 20.99, currency: "EUR", effective_from: TODAY, source: "hst" },
     ]);
   });
 
@@ -111,9 +112,9 @@ describe("HST supplier costs", () => {
       service: client,
       adAccountId: ACCOUNT,
       orders: [
-        order({ platformOrderId: "1", orderDay: "2026-08-20", items: [{ platformKey: "44551122", unitCost: 18, quantity: 1 }] }),
-        order({ platformOrderId: "2", orderDay: "2026-08-26", items: [{ platformKey: "44551122", unitCost: 21.5, quantity: 1 }] }),
-        order({ platformOrderId: "3", orderDay: "2026-08-22", items: [{ platformKey: "44551122", unitCost: 19, quantity: 1 }] }),
+        order({ platformOrderId: "1", orderDay: "2026-08-20", items: [{ keys: ["44551122"], unitCost: 18, currency: "EUR", quantity: 1 }] }),
+        order({ platformOrderId: "2", orderDay: "2026-08-26", items: [{ keys: ["44551122"], unitCost: 21.5, currency: "EUR", quantity: 1 }] }),
+        order({ platformOrderId: "3", orderDay: "2026-08-22", items: [{ keys: ["44551122"], unitCost: 19, currency: "EUR", quantity: 1 }] }),
       ],
       now: NOW,
     });
@@ -156,7 +157,37 @@ describe("HST supplier costs", () => {
     });
 
     expect(outcome).toMatchObject({ written: 1 });
-    expect(writes.updated).toEqual([{ id: "c1", patch: { cost: 20.99 } }]);
+    expect(writes.updated).toEqual([{ id: "c1", patch: { cost: 20.99, currency: "EUR" } }]);
+  });
+
+  it("falls back to the title for a store that sets no SKUs", async () => {
+    // The Shopify sync keys products on `sku || title`. A store with no SKUs
+    // is keyed by title, while HST still reports a variant id as platformSku —
+    // matching on the SKU alone would find nothing for exactly those stores.
+    const { client, writes } = service({
+      products: [{ id: "p1", platform_key: "Handgjord väska med blommor" }],
+    });
+
+    const outcome = await applyHstCosts({
+      service: client,
+      adAccountId: ACCOUNT,
+      orders: [
+        order({
+          items: [
+            {
+              keys: ["54120322990419", "Handgjord väska med blommor"],
+              unitCost: 8.37,
+              currency: "EUR",
+              quantity: 1,
+            },
+          ],
+        }),
+      ],
+      now: NOW,
+    });
+
+    expect(outcome).toMatchObject({ written: 1, unknownProducts: 0 });
+    expect(writes.inserted[0]).toMatchObject({ product_id: "p1", cost: 8.37 });
   });
 
   it("waits for a product the store has never sold instead of inventing one", async () => {
@@ -189,8 +220,8 @@ describe("HST supplier costs", () => {
       orders: [
         order({
           items: [
-            { platformKey: "44551122", unitCost: 10, quantity: 1 },
-            { platformKey: "44551123", unitCost: 12, quantity: 2 },
+            { keys: ["44551122"], unitCost: 10, currency: "EUR", quantity: 1 },
+            { keys: ["44551123"], unitCost: 12, currency: "EUR", quantity: 2 },
           ],
         }),
       ],

@@ -1079,6 +1079,8 @@ export type HstOrderCharge = {
   ad_account_id: string;
   platform_order_id: string;
   order_day: string;
+  /** The instant behind order_day, so the day can be re-derived per store zone. */
+  paid_at: string | null;
   tariff: number;
   currency: string;
   synced_at: string;
@@ -3080,7 +3082,7 @@ export type Database = {
       };
       hst_order_charges: {
         Row: Row<HstOrderCharge>;
-        Insert: Insert<HstOrderCharge, "order_day" | "tariff" | "currency" | "synced_at">;
+        Insert: Insert<HstOrderCharge, "order_day" | "paid_at" | "tariff" | "currency" | "synced_at">;
         Update: Partial<HstOrderCharge>;
         Relationships: [];
       };

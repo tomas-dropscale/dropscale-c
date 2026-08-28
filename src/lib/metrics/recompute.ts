@@ -38,6 +38,7 @@ import {
 import { fxDailyRates, rateOn } from "@/lib/shopify/fx";
 import { orderCogs, paymentFee } from "@/lib/cogs/engine";
 import { loadCostContext, registerSoldProducts } from "@/lib/cogs/context";
+import { addHstTariffs } from "@/lib/cogs/hst-tariff";
 import { dealsFromCampaigns, orderRevShare, type AttributionDeal } from "@/lib/finance/rev-share";
 import type { DailyMetricRow } from "./queries";
 import {
@@ -390,6 +391,17 @@ async function fetchShopifyReportingDailyMetrics(
       costByDay.set(order.date, entry);
     }
   }
+
+  // The supplier's per-order import duty, for stores bought through HST. A
+  // no-op for every other store — see cogs/hst-tariff.ts.
+  await addHstTariffs({
+    service,
+    adAccountId: account.id,
+    from,
+    to,
+    reportingCurrency: account.currency,
+    costByDay,
+  });
 
   return sales.map((day) => {
     const costs = costByDay.get(day.date);
@@ -803,6 +815,16 @@ async function syncAccountWindow(
         entry.shipping += Number(account.shipping_cost_per_order);
         costByDay.set(order.date, entry);
       }
+
+      // The supplier's per-order import duty, for stores bought through HST.
+      await addHstTariffs({
+        service: supabase,
+        adAccountId: account.id,
+        from,
+        to,
+        reportingCurrency: account.currency,
+        costByDay,
+      });
     }
 
     // ---- revenue share (collection-based), reporting currency -------------

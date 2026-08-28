@@ -244,6 +244,22 @@ async function ensureFreshToken(
   return renewed.accessToken;
 }
 
+/**
+ * A usable HST access token, renewed if needed — the session machinery above,
+ * lent to the other things that read the same ERP.
+ *
+ * The cost sync (hst-cost-sync.ts) reads a different endpoint with the same
+ * login. Exporting the token rather than duplicating parseSession/refresh keeps
+ * one place where a session is renewed and stored, so a renewal triggered by
+ * either sync leaves the other one working too.
+ */
+export async function hstAccessToken(
+  supabase: Supabase,
+  opts?: { forceRenew?: boolean },
+): Promise<string> {
+  return ensureFreshToken(supabase, opts);
+}
+
 export async function getHstStatus(): Promise<{
   hasSession: boolean;
   lastSyncedAt: string | null;

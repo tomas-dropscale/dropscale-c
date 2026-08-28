@@ -8,6 +8,7 @@ import {
   syncRevenueShareLedger,
 } from "@/lib/admin/commission-sync";
 import { syncHstCommission, type HstSyncResult } from "@/lib/admin/hst";
+import { syncHstCosts, type HstCostSyncResult } from "@/lib/admin/hst-cost-sync";
 import {
   billingEvidenceIsReady,
   billingEvidenceReadyAt,
@@ -148,6 +149,21 @@ async function run(
     }
     if (!hst.ok) console.error("HST sync failed during ledger sync:", hst.error);
 
+    // Supplier COGS ride alongside the commission, on the same session and the
+    // same "never fatal" terms. A store with no hst_shop_id is skipped, so this
+    // costs one query for agencies that do not buy through HST at all.
+    let hstCosts: HstCostSyncResult;
+    try {
+      hstCosts = await syncHstCosts({ client: opts?.client });
+    } catch (error) {
+      hstCosts = {
+        ...emptyHstCostResult(),
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+    if (!hstCosts.ok) console.error("HST cost sync failed during ledger sync:", hstCosts.error);
+
     // Manual referral terms never expire or reprice themselves. This refreshes
     // only the legacy `commission_rate` display cache when a scheduled sealed
     // term reaches its Monday in the Lisbon billing calendar. Historical
@@ -168,6 +184,7 @@ async function run(
       ok: true,
       syncedAt: new Date().toISOString(),
       hst,
+      hstCosts,
       referralRateCachesRefreshed,
     });
   } catch (error) {
@@ -182,4 +199,19 @@ async function run(
       { status: 500 },
     );
   }
+}
+
+/** A zero result, for when the cost sync throws before it can build its own. */
+function emptyHstCostResult(): HstCostSyncResult {
+  return {
+    ok: true,
+    accounts: 0,
+    written: 0,
+    unchanged: 0,
+    unknownProducts: 0,
+    charges: 0,
+    unquotedLines: 0,
+    pages: 0,
+    stores: [],
+  };
 }

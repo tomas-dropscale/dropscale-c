@@ -33,7 +33,14 @@ import type { HstOverview } from "@/lib/admin/hst";
  * reports. The commission figures are read-only (a sync republishes them);
  * the only thing entered here is a payment received.
  */
-export function HstView({ overview }: { overview: HstOverview }) {
+export function HstView({
+  overview,
+  footer,
+}: {
+  overview: HstOverview;
+  /** Rendered last, inside the page frame — admin-only sections live here. */
+  footer?: React.ReactNode;
+}) {
   const { intl } = useI18n();
   const router = useRouter();
 
@@ -542,6 +549,8 @@ export function HstView({ overview }: { overview: HstOverview }) {
           </div>
         </DialogContent>
       </Dialog>
+
+      {footer}
     </PageContainer>
   );
 }

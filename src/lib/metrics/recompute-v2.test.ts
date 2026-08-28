@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => ({
   rateOn: vi.fn(),
   orderCogs: vi.fn(),
   paymentFee: vi.fn(),
+  addHstTariffs: vi.fn().mockResolvedValue(0),
   loadCostContext: vi.fn(),
   registerSoldProducts: vi.fn(),
   dealsFromCampaigns: vi.fn(),
@@ -61,6 +62,9 @@ vi.mock("@/lib/shopify/fx", () => ({
 vi.mock("@/lib/cogs/engine", () => ({
   orderCogs: mocks.orderCogs,
   paymentFee: mocks.paymentFee,
+}));
+vi.mock("@/lib/cogs/hst-tariff", () => ({
+  addHstTariffs: mocks.addHstTariffs,
 }));
 vi.mock("@/lib/cogs/context", () => ({
   loadCostContext: mocks.loadCostContext,
