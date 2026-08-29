@@ -107,7 +107,7 @@ export default async function PnlPage({
       title={d.pnl.title}
       description={d.pnl.subtitle}
       actions={
-        accounts.length > 1 ? (
+        accounts.length > 0 ? (
           <StoreSelector accounts={accounts} current={selected?.id ?? null} />
         ) : undefined
       }
