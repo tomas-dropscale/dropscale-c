@@ -351,7 +351,7 @@ export function HstStoreCogs(props: HstStoreCogsProps) {
           </button>
         </div>
       ) : (
-        <div className="space-y-3">
+        <div className="space-y-4 rounded-[12px] border border-[var(--border-subtle)] bg-[var(--bg-base)]/50 p-4">
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="space-y-1.5">
               <Label htmlFor="hst-username">HST username</Label>
@@ -405,6 +405,7 @@ export function HstStoreCogs(props: HstStoreCogsProps) {
           <Button
             variant="primary"
             size="sm"
+            className="w-full sm:w-auto"
             loading={busy === "connect"}
             disabled={busy !== null || username.trim() === "" || password === ""}
             onClick={connect}

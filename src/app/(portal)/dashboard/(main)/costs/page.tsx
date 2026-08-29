@@ -183,26 +183,39 @@ function HstPanelSkeleton() {
   );
 }
 
+type HstContext = {
+  /** The HST surface exists here (migration applied) — the page leads with it. */
+  available: boolean;
+  /** Connected AND mapped to a shop — the per-order list can be shown. */
+  store: boolean;
+};
+
 /**
- * Is this an HST store — the client connected and this store mapped to a shop?
+ * How the Costs page should present a store, decided up front from a fast,
+ * DB-only check (no live supplier call).
  *
- * A fast, DB-only check (no live supplier call), so the page can decide up front
- * whether the bottom half is the per-order list or the per-product grid. A store
- * whose client is connected but which is not yet mapped stays on the grid, so
- * its costs remain editable until a shop is chosen.
+ * `available` drives the whole shape: the page leads with the HST panel, hides
+ * the per-product grid, drops the cost settings to the foot, and shows "I am not
+ * an HST member" — even before anyone signs in, so a fresh store is a clean
+ * choice between the supplier and the percentage rather than a wall of products.
+ * `store` is the stricter state — connected and mapped — that also earns the
+ * live per-order list.
  */
-async function isHstStore(clientId: string, adAccountId: string): Promise<boolean> {
+async function hstContext(clientId: string, adAccountId: string): Promise<HstContext> {
   const service = createServiceClient();
-  if (!service) return false;
+  if (!service) return { available: false, store: false };
   try {
     const [status, mapping] = await Promise.all([
       clientHstStatus(service, clientId),
       service.from("ad_accounts").select("hst_shop_id").eq("id", adAccountId).maybeSingle(),
     ]);
     const shopId = (mapping.data as { hst_shop_id?: string | null } | null)?.hst_shop_id;
-    return status.available && status.connected && Boolean(shopId);
+    return {
+      available: status.available,
+      store: status.available && status.connected && Boolean(shopId),
+    };
   } catch {
-    return false;
+    return { available: false, store: false };
   }
 }
 
@@ -276,10 +289,10 @@ export default async function CostsPage({
   // the active workspace — the page would not have rendered otherwise.
   const clientId = await activeWorkspaceId();
 
-  // An HST store prices its goods per order, so its lower half is the order
-  // list rather than the per-product grid; every other store keeps the grid and
-  // its percentage fallback exactly as before.
-  const hstStore = clientId ? await isHstStore(clientId, selected.id) : false;
+  // Where the HST surface exists the page leads with it — supplier panel, then
+  // the order list once connected, cost settings at the foot — and hides the
+  // per-product grid; the percentage lives in those settings, a click away.
+  const hst = clientId ? await hstContext(clientId, selected.id) : { available: false, store: false };
 
   return (
     <PageContainer
@@ -287,11 +300,11 @@ export default async function CostsPage({
       description={d.portal.cogsSubtitle}
       actions={
         <div className="flex items-center gap-2">
-          {/* An HST store's page leads with the order list; this is the way down
-              to the plain cost settings for anyone who would rather price by the
-              percentage than through the supplier — it scrolls there and flashes
-              the section. */}
-          {hstStore && <NotHstMemberLink />}
+          {/* Shown wherever the HST surface leads — even before signing in — as
+              the way down to the plain cost settings for anyone who would rather
+              price by the percentage than through the supplier; it scrolls there
+              and flashes the section. */}
+          {hst.available && <NotHstMemberLink />}
           <StoreSelector accounts={accounts} current={selected.id} />
         </div>
       }
@@ -315,9 +328,9 @@ export default async function CostsPage({
             </Suspense>
           </div>
         )}
-        {/* HST stores lead with the per-order list, read live and animated in
-            on connect and sync; it carries its own loading notice. */}
-        {hstStore && (
+        {/* A connected, mapped store leads with the per-order list, read live and
+            animated in on connect and sync; it carries its own loading notice. */}
+        {hst.store && (
           <HstOrderList
             adAccountId={selected.id}
             storeName={selected.store_name ?? selected.id}
@@ -325,10 +338,10 @@ export default async function CostsPage({
         )}
 
         {/* Cost settings sit at the foot of the page — always the store-level
-            fees and shipping, plus the per-product grid and bundles for a store
-            that prices per product. The anchor is where "I am not an HST member"
-            scrolls to; scroll-mt keeps the heading clear of the top. */}
-        <div id="cost-settings" className={hstStore ? "mt-8 scroll-mt-6" : undefined}>
+            fees and shipping, plus the per-product grid and bundles only where
+            the HST surface is absent. The anchor is where "I am not an HST
+            member" scrolls to; scroll-mt keeps the heading clear of the top. */}
+        <div id="cost-settings" className={hst.available ? "mt-8 scroll-mt-6" : undefined}>
           <CostsManager
             account={selected}
             products={products}
@@ -337,7 +350,7 @@ export default async function CostsPage({
             collections={collections}
             members={membersRes.data ?? []}
             collectionTiers={cTiersRes.data ?? []}
-            showProducts={!hstStore}
+            showProducts={!hst.available}
           />
         </div>
       </CogsFillProvider>
