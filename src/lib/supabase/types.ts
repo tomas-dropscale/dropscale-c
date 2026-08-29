@@ -1096,6 +1096,8 @@ export type ClientHstCredentials = {
   last_error: string | null;
   connected_at: string;
   updated_at: string;
+  /** Cached HST shop list (0090), so the dropdown renders without a live call. */
+  shops: Json | null;
 };
 
 export type HstOrderCharge = {
@@ -3113,6 +3115,7 @@ export type Database = {
           | "last_error"
           | "connected_at"
           | "updated_at"
+          | "shops"
         >;
         Update: Partial<ClientHstCredentials>;
         Relationships: [];

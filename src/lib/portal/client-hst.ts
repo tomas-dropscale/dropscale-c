@@ -145,6 +145,57 @@ export async function clientHstStatus(
   };
 }
 
+/** One HST shop this login can see — the cached form of hst-orders' HstShop. */
+export type CachedHstShop = { id: string; name: string };
+
+/**
+ * The last shop list we successfully read for this client, or [] when none is
+ * cached — including before migration 0090 exists.
+ *
+ * Read-only and forgiving: a missing column or any read error is simply "no
+ * cache", never a thrown page. The dropdown renders from this instantly; the
+ * live supplier call is only for repopulating it.
+ */
+export async function cachedHstShops(
+  service: Service,
+  clientId: string,
+): Promise<CachedHstShop[]> {
+  const { data, error } = await service
+    .from("client_hst_credentials")
+    .select("shops")
+    .eq("client_id", clientId)
+    .maybeSingle();
+  if (error) return [];
+  const raw = (data as { shops?: unknown } | null)?.shops;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((entry) => {
+      const shop = (entry ?? {}) as { id?: unknown; name?: unknown };
+      return { id: String(shop.id ?? ""), name: String(shop.name ?? "") };
+    })
+    .filter((shop) => shop.id !== "");
+}
+
+/**
+ * Remember this client's HST shop list so the dropdown can render without
+ * waiting on the supplier. Best-effort: a missing column (before 0090) or any
+ * write error is swallowed — the cache is an optimisation, never a requirement.
+ */
+export async function storeHstShops(
+  service: Service,
+  clientId: string,
+  shops: CachedHstShop[],
+): Promise<void> {
+  try {
+    await service
+      .from("client_hst_credentials")
+      .update({ shops: shops as unknown as Database["public"]["Tables"]["client_hst_credentials"]["Row"]["shops"] })
+      .eq("client_id", clientId);
+  } catch {
+    // no-op
+  }
+}
+
 /** Record why a sync failed, so a client sees a reason rather than silence. */
 export async function noteClientHstError(
   service: Service,

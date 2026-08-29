@@ -146,12 +146,16 @@ export async function hstRefresh(refreshToken: string): Promise<HstSession | nul
  * A 200 carrying HTML means the URL is the ERP's own page rather than its API,
  * and res.json() would fail on "<" while saying nothing about why.
  */
-export async function hstGet(url: string, token: string): Promise<unknown> {
+export async function hstGet(
+  url: string,
+  token: string,
+  timeoutMs: number = REQUEST_TIMEOUT_MS,
+): Promise<unknown> {
   let res: Response;
   try {
     res = await fetch(url, {
       headers: erpHeaders({ Authorization: `Bearer ${token}` }),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   } catch {
     // A network refusal or a timeout — never a token problem, so not flagged

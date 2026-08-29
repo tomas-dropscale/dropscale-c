@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   hstGet: vi.fn(),
   clientHstToken: vi.fn(),
   noteClientHstError: vi.fn(),
+  storeHstShops: vi.fn(),
   applyHstCosts: vi.fn(),
 }));
 
@@ -26,6 +27,7 @@ vi.mock("@/lib/hst/erp", () => ({ HstError: FakeHstError, hstGet: mocks.hstGet }
 vi.mock("@/lib/portal/client-hst", () => ({
   clientHstToken: mocks.clientHstToken,
   noteClientHstError: mocks.noteClientHstError,
+  storeHstShops: mocks.storeHstShops,
 }));
 vi.mock("./hst-costs", () => ({ applyHstCosts: mocks.applyHstCosts }));
 

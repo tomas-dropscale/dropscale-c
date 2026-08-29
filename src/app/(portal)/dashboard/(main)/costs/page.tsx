@@ -5,7 +5,7 @@ import { Loader2, PackageOpen } from "lucide-react";
 import { fetchAccounts } from "@/lib/portal/data";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/service";
-import { clientHstStatus } from "@/lib/portal/client-hst";
+import { cachedHstShops, clientHstStatus } from "@/lib/portal/client-hst";
 import { activeWorkspaceId } from "@/lib/portal/workspace";
 import { fetchHstShops } from "@/lib/admin/hst-cost-sync";
 import { HstStoreCogs, type HstStoreCogsProps } from "@/components/portal/hst-store-cogs";
@@ -81,11 +81,12 @@ async function loadHstPanel(
         .toISOString()
         .slice(0, 10);
 
-      // The live shop list is slow (it is an HST round-trip); the duty total is
-      // a quick local read. Run them together, and let either fail on its own —
-      // a supplier that will not list shops should not also hide the duty.
-      const [shopList, charges] = await Promise.allSettled([
-        fetchHstShops({ service, clientId }),
+      // The dropdown reads the CACHED shop list — instant, and resilient to a
+      // slow or briefly unreachable supplier. Only when nothing is cached do we
+      // pay for the live listing (which stores the cache for next time). The
+      // duty total is a quick local read, run alongside the cache read.
+      const [cached, charges] = await Promise.all([
+        cachedHstShops(service, clientId),
         service
           .from("hst_order_charges")
           .select("tariff, currency")
@@ -93,15 +94,18 @@ async function loadHstPanel(
           .gte("order_day", since),
       ]);
 
-      if (shopList.status === "fulfilled") {
-        shops = shopList.value;
+      if (cached.length > 0) {
+        shops = cached;
       } else {
-        shopsError =
-          shopList.reason instanceof Error ? shopList.reason.message : String(shopList.reason);
+        try {
+          shops = await fetchHstShops({ service, clientId });
+        } catch (cause) {
+          shopsError = cause instanceof Error ? cause.message : String(cause);
+        }
       }
 
-      if (charges.status === "fulfilled") {
-        const rows = (charges.value.data ?? []) as Array<{ tariff: number; currency: string }>;
+      {
+        const rows = (charges.data ?? []) as Array<{ tariff: number; currency: string }>;
         const billed = rows.filter((row) => Number(row.tariff) > 0);
         const total = billed.reduce((sum, row) => sum + Number(row.tariff), 0);
         if (billed.length > 0) {

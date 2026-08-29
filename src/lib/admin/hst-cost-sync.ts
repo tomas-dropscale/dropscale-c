@@ -4,7 +4,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { createClient } from "@/lib/supabase/server";
 import { HstError, hstGet } from "@/lib/hst/erp";
-import { clientHstToken, noteClientHstError } from "@/lib/portal/client-hst";
+import { clientHstToken, noteClientHstError, storeHstShops } from "@/lib/portal/client-hst";
 import { applyHstCosts, type HstOrderCost } from "./hst-costs";
 import { parseHstOrderPage, type HstShop } from "./hst-orders";
 import { parseHstOrderDisplay, type HstOrderDisplay } from "./hst-order-display";
@@ -217,6 +217,12 @@ export async function syncHstCosts(opts?: {
       result.pages += collected.pages;
       result.unquotedLines += collected.unquotedLines;
 
+      // Keep the shop-list cache warm off the same response the dropdown reads,
+      // so a new shop appears after a sync and a slow supplier never empties it.
+      if (collected.shops.length > 0) {
+        await storeHstShops(service, account.client_id, collected.shops);
+      }
+
       const outcome = await applyHstCosts({
         service,
         adAccountId: account.id,
@@ -260,8 +266,13 @@ export async function fetchHstShops(input: {
 }): Promise<HstShop[]> {
   const token = await clientHstToken(input.service, input.clientId);
   // Any shop id works here; the response carries the whole list regardless.
-  const payload = await hstGet(ordersUrl("", 1), token);
-  return parseHstOrderPage(payload, { shopId: "", timeZone: "UTC" }).shops;
+  // A generous timeout: this is the call that fills the cache, and some
+  // accounts take ~14s to list — worth waiting for once so every later render
+  // is instant.
+  const payload = await hstGet(ordersUrl("", 1), token, 25_000);
+  const shops = parseHstOrderPage(payload, { shopId: "", timeZone: "UTC" }).shops;
+  await storeHstShops(input.service, input.clientId, shops);
+  return shops;
 }
 
 /**
