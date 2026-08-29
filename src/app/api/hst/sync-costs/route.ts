@@ -3,6 +3,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { mayManageStoreSupplier } from "@/lib/portal/hst-store-access";
 import { createServiceClient } from "@/lib/supabase/service";
 import { syncHstCosts } from "@/lib/admin/hst-cost-sync";
+import { resyncAccountNow } from "@/lib/metrics/recompute";
 
 /**
  * POST — pull one store's supplier costs now, instead of waiting for the hour.
@@ -53,6 +54,18 @@ export async function POST(request: NextRequest) {
       { error: "This store has no supplier code yet — save one first." },
       { status: 422 },
     );
+  }
+
+  // Fold the freshly-synced costs into the rollup now, so the client's P&L and
+  // dashboard COGS reflect them without waiting for the hourly cron. A 90-day
+  // window to match the wider first-pull horizon; never fatal to the sync's own
+  // outcome, which is what the caller is waiting on.
+  if (result.ok && !result.stores.some((store) => store.error)) {
+    try {
+      await resyncAccountNow(adAccountId, { client: service });
+    } catch (error) {
+      console.error(`Rollup refresh after HST cost sync failed for ${adAccountId}:`, error);
+    }
   }
 
   return NextResponse.json(result, { status: result.ok ? 200 : 400 });

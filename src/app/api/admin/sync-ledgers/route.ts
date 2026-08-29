@@ -9,6 +9,7 @@ import {
 } from "@/lib/admin/commission-sync";
 import { syncHstCommission, type HstSyncResult } from "@/lib/admin/hst";
 import { syncHstCosts, type HstCostSyncResult } from "@/lib/admin/hst-cost-sync";
+import { refreshAccountsNow } from "@/lib/metrics/recompute";
 import {
   billingEvidenceIsReady,
   billingEvidenceReadyAt,
@@ -163,6 +164,23 @@ async function run(
       };
     }
     if (!hstCosts.ok) console.error("HST cost sync failed during ledger sync:", hstCosts.error);
+
+    // Fold the freshly-written supplier costs into the daily rollup in the same
+    // pass, so the P&L and dashboard COGS move on the hourly beat the ad spend
+    // does rather than a cycle behind. Only the stores that actually synced, on
+    // the incremental window, and never fatal to the ledger run.
+    if (opts?.client) {
+      const costAccountIds = hstCosts.stores
+        .filter((store) => !store.error && (store.written > 0 || store.charges > 0))
+        .map((store) => store.adAccountId);
+      if (costAccountIds.length > 0) {
+        try {
+          await refreshAccountsNow(costAccountIds, { client: opts.client });
+        } catch (error) {
+          console.error("Rollup refresh after HST cost sync failed:", error);
+        }
+      }
+    }
 
     // Manual referral terms never expire or reprice themselves. This refreshes
     // only the legacy `commission_rate` display cache when a scheduled sealed

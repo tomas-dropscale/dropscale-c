@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   syncHstCommission: vi.fn(),
   syncHstCosts: vi.fn().mockResolvedValue({ ok: true, accounts: 0, written: 0, unchanged: 0, unknownProducts: 0, charges: 0, unquotedLines: 0, pages: 0, stores: [] }),
   syncRevenueShareLedger: vi.fn(),
+  refreshAccountsNow: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -27,6 +28,9 @@ vi.mock("@/lib/admin/hst-cost-sync", () => ({
 }));
 vi.mock("@/lib/admin/hst", () => ({
   syncHstCommission: mocks.syncHstCommission,
+}));
+vi.mock("@/lib/metrics/recompute", () => ({
+  refreshAccountsNow: mocks.refreshAccountsNow,
 }));
 vi.mock("@/lib/billing/weekly", async () =>
   vi.importActual("../../../../lib/billing/weekly"),
