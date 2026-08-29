@@ -198,6 +198,7 @@ describe("V2 Shopify reporting adapter", () => {
     });
     expect(sales).toEqual({
       currency: "EUR",
+      timeZone: "Europe/Lisbon",
       days: [
         {
           date: "2026-08-13",

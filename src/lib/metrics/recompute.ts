@@ -38,7 +38,7 @@ import {
 import { fxDailyRates, rateOn } from "@/lib/shopify/fx";
 import { orderCogs, paymentFee } from "@/lib/cogs/engine";
 import { loadCostContext, registerSoldProducts } from "@/lib/cogs/context";
-import { addHstTariffs } from "@/lib/cogs/hst-tariff";
+import { addHstTariffs, applyHstOrderCosts } from "@/lib/cogs/hst-tariff";
 import { dealsFromCampaigns, orderRevShare, type AttributionDeal } from "@/lib/finance/rev-share";
 import type { DailyMetricRow } from "./queries";
 import {
@@ -403,8 +403,30 @@ async function fetchShopifyReportingDailyMetrics(
     costByDay,
   });
 
+  // For an HST store, replace the per-product COGS estimate with the supplier's
+  // actual per-order cost, aligned to the store's own days. No-op elsewhere and
+  // until 0091 has stored our_cost.
+  if (account.hst_shop_id) {
+    await applyHstOrderCosts({
+      service,
+      adAccountId: account.id,
+      from,
+      to,
+      reportingCurrency: account.currency,
+      timeZone: result.timeZone || "UTC",
+      costByDay,
+    });
+  }
+
+  // The untouched store-currency revenue (pre-FX) lives on result.days; sales is
+  // the EUR-converted copy. Keep both so the read side can show the exact Shopify
+  // figure and still convert for an EUR total.
+  const rawByDay = new Map(result.days.map((day) => [day.date, day]));
+  const storeCurrency = result.currency ?? account.currency;
+
   return sales.map((day) => {
     const costs = costByDay.get(day.date);
+    const raw = rawByDay.get(day.date);
     return {
       day: day.date,
       revenue: day.revenue,
@@ -418,6 +440,10 @@ async function fetchShopifyReportingDailyMetrics(
       shipping_cost: costs?.shipping ?? 0,
       revenue_share_base: 0,
       revenue_share_amount: 0,
+      revenue_store: raw?.revenue ?? day.revenue,
+      refunds_store: raw?.refunds ?? day.refunds,
+      attributed_revenue_store: raw?.attributedRevenue ?? day.attributedRevenue,
+      store_currency: storeCurrency,
     };
   });
 }
@@ -743,6 +769,11 @@ async function syncAccountWindow(
 
   let sales: DailySales[] = [];
   let shopifySynced = false;
+  // The revenue side in the store's own currency (pre-FX) — the untouched
+  // Shopify figures, kept so the read side can show the exact number and convert
+  // for a EUR total. Populated below when Shopify answers.
+  let rawSalesByDay = new Map<string, DailySales>();
+  let storeCurrency = account.currency;
   // Per-day cost chain (reporting currency): COGS, payment fees, shipping.
   const costByDay = new Map<string, { product: number; fees: number; shipping: number }>();
   // Per-day revenue share (reporting currency): base revenue + billed amount.
@@ -760,6 +791,10 @@ async function syncAccountWindow(
     const result = await fetchDailySales(account.shopify_url, token, from, to);
     sales = result.days;
     shopifySynced = true;
+    // Capture the raw store-currency figures before the FX pass below rewrites
+    // `sales` into EUR.
+    rawSalesByDay = new Map(result.days.map((day) => [day.date, day]));
+    storeCurrency = result.currency ?? account.currency;
 
     // Order amounts arrive in the STORE's base currency; daily_metrics is
     // kept in the account's reporting currency. Convert with the day's ECB
@@ -825,6 +860,21 @@ async function syncAccountWindow(
         reportingCurrency: account.currency,
         costByDay,
       });
+
+      // For an HST store, replace the per-product COGS estimate with the
+      // supplier's actual per-order cost, on the store's own days. No-op
+      // elsewhere and until 0091 has stored our_cost.
+      if (account.hst_shop_id) {
+        await applyHstOrderCosts({
+          service: supabase,
+          adAccountId: account.id,
+          from,
+          to,
+          reportingCurrency: account.currency,
+          timeZone: result.timeZone || "UTC",
+          costByDay,
+        });
+      }
     }
 
     // ---- revenue share (collection-based), reporting currency -------------
@@ -936,6 +986,7 @@ async function syncAccountWindow(
     const shop = salesByDay.get(day);
     const costs = costByDay.get(day);
     const rev = revShareByDay.get(day);
+    const raw = rawSalesByDay.get(day);
     // Empty whenever Google DID answer, so a genuine no-spend day still
     // resolves to 0 rather than resurrecting an older figure.
     const prior = carried.get(day);
@@ -964,6 +1015,11 @@ async function syncAccountWindow(
       revenue_share_base: rev?.base ?? 0,
       revenue_share_amount: rev?.amount ?? 0,
       computed_at: new Date().toISOString(),
+      // The revenue side in the store's own currency — the exact Shopify figure.
+      revenue_store: raw?.revenue ?? shop?.revenue ?? 0,
+      refunds_store: raw?.refunds ?? shop?.refunds ?? 0,
+      attributed_revenue_store: raw?.attributedRevenue ?? shop?.attributedRevenue ?? 0,
+      store_currency: storeCurrency,
     };
   });
 

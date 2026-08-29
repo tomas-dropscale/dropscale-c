@@ -1004,6 +1004,14 @@ export type DailyMetric = {
   revenue_share_base: number;
   revenue_share_amount: number;
   computed_at: string;
+  // The revenue side in the STORE's own base currency (migration 0092), the
+  // untouched Shopify figures — converted to a display currency only at read
+  // time. Null before 0092 / for rows a sync has not re-touched since.
+  revenue_store: number | null;
+  refunds_store: number | null;
+  attributed_revenue_store: number | null;
+  /** The store's base currency the *_store columns are in (e.g. "JPY"). */
+  store_currency: string | null;
 };
 
 // HST supplier-commission integration (migration 0011). Single-row config.
@@ -1107,6 +1115,8 @@ export type HstOrderCharge = {
   /** The instant behind order_day, so the day can be re-derived per store zone. */
   paid_at: string | null;
   tariff: number;
+  /** The supplier's total charge for this order (goods + tariff), 0091. */
+  our_cost: number | null;
   currency: string;
   synced_at: string;
 };
@@ -3122,7 +3132,10 @@ export type Database = {
       };
       hst_order_charges: {
         Row: Row<HstOrderCharge>;
-        Insert: Insert<HstOrderCharge, "order_day" | "paid_at" | "tariff" | "currency" | "synced_at">;
+        Insert: Insert<
+          HstOrderCharge,
+          "order_day" | "paid_at" | "tariff" | "our_cost" | "currency" | "synced_at"
+        >;
         Update: Partial<HstOrderCharge>;
         Relationships: [];
       };
@@ -3227,6 +3240,10 @@ export type Database = {
           | "revenue_share_base"
           | "revenue_share_amount"
           | "computed_at"
+          | "revenue_store"
+          | "refunds_store"
+          | "attributed_revenue_store"
+          | "store_currency"
         >;
         Update: Partial<DailyMetric>;
         Relationships: [

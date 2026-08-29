@@ -28,6 +28,12 @@ export type HstOrderCost = {
   paidAt: string;
   /** EU/US import tariff for the whole order; 0 when the supplier sends "-". */
   tariff: number;
+  /**
+   * The supplier's TOTAL charge for this order (g_cost = goods + tariff), as the
+   * ERP states it. This is what an HST store's COGS reconciles to — the actual
+   * per-order billing, not the per-product estimate. 0 when the ERP sends "-".
+   */
+  totalCost: number;
   currency: string;
   items: Array<{
     /**
@@ -220,6 +226,10 @@ export async function applyHstCosts(input: {
       order_day: order.orderDay,
       paid_at: order.paidAt,
       tariff: order.tariff,
+      // The supplier's own total for the order — what an HST store's COGS
+      // reconciles to. Null when the ERP has not priced it (never 0-as-known).
+      our_cost:
+        Number.isFinite(order.totalCost) && order.totalCost > 0 ? order.totalCost : null,
       currency: order.currency,
       synced_at: new Date().toISOString(),
     }));

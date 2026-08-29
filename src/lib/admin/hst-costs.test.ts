@@ -74,6 +74,7 @@ function order(overrides: Partial<HstOrderCost> = {}): HstOrderCost {
     orderDay: "2026-08-26",
     paidAt: "2026-08-26T14:50:04.000Z",
     tariff: 3,
+    totalCost: 23.99,
     currency: "EUR",
     items: [{ keys: ["44551122"], unitCost: 20.99, currency: "EUR", quantity: 1 }],
     ...overrides,

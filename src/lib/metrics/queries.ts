@@ -29,6 +29,14 @@ export type DailyMetricRow = {
   revenue_share_base: number;
   revenue_share_amount: number;
   computed_at: string;
+  /** Revenue side in the store's own base currency (0092) — the untouched
+   *  Shopify figures, converted to a display currency only at read time.
+   *  Optional: null/absent for rows a populating sync has not re-touched, and
+   *  readers fall back to the EUR columns then. */
+  revenue_store?: number | null;
+  refunds_store?: number | null;
+  attributed_revenue_store?: number | null;
+  store_currency?: string | null;
 };
 
 export async function fetchDailyMetrics(

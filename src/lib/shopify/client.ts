@@ -385,7 +385,12 @@ export async function fetchDailySales(
   from: string,
   to: string,
   graphql: ShopifyGraphqlExecutor = shopifyGraphql,
-): Promise<{ currency: string | null; days: DailySales[]; orders: SyncedOrder[] }> {
+): Promise<{
+  currency: string | null;
+  timeZone: string;
+  days: DailySales[];
+  orders: SyncedOrder[];
+}> {
   type OrderNode = {
     id: string;
     createdAt: string;
@@ -623,6 +628,9 @@ export async function fetchDailySales(
 
   return {
     currency,
+    // The shop's own zone — the one order days were bucketed in. Returned so the
+    // rollup can align other per-order facts (HST costs) to the same days.
+    timeZone,
     days: [...byDay.entries()]
       .map(([date, sums]) => ({ date, ...sums }))
       .sort((a, b) => a.date.localeCompare(b.date)),

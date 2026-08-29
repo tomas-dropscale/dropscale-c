@@ -62,6 +62,8 @@ describe("HST order list", () => {
     const [order] = result.orders;
     expect(order.platformOrderId).toBe("8004536729939");
     expect(order.tariff).toBe(3);
+    // g_cost is the ERP's own total for the order — what an HST store reconciles to.
+    expect(order.totalCost).toBe(20.99);
     expect(order.currency).toBe("EUR");
     expect(order.items.map((item) => item.unitCost)).toEqual([8.37, 9.62]);
     // What the supplier says the whole order cost, rebuilt from the parts.

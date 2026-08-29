@@ -183,6 +183,9 @@ export function parseHstOrderPage(
       orderDay: dayIn(instant, opts.timeZone),
       paidAt: new Date(instant).toISOString(),
       tariff: money(row.g_tariff) ?? 0,
+      // g_cost is the ERP's own total for the order (goods + tariff) — what HST
+      // actually bills. Kept whole so an HST store reconciles to it exactly.
+      totalCost: money(row.g_cost) ?? 0,
       currency: text(row.g_currency).toUpperCase() || "EUR",
       items,
     });
