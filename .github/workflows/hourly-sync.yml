@@ -1,0 +1,66 @@
+name: Hourly reporting sync
+
+# Reliable hourly trigger for the metrics rollup (ad spend, COGS), the
+# commission ledger and the HST cost sync. These already run from the Cloudflare
+# Worker's own cron ("0 * * * *" in wrangler.jsonc), but that schedule has proven
+# unreliable in practice — whole nights pass with no refresh, so ad spend and
+# COGS drift hours stale. This fires the SAME endpoints on a schedule that does.
+#
+# It is safe alongside the Worker cron: every endpoint is idempotent and
+# self-throttled by a 15-minute freshness gate, so if the Worker cron DID run at
+# :00 this :07 run finds the data fresh and does nothing; if it did NOT, this
+# fills the gap. Net effect: at most one real refresh an hour, guaranteed.
+#
+# This is NOT the deploy path — deployment stays on Cloudflare Workers Builds.
+#
+# Setup (one time):
+#   1. Repository secret CRON_SECRET — the SAME value as the Worker's CRON_SECRET
+#      (the endpoints authorize on `Authorization: Bearer <CRON_SECRET>`). If the
+#      Worker has none set, set it there too: `wrangler secret put CRON_SECRET`.
+#   2. Optional repository variable SITE_URL if production is not
+#      https://dropscale.app.
+
+on:
+  schedule:
+    - cron: "7 * * * *" # hourly, offset from the Worker's :00
+  workflow_dispatch: {}
+
+concurrency:
+  group: hourly-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger reporting, ledger and HST sync
+        env:
+          BASE: ${{ vars.SITE_URL || 'https://dropscale.app' }}
+          SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "$SECRET" ]; then
+            echo "::warning::CRON_SECRET repository secret is not set — skipping. Add it (matching the Worker's CRON_SECRET) to enable the hourly sync."
+            exit 0
+          fi
+
+          fail=0
+          for path in \
+            "api/admin/sync-reporting?range=d7" \
+            "api/admin/sync-reporting?range=d30" \
+            "api/admin/sync-reporting?range=today" \
+            "api/admin/sync-ledgers"; do
+            echo "POST /$path"
+            code=$(curl -sS -o /tmp/body -w "%{http_code}" -X POST "$BASE/$path" \
+              -H "Authorization: Bearer $SECRET" \
+              -H "Content-Type: application/json" \
+              --max-time 200 || echo "000")
+            echo "  status=$code"
+            head -c 400 /tmp/body 2>/dev/null || true
+            echo
+            case "$code" in
+              200 | 502) ;; # 200 ok; 502 = partial refresh (budget/provider) — still did work
+              401 | 403) echo "::error::/$path was rejected ($code) — CRON_SECRET does not match the Worker's."; fail=1 ;;
+              *) echo "::warning::/$path returned $code"; fail=1 ;;
+            esac
+          done
+          exit $fail
