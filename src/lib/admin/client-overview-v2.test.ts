@@ -112,8 +112,17 @@ vi.mock("@/lib/metrics/queries", () => ({
     const attributedRevenue = attributed.length
       ? attributed.reduce((sum, row) => sum + Number(row.attributed_revenue), 0)
       : null;
+    const netRevenue = totals.revenue - totals.refunds;
+    const profit =
+      netRevenue - totals.productCost - totals.paymentFees - totals.shippingCost - totals.adSpend;
     return {
       ...totals,
+      netRevenue,
+      profit,
+      margin: netRevenue > 0 ? profit / netRevenue : 0,
+      aov: totals.orders > 0 ? netRevenue / totals.orders : 0,
+      mer: totals.adSpend > 0 ? netRevenue / totals.adSpend : 0,
+      costPerOrder: totals.orders > 0 ? totals.adSpend / totals.orders : 0,
       attributedOrders,
       attributedRevenue,
       costPerAttributedOrder:

@@ -34,12 +34,6 @@ import { createServiceClient } from "@/lib/supabase/service";
 import { ACCOUNT_COLUMNS } from "@/lib/portal/data";
 import { currencyScope, displayCurrency } from "@/lib/portal/currency";
 import {
-  googleProfit,
-  googleRoas,
-  googleShare,
-  type DayCosts,
-} from "@/lib/admin/google-attribution";
-import {
   fetchDailyMetrics,
   freshness,
   groupByAccount,
@@ -144,16 +138,6 @@ async function storesWithPublicDomains(
       : null;
     return primaryDomain ? { ...account, shopify_url: primaryDomain } : account;
   });
-}
-
-function estimatedGoogleCog(
-  googleRevenue: number | null,
-  grossRevenue: number,
-  productCost: number,
-): number | null {
-  return googleRevenue === null
-    ? null
-    : productCost * googleShare(googleRevenue, grossRevenue);
 }
 
 async function reportingScope(
@@ -528,15 +512,13 @@ export async function fetchClientOverview(
       const rate = totals.adSpend > 0
         ? (commission / totals.adSpend) * 100
         : (rateById.get(account.id) ?? 0);
-      const revenue = totals.attributedRevenue;
-      const costs: DayCosts = {
-        revenue: totals.revenue,
-        refunds: totals.refunds,
-        productCost: totals.productCost,
-        paymentFees: totals.paymentFees,
-        shippingCost: totals.shippingCost,
-        adSpend: totals.adSpend,
-      };
+      // The agency's Analytics view reconciles against Shopify, so every store
+      // figure here is the store's TOTAL NET revenue — the exact "Total de vendas"
+      // the merchant reads, net of returns/refunds — not the Google-attributed
+      // slice. Product decision (2026-08-29): "no admin tem de aparecer o Shopify".
+      // ROAS/COG/profit follow the same total, so they stay internally consistent
+      // with the revenue shown; trackedRoas below still carries Google's own view.
+      const revenue = totals.netRevenue;
 
       return {
         accountId: account.id,
@@ -563,11 +545,11 @@ export async function fetchClientOverview(
         ctr: totals.ctr,
         cpc: totals.cpc,
         googleRevenue: revenue,
-        googleOrders: totals.attributedOrders,
-        costPerGoogleOrder: totals.costPerAttributedOrder,
-        roas: googleRoas(revenue, totals.adSpend),
-        estimatedCog: estimatedGoogleCog(revenue, totals.revenue, totals.productCost),
-        profit: googleProfit(revenue, costs),
+        googleOrders: totals.orders,
+        costPerGoogleOrder: totals.costPerOrder,
+        roas: totals.adSpend > 0 ? revenue / totals.adSpend : 0,
+        estimatedCog: totals.productCost,
+        profit: totals.profit,
         trackedRoas: totals.roas,
         conversions: totals.conversions,
         conversionValue: totals.conversionValue,
@@ -585,7 +567,7 @@ export async function fetchClientOverview(
             return {
               day,
               adSpend: dayTotals.adSpend,
-              revenue: dayTotals.attributedRevenue ?? 0,
+              revenue: dayTotals.netRevenue,
             };
           })
           .sort((a, b) => a.day.localeCompare(b.day)),
@@ -602,22 +584,14 @@ export async function fetchClientOverview(
   }, 0);
   const revShare = stores.reduce((sum, store) => sum + store.revShare, 0);
 
-  const revenue = totals.attributedRevenue;
-  const orders = totals.attributedOrders;
-
-  // Costs belong to the whole shop; only the Google slice of them is charged
-  // against the Google slice of revenue. The blended `revenue` is the
-  // denominator of that split and never a figure the report displays.
-  const costs: DayCosts = {
-    revenue: totals.revenue,
-    refunds: totals.refunds,
-    productCost: totals.productCost,
-    paymentFees: totals.paymentFees,
-    shippingCost: totals.shippingCost,
-    adSpend: totals.adSpend,
-  };
-  // Before our fee — see the note on `profit` in the type above.
-  const profit = googleProfit(revenue, costs);
+  // Client-level strip mirrors the store cards: the store's TOTAL NET revenue
+  // that reconciles with Shopify's "Total de vendas", not the Google-attributed
+  // slice. See the note in the per-store block above.
+  const revenue = totals.netRevenue;
+  const orders = totals.orders;
+  // Full trading profit on that total: net revenue less COGS, fees, shipping and
+  // ad spend, before the agency fee.
+  const profit = totals.profit;
 
   const days = [...groupByDay(rows)]
     // A day nobody has attributed yet is not a day of zero sales, and plotting
@@ -625,22 +599,13 @@ export async function fetchClientOverview(
     .filter(([, dayRows]) => dayRows.some((row) => row.attributed_orders !== null))
     .map(([day, dayRows]) => {
       const daySums = sumMetrics(dayRows);
-      const dayProfit = googleProfit(daySums.attributedRevenue, {
-        revenue: daySums.revenue,
-        refunds: daySums.refunds,
-        productCost: daySums.productCost,
-        paymentFees: daySums.paymentFees,
-        shippingCost: daySums.shippingCost,
-        adSpend: daySums.adSpend,
-      });
-
       // The chart plots the client's trading result, fee excluded, so its line
       // and the "Their profit" card above it are the same measure.
       return {
         day,
-        revenue: daySums.attributedRevenue ?? 0,
+        revenue: daySums.netRevenue,
         adSpend: daySums.adSpend,
-        profit: dayProfit ?? 0,
+        profit: daySums.profit,
       };
     })
     .sort((a, b) => a.day.localeCompare(b.day));
@@ -662,21 +627,21 @@ export async function fetchClientOverview(
     totals: {
       googleRevenue: revenue,
       googleOrders: orders,
-      aov: revenue !== null && orders && orders > 0 ? revenue / orders : 0,
+      aov: orders > 0 ? revenue / orders : 0,
       adSpend: totals.adSpend,
       impressions: totals.impressions,
       clicks: totals.clicks,
       ctr: totals.ctr,
       cpc: totals.cpc,
       conversions: totals.conversions,
-      roas: googleRoas(revenue, totals.adSpend),
-      estimatedCog: estimatedGoogleCog(revenue, totals.revenue, totals.productCost),
+      roas: totals.adSpend > 0 ? revenue / totals.adSpend : 0,
+      estimatedCog: totals.productCost,
       trackedRoas: totals.roas,
       commission,
       revShare,
       agencyRevenue: commission + revShare,
       profit,
-      margin: profit !== null && revenue !== null && revenue > 0 ? profit / revenue : null,
+      margin: revenue > 0 ? profit / revenue : null,
     },
     stores,
     days,

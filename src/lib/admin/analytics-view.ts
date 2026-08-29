@@ -52,8 +52,8 @@ function clientMetrics(overview: AdminClientOverview): AnalyticsMetric[] {
       format: "money",
       hint:
         totals.googleOrders === null
-          ? "Awaiting attribution sync"
-          : `${totals.googleOrders} non-Meta attributed orders`,
+          ? "Awaiting sync"
+          : `${totals.googleOrders} orders · matches Shopify`,
     },
     {
       key: "spend",
@@ -67,7 +67,7 @@ function clientMetrics(overview: AdminClientOverview): AnalyticsMetric[] {
       label: "Estimated COG",
       value: totals.estimatedCog,
       format: "money",
-      hint: "Product cost apportioned to this revenue slice",
+      hint: "Total product cost for the period",
     },
     {
       key: "roas",
