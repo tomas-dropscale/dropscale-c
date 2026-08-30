@@ -97,6 +97,15 @@ export type CanonicalReportingSource = {
       shopifyClientId: string;
       clientSecretCiphertext: string;
     } | null;
+    /**
+     * The connection's recorded health-probe failure (last_error_code), when
+     * present. A latched probe failure — often a transient outage caught by an
+     * admin Test click — must DEGRADE this one family (its sync fails and the
+     * stored figures carry) instead of invalidating the whole store's
+     * resolution, which used to blank the client's portal and freeze every
+     * family's sync until a successful re-test.
+     */
+    healthError: string | null;
   } | null;
   googleAds: {
     connectionId: string;
@@ -107,6 +116,8 @@ export type CanonicalReportingSource = {
     currency: string | null;
     timeZone: string | null;
     dataSourceId: string | null;
+    /** Same contract as shopify.healthError — degrade, never blank. */
+    healthError: string | null;
   } | null;
 };
 
@@ -349,12 +360,16 @@ async function resolveReportingSourcesByStatus({
       ? googleConnections.get(binding.google_ads_connection_id)
       : null;
 
+    // A latched health-probe failure (last_error_code) deliberately does NOT
+    // invalidate the binding: it is carried as healthError so only that
+    // family's sync degrades to its stored figures. Treating it as fatal made
+    // one failed admin Test during a transient outage blank the whole client
+    // portal and freeze every sync until a successful re-test.
     if (
       shopify &&
       (shopify.status !== "connected" ||
         shopify.client_id !== binding.client_id ||
         !shopify.last_verified_at ||
-        shopify.last_error_code !== null ||
         !hasValidShopifyMetadata(shopify) ||
         normalizeShopDomain(account.shopify_url ?? "") !== shopify.shopify_domain)
     ) {
@@ -376,7 +391,6 @@ async function resolveReportingSourcesByStatus({
         google.status !== "connected" ||
         google.client_id !== binding.client_id ||
         !google.last_verified_at ||
-        google.last_error_code !== null ||
         !google.currency ||
         !/^[A-Z]{3}$/.test(google.currency) ||
         !google.time_zone?.trim()
@@ -427,7 +441,6 @@ async function resolveReportingSourcesByStatus({
         anchorShopify.status !== "connected" ||
         anchorShopify.client_id !== binding.client_id ||
         !anchorShopify.last_verified_at ||
-        anchorShopify.last_error_code !== null ||
         !hasValidShopifyMetadata(anchorShopify) ||
         normalizeShopDomain(anchorAccount.shopify_url ?? "") !==
           anchorShopify.shopify_domain
@@ -520,6 +533,7 @@ async function resolveReportingSourcesByStatus({
                     clientSecretCiphertext: shopifyCredential.clientSecretCiphertext,
                   }
                 : null,
+              healthError: shopify.last_error_code,
             }
           : null,
         googleAds:
@@ -532,6 +546,7 @@ async function resolveReportingSourcesByStatus({
                 currency: google.currency,
                 timeZone: google.time_zone,
                 dataSourceId: google.data_source_id,
+                healthError: google.last_error_code,
               }
             : null,
       };

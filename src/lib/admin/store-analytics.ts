@@ -524,6 +524,9 @@ async function supplementalShopifySource(
         shopifyClientId: credential.shopify_client_id.trim(),
         clientSecretCiphertext: credential.client_secret_ciphertext.trim(),
       },
+      // The guard above already refused any connection with a recorded probe
+      // failure, so this supplemental source is healthy by construction.
+      healthError: null,
     },
     googleAds: null,
   };

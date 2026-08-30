@@ -149,6 +149,7 @@ function anchorSource(overrides: Partial<CanonicalReportingSource> = {}): Canoni
         shopifyClientId: "shopify-client",
         clientSecretCiphertext: "ciphertext",
       },
+      healthError: null,
     },
     googleAds: null,
     ...overrides,
@@ -176,6 +177,7 @@ function childSource(): CanonicalReportingSource {
       currency: "EUR",
       timeZone: "Europe/Lisbon",
       dataSourceId: "source",
+      healthError: null,
     },
   };
 }
@@ -662,6 +664,37 @@ describe("V2 daily-metrics recompute", () => {
 
     // The Google family failed, so the stored spend survives — a $ figure is
     // never silently written as €, and only Shopify records a receipt.
+    expect(db.upserts.flat()[0]).toMatchObject({ ad_spend: 10, revenue: 100 });
+    expect(db.receipts).toEqual([
+      expect.objectContaining({ p_source_type: "shopify" }),
+    ]);
+  });
+
+  it("keeps stored ad figures when the Google connection carries a health error", async () => {
+    // A latched probe failure degrades the Google family only: stored spend
+    // carries, the Shopify family still refreshes, and only Shopify records a
+    // receipt — never a blanked portal or a frozen revenue sync.
+    const pair = pairedSource();
+    pair.googleAds = { ...pair.googleAds!, healthError: "health_check_failed" };
+    const db = fakeDatabase(
+      [
+        account(ANCHOR, {
+          google_ads_customer_id: "1112223333",
+          shopify_url: "store.myshopify.com",
+        }),
+      ],
+      [stored()],
+    );
+    mocks.createServiceClient.mockReturnValue(db.client);
+    mocks.resolveReportingSources.mockResolvedValue([pair]);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await refreshReportingSourcesNow([ANCHOR], {
+      client: db.client as never,
+      from: DAY,
+      to: DAY,
+    });
+
     expect(db.upserts.flat()[0]).toMatchObject({ ad_spend: 10, revenue: 100 });
     expect(db.receipts).toEqual([
       expect.objectContaining({ p_source_type: "shopify" }),

@@ -561,9 +561,17 @@ export async function fetchCampaigns(account: AdAccount, range: RangeSelection):
 
     try {
       return (await Promise.all(
-        sources.map((source) =>
-          fetchGoogleReportingCampaigns(source, range.from, range.to),
-        ),
+        sources.map(async (source) => {
+          const rows = await fetchGoogleReportingCampaigns(source, range.from, range.to);
+          // Campaign money comes straight from Google in the source's NATIVE
+          // billing currency (a USD account stays USD — range aggregates have
+          // no per-day rate to convert with). Carry that currency so the table
+          // labels these figures honestly instead of borrowing the account's.
+          const sourceCurrency = source.googleAds?.currency ?? undefined;
+          return sourceCurrency
+            ? rows.map((row) => ({ ...row, currency: sourceCurrency }))
+            : rows;
+        }),
       ))
         .flat()
         .sort((left, right) => right.spend - left.spend || left.id.localeCompare(right.id));

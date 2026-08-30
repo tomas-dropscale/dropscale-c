@@ -899,6 +899,14 @@ export type Campaign = {
   cpc: number;
   daily_budget: number | null;
   updated_at: string;
+  /**
+   * Billing currency the money figures are in, when it differs from the ad
+   * account's reporting currency — campaign reads come straight from Google in
+   * the account's NATIVE currency and are never FX-converted (they are range
+   * aggregates, so no per-day rate applies). Absent on legacy rows, where the
+   * two currencies are guaranteed equal.
+   */
+  currency?: string;
 };
 
 export type CampaignAction =

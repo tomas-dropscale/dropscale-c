@@ -31,6 +31,17 @@ export function CampaignsTable({
     ended: d.campaigns.statusEnded,
   };
 
+  // Campaign money arrives in the Google account's NATIVE billing currency
+  // (row.currency, when it differs from the store's reporting currency) — a
+  // USD-billing account's rows must never be printed with a € label. Totals
+  // use the rows' currency when it is uniform, else the account fallback.
+  const rowCurrency = (campaign: Campaign) => campaign.currency ?? currency;
+  const totalsCurrency =
+    campaigns.length > 0 &&
+    campaigns.every((campaign) => rowCurrency(campaign) === rowCurrency(campaigns[0]))
+      ? rowCurrency(campaigns[0])
+      : currency;
+
   const totals = campaigns.reduce(
     (sum, campaign) => ({
       spend: sum.spend + Number(campaign.spend),
@@ -72,15 +83,15 @@ export function CampaignsTable({
             <dl className="mt-2.5 grid grid-cols-3 gap-x-3 gap-y-2.5 text-[12.5px]">
               {(
                 [
-                  [d.campaigns.spend, money(campaign.spend, currency)],
+                  [d.campaigns.spend, money(campaign.spend, rowCurrency(campaign))],
                   [d.campaigns.impressions, compact(campaign.impressions)],
                   [d.campaigns.clicks, integer(campaign.clicks)],
                   [d.campaigns.ctr, percent(Number(campaign.ctr))],
-                  [d.campaigns.cpc, money(campaign.cpc, currency)],
+                  [d.campaigns.cpc, money(campaign.cpc, rowCurrency(campaign))],
                   [
                     d.campaigns.dailyBudget,
                     campaign.daily_budget != null
-                      ? money(campaign.daily_budget, currency)
+                      ? money(campaign.daily_budget, rowCurrency(campaign))
                       : "—",
                   ],
                 ] as const
@@ -101,14 +112,14 @@ export function CampaignsTable({
           <dl className="mt-2.5 grid grid-cols-3 gap-x-3 gap-y-2.5 text-[12.5px] font-semibold">
             {(
               [
-                [d.campaigns.spend, money(totals.spend, currency)],
+                [d.campaigns.spend, money(totals.spend, totalsCurrency)],
                 [d.campaigns.impressions, compact(totals.impressions)],
                 [d.campaigns.clicks, integer(totals.clicks)],
                 [d.campaigns.ctr, percent(totalCtr)],
-                [d.campaigns.cpc, money(totalCpc, currency)],
+                [d.campaigns.cpc, money(totalCpc, totalsCurrency)],
                 [
                   d.campaigns.dailyBudget,
-                  totals.budget > 0 ? money(totals.budget, currency) : "—",
+                  totals.budget > 0 ? money(totals.budget, totalsCurrency) : "—",
                 ],
               ] as const
             ).map(([label, value]) => (
@@ -172,7 +183,7 @@ export function CampaignsTable({
                       </Badge>
                     </td>
                     <td className="px-4 py-3 text-right whitespace-nowrap text-[var(--text-primary)]">
-                      {money(campaign.spend, currency)}
+                      {money(campaign.spend, rowCurrency(campaign))}
                     </td>
                     <td className="px-4 py-3 text-right text-[var(--text-secondary)]">
                       {compact(campaign.impressions)}
@@ -184,11 +195,11 @@ export function CampaignsTable({
                       {percent(Number(campaign.ctr))}
                     </td>
                     <td className="px-4 py-3 text-right whitespace-nowrap text-[var(--text-secondary)]">
-                      {money(campaign.cpc, currency)}
+                      {money(campaign.cpc, rowCurrency(campaign))}
                     </td>
                     <td className="px-4 py-3 text-right whitespace-nowrap text-[var(--text-secondary)]">
                       {campaign.daily_budget != null
-                        ? money(campaign.daily_budget, currency)
+                        ? money(campaign.daily_budget, rowCurrency(campaign))
                         : "—"}
                     </td>
                   </tr>
@@ -200,7 +211,7 @@ export function CampaignsTable({
                           <div>
                             <p className="label-caps mb-1">{d.campaigns.avgCpc}</p>
                             <p className="text-[var(--text-primary)]">
-                              {money(campaign.cpc, currency)}
+                              {money(campaign.cpc, rowCurrency(campaign))}
                             </p>
                           </div>
                           <div>
@@ -234,16 +245,16 @@ export function CampaignsTable({
               <td className="px-4 py-3 pl-10">{d.campaigns.total}</td>
               <td className="px-4 py-3" />
               <td className="px-4 py-3 text-right whitespace-nowrap">
-                {money(totals.spend, currency)}
+                {money(totals.spend, totalsCurrency)}
               </td>
               <td className="px-4 py-3 text-right">{compact(totals.impressions)}</td>
               <td className="px-4 py-3 text-right">{integer(totals.clicks)}</td>
               <td className="px-4 py-3 text-right">{percent(totalCtr)}</td>
               <td className="px-4 py-3 text-right whitespace-nowrap">
-                {money(totalCpc, currency)}
+                {money(totalCpc, totalsCurrency)}
               </td>
               <td className="px-4 py-3 text-right whitespace-nowrap">
-                {totals.budget > 0 ? money(totals.budget, currency) : "—"}
+                {totals.budget > 0 ? money(totals.budget, totalsCurrency) : "—"}
               </td>
             </tr>
           </tbody>

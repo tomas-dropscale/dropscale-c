@@ -128,6 +128,7 @@ function shopifySource(
       primaryDomain: "shop.example",
       currency: "EUR",
       credential: null,
+      healthError: null,
     },
     googleAds: null,
     ...overrides,
@@ -159,6 +160,7 @@ function googleSource(
       currency: "EUR",
       timeZone: "Europe/Lisbon",
       dataSourceId: null,
+      healthError: null,
     },
   };
 }

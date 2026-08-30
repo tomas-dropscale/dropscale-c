@@ -140,6 +140,7 @@ function source(
           primaryDomain: "store.example",
           currency: "EUR",
           credential: null,
+          healthError: null,
         }
       : null,
     googleAds: {
@@ -151,6 +152,7 @@ function source(
       currency: "EUR",
       timeZone: "Europe/Lisbon",
       dataSourceId: null,
+      healthError: null,
     },
   };
 }

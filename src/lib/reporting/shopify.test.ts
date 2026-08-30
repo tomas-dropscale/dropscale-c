@@ -78,6 +78,7 @@ function source(
         shopifyClientId: "client-id-123456",
         clientSecretCiphertext: CIPHERTEXT,
       },
+      healthError: null,
     },
     googleAds: null,
     ...overrides,

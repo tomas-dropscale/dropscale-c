@@ -536,6 +536,15 @@ async function syncReportingSourceWindow(
       account.id,
       source.googleAds
         ? async () => {
+            // A latched health-probe failure degrades THIS family only: it
+            // fails here so the merge keeps the stored figures, while the
+            // other family and the portal stay alive. Clears on the next
+            // successful admin test or reconnect.
+            if (source.googleAds!.healthError) {
+              throw new Error(
+                `The bound Google Ads connection is marked unhealthy (${source.googleAds!.healthError}).`,
+              );
+            }
             const rows = await fetchGoogleReportingDailyMetrics(source, from, to);
             // Google reports money in the ad account's own billing currency;
             // daily_metrics is kept in the reporting currency. Convert every
@@ -562,7 +571,14 @@ async function syncReportingSourceWindow(
       "Shopify",
       account.id,
       source.shopify
-        ? () => fetchShopifyReportingDailyMetrics(service, account, source, from, to)
+        ? async () => {
+            if (source.shopify!.healthError) {
+              throw new Error(
+                `The bound Shopify connection is marked unhealthy (${source.shopify!.healthError}).`,
+              );
+            }
+            return fetchShopifyReportingDailyMetrics(service, account, source, from, to);
+          }
         : null,
     ),
   ]);

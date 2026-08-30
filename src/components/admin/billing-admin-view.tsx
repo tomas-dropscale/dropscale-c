@@ -12,6 +12,7 @@ import {
   FileWarning,
   MoreHorizontal,
   ReceiptText,
+  RotateCcw,
   Search,
   type LucideIcon,
 } from "lucide-react";
@@ -328,6 +329,10 @@ export function BillingAdminView({
   );
   const [skippingId, setSkippingId] = React.useState<string | null>(null);
   const [skipFeedback, setSkipFeedback] = React.useState<Feedback>(null);
+  const [unskipClient, setUnskipClient] = React.useState<OverviewClient | null>(
+    null,
+  );
+  const [unskippingId, setUnskippingId] = React.useState<string | null>(null);
   const [issueDialogOpen, setIssueDialogOpen] = React.useState(false);
   const [issuingAll, setIssuingAll] = React.useState(false);
   const [issueFeedback, setIssueFeedback] = React.useState<Feedback>(null);
@@ -411,7 +416,12 @@ export function BillingAdminView({
       const response = await fetch("/api/admin/billing/skip-cycle", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ clientId: skipClient.clientId }),
+        // periodStart pins the request to the week this dialog DISPLAYED — a
+        // confirm clicked across Monday midnight must not skip the new week.
+        body: JSON.stringify({
+          clientId: skipClient.clientId,
+          periodStart: overview.currentPeriod.start,
+        }),
       });
       const body = (await response.json().catch(() => null)) as unknown;
       if (!response.ok) {
@@ -437,6 +447,46 @@ export function BillingAdminView({
       });
     } finally {
       setSkippingId(null);
+    }
+  }
+
+  async function reactivateCurrentCycle() {
+    if (!unskipClient?.currentSkipId) return;
+    setUnskippingId(unskipClient.clientId);
+    setSkipFeedback(null);
+    try {
+      const response = await fetch("/api/admin/billing/skip-cycle", {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          clientId: unskipClient.clientId,
+          periodStart: overview.currentPeriod.start,
+        }),
+      });
+      const body = (await response.json().catch(() => null)) as unknown;
+      if (!response.ok) {
+        setSkipFeedback({
+          tone: "error",
+          message: requestError(
+            body,
+            "Não foi possível reativar este ciclo.",
+          ),
+        });
+        return;
+      }
+      setSkipFeedback({
+        tone: "success",
+        message: `O ciclo atual de ${unskipClient.clientName} voltou a cobrar normalmente.`,
+      });
+      setUnskipClient(null);
+      router.refresh();
+    } catch {
+      setSkipFeedback({
+        tone: "error",
+        message: "Não foi possível reativar este ciclo.",
+      });
+    } finally {
+      setUnskippingId(null);
     }
   }
 
@@ -673,7 +723,6 @@ export function BillingAdminView({
                 <SelectItem value="payable">Por pagar</SelectItem>
                 <SelectItem value="overdue">Em atraso</SelectItem>
                 <SelectItem value="skip_cycle">Skip cycle</SelectItem>
-                <SelectItem value="paused">Billing pausado</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -907,6 +956,20 @@ export function BillingAdminView({
                                 </DropdownMenuItem>
                               </>
                             )}
+                            {row.client.currentSkipId && (
+                              <>
+                                <DropdownMenuSeparator />
+                                <DropdownMenuItem
+                                  onSelect={() => {
+                                    setSkipFeedback(null);
+                                    setUnskipClient(row.client);
+                                  }}
+                                >
+                                  <RotateCcw aria-hidden />
+                                  Reativar ciclo atual
+                                </DropdownMenuItem>
+                              </>
+                            )}
                             {(stripeHostedUrl || stripeInvoicePdf) && (
                               <DropdownMenuSeparator />
                             )}
@@ -1040,6 +1103,59 @@ export function BillingAdminView({
             >
               <CalendarDays />
               {skippingId ? "A guardar skip" : "Confirmar skip"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={Boolean(unskipClient)}
+        onOpenChange={(open) => {
+          if (!open && !unskippingId) setUnskipClient(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Reativar ciclo atual</DialogTitle>
+            <DialogDescription>
+              {unskipClient
+                ? `Voltar a cobrar ${unskipClient.clientName} no ciclo ${formatPeriod(
+                    overview.currentPeriod.start,
+                    overview.currentPeriod.end,
+                    intl,
+                  )}.`
+                : ""}
+            </DialogDescription>
+          </DialogHeader>
+
+          {skipFeedback?.tone === "error" && (
+            <FormAlert tone="error">{skipFeedback.message}</FormAlert>
+          )}
+
+          <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-panel-hover)] p-3 text-[12px] leading-relaxed text-[var(--text-secondary)]">
+            O skip deste ciclo é removido e a semana volta a ser faturada
+            normalmente no fecho. Deixa de ser possível reativar depois de o
+            ciclo fechar com o recibo de não-cobrança.
+          </div>
+
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={Boolean(unskippingId)}
+              onClick={() => setUnskipClient(null)}
+            >
+              {d.common.cancel}
+            </Button>
+            <Button
+              type="button"
+              variant="primary"
+              loading={Boolean(unskippingId)}
+              disabled={!unskipClient?.currentSkipId}
+              onClick={reactivateCurrentCycle}
+            >
+              <RotateCcw />
+              {unskippingId ? "A reativar" : "Reativar ciclo"}
             </Button>
           </DialogFooter>
         </DialogContent>

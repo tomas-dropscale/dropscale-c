@@ -55,6 +55,16 @@ const SHOPIFY_ZERO: Omit<ShopifyDailyMetric, "day"> = {
   revenue_share_amount: 0,
 };
 
+// A Google-only account HAS no Shopify family — its attribution columns must
+// stay null ("never computed"), not 0 ("computed, zero conversions"): a 0 here
+// would defeat the store group's null sentinel and let dashboards assert zero
+// conversions for an anchor whose attribution never ran.
+const SHOPIFY_NOT_APPLICABLE: Omit<ShopifyDailyMetric, "day"> = {
+  ...SHOPIFY_ZERO,
+  attributed_orders: null,
+  attributed_revenue: null,
+};
+
 function calendar(from: string, to: string): string[] {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to) || from > to) {
     throw new ReportingMetricMergeError("The reporting date range is invalid.");
@@ -167,7 +177,7 @@ export function mergeDailyMetricFamilies({
         ? shopifyRows?.get(day) ?? SHOPIFY_ZERO
         : shopify.state === "failed"
           ? shopifyFrom(stored!)
-          : SHOPIFY_ZERO;
+          : SHOPIFY_NOT_APPLICABLE;
 
     return {
       ad_account_id: adAccountId,

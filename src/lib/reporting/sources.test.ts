@@ -400,6 +400,7 @@ describe("runtime V2 reporting source resolution", () => {
       primaryDomain: "northwind.example",
       currency: "EUR",
       credential: null,
+      healthError: null,
     });
     expect(createReportingShopifyRepository).not.toHaveBeenCalled();
     expect(loadCredential).not.toHaveBeenCalled();
@@ -641,6 +642,27 @@ describe("runtime V2 reporting source resolution", () => {
 
     expect(sources.find((source) => source.googleAds)?.googleAds?.currency).toBe("USD");
     expect(sources.find((source) => source.shopify)?.shopify?.currency).toBe("EUR");
+  });
+
+  it("carries a latched health-probe failure as healthError instead of failing the client", async () => {
+    // A failed admin Test during a transient outage records last_error_code.
+    // That must degrade ONE family (its sync carries stored figures), never
+    // blank the whole client's portal and freeze every sync until a re-test.
+    const data = snapshot();
+    data.client_google_ads_connections[0] = {
+      ...data.client_google_ads_connections[0],
+      last_error_code: "health_check_failed",
+    };
+
+    const sources = await resolveReportingSources({
+      service: serviceFor(data),
+      shopifyRepository: repository(),
+    });
+
+    expect(sources.find((source) => source.googleAds)?.googleAds?.healthError).toBe(
+      "health_check_failed",
+    );
+    expect(sources.find((source) => source.shopify)?.shopify?.healthError).toBeNull();
   });
 
   it("fails closed when a bound Google source has no verified currency", async () => {

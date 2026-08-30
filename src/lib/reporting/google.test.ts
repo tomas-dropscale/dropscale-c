@@ -31,6 +31,7 @@ const source: CanonicalReportingSource = {
     currency: "EUR",
     timeZone: "Europe/Lisbon",
     dataSourceId: "source",
+    healthError: null,
   },
 };
 
