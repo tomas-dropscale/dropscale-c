@@ -11,6 +11,7 @@ import "server-only";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
+import { createServiceClient } from "@/lib/supabase/service";
 import {
   allowedLocalStatusesForStripeUpdate,
   assertStripeInvoiceMatchesLocal,
@@ -1964,47 +1965,51 @@ async function fetchAdminBillingPositions(
   // Accounts whose bound Google source bills in a non-EUR currency: their
   // daily_metrics spend is ECB-converted for reporting, but the EUR-only
   // billing chain can never book it, so positions must not accrue a fee on it.
+  // The V2 binding tables are service-only (0054 grants SELECT to service_role
+  // alone), so this read must NOT ride the admin's session client — and it is
+  // deliberately non-fatal: an empty set merely restores the pre-gate accrual
+  // display, while a throw here took the whole billing dashboard down.
   const accountsWithNonEurGoogleSource = new Set<string>();
-  if (accountIds.length > 0) {
-    const { data: boundRows, error: boundError } = await supabase
-      .from("client_reporting_bindings")
-      .select("ad_account_id, google_ads_connection_id")
-      .in("ad_account_id", accountIds)
-      .eq("status", "active")
-      .not("google_ads_connection_id", "is", null);
-    if (boundError) {
-      throw new Error(
-        `Could not load billing position reporting bindings: ${boundError.message}`,
-      );
-    }
-    const googleIds = [
-      ...new Set(
-        (boundRows ?? []).flatMap((row) =>
-          row.google_ads_connection_id ? [row.google_ads_connection_id] : [],
+  const bindingService = createServiceClient();
+  if (accountIds.length > 0 && bindingService) {
+    try {
+      const { data: boundRows, error: boundError } = await bindingService
+        .from("client_reporting_bindings")
+        .select("ad_account_id, google_ads_connection_id")
+        .in("ad_account_id", accountIds)
+        .eq("status", "active")
+        .not("google_ads_connection_id", "is", null);
+      if (boundError) throw boundError;
+      const googleIds = [
+        ...new Set(
+          (boundRows ?? []).flatMap((row) =>
+            row.google_ads_connection_id ? [row.google_ads_connection_id] : [],
+          ),
         ),
-      ),
-    ];
-    if (googleIds.length > 0) {
-      const { data: googleRows, error: googleError } = await supabase
-        .from("client_google_ads_connections")
-        .select("id, currency")
-        .in("id", googleIds);
-      if (googleError) {
-        throw new Error(
-          `Could not load billing position Google sources: ${googleError.message}`,
+      ];
+      if (googleIds.length > 0) {
+        const { data: googleRows, error: googleError } = await bindingService
+          .from("client_google_ads_connections")
+          .select("id, currency")
+          .in("id", googleIds);
+        if (googleError) throw googleError;
+        const currencyByGoogle = new Map(
+          (googleRows ?? []).map((row) => [row.id, row.currency]),
         );
-      }
-      const currencyByGoogle = new Map(
-        (googleRows ?? []).map((row) => [row.id, row.currency]),
-      );
-      for (const row of boundRows ?? []) {
-        const currency = row.google_ads_connection_id
-          ? currencyByGoogle.get(row.google_ads_connection_id)
-          : null;
-        if (currency && currency.toUpperCase() !== "EUR") {
-          accountsWithNonEurGoogleSource.add(row.ad_account_id);
+        for (const row of boundRows ?? []) {
+          const currency = row.google_ads_connection_id
+            ? currencyByGoogle.get(row.google_ads_connection_id)
+            : null;
+          if (currency && currency.toUpperCase() !== "EUR") {
+            accountsWithNonEurGoogleSource.add(row.ad_account_id);
+          }
         }
       }
+    } catch (error) {
+      console.error(
+        "Billing positions could not resolve non-EUR Google sources:",
+        error instanceof Error ? error.message : error,
+      );
     }
   }
 
