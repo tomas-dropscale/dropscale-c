@@ -7,7 +7,7 @@ import { StoreSelector } from "@/components/portal/store-selector";
 import { PageContainer } from "@/components/ui/page-container";
 import { fetchDailyMetrics, sumMetrics } from "@/lib/metrics/queries";
 import { buildPnlSheet, monthDays } from "@/lib/portal/pnl";
-import { fetchManualReferralRateSchedule } from "@/lib/billing/referral-rate-schedule";
+import { fetchManualReferralRateScheduleOrNull } from "@/lib/billing/referral-rate-schedule";
 import { manualReferralRateOnDay } from "@/lib/billing/referrals";
 import { currencyScope, displayCurrency } from "@/lib/portal/currency";
 import { MixedCurrencyNotice } from "@/components/portal/mixed-currency-notice";
@@ -71,7 +71,7 @@ export default async function PnlPage({
       to,
     ),
     scope[0]
-      ? fetchManualReferralRateSchedule(scope[0].client_id)
+      ? fetchManualReferralRateScheduleOrNull(scope[0].client_id)
       : Promise.resolve([]),
   ]);
   const unallocatedIds = new Set(metricsScope.unallocatedGoogleAccountIds);
@@ -85,7 +85,7 @@ export default async function PnlPage({
     (accountId, day) => {
       const account = metricsScope.metricAccountsById.get(accountId);
       return Number(account?.list_commission_rate) === 10 && !account?.revenue_share_enabled
-        ? manualReferralRateOnDay(day, referralRateSchedule)
+        ? (referralRateSchedule ? manualReferralRateOnDay(day, referralRateSchedule) : 0)
         : Number(account?.commission_rate ?? 0);
     },
   );

@@ -582,16 +582,24 @@ async function adminAccountInventory(
     });
   }
 
-  if (
-    v2ClientIds.some(
-      (clientId) =>
-        // A client whose sources failed to verify is deliberately degraded to
-        // absent (see the tolerant resolve above) — never fatal for the rest.
-        !unresolvedV2ClientIds.has(clientId) &&
-        !sources.some((source) => source.clientId === clientId),
-    ) ||
-    usedSourceIds.size !== sources.length
-  ) {
+  // A cutover client with NO resolvable source is degraded to absent, exactly
+  // like one whose resolve threw: an admin can revoke a departed client's last
+  // binding through the sanctioned Remove-asset flow, which leaves the rollout
+  // marker in place and the client sourceless. Treating that as fatal took the
+  // whole campaigns page down for every admin and every other client — the
+  // FITTED-class failure the tolerant resolve above already exists to prevent.
+  const sourcelessV2ClientIds = v2ClientIds.filter(
+    (clientId) =>
+      !unresolvedV2ClientIds.has(clientId) &&
+      !sources.some((source) => source.clientId === clientId),
+  );
+  if (sourcelessV2ClientIds.length > 0) {
+    console.error(
+      `Admin reporting inventory: ${sourcelessV2ClientIds.length} cutover client(s) have no active reporting source; showing the rest.`,
+    );
+  }
+  // A source counted twice IS still fatal: it would double a store's spend.
+  if (usedSourceIds.size !== sources.length) {
     throw new Error("Admin reporting inventory is unavailable.");
   }
   return [...legacy, ...v2].sort((left, right) =>

@@ -22,7 +22,7 @@ import {
   groupByDay,
   sumMetrics,
 } from "@/lib/metrics/queries";
-import { fetchManualReferralRateSchedule } from "@/lib/billing/referral-rate-schedule";
+import { fetchManualReferralRateScheduleOrNull } from "@/lib/billing/referral-rate-schedule";
 import { manualReferralRateOnDay } from "@/lib/billing/referrals";
 import { parseRange } from "@/lib/portal/range";
 import { currencyScope, displayCurrency } from "@/lib/portal/currency";
@@ -79,7 +79,7 @@ export default async function DashboardPage({
       range.to,
     ),
     accounts[0]
-      ? fetchManualReferralRateSchedule(accounts[0].client_id)
+      ? fetchManualReferralRateScheduleOrNull(accounts[0].client_id)
       : Promise.resolve([]),
   ]);
   const unallocatedIds = new Set(metricsScope.unallocatedGoogleAccountIds);
@@ -143,7 +143,7 @@ export default async function DashboardPage({
       const standardManualContract =
         Number(account?.list_commission_rate) === 10 && !account?.revenue_share_enabled;
       const rate = standardManualContract
-        ? manualReferralRateOnDay(row.day, referralRateSchedule)
+        ? (referralRateSchedule ? manualReferralRateOnDay(row.day, referralRateSchedule) : 0)
         : Number(account?.commission_rate ?? 0);
       return sum + (Number(row.ad_spend) * rate) / 100;
     },

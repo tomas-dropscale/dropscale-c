@@ -13,7 +13,7 @@ import {
   sumMetrics,
 } from "@/lib/metrics/queries";
 import { parseRange } from "@/lib/portal/range";
-import { fetchManualReferralRateSchedule } from "@/lib/billing/referral-rate-schedule";
+import { fetchManualReferralRateScheduleOrNull } from "@/lib/billing/referral-rate-schedule";
 import { manualReferralRateOnDay } from "@/lib/billing/referrals";
 import { multiplier } from "@/lib/format";
 import { Button } from "@/components/ui/button";
@@ -53,7 +53,7 @@ export default async function AccountPage({
   const [physicalRows, campaigns, referralRateSchedule, funnel, { d }] = await Promise.all([
     fetchDailyMetrics(metricAccountIds, range.from, range.to),
     fetchCampaigns(account, range),
-    fetchManualReferralRateSchedule(account.client_id),
+    fetchManualReferralRateScheduleOrNull(account.client_id),
     // The same stored Shopify funnel the admin analytics screen shows, for the
     // client's own store. Never throws: a failure renders as the funnel's own
     // notice rather than taking the page down.
@@ -73,7 +73,7 @@ export default async function AccountPage({
 
   const referralRateForDay = (day: string) =>
     Number(account.list_commission_rate) === 10 && !account.revenue_share_enabled
-      ? manualReferralRateOnDay(day, referralRateSchedule)
+      ? (referralRateSchedule ? manualReferralRateOnDay(day, referralRateSchedule) : 0)
       : Number(account.commission_rate);
   const metrics = metricSetFromRows(rows, (row) => referralRateForDay(row.day));
   const historicalRates = new Set(rows.map((row) => referralRateForDay(row.day)));

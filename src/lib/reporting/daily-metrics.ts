@@ -155,16 +155,24 @@ export function mergeDailyMetricFamilies({
     shopify.state === "succeeded" ? keyed(shopify.rows, allowed, "Shopify") : null;
   const hasFailedFamily = google.state === "failed" || shopify.state === "failed";
 
-  if (
-    hasFailedFamily &&
-    days.some((day) => !prior.has(day))
-  ) {
+  // A failed family can only be carried on a day that already has a stored
+  // value. Days without one are SKIPPED, not invented: writing a zero there
+  // would be indistinguishable from a real zero and would then be carried
+  // forward for ever as if it had been measured.
+  //
+  // Skipping rather than failing the whole window is what keeps a degraded
+  // account alive: the hourly window always contains today, and today's row
+  // does not exist until this sync writes it, so failing the window would
+  // freeze EVERY family — the healthy one included — from the first midnight
+  // after a family started failing.
+  const writable = hasFailedFamily ? days.filter((day) => prior.has(day)) : days;
+  if (hasFailedFamily && writable.length === 0) {
     throw new ReportingMetricMergeError(
       "A reporting source failed before the window had a value to preserve.",
     );
   }
 
-  return days.map((day) => {
+  return writable.map((day) => {
     const stored = prior.get(day);
     const googleFamily =
       google.state === "succeeded"

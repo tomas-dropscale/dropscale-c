@@ -33,3 +33,26 @@ export async function fetchManualReferralRateSchedule(
     throw new Error("The manual referral rate schedule was invalid", { cause: error });
   }
 }
+
+/**
+ * The same read for pages whose subject is the client's own revenue and
+ * profit, where the referral schedule prices only an auxiliary fee ESTIMATE.
+ *
+ * Null means "cannot be priced" — never an empty schedule, which would fall
+ * back to the list rate and overstate a referred client's fee. Callers must
+ * suppress the fee line on null. Fail-closed for the fee, not for the page:
+ * a failed fee estimate must never take a client's numbers off the screen.
+ */
+export async function fetchManualReferralRateScheduleOrNull(
+  clientId: string,
+): Promise<ManualReferralRatePoint[] | null> {
+  try {
+    return await fetchManualReferralRateSchedule(clientId);
+  } catch (error) {
+    console.error(
+      "Manual referral rate schedule unavailable; fee estimate suppressed:",
+      error instanceof Error ? error.message : error,
+    );
+    return null;
+  }
+}

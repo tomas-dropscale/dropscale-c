@@ -37,7 +37,7 @@ const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 async function readSkipRequest(
   request: NextRequest,
 ): Promise<
-  | { clientId: string; adminId: string }
+  | { clientId: string; periodStart: string; adminId: string }
   | { error: string; status: number }
 > {
   const { user, profile } = await getSessionProfile();
@@ -66,7 +66,7 @@ async function readSkipRequest(
       status: 409,
     };
   }
-  return { clientId: body.clientId, adminId: profile.id };
+  return { clientId: body.clientId, periodStart: body.periodStart, adminId: profile.id };
 }
 
 export async function POST(request: NextRequest) {
@@ -76,7 +76,9 @@ export async function POST(request: NextRequest) {
   const service = createServiceClient();
   if (!service) return response({ error: "Billing is not configured." }, 503);
 
-  const periodStart = mondayOf(new Date());
+  // The validated pin, not a second clock read: re-deriving the Monday here
+  // would let a request that passed validation act on the NEXT week.
+  const periodStart = parsed.periodStart;
   const periodEnd = addDays(periodStart, 6);
   const { data, error } = await service.rpc("skip_billing_cycle", {
     p_client_id: parsed.clientId,
@@ -125,7 +127,7 @@ export async function DELETE(request: NextRequest) {
 
   const { data, error } = await service.rpc("remove_billing_cycle_skip", {
     p_client_id: parsed.clientId,
-    p_period_start: mondayOf(new Date()),
+    p_period_start: parsed.periodStart,
     p_removed_by: parsed.adminId,
   });
 

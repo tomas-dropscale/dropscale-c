@@ -107,6 +107,33 @@ describe("daily reporting family merge", () => {
     expect(result.every((entry) => entry.computed_at === COMPUTED_AT)).toBe(true);
   });
 
+  it("keeps refreshing stored days when a family fails and the newest day has no value yet", () => {
+    // Every hourly window ends on today, and today's row does not exist until
+    // this sync writes it. Failing the whole window there would freeze the
+    // HEALTHY family too, from the first midnight after a family started
+    // failing — the exact freeze a latched health error used to cause.
+    const result = mergeDailyMetricFamilies({
+      adAccountId: ACCOUNT,
+      from: "2026-08-13",
+      to: "2026-08-14",
+      existing: [row("2026-08-13")],
+      google: { state: "failed" },
+      shopify: {
+        state: "succeeded",
+        rows: [
+          { ...row("2026-08-13"), revenue: 90 },
+          { ...row("2026-08-14"), revenue: 70 },
+        ],
+      },
+      computedAt: COMPUTED_AT,
+    });
+
+    // The stored day refreshes with fresh Shopify and carried Google figures;
+    // the day with nothing to carry is skipped rather than invented as zero.
+    expect(result.map((entry) => entry.day)).toEqual(["2026-08-13"]);
+    expect(result[0]).toMatchObject({ revenue: 90, ad_spend: 10 });
+  });
+
   it("refuses a partial first write when an applicable source failed", () => {
     expect(() =>
       mergeDailyMetricFamilies({

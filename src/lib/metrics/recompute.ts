@@ -599,11 +599,38 @@ async function syncReportingSourceWindow(
     computedAt: new Date().toISOString(),
   });
   if (lifecycle === "staged") {
+    // The staged commit RPC (0056) validates its rows against a fixed key
+    // whitelist that predates the store-currency columns (0092), and rejects
+    // the whole window with "unsupported field" if they are present — which
+    // silently killed every staged Shopify sync, i.e. every restage. The
+    // staged window carries the reporting-currency figures only; the *_store
+    // values are refilled by the normal sync once the source is promoted.
+    const stagedRows = rows.map((row) => ({
+      ad_account_id: row.ad_account_id,
+      day: row.day,
+      ad_spend: row.ad_spend,
+      impressions: row.impressions,
+      clicks: row.clicks,
+      conversions: row.conversions,
+      conversion_value: row.conversion_value,
+      revenue: row.revenue,
+      orders_count: row.orders_count,
+      units_sold: row.units_sold,
+      attributed_orders: row.attributed_orders,
+      attributed_revenue: row.attributed_revenue,
+      refunds_amount: row.refunds_amount,
+      product_cost: row.product_cost,
+      payment_fees: row.payment_fees,
+      shipping_cost: row.shipping_cost,
+      revenue_share_base: row.revenue_share_base,
+      revenue_share_amount: row.revenue_share_amount,
+      computed_at: row.computed_at,
+    }));
     const { data, error } = await service.rpc("commit_client_staged_reporting_metrics", {
       p_binding_id: source.bindingId,
       p_success_from: from,
       p_success_to: to,
-      p_rows: rows,
+      p_rows: stagedRows,
     });
     if (error || data !== source.bindingId) {
       throw error ?? new Error("A staged reporting window was not committed.");
