@@ -342,7 +342,11 @@ describe("Phase 2 admin reporting cutover workflow", () => {
     expect(mocks.rpc).not.toHaveBeenCalled();
   });
 
-  it("never offers an unbillable mapped non-EUR Google source", async () => {
+  it("keeps queue provisioning EUR-only but no longer currency-blocks an ECB-convertible source", async () => {
+    // DKK converts with the day's ECB rate, so the client is not blocked —
+    // the source is simply awaiting a binding (Rebind sources is the path;
+    // queue candidates deliberately stay EUR-only because provisioning pins
+    // the pair to the Google billing currency).
     const data = snapshot();
     data.googleConnections[0].currency = "DKK";
 
@@ -351,9 +355,22 @@ describe("Phase 2 admin reporting cutover workflow", () => {
     expect(queue.candidates.some((candidate) => candidate.sourceLabel.includes("1234567890"))).toBe(
       false,
     );
+    expect(queue.clients[0].status).toBe("bindings_required");
+    expect(queue.clients[0].message).not.toContain("ECB publishes no rate");
+  });
+
+  it("still blocks a Google source billing in a currency the ECB cannot convert", async () => {
+    const data = snapshot();
+    data.googleConnections[0].currency = "TWD";
+
+    const queue = await projectClientReportingCutover(data);
+
+    expect(queue.candidates.some((candidate) => candidate.sourceLabel.includes("1234567890"))).toBe(
+      false,
+    );
     expect(queue.clients[0]).toMatchObject({
       status: "blocked",
-      message: expect.stringContaining("billing baseline is EUR-only"),
+      message: expect.stringContaining("ECB publishes no rate"),
     });
   });
 

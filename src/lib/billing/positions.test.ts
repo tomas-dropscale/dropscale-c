@@ -106,6 +106,26 @@ describe("billing positions", () => {
     expect(result.clients[0].current.accruedFee).toBe(22.5);
   });
 
+  it("never accrues a current-week fee on spend from a non-EUR Google source", () => {
+    // The account reports in EUR (daily_metrics carries ECB-converted spend),
+    // but its bound Google source bills in USD — the EUR-only billing chain
+    // can never book that spend, so positions must not show it as accruing.
+    const result = position({
+      metricRows: [
+        {
+          accountId: "account-1",
+          day: "2026-08-03",
+          adSpend: 200,
+          computedAt: "2026-08-04T13:30:00.000Z",
+        },
+      ],
+      accountsWithNonEurGoogleSource: new Set(["account-1"]),
+    });
+
+    expect(result.clients[0].current.grossSpend).toBe(0);
+    expect(result.clients[0].current.accruedFee).toBe(0);
+  });
+
   it("shows a positive Sunday entry day as a range instead of an exact debt", () => {
     const sundayAccount = account({
       createdAt: "2026-08-02T13:38:00.000Z",

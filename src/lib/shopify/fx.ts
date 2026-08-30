@@ -28,6 +28,21 @@ export class FxError extends Error {
 }
 
 /**
+ * The currencies the ECB publishes reference rates for — the ONLY ones
+ * fxDailyRates can convert. Anything outside this set throws FxError on every
+ * call, forever, so a Google account billing in e.g. TWD or AED must never be
+ * accepted as a convertible reporting source: gate on this set at BIND time
+ * (see rebind-sources.ts), where a refusal is a visible skip reason, instead
+ * of at sync time, where it would be a permanent silent failure.
+ */
+export const FX_SUPPORTED_CURRENCIES: ReadonlySet<string> = new Set([
+  "EUR", "AUD", "BGN", "BRL", "CAD", "CHF", "CNY", "CZK", "DKK", "GBP",
+  "HKD", "HUF", "IDR", "ILS", "INR", "ISK", "JPY", "KRW", "MXN", "MYR",
+  "NOK", "NZD", "PHP", "PLN", "RON", "SEK", "SGD", "THB", "TRY", "USD",
+  "ZAR",
+]);
+
+/**
  * Sorted [day, rate] pairs covering [from, to] (business days only).
  * Throws FxError when the pair is unsupported or the service is down —
  * writing unconverted numbers as if converted is the one unacceptable outcome.

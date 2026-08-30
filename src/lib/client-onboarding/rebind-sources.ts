@@ -2,6 +2,7 @@ import "server-only";
 
 import { ClientOnboardingError } from "@/lib/client-onboarding/sessions";
 import { normalizeShopDomain } from "@/lib/shopify/client";
+import { FX_SUPPORTED_CURRENCIES } from "../shopify/fx";
 import { createServiceClient } from "@/lib/supabase/service";
 
 /**
@@ -67,6 +68,7 @@ type AccountRow = {
   store_name: string;
   google_ads_customer_id: string | null;
   shopify_url: string | null;
+  currency: string;
 };
 type BindingRow = {
   id: string;
@@ -116,12 +118,21 @@ function usableShopify(row: ShopifyRow, credentials: Set<string>): boolean {
 }
 
 function usableGoogle(row: GoogleRow): boolean {
+  // Any VERIFIED, ECB-CONVERTIBLE billing currency is bindable for reporting —
+  // the sync converts Google money columns to the account's reporting currency
+  // with the day's ECB rate. A currency outside the ECB reference set (TWD,
+  // AED, …) must be refused HERE, where it becomes a visible skip reason: bound,
+  // it would make every hourly sync throw FxError forever, and on a fresh
+  // binding that failure stops the whole window write, Shopify included.
+  // Billing activation stays EUR-only and enforces that on its own paths; a
+  // non-EUR account reports but does not bill until those are extended.
   return Boolean(
     row.status === "connected" &&
       row.last_verified_at &&
       !row.last_error_code &&
       canonicalCustomerId(row.windsor_account_id) &&
-      row.currency === "EUR" &&
+      row.currency &&
+      FX_SUPPORTED_CURRENCIES.has(row.currency) &&
       row.time_zone?.trim(),
   );
 }
@@ -180,7 +191,7 @@ export async function rebindClientReportingSources(input: {
     await Promise.all([
       service
         .from("ad_accounts")
-        .select("id, store_name, google_ads_customer_id, shopify_url")
+        .select("id, store_name, google_ads_customer_id, shopify_url, currency")
         .eq("client_id", input.clientId),
       service
         .from("client_reporting_bindings")
@@ -287,7 +298,7 @@ export async function rebindClientReportingSources(input: {
     let googleOwner: AccountRow | null = null;
     if (google && !usableGoogle(google)) {
       outcome.skipped.push({
-        reason: `${google.admin_label?.trim() || google.account_name || google.windsor_account_id} is not a usable reporting source yet; it needs a verified EUR identity, so ${domain} keeps its store source alone.`,
+        reason: `${google.admin_label?.trim() || google.account_name || google.windsor_account_id} is not a usable reporting source yet; it needs a verified billing identity (currency and time zone), so ${domain} keeps its store source alone.`,
       });
       google = null;
     }
@@ -304,6 +315,23 @@ export async function rebindClientReportingSources(input: {
       } else {
         googleOwner = owners[0] ?? null;
       }
+    }
+    // A spend child reports in ITS OWN account's currency, so a child owner in
+    // another currency than the anchor would split one store's daily_metrics
+    // across two currencies — the store scope then fails every rollup read.
+    // The sync's FX pass normalizes connection→account, never account→account,
+    // so this must be refused here, visibly, before any binding is committed.
+    if (
+      google &&
+      googleOwner &&
+      googleOwner.id !== storeOwner.id &&
+      googleOwner.currency !== storeOwner.currency
+    ) {
+      outcome.skipped.push({
+        reason: `${googleOwner.store_name} reports in ${googleOwner.currency} but ${domain}'s anchor account reports in ${storeOwner.currency}. Align the account currencies before rebinding, so ${domain} keeps its store source alone.`,
+      });
+      google = null;
+      googleOwner = null;
     }
 
     const commits: Commit[] =

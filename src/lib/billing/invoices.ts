@@ -1961,6 +1961,53 @@ async function fetchAdminBillingPositions(
     }));
   }
 
+  // Accounts whose bound Google source bills in a non-EUR currency: their
+  // daily_metrics spend is ECB-converted for reporting, but the EUR-only
+  // billing chain can never book it, so positions must not accrue a fee on it.
+  const accountsWithNonEurGoogleSource = new Set<string>();
+  if (accountIds.length > 0) {
+    const { data: boundRows, error: boundError } = await supabase
+      .from("client_reporting_bindings")
+      .select("ad_account_id, google_ads_connection_id")
+      .in("ad_account_id", accountIds)
+      .eq("status", "active")
+      .not("google_ads_connection_id", "is", null);
+    if (boundError) {
+      throw new Error(
+        `Could not load billing position reporting bindings: ${boundError.message}`,
+      );
+    }
+    const googleIds = [
+      ...new Set(
+        (boundRows ?? []).flatMap((row) =>
+          row.google_ads_connection_id ? [row.google_ads_connection_id] : [],
+        ),
+      ),
+    ];
+    if (googleIds.length > 0) {
+      const { data: googleRows, error: googleError } = await supabase
+        .from("client_google_ads_connections")
+        .select("id, currency")
+        .in("id", googleIds);
+      if (googleError) {
+        throw new Error(
+          `Could not load billing position Google sources: ${googleError.message}`,
+        );
+      }
+      const currencyByGoogle = new Map(
+        (googleRows ?? []).map((row) => [row.id, row.currency]),
+      );
+      for (const row of boundRows ?? []) {
+        const currency = row.google_ads_connection_id
+          ? currencyByGoogle.get(row.google_ads_connection_id)
+          : null;
+        if (currency && currency.toUpperCase() !== "EUR") {
+          accountsWithNonEurGoogleSource.add(row.ad_account_id);
+        }
+      }
+    }
+  }
+
   const { data: source, error: sourceError } = await supabase
     .from("revenue_sources")
     .select("id")
@@ -2003,6 +2050,7 @@ async function fetchAdminBillingPositions(
     skips,
     referralTermsByClient,
     commissionTermsByAccount,
+    accountsWithNonEurGoogleSource,
   });
 }
 

@@ -251,6 +251,15 @@ type PositionInput = {
   skips?: BillingPositionSkip[];
   referralTermsByClient?: Map<string, BillingPositionReferralTerm[]>;
   commissionTermsByAccount?: Map<string, BillingPositionAccountTerm[]>;
+  /**
+   * Accounts whose bound Google source bills in a non-EUR currency. Their
+   * daily_metrics spend is ECB-converted for REPORTING, but the EUR-only
+   * billing chain can never book it (no billing start, ledger fails closed) —
+   * so accruing a current-week fee on it would show agency revenue that
+   * structurally cannot close. Excluded from the current-week accrual until
+   * billing learns foreign currencies.
+   */
+  accountsWithNonEurGoogleSource?: ReadonlySet<string>;
 };
 
 type AccountWeek = {
@@ -464,6 +473,7 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
     }
     if (
       account.currency.toUpperCase() !== BILLING_CURRENCY ||
+      input.accountsWithNonEurGoogleSource?.has(account.id) ||
       candidateStart > today ||
       (end && end.googleLocalDate < currentPeriod.start)
     ) {
@@ -559,6 +569,9 @@ export function buildBillingPositions(input: PositionInput): BillingPositions {
     if (
       !account ||
       account.currency.toUpperCase() !== BILLING_CURRENCY ||
+      // FX-converted spend from a non-EUR Google source: reportable, but the
+      // EUR-only ledger can never book it — never accrue a fee on it.
+      input.accountsWithNonEurGoogleSource?.has(row.accountId) ||
       row.day < currentPeriod.start ||
       row.day > today ||
       row.day > currentPeriod.end

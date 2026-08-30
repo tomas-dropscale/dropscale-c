@@ -622,9 +622,33 @@ describe("runtime V2 reporting source resolution", () => {
     expect(sources.find((source) => source.googleAds)?.googleAds?.currency).toBe("EUR");
   });
 
-  it("fails closed when Google disagrees with the canonical reporting currency", async () => {
+  it("resolves a Google source billing in another currency for the daily FX pass", async () => {
+    // A Google account billing in USD on a EUR-reporting store is a valid
+    // source: the sync converts its money columns with the day's ECB rate,
+    // exactly like Shopify shopMoney in another currency. Equality here used
+    // to stand in for that conversion — and binding such an account halted the
+    // whole store's resolution, Shopify family included.
     const data = snapshot();
-    data.ad_accounts[0] = { ...data.ad_accounts[0], currency: "USD" };
+    data.client_google_ads_connections[0] = {
+      ...data.client_google_ads_connections[0],
+      currency: "USD",
+    };
+
+    const sources = await resolveReportingSources({
+      service: serviceFor(data),
+      shopifyRepository: repository(),
+    });
+
+    expect(sources.find((source) => source.googleAds)?.googleAds?.currency).toBe("USD");
+    expect(sources.find((source) => source.shopify)?.shopify?.currency).toBe("EUR");
+  });
+
+  it("fails closed when a bound Google source has no verified currency", async () => {
+    const data = snapshot();
+    data.client_google_ads_connections[0] = {
+      ...data.client_google_ads_connections[0],
+      currency: null,
+    };
 
     await expect(
       resolveReportingSources({

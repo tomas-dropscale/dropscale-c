@@ -366,6 +366,12 @@ async function resolveReportingSourcesByStatus({
 
     let googleIdentity: ReturnType<typeof normalizeGoogleAdsCustomerId> | null = null;
     if (google) {
+      // The Google billing currency must be VERIFIED, not equal to the account's
+      // reporting currency: the sync converts every Google money column with the
+      // day's ECB rate (see syncReportingSourceWindow), so a store reporting in
+      // EUR can carry a Google account that bills in USD. Equality here used to
+      // stand in for that conversion — and made binding such an account halt the
+      // whole store's resolution, Shopify family included.
       if (
         google.status !== "connected" ||
         google.client_id !== binding.client_id ||
@@ -373,8 +379,7 @@ async function resolveReportingSourcesByStatus({
         google.last_error_code !== null ||
         !google.currency ||
         !/^[A-Z]{3}$/.test(google.currency) ||
-        !google.time_zone?.trim() ||
-        google.currency !== account.currency
+        !google.time_zone?.trim()
       ) {
         invalid("A bound Google Ads source does not match its owner.");
       }

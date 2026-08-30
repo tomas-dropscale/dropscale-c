@@ -12,6 +12,7 @@ import {
   refreshStagedReportingSourceNow,
 } from "@/lib/metrics/recompute";
 import { normalizeShopDomain } from "@/lib/shopify/client";
+import { FX_SUPPORTED_CURRENCIES } from "../shopify/fx";
 import { createServiceClient } from "@/lib/supabase/service";
 import type { Database } from "@/lib/supabase/types";
 
@@ -887,8 +888,13 @@ async function buildClientReportingCutoverQueue(
     const metadataPending = googleSources.filter(
       (source) => !source.last_error_code && !source.currency && !source.time_zone?.trim(),
     );
+    // Any ECB-convertible billing currency is reportable: the sync converts
+    // Google money columns to the account's reporting currency with the day's
+    // rate, and the activation RPC accepts such sources without the EUR-only
+    // billing baseline (the account then reports but is not auto-billed). Only
+    // a currency the FX layer cannot convert at all still blocks the client.
     const billingCurrencySupported = googleSources.every(
-      (source) => !source.currency || source.currency === "EUR",
+      (source) => !source.currency || FX_SUPPORTED_CURRENCIES.has(source.currency),
     );
     const sourceCoverageExact =
       healthy &&
@@ -1142,7 +1148,7 @@ async function buildClientReportingCutoverQueue(
           : !authoritativeBindingsHealthy
             ? "An authoritative reporting binding no longer has its exact healthy connected source. Reporting remains blocked until that authority is repaired."
           : !billingCurrencySupported
-            ? "Google staged reporting currently requires EUR because the immutable billing baseline is EUR-only. No staging or activation action is available."
+            ? "A Google source bills in a currency the ECB publishes no rate for, so its spend can never be converted. No staging or activation action is available."
             : metadataPending.length > 0
               ? `Google has reported no currency or time zone for ${metadataPending
                   .map((source) => source.account_name || source.windsor_account_id)

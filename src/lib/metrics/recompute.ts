@@ -469,11 +469,13 @@ function assertReportingSourceSyncable(
   ) {
     throw new Error("A Google child cannot read its Shopify anchor.");
   }
+  // Currency must be VERIFIED, not equal: a Google account billing in USD is
+  // syncable because syncReportingSourceWindow converts every money column to
+  // the reporting currency with the day's ECB rate. Unknown currency stays a
+  // hard stop — conversion cannot start from a currency nobody has confirmed.
   if (
     source.googleAds &&
-    (!source.googleAds.currency ||
-      source.googleAds.currency !== account.currency ||
-      !source.googleAds.timeZone?.trim())
+    (!source.googleAds.currency || !source.googleAds.timeZone?.trim())
   ) {
     throw new Error("A V2 Google Ads source has incomplete reporting metadata.");
   }
@@ -533,7 +535,27 @@ async function syncReportingSourceWindow(
       "Google",
       account.id,
       source.googleAds
-        ? () => fetchGoogleReportingDailyMetrics(source, from, to)
+        ? async () => {
+            const rows = await fetchGoogleReportingDailyMetrics(source, from, to);
+            // Google reports money in the ad account's own billing currency;
+            // daily_metrics is kept in the reporting currency. Convert every
+            // money column with the day's ECB rate, exactly as the Shopify
+            // side does. An FX failure fails the family — the sync then keeps
+            // the stored figures rather than booking dollars as euros.
+            const googleCurrency = source.googleAds!.currency;
+            if (!googleCurrency || googleCurrency === account.currency || rows.length === 0) {
+              return rows;
+            }
+            const rates = await fxDailyRates(googleCurrency, account.currency, from, to);
+            return rows.map((row) => {
+              const rate = rateOn(rates, row.day);
+              return {
+                ...row,
+                ad_spend: row.ad_spend * rate,
+                conversion_value: row.conversion_value * rate,
+              };
+            });
+          }
         : null,
     ),
     reportingFamily(

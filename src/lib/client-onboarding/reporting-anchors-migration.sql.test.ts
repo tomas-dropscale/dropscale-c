@@ -23,6 +23,10 @@ const REACTIVATION_MIGRATION = readFileSync(
   "supabase/migrations/0058_incident_reporting_reactivation.sql",
   "utf8",
 );
+const FX_ACTIVATION_MIGRATION = readFileSync(
+  "supabase/migrations/0093_fx_convertible_reporting_activation.sql",
+  "utf8",
+);
 
 const ADMIN = "55000000-0000-4000-8000-000000000001";
 const CLIENT = "55000000-0000-4000-8000-000000000002";
@@ -429,6 +433,11 @@ beforeEach(async () => {
     await db.exec(REACTIVATION_MIGRATION);
   } catch (error) {
     throw new Error("0058 migration failed", { cause: error });
+  }
+  try {
+    await db.exec(FX_ACTIVATION_MIGRATION);
+  } catch (error) {
+    throw new Error("0093 migration failed", { cause: error });
   }
 
   await db.query(
@@ -945,6 +954,115 @@ describe("normalized reporting anchors migration", () => {
     );
   });
 
+  it("activates an ECB-convertible non-EUR pair without the EUR billing baseline (0093)", async () => {
+    // The Filipe & João shape: a Google source billing in USD on a store whose
+    // spend is FX-converted at sync. No billing start can exist (capture is
+    // EUR-only), so activation waives the baseline for ECB-convertible
+    // currencies — the client goes Live for reporting while the account stays
+    // pending and every billing automation keeps skipping it.
+    await db.query(
+      "update public.client_shopify_connections set status = 'revoked' where id = $1",
+      [SHOPIFY_2],
+    );
+    await db.query(
+      "update public.client_google_ads_connections set status = 'revoked' where id = $1",
+      [GOOGLE_2],
+    );
+    await db.query(
+      `insert into public.client_asset_mappings(session_id, shopify_connection_id, google_ads_connection_id)
+       values ($1, $2, $3)`,
+      [SESSION, SHOPIFY, GOOGLE],
+    );
+    const binding = await provision({ google: GOOGLE, key: "anchor:fx:usd" });
+    await materializeBindingWindow(binding.rows[0]!.id);
+    for (const [source, currency] of [
+      ["shopify", "USD"],
+      ["google_ads", "USD"],
+    ]) {
+      await db.query(
+        `select public.record_client_reporting_sync_success(
+           $1, $2, current_date - 90, current_date - 1, $3, 90
+         )`,
+        [binding.rows[0]!.id, source, currency],
+      );
+    }
+
+    await db.query(
+      "select public.activate_client_reporting_cutover($1, $2, 'FX-convertible reporting cutover')",
+      [CLIENT, ADMIN],
+    );
+
+    const result = await db.query<{
+      surface: string;
+      cutover_at: string | null;
+      account_status: string;
+      starts: string;
+    }>(
+      `select rollout.operational_surface as surface,
+              rollout.reporting_cutover_at::text as cutover_at,
+              account.status as account_status,
+              (select count(*)::text from public.ad_account_billing_starts) as starts
+       from public.client_rollout_states rollout
+       join public.client_reporting_bindings binding on binding.id = $2
+       join public.ad_accounts account on account.id = binding.ad_account_id
+       where rollout.client_id = $1`,
+      [CLIENT, binding.rows[0]!.id],
+    );
+    expect(result.rows[0]).toEqual({
+      surface: "v2_active",
+      cutover_at: expect.any(String),
+      // Reporting-only activation: the account never leaves pending, so
+      // commission sync and invoicing keep excluding it — reports, not billed.
+      account_status: "pending",
+      starts: "0",
+    });
+  });
+
+  it("still refuses a Google source billing outside the ECB reference set (0093)", async () => {
+    await db.query(
+      "update public.client_shopify_connections set status = 'revoked' where id = $1",
+      [SHOPIFY_2],
+    );
+    await db.query(
+      "update public.client_google_ads_connections set status = 'revoked' where id = $1",
+      [GOOGLE_2],
+    );
+    await db.query(
+      "update public.client_google_ads_connections set currency = 'TWD' where id = $1",
+      [GOOGLE],
+    );
+    await db.query(
+      `insert into public.client_asset_mappings(session_id, shopify_connection_id, google_ads_connection_id)
+       values ($1, $2, $3)`,
+      [SESSION, SHOPIFY, GOOGLE],
+    );
+    const binding = await provision({ google: GOOGLE, key: "anchor:fx:twd" });
+    await materializeBindingWindow(binding.rows[0]!.id);
+    for (const [source, currency] of [
+      ["shopify", "USD"],
+      ["google_ads", "TWD"],
+    ]) {
+      await db.query(
+        `select public.record_client_reporting_sync_success(
+           $1, $2, current_date - 90, current_date - 1, $3, 90
+         )`,
+        [binding.rows[0]!.id, source, currency],
+      );
+    }
+
+    await expect(
+      db.query(
+        "select public.activate_client_reporting_cutover($1, $2, 'Unconvertible currency stays fail-closed')",
+        [CLIENT, ADMIN],
+      ),
+    ).rejects.toThrow(/exact immutable billing start/i);
+    const marker = await db.query<{ cutover_at: string | null }>(
+      "select reporting_cutover_at as cutover_at from public.client_rollout_states where client_id = $1",
+      [CLIENT],
+    );
+    expect(marker.rows[0]?.cutover_at).toBeNull();
+  });
+
   it("provisions one Shopify anchor with multiple Google spend children without duplicate facts", async () => {
     await db.query("delete from public.ad_accounts where id = $1", [
       LEGACY_PAIR,
@@ -1198,6 +1316,13 @@ describe("normalized reporting anchors migration", () => {
       "update public.client_shopify_connections set shopify_currency = 'JPY' where id = $1",
       [SHOPIFY],
     );
+    // Pin the Google source to EUR so this test keeps proving the FULL
+    // immutable billing baseline discipline — since 0093, a non-EUR
+    // ECB-convertible source activates without it (covered separately below).
+    await db.query(
+      "update public.client_google_ads_connections set currency = 'EUR' where id = $1",
+      [GOOGLE],
+    );
     await db.query(
       `insert into public.client_asset_mappings(session_id, shopify_connection_id, google_ads_connection_id)
        values ($1, $2, $3)`,
@@ -1218,7 +1343,7 @@ describe("normalized reporting anchors migration", () => {
        where binding.id = $1`,
       [binding.rows[0]!.id],
     );
-    expect(accountBefore.rows[0]?.currency).toBe("USD");
+    expect(accountBefore.rows[0]?.currency).toBe("EUR");
     // `v2_active` existed before reporting cutover. Without the distinct
     // marker it must remain legacy-write-allowed and eligible for this gate.
     await db.query(
@@ -1258,7 +1383,7 @@ describe("normalized reporting anchors migration", () => {
 
     for (const [source, currency] of [
       ["shopify", "JPY"],
-      ["google_ads", "USD"],
+      ["google_ads", "EUR"],
     ]) {
       await db.query(
         `select public.record_client_reporting_sync_success(
@@ -1277,7 +1402,7 @@ describe("normalized reporting anchors migration", () => {
     await materializeBindingWindow(binding.rows[0]!.id);
     for (const [source, currency] of [
       ["shopify", "JPY"],
-      ["google_ads", "USD"],
+      ["google_ads", "EUR"],
     ]) {
       await db.query(
         `select public.record_client_reporting_sync_success(
@@ -1295,7 +1420,7 @@ describe("normalized reporting anchors migration", () => {
     await db.query(
       `insert into public.ad_account_billing_starts(
          ad_account_id, google_ads_customer_id, currency
-       ) values ($1, '9999999999', 'USD')`,
+       ) values ($1, '9999999999', 'EUR')`,
       [accountBefore.rows[0]!.id],
     );
     await expect(
@@ -1311,7 +1436,7 @@ describe("normalized reporting anchors migration", () => {
     await db.query(
       `insert into public.ad_account_billing_starts(
          ad_account_id, google_ads_customer_id, currency
-       ) values ($1, '1111111111', 'USD')`,
+       ) values ($1, '1111111111', 'EUR')`,
       [accountBefore.rows[0]!.id],
     );
     await expect(
@@ -1327,7 +1452,7 @@ describe("normalized reporting anchors migration", () => {
     await db.query(
       `insert into public.ad_account_billing_ends(
          ad_account_id, google_ads_customer_id, currency
-       ) values ($1, '1111111111', 'USD')`,
+       ) values ($1, '1111111111', 'EUR')`,
       [accountBefore.rows[0]!.id],
     );
     await expect(

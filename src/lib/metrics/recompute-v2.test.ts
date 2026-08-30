@@ -605,6 +605,69 @@ describe("V2 daily-metrics recompute", () => {
     );
   });
 
+  it("converts a non-EUR Google account's spend into the reporting currency", async () => {
+    const pair = pairedSource();
+    pair.googleAds = { ...pair.googleAds!, currency: "USD" };
+    const db = fakeDatabase([
+      account(ANCHOR, {
+        google_ads_customer_id: "1112223333",
+        shopify_url: "store.myshopify.com",
+      }),
+    ]);
+    mocks.createServiceClient.mockReturnValue(db.client);
+    mocks.resolveReportingSources.mockResolvedValue([pair]);
+    mocks.fxDailyRates.mockResolvedValue([[DAY, 0.9]]);
+    mocks.rateOn.mockReturnValue(0.9);
+
+    await refreshReportingSourcesNow([ANCHOR], {
+      client: db.client as never,
+      from: DAY,
+      to: DAY,
+    });
+
+    expect(mocks.fxDailyRates).toHaveBeenCalledWith("USD", "EUR", DAY, DAY);
+    expect(db.upserts.flat()).toEqual([
+      expect.objectContaining({
+        ad_account_id: ANCHOR,
+        // $20 spend and $80 conversion value at 0.9 — never dollars booked as euros.
+        ad_spend: 18,
+        conversion_value: 72,
+        revenue: 100,
+      }),
+    ]);
+  });
+
+  it("keeps stored ad figures when the Google FX conversion is unavailable", async () => {
+    const pair = pairedSource();
+    pair.googleAds = { ...pair.googleAds!, currency: "USD" };
+    const db = fakeDatabase(
+      [
+        account(ANCHOR, {
+          google_ads_customer_id: "1112223333",
+          shopify_url: "store.myshopify.com",
+        }),
+      ],
+      [stored()],
+    );
+    mocks.createServiceClient.mockReturnValue(db.client);
+    mocks.resolveReportingSources.mockResolvedValue([pair]);
+    mocks.fxDailyRates.mockRejectedValue(new Error("fx unavailable"));
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await refreshReportingSourcesNow([ANCHOR], {
+      client: db.client as never,
+      from: DAY,
+      to: DAY,
+    });
+
+    // The Google family failed, so the stored spend survives — a $ figure is
+    // never silently written as €, and only Shopify records a receipt.
+    expect(db.upserts.flat()[0]).toMatchObject({ ad_spend: 10, revenue: 100 });
+    expect(db.receipts).toEqual([
+      expect.objectContaining({ p_source_type: "shopify" }),
+    ]);
+  });
+
   it("syncs a preserved legacy identity after its Google binding is upgraded to a pair", async () => {
     const legacyPair = account(ANCHOR, {
       reporting_role: "legacy_hybrid",
