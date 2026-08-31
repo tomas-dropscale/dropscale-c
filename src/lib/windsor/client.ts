@@ -1144,51 +1144,97 @@ export async function fetchGoogleAdsDailyBreakdownForStore(
   if (storeDomains.length === 0) {
     return fetchGoogleAdsDailyBreakdown(accountId, from, to, options);
   }
-  const [timeline, finalUrlsByCampaign] = await Promise.all([
+  // The account total is the freshest figure Windsor has: for the day still in
+  // progress its campaign tables run hours behind the account one (measured
+  // 2026-08-31: account 47.78 vs campaigns 5.89 for the same account and day).
+  // Reading the store's spend from the campaign rows alone therefore reported a
+  // fraction of today's ad spend all morning, every morning.
+  //
+  // So the campaign rows are used for what only they can say — WHICH spend
+  // belongs to another store — and that is subtracted from the account total.
+  // When nothing is excluded, which is every single-store account, the result
+  // is exactly the account total and as fresh as Windsor can be; when a foreign
+  // campaign does spend, its (possibly lagging) share is removed. Both are
+  // closer to the truth than dropping the day to its campaign-table shadow.
+  const [accountDays, timeline, finalUrlsByCampaign] = await Promise.all([
+    fetchGoogleAdsDailyBreakdown(accountId, from, to, options),
     fetchGoogleAdsCampaignTimeline(accountId, from, to, options),
     fetchGoogleAdsCampaignFinalUrls(accountId, from, to, options),
   ]);
-  const byDay = new Map<string, WindsorGoogleAdsDailyRow>();
+
+  type Totals = { spend: number; impressions: number; clicks: number; conversions: number; conversionValue: number };
+  const zero = (): Totals => ({ spend: 0, impressions: 0, clicks: 0, conversions: 0, conversionValue: 0 });
+  const kept = new Map<string, Totals>();
+  const excluded = new Map<string, Totals>();
+  const identity = new Map<string, WindsorGoogleAdsDailyRow>();
+
   for (const row of timeline) {
-    if (!campaignBelongsToStore(finalUrlsByCampaign.get(row.campaignId), storeDomains)) {
-      continue;
-    }
-    const current = byDay.get(row.date);
-    if (!current) {
-      byDay.set(row.date, {
+    const seen = identity.get(row.date);
+    if (!seen) {
+      identity.set(row.date, {
         date: row.date,
         accountId: row.accountId,
         customerId: row.customerId,
         currency: row.currency,
         timeZone: row.timeZone,
-        spend: row.spend,
-        impressions: row.impressions,
-        clicks: row.clicks,
-        conversions: row.conversions,
-        conversionValue: row.conversionValue,
+        spend: 0,
+        impressions: 0,
+        clicks: 0,
+        conversions: 0,
+        conversionValue: 0,
       });
-      continue;
-    }
-    if (
-      current.accountId !== row.accountId ||
-      current.customerId !== row.customerId ||
-      current.currency !== row.currency ||
-      current.timeZone !== row.timeZone
+    } else if (
+      seen.accountId !== row.accountId ||
+      seen.customerId !== row.customerId ||
+      seen.currency !== row.currency ||
+      seen.timeZone !== row.timeZone
     ) {
       throw invalidDailyResponse();
     }
-    current.spend += row.spend;
-    current.impressions += row.impressions;
-    current.clicks += row.clicks;
-    current.conversions += row.conversions;
-    current.conversionValue += row.conversionValue;
+    const belongs = campaignBelongsToStore(
+      finalUrlsByCampaign.get(row.campaignId),
+      storeDomains,
+    );
+    const bucket = belongs ? kept : excluded;
+    const totals = bucket.get(row.date) ?? zero();
+    totals.spend += row.spend;
+    totals.impressions += row.impressions;
+    totals.clicks += row.clicks;
+    totals.conversions += row.conversions;
+    totals.conversionValue += row.conversionValue;
+    bucket.set(row.date, totals);
   }
-  // Float sums must stay within the 6-decimal contract of the daily row.
+
   const round = (value: number) => Math.round(value * 1e6) / 1e6;
-  for (const row of byDay.values()) {
-    row.spend = round(row.spend);
-    row.conversions = round(row.conversions);
-    row.conversionValue = round(row.conversionValue);
+  const atLeastZero = (value: number) => (value > 0 ? value : 0);
+  const byDay = new Map<string, WindsorGoogleAdsDailyRow>();
+
+  for (const day of accountDays) {
+    const away = excluded.get(day.date) ?? zero();
+    byDay.set(day.date, {
+      ...day,
+      spend: round(atLeastZero(day.spend - away.spend)),
+      impressions: atLeastZero(day.impressions - away.impressions),
+      clicks: atLeastZero(day.clicks - away.clicks),
+      conversions: round(atLeastZero(day.conversions - away.conversions)),
+      conversionValue: round(atLeastZero(day.conversionValue - away.conversionValue)),
+    });
+  }
+
+  // A day the account read did not carry, but the campaign rows did, still
+  // belongs in the answer — reported from what is known about it.
+  for (const [date, totals] of kept) {
+    if (byDay.has(date)) continue;
+    const seen = identity.get(date);
+    if (!seen) continue;
+    byDay.set(date, {
+      ...seen,
+      spend: round(totals.spend),
+      impressions: totals.impressions,
+      clicks: totals.clicks,
+      conversions: round(totals.conversions),
+      conversionValue: round(totals.conversionValue),
+    });
   }
   return [...byDay.values()].sort((left, right) => left.date.localeCompare(right.date));
 }

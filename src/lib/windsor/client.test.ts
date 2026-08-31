@@ -1437,8 +1437,28 @@ describe("Windsor store-scoped daily breakdown", () => {
     expect(urls.has("2")).toBe(false);
   });
 
-  it("sums only the campaigns that belong to the store's domains", async () => {
+  it("takes the fresh account total less any spend that belongs elsewhere", async () => {
+    // The account read comes first: Windsor keeps it current while its campaign
+    // tables lag hours behind on the day in progress, so the store's spend is
+    // that total minus the campaigns proved to point at another store.
+    const accountRow = (date: string, spend: number, impressions: number) => ({
+      date,
+      account_id: "123-456-7890",
+      account_currency_code: "EUR",
+      account_time_zone: "Europe/Lisbon",
+      spend,
+      impressions,
+      clicks: 20,
+      conversions: "1",
+      conversion_value: spend * 2,
+    });
     const fetcher = mockFetch(
+      jsonResponse({
+        data: [
+          accountRow("2026-08-10", 109.111111, 200),
+          accountRow("2026-08-11", 12.25, 200),
+        ],
+      }),
       jsonResponse({
         data: [
           timelineRow("1", "2026-08-10", 10.111111),
@@ -1471,8 +1491,9 @@ describe("Windsor store-scoped daily breakdown", () => {
       { fetcher: fetcher as typeof fetch },
     );
 
-    // Campaign 2 is excluded by positive foreign-URL evidence; campaign 3 has
-    // no URL evidence and stays attributed.
+    // Campaign 2 is excluded by positive foreign-URL evidence and subtracted
+    // from the account total; campaign 3 has no URL evidence, stays attributed,
+    // and so is simply left inside that total.
     expect(rows).toEqual([
       expect.objectContaining({
         date: "2026-08-10",
