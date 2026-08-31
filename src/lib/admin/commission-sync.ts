@@ -956,7 +956,7 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
               "EUR",
             )
           ) {
-            throw new Error(
+            throw new ConcurrentLedgerRun(
               "The ledger changed while Google spend was being refreshed.",
             );
           }
@@ -990,7 +990,7 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
             await completeWindow.select("ad_account_id").maybeSingle();
           if (syncWindowError) throw syncWindowError;
           if (!completedWindow) {
-            throw new Error(
+            throw new ConcurrentLedgerRun(
               "This refresh was superseded by a newer account or sync change.",
             );
           }
@@ -1017,6 +1017,14 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
             }
           }
 
+          // A window claimed by a concurrent run is the guard working: the
+          // other run writes the same rows. Logged, never counted as failure.
+          if (error instanceof ConcurrentLedgerRun) {
+            console.warn(
+              `Commission sync skipped ${account.id}: ${error.message}`,
+            );
+            return;
+          }
           failures.push(
             `${account.store_name}: ${
               error instanceof Error ? error.message : String(error)
@@ -1045,6 +1053,23 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
 // ---------------------------------------------------------------------------
 // Revenue-share ledger
 // ---------------------------------------------------------------------------
+
+/**
+ * Another run claimed this account's ledger window first.
+ *
+ * Two schedulers drive the hourly sync (the Worker cron and the GitHub
+ * fallback) precisely so a missed tick still refreshes; when they overlap,
+ * the loser finds its window already claimed. That is the guard working, not
+ * a data failure: the winner writes the same rows, and the next tick is
+ * unaffected. Counting it as a failure made a forced run throw, 500 the
+ * hourly job, skip every later step, and email a red X for a healthy sync.
+ */
+class ConcurrentLedgerRun extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ConcurrentLedgerRun";
+  }
+}
 
 const REV_SHARE_SOURCE = "Revenue Share";
 const REV_SHARE_WINDOW_DAYS = 90;

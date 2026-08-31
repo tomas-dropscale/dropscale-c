@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { activeWorkspaceId } from "@/lib/portal/workspace";
+import { fetchHstShops } from "@/lib/admin/hst-cost-sync";
 import { createServiceClient } from "@/lib/supabase/service";
 import { connectClientHst, disconnectClientHst } from "@/lib/portal/client-hst";
 import { HstError } from "@/lib/hst/erp";
@@ -50,7 +51,23 @@ export async function POST(request: NextRequest) {
 
   try {
     await connectClientHst({ service, clientId, username, password, captchaCode });
-    return NextResponse.json({ ok: true });
+    // Warm the shop list with the session just proved, so the page that
+    // re-renders next offers the shops to pick from. Without this a store
+    // whose cache was never filled — or was emptied while the session was
+    // dead — lands on the "type a code" fallback, and the code is an id of
+    // the supplier's that appears nowhere in their own interface.
+    let shops = 0;
+    try {
+      shops = (await fetchHstShops({ service, clientId })).length;
+    } catch (cause) {
+      // Signing in worked; only the listing did not. Never fail the connect
+      // for it — the page falls back to the code field and can retry.
+      console.error(
+        "HST shop list could not be warmed after sign-in:",
+        cause instanceof Error ? cause.message : cause,
+      );
+    }
+    return NextResponse.json({ ok: true, shops });
   } catch (error) {
     // HST's own refusal is a sentence the person can act on ("wrong password",
     // "captcha required"); anything else is ours and stays generic.

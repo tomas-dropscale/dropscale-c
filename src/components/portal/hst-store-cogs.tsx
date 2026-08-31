@@ -121,6 +121,9 @@ export function HstStoreCogs(props: HstStoreCogsProps) {
       // Nothing left to do with the password here once it is a session.
       setPassword("");
       setReauth(false);
+      // A fresh sign-in warms the shop list, so offer it again even if this
+      // person had fallen back to typing a code while the session was dead.
+      setManual(false);
       setNotice(props.connected ? "Signed in to HST again. The hourly sync resumes." : "Connected to HST.");
       router.refresh();
     }
