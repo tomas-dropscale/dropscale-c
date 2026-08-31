@@ -28,6 +28,11 @@ const FX_ACTIVATION_MIGRATION = readFileSync(
   "utf8",
 );
 
+const CHILD_ADOPTION_MIGRATION = readFileSync(
+  "supabase/migrations/0094_adopt_unanchored_google_child.sql",
+  "utf8",
+);
+
 const ADMIN = "55000000-0000-4000-8000-000000000001";
 const CLIENT = "55000000-0000-4000-8000-000000000002";
 const OTHER = "55000000-0000-4000-8000-000000000003";
@@ -438,6 +443,11 @@ beforeEach(async () => {
     await db.exec(FX_ACTIVATION_MIGRATION);
   } catch (error) {
     throw new Error("0093 migration failed", { cause: error });
+  }
+  try {
+    await db.exec(CHILD_ADOPTION_MIGRATION);
+  } catch (error) {
+    throw new Error("0094 migration failed", { cause: error });
   }
 
   await db.query(
@@ -3390,5 +3400,99 @@ describe("normalized reporting anchors migration", () => {
       auth_abandon: false,
       service_abandon: true,
     });
+  });
+});
+
+describe("adopting an unanchored Google source (0094)", () => {
+  async function unanchoredPair() {
+    const anchor = await provision({ key: "anchor:adopt:shopify" });
+    const child = await provision({
+      shopify: null,
+      google: GOOGLE,
+      key: "anchor:adopt:google",
+    });
+    return { anchorId: anchor.rows[0]!.id, childId: child.rows[0]!.id };
+  }
+
+  async function adopt(childId: string, anchorId: string, key = "adopt:test:001") {
+    return db.query<{ id: string }>(
+      `select public.adopt_client_reporting_google_child($1, $2, $3, $4, 'Linked to its store') as id`,
+      [childId, anchorId, ADMIN, key],
+    );
+  }
+
+  it("answers the null anchor and writes the mapping the resolver demands", async () => {
+    const { anchorId, childId } = await unanchoredPair();
+
+    const adopted = await adopt(childId, anchorId);
+    expect(adopted.rows[0]!.id).toBe(childId);
+
+    const binding = await db.query<{
+      shopify_anchor_binding_id: string;
+      status: string;
+      shopify_connection_id: string | null;
+    }>(
+      `select shopify_anchor_binding_id, status, shopify_connection_id
+       from public.client_reporting_bindings where id = $1`,
+      [childId],
+    );
+    // The binding is re-parented in place: same row, still active, still
+    // Google-only. Nothing was revoked and no replacement was created.
+    expect(binding.rows[0]).toMatchObject({
+      shopify_anchor_binding_id: anchorId,
+      status: "active",
+      shopify_connection_id: null,
+    });
+
+    const mapping = await db.query<{ shopify_connection_id: string }>(
+      `select shopify_connection_id from public.client_asset_mappings
+       where google_ads_connection_id = $1`,
+      [GOOGLE],
+    );
+    expect(mapping.rows).toHaveLength(1);
+    expect(mapping.rows[0]!.shopify_connection_id).toBe(SHOPIFY);
+
+    const event = await db.query<{ event_type: string; binding_id: string }>(
+      `select event_type, binding_id from public.client_reporting_anchor_events
+       where idempotency_key = 'adopt:test:001'`,
+    );
+    expect(event.rows[0]).toMatchObject({ event_type: "adopted", binding_id: childId });
+  });
+
+  it("still refuses a hand-written anchor without the purpose-bound key", async () => {
+    const { anchorId, childId } = await unanchoredPair();
+    // This is the whole safety claim of the migration: the escape exists only
+    // for the RPC, and a direct write is rejected exactly as it was before.
+    await expectSqlState(
+      db.query(
+        `update public.client_reporting_bindings
+         set shopify_anchor_binding_id = $1 where id = $2`,
+        [anchorId, childId],
+      ),
+      "23514",
+    );
+  });
+
+  it("never re-points an anchor that is already set", async () => {
+    const { anchorId, childId } = await unanchoredPair();
+    await adopt(childId, anchorId);
+    // Once answered, the column is closed: the RPC only accepts a binding whose
+    // anchor is still null, so a second adoption cannot move it anywhere.
+    await expectSqlState(adopt(childId, anchorId, "adopt:test:002"), "23514");
+  });
+
+  it("replays an identical adoption instead of failing the second caller", async () => {
+    const { anchorId, childId } = await unanchoredPair();
+    await adopt(childId, anchorId);
+    const replay = await adopt(childId, anchorId);
+    expect(replay.rows[0]!.id).toBe(childId);
+  });
+
+  it("refuses an anchor belonging to a different client", async () => {
+    const { childId } = await unanchoredPair();
+    await expectSqlState(
+      adopt(childId, "55000000-0000-4000-8000-0000000000ff", "adopt:test:003"),
+      "23514",
+    );
   });
 });

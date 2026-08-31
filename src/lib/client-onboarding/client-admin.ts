@@ -511,7 +511,10 @@ function assetMappingWriteError(error: unknown) {
       404,
     );
   }
-  if (code === "23514" || code === "23503" || code === "23505") {
+  // 22023 is the adoption RPC stating its own input contract. Without it the
+  // caller got a generic "could not be saved", which reads like a fault on our
+  // side rather than a refusal with a reason.
+  if (code === "23514" || code === "23503" || code === "23505" || code === "22023") {
     const explanation = errorMessage(error);
     const stated =
       typeof explanation === "string" && explanation.trim().length > 0
@@ -578,6 +581,15 @@ export async function mapGoogleAdsAccountToStore(input: {
   adminId: string;
 }) {
   const service = serviceOrThrow();
+
+  // A Google source that is already BOUND standalone needs more than a mapping:
+  // the resolver rejects a mapped Google binding that has no Shopify anchor
+  // (reporting/sources.ts), so writing only the mapping would blank the whole
+  // client. Adopt it into the anchor instead - one RPC that writes the mapping
+  // and answers the binding's null anchor in the same transaction.
+  const adopted = await adoptExistingBindingIfAny(service, input);
+  if (adopted) return;
+
   const { data, error } = await service.rpc("map_client_google_ads_to_store", {
     p_google_ads_connection_id: input.googleAdsConnectionId,
     p_shopify_connection_id: input.shopifyConnectionId,
@@ -587,6 +599,74 @@ export async function mapGoogleAdsAccountToStore(input: {
   if (data !== input.googleAdsConnectionId) {
     throw databaseError("The store mapping could not be verified.");
   }
+}
+
+/**
+ * Fill in the anchor of an already-bound standalone Google source.
+ *
+ * Returns false when this connection has no such binding, leaving the caller on
+ * the ordinary pre-binding mapping path. Any anchor whose store does not match
+ * the requested one is simply not adopted - the RPC is the authority on whether
+ * the pair is legitimate, exactly as the mapping RPC is.
+ */
+async function adoptExistingBindingIfAny(
+  service: ReturnType<typeof serviceOrThrow>,
+  input: { googleAdsConnectionId: string; shopifyConnectionId: string; adminId: string },
+): Promise<boolean> {
+  type BindingRow = {
+    id: string;
+    client_id: string;
+    status: string;
+    shopify_connection_id: string | null;
+    shopify_anchor_binding_id: string | null;
+  };
+  const COLUMNS = "id, client_id, status, shopify_connection_id, shopify_anchor_binding_id";
+
+  // Deliberately one filter per read, with the rest applied here: the shape a
+  // binding must have to be adoptable is a rule worth stating in code rather
+  // than spreading across PostgREST operators.
+  const { data: byGoogle } = await service
+    .from("client_reporting_bindings")
+    .select(COLUMNS)
+    .eq("google_ads_connection_id", input.googleAdsConnectionId);
+  const child = ((byGoogle ?? []) as BindingRow[]).find(
+    (row) =>
+      row.status === "active" &&
+      row.shopify_connection_id === null &&
+      row.shopify_anchor_binding_id === null,
+  );
+  if (!child) return false;
+
+  const { data: byShopify } = await service
+    .from("client_reporting_bindings")
+    .select(COLUMNS)
+    .eq("shopify_connection_id", input.shopifyConnectionId);
+  const anchor = ((byShopify ?? []) as BindingRow[]).find(
+    (row) =>
+      row.status === "active" &&
+      row.client_id === child.client_id &&
+      row.shopify_anchor_binding_id === null,
+  );
+  if (!anchor) {
+    throw new ClientOnboardingError(
+      "invalid_state",
+      "That store has no active reporting anchor to attach this account to.",
+      409,
+    );
+  }
+
+  const { data, error } = await service.rpc("adopt_client_reporting_google_child", {
+    p_binding_id: child.id,
+    p_shopify_anchor_binding_id: anchor.id,
+    p_admin_id: input.adminId,
+    p_idempotency_key: `adopt:${child.id}:${anchor.id}`,
+    p_reason: "Admin linked an unanchored Google source to its store.",
+  });
+  if (error) throw assetMappingWriteError(error);
+  if (data !== child.id) {
+    throw databaseError("The store link could not be verified.");
+  }
+  return true;
 }
 
 /**

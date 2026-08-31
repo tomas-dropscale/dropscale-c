@@ -3411,6 +3411,16 @@ export type Database = {
         Args: { p_client_id: string; p_admin_id: string };
         Returns: string;
       };
+      adopt_client_reporting_google_child: {
+        Args: {
+          p_binding_id: string;
+          p_shopify_anchor_binding_id: string;
+          p_admin_id: string;
+          p_idempotency_key: string;
+          p_reason: string;
+        };
+        Returns: string;
+      };
       map_client_google_ads_to_store: {
         Args: {
           p_google_ads_connection_id: string;
