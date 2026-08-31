@@ -323,8 +323,17 @@ export function HstStoreCogs(props: HstStoreCogsProps) {
           </div>
 
           {props.shopsError ? (
-            <p className="text-[12px] text-[var(--text-muted)]">
-              Couldn&rsquo;t list your shops ({props.shopsError}) — enter the code by hand.
+            /* The shop code is an id of the supplier's that appears nowhere in
+               their own interface, so "type it by hand" asks for something
+               nobody has. The team can read it from HST, so point there. */
+            <p className="text-[12px] leading-relaxed text-[var(--text-muted)]">
+              Couldn&rsquo;t list your shops right now ({props.shopsError}).{" "}
+              <span className="text-[var(--text-secondary)]">
+                Ask the Dropscale team for your shop ID and paste it above —
+                we can read it from HST for you.
+              </span>{" "}
+              Or try again in a few minutes: the list often comes through on a
+              second attempt.
             </p>
           ) : props.shops.length > 0 ? (
             <button

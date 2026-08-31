@@ -284,7 +284,7 @@ export async function fetchHstShops(input: {
   // A generous timeout: this is the call that fills the cache, and some
   // accounts take ~14s to list — worth waiting for once so every later render
   // is instant.
-  const payload = await hstGet(shopListUrl(), token, 25_000);
+  const payload = await hstGet(shopListUrl(), token, 45_000);
   const shops = parseHstOrderPage(payload, { shopId: "", timeZone: "UTC" }).shops;
   await storeHstShops(input.service, input.clientId, shops);
   return shops;
