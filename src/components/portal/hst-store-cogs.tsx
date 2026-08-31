@@ -67,6 +67,23 @@ export function HstStoreCogs(props: HstStoreCogsProps) {
   const [manual, setManual] = React.useState(false);
   const picking = props.shops.length > 0 && !manual;
 
+  /**
+   * HST sessions last about a day and a half, and their refresh endpoint no
+   * longer renews them — it answers "user does not exist" for a token it
+   * issued itself, so the stored session simply dies. The only way back in is
+   * HST's own sign-in form, which requires the code drawn in the browser: a
+   * person has to type it, which is why nothing here signs in on its own.
+   *
+   * Recognised here so the panel can say that plainly and offer the way back,
+   * instead of showing the supplier's raw "The captcha code field is
+   * required." — true, but meaningless to the person reading it.
+   */
+  const sessionExpired =
+    props.connected &&
+    /did not sign in|refused those credentials|captcha/i.test(props.lastError ?? "");
+  const [reauth, setReauth] = React.useState(false);
+  const signingIn = !props.connected || reauth || sessionExpired;
+
   const saved = props.hstShopId ?? "";
   const dirty = code.trim() !== saved;
 
@@ -103,7 +120,8 @@ export function HstStoreCogs(props: HstStoreCogsProps) {
     if (ok) {
       // Nothing left to do with the password here once it is a session.
       setPassword("");
-      setNotice("Connected to HST.");
+      setReauth(false);
+      setNotice(props.connected ? "Signed in to HST again. The hourly sync resumes." : "Connected to HST.");
       router.refresh();
     }
     setBusy(null);
@@ -223,11 +241,27 @@ export function HstStoreCogs(props: HstStoreCogsProps) {
       {notice && <FormAlert tone="success">{notice}</FormAlert>}
       {/* The last sync's own reason. Without it a wrong password and a supplier
           with nothing to report look exactly alike from here. */}
-      {props.lastError && !error && (
+      {props.lastError && !error && !sessionExpired && (
         <FormAlert>The last sync failed: {props.lastError}</FormAlert>
       )}
+      {sessionExpired && !error && (
+        <FormAlert>
+          Your HST session has expired, so the costs stopped updating. HST only
+          renews a session through their own sign-in, and that asks for the code
+          drawn in the image — so nobody but you can do it. Sign in again below
+          and the hourly sync picks up where it left off. Everything already
+          recorded stays as it is.
+        </FormAlert>
+      )}
 
-      {props.connected ? (
+      {signingIn && props.connected && (
+        <div className="rounded-[12px] border border-[var(--accent-gold)]/25 bg-[var(--accent-gold-dim)] px-3 py-2 text-[12.5px] text-[var(--text-secondary)]">
+          Signing in again only replaces the expired session. Your shop choice
+          and every cost already recorded are kept.
+        </div>
+      )}
+
+      {props.connected && !signingIn ? (
         <div className="space-y-2">
           <Label htmlFor="hst-code">
             {picking ? "Which of your HST shops is this store?" : "Shop code in HST"}
@@ -341,6 +375,22 @@ export function HstStoreCogs(props: HstStoreCogsProps) {
             </div>
           )}
 
+          {/* A session that has not failed YET can still be the wrong one —
+              after an HST password change, say. Signing in again is the
+              harmless repair; disconnecting is not what that person wants. */}
+          <button
+            type="button"
+            className="mr-4 text-[12px] text-[var(--text-muted)] underline underline-offset-2 hover:text-[var(--text-secondary)] disabled:opacity-50"
+            disabled={busy !== null}
+            onClick={() => {
+              setError(null);
+              setNotice(null);
+              setReauth(true);
+            }}
+          >
+            Sign in to HST again
+          </button>
+
           <button
             type="button"
             className="text-[12px] text-[var(--text-muted)] underline underline-offset-2 hover:text-[var(--text-secondary)] disabled:opacity-50"
@@ -410,8 +460,17 @@ export function HstStoreCogs(props: HstStoreCogsProps) {
             disabled={busy !== null || username.trim() === "" || password === ""}
             onClick={connect}
           >
-            Connect HST
+            {props.connected ? "Sign in again" : "Connect HST"}
           </Button>
+          {props.connected && reauth && !sessionExpired && (
+            <button
+              type="button"
+              className="ml-3 text-[12px] text-[var(--text-muted)] underline underline-offset-2 hover:text-[var(--text-secondary)]"
+              onClick={() => setReauth(false)}
+            >
+              Cancel
+            </button>
+          )}
         </div>
       )}
     </section>

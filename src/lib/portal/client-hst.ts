@@ -59,7 +59,12 @@ async function storeSession(
     .from("client_hst_credentials")
     .update({
       access_token_enc: await encryptToken(session.accessToken),
-      refresh_token_enc: session.refreshToken ? await encryptToken(session.refreshToken) : null,
+      // A renewal that returns no NEW refresh token is not a renewal that
+      // revoked the old one: overwriting it with null here would throw away
+      // the only way back in and force a human sign-in on the next expiry.
+      ...(session.refreshToken
+        ? { refresh_token_enc: await encryptToken(session.refreshToken) }
+        : {}),
       token_expires_at: session.expires
         ? new Date(parseExpiry(session.expires) || Date.now()).toISOString()
         : null,
