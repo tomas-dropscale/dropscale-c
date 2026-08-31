@@ -78,6 +78,21 @@ function emptyResult(): HstCostSyncResult {
   };
 }
 
+/**
+ * The shop list alone, in the smallest page the ERP will answer.
+ *
+ * The list rides in , beside the order rows rather than derived
+ * from them, so asking for one row returns the same shops as asking for a
+ * hundred — and the ERP prices this by page size: measured on a live account,
+ * limit=100 took 42s, limit=12 took 25s, limit=1 took 12s. The hundred-row
+ * page was timing out every time, which is why a client with a perfectly
+ * healthy session was told to type a shop code that exists nowhere they can
+ * read it.
+ */
+function shopListUrl(): string {
+  return ORDERS_URL + "?search_field=platformOrderId&shopIds=&page=1&limit=1";
+}
+
 function ordersUrl(shopId: string, page: number): string {
   // `shopIds` is the filter name the commission endpoint on this same ERP
   // takes. Correctness does not rest on it: every row is checked against the
@@ -269,7 +284,7 @@ export async function fetchHstShops(input: {
   // A generous timeout: this is the call that fills the cache, and some
   // accounts take ~14s to list — worth waiting for once so every later render
   // is instant.
-  const payload = await hstGet(ordersUrl("", 1), token, 25_000);
+  const payload = await hstGet(shopListUrl(), token, 25_000);
   const shops = parseHstOrderPage(payload, { shopId: "", timeZone: "UTC" }).shops;
   await storeHstShops(input.service, input.clientId, shops);
   return shops;
