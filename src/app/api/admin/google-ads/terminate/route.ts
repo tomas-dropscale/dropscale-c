@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { captureGoogleBillingEndAsAgency } from "@/lib/google-ads/billing-start";
+import { windsorCaptureSearch } from "@/lib/google-ads/windsor-capture";
 import { createServiceClient } from "@/lib/supabase/service";
 import { createClient } from "@/lib/supabase/server";
 
@@ -133,18 +134,37 @@ export async function POST(request: NextRequest) {
   let captured;
   try {
     captured = await captureGoogleBillingEndAsAgency(googleAdsCustomerId);
-  } catch (error) {
-    console.error("Google billing-end capture failed:", {
+  } catch (directError) {
+    // The agency operates through Windsor; the direct Google grant is not
+    // maintained and lapses. Windsor carries the same account-level daily
+    // counter, and the identity it must match is the immutable billing start
+    // already on file - so the capture falls back rather than blocking every
+    // store handover on a credential nobody uses.
+    console.error("Direct Google billing-end capture failed; retrying via Windsor:", {
       accountId: account.id,
-      message: error instanceof Error ? error.message : "Unknown Google Ads error",
+      message: directError instanceof Error ? directError.message : "Unknown Google Ads error",
     });
-    return NextResponse.json(
-      {
-        error:
-          "Google Ads could not capture the closing counter. Billing is still active; confirm agency access and try again.",
-      },
-      { status: 502 },
-    );
+    try {
+      captured = await captureGoogleBillingEndAsAgency(googleAdsCustomerId, {
+        search: windsorCaptureSearch({
+          customerId: billingStart.google_ads_customer_id,
+          timeZone: billingStart.google_time_zone,
+          currency: billingStart.currency.toUpperCase(),
+        }),
+      });
+    } catch (windsorError) {
+      console.error("Windsor billing-end capture failed:", {
+        accountId: account.id,
+        message: windsorError instanceof Error ? windsorError.message : "Unknown Windsor error",
+      });
+      return NextResponse.json(
+        {
+          error:
+            "Neither Google Ads nor Windsor could capture the closing counter. Billing is still active; try again.",
+        },
+        { status: 502 },
+      );
+    }
   }
 
   if (

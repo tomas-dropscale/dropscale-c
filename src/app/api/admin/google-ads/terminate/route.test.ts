@@ -3,6 +3,7 @@ import { NextRequest } from "next/server";
 
 const mocks = vi.hoisted(() => ({
   capture: vi.fn(),
+  windsorSearch: vi.fn(() => vi.fn()),
   createServiceClient: vi.fn(),
   createClient: vi.fn(),
   rpc: vi.fn(),
@@ -11,6 +12,9 @@ const mocks = vi.hoisted(() => ({
 vi.mock("server-only", () => ({}));
 vi.mock("@/lib/google-ads/billing-start", () => ({
   captureGoogleBillingEndAsAgency: mocks.capture,
+}));
+vi.mock("@/lib/google-ads/windsor-capture", () => ({
+  windsorCaptureSearch: mocks.windsorSearch,
 }));
 vi.mock("@/lib/supabase/service", () => ({
   createServiceClient: mocks.createServiceClient,
@@ -154,6 +158,33 @@ describe("admin Google billing termination", () => {
     expect(response.status).toBe(502);
     expect(mocks.capture).toHaveBeenCalledWith("1234567890");
     expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the Windsor counter when the direct Google grant lapses", async () => {
+    mocks.createClient.mockResolvedValue(session());
+    const service = { rpc: mocks.rpc };
+    mocks.createServiceClient.mockReturnValue(service);
+    mocks.rpc.mockResolvedValue({ data: [{ id: END_ID }], error: null });
+    const windsorBackedSearch = vi.fn();
+    mocks.windsorSearch.mockReturnValue(windsorBackedSearch);
+    mocks.capture
+      .mockRejectedValueOnce(new Error("USER_PERMISSION_DENIED"))
+      .mockResolvedValueOnce(captured);
+
+    const response = await POST(request({ accountId: ACCOUNT_ID }));
+
+    expect(response.status).toBe(200);
+    // The retry runs the SAME capture loop, only with the Windsor-backed
+    // read, and the identity it enforces is the immutable billing start.
+    expect(mocks.windsorSearch).toHaveBeenCalledWith({
+      customerId: "1234567890",
+      timeZone: "Europe/Lisbon",
+      currency: "EUR",
+    });
+    expect(mocks.capture).toHaveBeenNthCalledWith(2, "1234567890", {
+      search: windsorBackedSearch,
+    });
+    expect(mocks.rpc).toHaveBeenCalledTimes(1);
   });
 
   it("rejects live evidence that no longer matches the immutable start", async () => {
