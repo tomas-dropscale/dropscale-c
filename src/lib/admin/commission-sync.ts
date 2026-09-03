@@ -465,20 +465,55 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
     // Owner rule (2026-08-18): a shared Google account can host another
     // store's campaigns, so Windsor ledger evidence only counts campaigns
     // whose final URLs point at this store's domain. The domain comes from
-    // the account's own active binding, never from a sibling store.
+    // the account's own active binding — or, for a Google spend child, from
+    // the anchor that binding names: the child exists to hold that store's
+    // spend, and leaving it unfiltered would bill the whole shared account to
+    // one store, another store's campaigns included. That is the same
+    // coalesce(binding, anchor) reading the database guards already use.
     const { data: bindingDomainRows, error: bindingDomainRowsError } =
       await supabase
         .from("client_reporting_bindings")
-        .select("ad_account_id, shopify_connection_id")
+        .select("ad_account_id, shopify_connection_id, shopify_anchor_binding_id")
         .eq("status", "active")
-        .not("shopify_connection_id", "is", null)
         .in("ad_account_id", billable.map((account) => account.id));
     if (bindingDomainRowsError) throw bindingDomainRowsError;
     type BindingDomainRow = {
       ad_account_id: string;
-      shopify_connection_id: string;
+      shopify_connection_id: string | null;
+      shopify_anchor_binding_id: string | null;
     };
-    const boundShopifyConnections = (bindingDomainRows ?? []) as unknown as BindingDomainRow[];
+    const accountBindings = ((bindingDomainRows ?? []) as unknown as BindingDomainRow[]).filter(
+      (row) => row.shopify_connection_id !== null || row.shopify_anchor_binding_id !== null,
+    );
+    const anchorBindingIds = [
+      ...new Set(
+        accountBindings
+          .filter((row) => !row.shopify_connection_id && row.shopify_anchor_binding_id)
+          .map((row) => row.shopify_anchor_binding_id as string),
+      ),
+    ];
+    const anchorShopifyByBinding = new Map<string, string>();
+    if (anchorBindingIds.length > 0) {
+      const { data: anchorRows, error: anchorRowsError } = await supabase
+        .from("client_reporting_bindings")
+        .select("id, shopify_connection_id")
+        .eq("status", "active")
+        .in("id", anchorBindingIds);
+      if (anchorRowsError) throw anchorRowsError;
+      for (const row of (anchorRows ?? []) as unknown as { id: string; shopify_connection_id: string | null }[]) {
+        if (row.shopify_connection_id) anchorShopifyByBinding.set(row.id, row.shopify_connection_id);
+      }
+    }
+    const boundShopifyConnections = accountBindings.flatMap((row) => {
+      const connectionId =
+        row.shopify_connection_id ??
+        (row.shopify_anchor_binding_id
+          ? anchorShopifyByBinding.get(row.shopify_anchor_binding_id) ?? null
+          : null);
+      return connectionId
+        ? [{ ad_account_id: row.ad_account_id, shopify_connection_id: connectionId }]
+        : [];
+    });
     const shopifyConnectionIds = [
       ...new Set(boundShopifyConnections.map((row) => row.shopify_connection_id)),
     ];

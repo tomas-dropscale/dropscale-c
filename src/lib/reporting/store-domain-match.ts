@@ -27,13 +27,22 @@ export function normalizeStoreDomain(
   return host.includes(".") ? host : null;
 }
 
-/** Every usable domain alias of a source's Shopify store, normalized. */
+/**
+ * Every usable domain alias of a source's Shopify store, normalized.
+ *
+ * A Google child source carries no Shopify side of its own, so it falls back
+ * to its anchor's identity: the child exists to hold that store's spend, and
+ * an unfiltered child would claim the whole shared account — another store's
+ * campaigns included.
+ */
 export function storeDomainsForSource(source: {
   shopify: { domain: string; primaryDomain: string | null } | null;
+  anchorShopifyDomains?: { domain: string; primaryDomain: string | null } | null;
 }): string[] {
-  if (!source.shopify) return [];
+  const identity = source.shopify ?? source.anchorShopifyDomains ?? null;
+  if (!identity) return [];
   const domains = new Set<string>();
-  for (const candidate of [source.shopify.primaryDomain, source.shopify.domain]) {
+  for (const candidate of [identity.primaryDomain, identity.domain]) {
     const normalized = normalizeStoreDomain(candidate);
     if (normalized) domains.add(normalized);
   }

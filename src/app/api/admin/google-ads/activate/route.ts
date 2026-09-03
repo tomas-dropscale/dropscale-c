@@ -233,6 +233,9 @@ export async function POST(request: NextRequest) {
       .from("ad_account_billing_starts")
       .select("id")
       .eq("google_ads_customer_id", googleAdsCustomerId)
+      // A handed-over identity legitimately has one start per successor;
+      // any start at all refuses this path, so one row is enough to decide.
+      .limit(1)
       .maybeSingle();
     if (billingStartError) {
       return NextResponse.json(

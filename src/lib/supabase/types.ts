@@ -3411,6 +3411,16 @@ export type Database = {
         Args: { p_client_id: string; p_admin_id: string };
         Returns: string;
       };
+      handover_client_reporting_google_source: {
+        Args: {
+          p_source_binding_id: string;
+          p_target_anchor_binding_id: string;
+          p_admin_id: string;
+          p_idempotency_key: string;
+          p_reason: string;
+        };
+        Returns: string;
+      };
       adopt_client_reporting_google_child: {
         Args: {
           p_binding_id: string;

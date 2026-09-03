@@ -107,6 +107,15 @@ export type CanonicalReportingSource = {
      */
     healthError: string | null;
   } | null;
+  /**
+   * The anchor store's domains, present only on a Google child source. A
+   * child has no Shopify side of its own, but its spend belongs to the
+   * anchor's store, and the campaign-to-store domain filter needs that
+   * store's identity: without it a child ingests the WHOLE account's spend,
+   * including campaigns advertising another store — exactly what a
+   * handed-over account's first sync window would do.
+   */
+  anchorShopifyDomains?: { domain: string; primaryDomain: string | null } | null;
   googleAds: {
     connectionId: string;
     windsorAccountId: string;
@@ -418,6 +427,7 @@ async function resolveReportingSourcesByStatus({
     }
 
     let anchor: BindingRow | null = null;
+    let anchorShopifyRow: ShopifyRow | null = null;
     if (binding.shopify_anchor_binding_id) {
       anchor = bindingsById.get(binding.shopify_anchor_binding_id) ?? null;
       if (
@@ -432,7 +442,8 @@ async function resolveReportingSourcesByStatus({
         invalid("A Google Ads child has an invalid Shopify anchor.");
       }
       const anchorAccount = accounts.get(anchor.ad_account_id);
-      const anchorShopify = shopifyConnections.get(anchor.shopify_connection_id);
+      const anchorShopify = shopifyConnections.get(anchor.shopify_connection_id) ?? null;
+      anchorShopifyRow = anchorShopify;
       if (
         anchor.status !== "active" ||
         !anchorAccount ||
@@ -464,7 +475,7 @@ async function resolveReportingSourcesByStatus({
       invalid("A mapped Google Ads source has no Shopify anchor.");
     }
 
-    return { binding, shopify, google, googleIdentity, anchor };
+    return { binding, shopify, google, googleIdentity, anchor, anchorShopifyRow };
   });
 
   const credentialByShopify = new Map<string, StoredShopifyConnectionCredential>();
@@ -493,7 +504,7 @@ async function resolveReportingSourcesByStatus({
   }
 
   return validated
-    .map(({ binding, shopify, google, googleIdentity, anchor }): CanonicalReportingSource => {
+    .map(({ binding, shopify, google, googleIdentity, anchor, anchorShopifyRow }): CanonicalReportingSource => {
       const shopifyCredential = binding.shopify_connection_id
         ? credentialByShopify.get(binding.shopify_connection_id)
         : null;
@@ -519,6 +530,12 @@ async function resolveReportingSourcesByStatus({
           shopifyAnchorBindingId: shopifyAnchor?.id ?? null,
           shopifyAnchorAdAccountId: shopifyAnchor?.ad_account_id ?? null,
         },
+        anchorShopifyDomains: anchorShopifyRow
+          ? {
+              domain: anchorShopifyRow.shopify_domain,
+              primaryDomain: anchorShopifyRow.primary_domain,
+            }
+          : null,
         shopify: shopify
           ? {
               connectionId: shopify.id,

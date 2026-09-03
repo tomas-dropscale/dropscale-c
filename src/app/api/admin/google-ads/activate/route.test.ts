@@ -78,6 +78,11 @@ function session({
         select: vi.fn(() => ({
           eq: vi.fn(() => ({
             maybeSingle: vi.fn(async () => result(data)),
+            // Two starts can legitimately share a customer id after a store
+            // handover; the route caps the audit read at one row.
+            limit: vi.fn(() => ({
+              maybeSingle: vi.fn(async () => result(data)),
+            })),
           })),
         })),
       };

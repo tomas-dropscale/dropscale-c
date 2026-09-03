@@ -174,18 +174,28 @@ export function mergeDailyMetricFamilies({
 
   return writable.map((day) => {
     const stored = prior.get(day);
+    // "Not applicable" means the binding has no such source TODAY — it says
+    // nothing about yesterday. An account that loses a family (a store handover
+    // moves its Google source to another store) keeps measured history: zeroing
+    // it here would silently erase the window's recorded spend on the first
+    // sync after the swap. Carry the stored values; zeros are only for days
+    // that never had a row.
     const googleFamily =
       google.state === "succeeded"
         ? googleRows?.get(day) ?? GOOGLE_ZERO
         : google.state === "failed"
           ? googleFrom(stored!)
-          : GOOGLE_ZERO;
+          : stored
+            ? googleFrom(stored)
+            : GOOGLE_ZERO;
     const shopifyFamily =
       shopify.state === "succeeded"
         ? shopifyRows?.get(day) ?? SHOPIFY_ZERO
         : shopify.state === "failed"
           ? shopifyFrom(stored!)
-          : SHOPIFY_NOT_APPLICABLE;
+          : stored
+            ? shopifyFrom(stored)
+            : SHOPIFY_NOT_APPLICABLE;
 
     return {
       ad_account_id: adAccountId,

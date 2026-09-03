@@ -849,7 +849,7 @@ describe("V2 daily-metrics recompute", () => {
     expect(mocks.fetchDailySales).not.toHaveBeenCalled();
   });
 
-  it("refuses to erase Shopify facts from a partial legacy Google binding", async () => {
+  it("carries Shopify facts on a partial legacy Google binding instead of erasing them", async () => {
     const legacyGoogle = account(CHILD, { reporting_role: "legacy_hybrid" });
     const db = fakeDatabase(
       [legacyGoogle],
@@ -866,35 +866,47 @@ describe("V2 daily-metrics recompute", () => {
     );
     mocks.resolveReportingSources.mockResolvedValue([childSource()]);
 
-    await expect(
-      refreshReportingSourcesNow([CHILD], {
-        client: db.client as never,
-        from: DAY,
-        to: DAY,
-      }),
-    ).rejects.toThrow("would erase historical facts");
+    await refreshReportingSourcesNow([CHILD], {
+      client: db.client as never,
+      from: DAY,
+      to: DAY,
+    });
 
-    expect(mocks.fetchGoogleReportingDailyMetrics).not.toHaveBeenCalled();
-    expect(db.upserts).toEqual([]);
-    expect(db.receipts).toEqual([]);
+    // The Google side refreshes; the Shopify side the source no longer has is
+    // CARRIED from the stored row, never zeroed - measured history survives a
+    // source losing one family.
+    expect(db.upserts.flat()).toEqual([
+      expect.objectContaining({
+        ad_account_id: CHILD,
+        ad_spend: 20,
+        revenue: 50,
+        orders_count: 2,
+        units_sold: 2,
+      }),
+    ]);
   });
 
-  it("refuses to erase Google facts from a partial legacy Shopify binding", async () => {
+  it("carries Google history on a partial legacy Shopify binding - the store handover shape", async () => {
+    // Exactly what a store handover leaves behind: a legacy_hybrid account
+    // whose Google source moved to another store. Its revenue keeps
+    // refreshing; its recorded spend stays.
     const legacyShopify = account(ANCHOR, { reporting_role: "legacy_hybrid" });
     const db = fakeDatabase([legacyShopify], [stored({ ad_spend: 10 })]);
     mocks.resolveReportingSources.mockResolvedValue([anchorSource()]);
 
-    await expect(
-      refreshReportingSourcesNow([ANCHOR], {
-        client: db.client as never,
-        from: DAY,
-        to: DAY,
-      }),
-    ).rejects.toThrow("would erase historical facts");
+    await refreshReportingSourcesNow([ANCHOR], {
+      client: db.client as never,
+      from: DAY,
+      to: DAY,
+    });
 
-    expect(mocks.createShopifyReportingAdapter).not.toHaveBeenCalled();
-    expect(db.upserts).toEqual([]);
-    expect(db.receipts).toEqual([]);
+    expect(db.upserts.flat()).toEqual([
+      expect.objectContaining({
+        ad_account_id: ANCHOR,
+        revenue: 100,
+        ad_spend: 10,
+      }),
+    ]);
   });
 
   it("fails closed when the receipt RPC is unavailable after the metric upsert", async () => {

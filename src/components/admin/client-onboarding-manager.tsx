@@ -506,6 +506,14 @@ export function ClientOnboardingManager({
   const [invitation, setInvitation] = React.useState<Invitation | null>(null);
   const [actionTarget, setActionTarget] = React.useState<ActionTarget | null>(null);
   const [disconnectTarget, setDisconnectTarget] = React.useState<DisconnectTarget | null>(null);
+  const [storeMoveTarget, setStoreMoveTarget] = React.useState<{
+    connectionId: string;
+    accountName: string;
+    clientName: string;
+    fromStore: string;
+    toStore: string;
+    toStoreName: string;
+  } | null>(null);
   const [stopCountingTarget, setStopCountingTarget] = React.useState<{
     connectionId: string;
     name: string;
@@ -1620,7 +1628,32 @@ export function ClientOnboardingManager({
                                           id={`${account.id}-store`}
                                           disabled={disabled || busy === `map:${account.id}`}
                                           value={mappedStoreFor(card, account.id) ?? ""}
-                                          onChange={(event) => void mapAccountToStore(account.id, event.target.value)}
+                                          onChange={(event) => {
+                                            const next = event.target.value;
+                                            const current = mappedStoreFor(card, account.id);
+                                            // Re-pointing a mapped account is a
+                                            // store HANDOVER - confirmed, never
+                                            // a silent select change.
+                                            if (current && current !== next) {
+                                              const toStore = linkableStores.find(
+                                                (storeItem) => storeItem.id === next,
+                                              );
+                                              const fromStore = linkableStores.find(
+                                                (storeItem) => storeItem.id === current,
+                                              );
+                                              setStoreMoveTarget({
+                                                connectionId: account.id,
+                                                accountName: account.accountName,
+                                                clientName: cardClientName(card),
+                                                fromStore: fromStore?.name ?? "its current store",
+                                                toStore: next,
+                                                toStoreName: toStore?.name ?? "the selected store",
+                                              });
+                                              setDialogError("");
+                                              return;
+                                            }
+                                            void mapAccountToStore(account.id, next);
+                                          }}
                                           className="h-8 rounded-[8px] border border-[var(--border-subtle)] bg-[var(--bg-panel)] px-2 text-[11.5px] text-[var(--text-primary)]"
                                         >
                                           {/*
@@ -1973,6 +2006,49 @@ export function ClientOnboardingManager({
                   ) : (
                     <><Lock aria-hidden /> Block access</>
                   )}
+                </Button>
+              </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(storeMoveTarget)} onOpenChange={(open) => { if (!open) { setStoreMoveTarget(null); setDialogError(""); } }}>
+        <DialogContent>
+          {storeMoveTarget && (
+            <>
+              <DialogHeader>
+                <DialogTitle>Move {storeMoveTarget.accountName} to {storeMoveTarget.toStoreName}?</DialogTitle>
+                <DialogDescription>
+                  {storeMoveTarget.fromStore} keeps everything it already spent — history,
+                  ledger and invoices stay exactly where they are. From this move on, the
+                  account&apos;s spend reports and bills to {storeMoveTarget.toStoreName}.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3 text-[12px] leading-relaxed text-[var(--text-secondary)]">
+                <strong className="font-medium text-[var(--text-primary)]">
+                  {storeMoveTarget.clientName}
+                </strong>
+                <br />
+                Google Ads · {storeMoveTarget.accountName}
+                <p className="mt-2">
+                  Stop counting must have closed the old store&apos;s Google billing first —
+                  the move is refused otherwise, so nothing can ever bill twice.
+                </p>
+              </div>
+              {dialogError && <p role="alert" className="text-[12px] text-[var(--danger-red)]">{dialogError}</p>}
+              <DialogFooter>
+                <Button type="button" onClick={() => { setStoreMoveTarget(null); setDialogError(""); }}>Cancel</Button>
+                <Button
+                  type="button"
+                  variant="danger"
+                  loading={busy === `map:${storeMoveTarget.connectionId}`}
+                  onClick={async () => {
+                    await mapAccountToStore(storeMoveTarget.connectionId, storeMoveTarget.toStore);
+                    setStoreMoveTarget(null);
+                  }}
+                >
+                  Move account
                 </Button>
               </DialogFooter>
             </>

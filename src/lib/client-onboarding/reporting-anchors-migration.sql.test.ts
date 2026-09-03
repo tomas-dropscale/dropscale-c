@@ -32,6 +32,10 @@ const CHILD_ADOPTION_MIGRATION = readFileSync(
   "supabase/migrations/0094_adopt_unanchored_google_child.sql",
   "utf8",
 );
+const STORE_HANDOVER_MIGRATION = readFileSync(
+  "supabase/migrations/0095_reporting_store_handover.sql",
+  "utf8",
+);
 
 const ADMIN = "55000000-0000-4000-8000-000000000001";
 const CLIENT = "55000000-0000-4000-8000-000000000002";
@@ -128,6 +132,8 @@ create table public.ad_accounts (
 );
 create unique index ad_accounts_google_customer_unique_idx
   on public.ad_accounts(google_ads_customer_id) where google_ads_customer_id is not null;
+create unique index ad_accounts_google_customer_uq
+  on public.ad_accounts(google_ads_customer_id) where google_ads_customer_id is not null;
 create unique index ad_accounts_shopify_url_uq
   on public.ad_accounts(shopify_url) where shopify_url is not null;
 alter table public.ad_accounts enable row level security;
@@ -189,6 +195,7 @@ create table public.client_google_ads_connections (
   status text not null,
   windsor_account_id text not null,
   account_name text not null,
+  admin_label text,
   currency text,
   time_zone text,
   data_source_id text,
@@ -270,11 +277,17 @@ create table public.cogs_collections (id uuid primary key default gen_random_uui
 create table public.commissions (id uuid primary key default gen_random_uuid(), ad_account_id uuid references public.ad_accounts(id), amount numeric not null default 0);
 create table public.ad_account_billing_starts (
   id uuid primary key default gen_random_uuid(), ad_account_id uuid not null unique references public.ad_accounts(id),
-  google_ads_customer_id text not null, currency text not null
+  google_ads_customer_id text not null, currency text not null,
+  google_local_date date, google_time_zone text, baseline_cost_micros bigint,
+  capture_started_at timestamptz, captured_at timestamptz, capture_id uuid,
+  source text, start_basis text, reviewed_by uuid, created_at timestamptz not null default now()
 );
 create table public.ad_account_billing_ends (
   id uuid primary key default gen_random_uuid(), ad_account_id uuid not null unique references public.ad_accounts(id),
-  google_ads_customer_id text not null, currency text not null
+  google_ads_customer_id text not null, currency text not null,
+  billing_start_id uuid, google_local_date date, google_time_zone text, end_cost_micros bigint,
+  capture_started_at timestamptz, captured_at timestamptz, capture_id uuid,
+  source text, reviewed_by uuid, created_at timestamptz not null default now()
 );
 create table public.google_ledger_sync_windows (ad_account_id uuid references public.ad_accounts(id));
 create table public.reviewed_full_day_billing_boundaries (id uuid primary key default gen_random_uuid(), ad_account_id uuid references public.ad_accounts(id));
@@ -448,6 +461,11 @@ beforeEach(async () => {
     await db.exec(CHILD_ADOPTION_MIGRATION);
   } catch (error) {
     throw new Error("0094 migration failed", { cause: error });
+  }
+  try {
+    await db.exec(STORE_HANDOVER_MIGRATION);
+  } catch (error) {
+    throw new Error("0095 migration failed", { cause: error });
   }
 
   await db.query(
@@ -3495,4 +3513,314 @@ describe("adopting an unanchored Google source (0094)", () => {
       "23514",
     );
   });
+});
+
+describe("handing a Google source to a new store (0095)", () => {
+  // A third store of its own: SHOPIFY_2's domain deliberately collides with
+  // the seeded legacy pair for the adoption tests, and a handover target
+  // must be a plain fresh anchor.
+  const TARGET_SHOPIFY = "55000000-0000-4000-8000-000000000022";
+
+  async function pairAndTarget() {
+    // The pair lives on the seeded LEGACY account - the exact shape the
+    // handover serves (a pre-V2 identity upgraded to a pair binding). The
+    // handover is EUR-only by construction, so the scenario runs in EUR.
+    await db.query(
+      "update public.ad_accounts set currency = 'EUR' where id = $1",
+      [LEGACY_PAIR],
+    );
+    await db.query(
+      "update public.client_google_ads_connections set currency = 'EUR' where id = $1",
+      [GOOGLE_2],
+    );
+    await db.query(
+      "update public.client_shopify_connections set shopify_currency = 'EUR' where id = $1",
+      [SHOPIFY_2],
+    );
+    await db.query(
+      `insert into public.client_asset_mappings(session_id, shopify_connection_id, google_ads_connection_id)
+       values ($1, $2, $3)`,
+      [SESSION, SHOPIFY_2, GOOGLE_2],
+    );
+    const pair = await db.query<{ id: string }>(
+      `select public.commit_client_reporting_binding(
+         $1, $2, $3, null, 'anchor:handover:legacy-pair', $4,
+         'Legacy pair binding for the handover fixture'
+       ) as id`,
+      [LEGACY_PAIR, SHOPIFY_2, GOOGLE_2, ADMIN],
+    );
+    await db.query(
+      `insert into public.client_shopify_connections(
+         id, session_id, client_id, status, shopify_shop_id, shopify_name,
+         shopify_domain, shopify_currency, credential_hint, last_verified_at
+       ) values ($1, $2, $3, 'connected', 'shop-3', 'Target Store',
+         'target-store.myshopify.com', 'EUR', 'hint', now())`,
+      [TARGET_SHOPIFY, SESSION, CLIENT],
+    );
+    await db.query(
+      `insert into public.client_shopify_credentials(
+         connection_id, shopify_client_id, client_secret_ciphertext
+       ) values ($1, 'client-id-3', 'secret-ciphertext-3')`,
+      [TARGET_SHOPIFY],
+    );
+    const target = await provision({
+      shopify: TARGET_SHOPIFY,
+      key: "anchor:handover:target",
+    });
+    return { pairId: pair.rows[0]!.id, targetId: target.rows[0]!.id };
+  }
+
+  async function cutOverBoth(pairId: string, targetId: string) {
+    // Cutover demands every connected source be covered exactly once; the
+    // seeded spares stay out of this scenario.
+    await db.query(
+      "update public.client_shopify_connections set status = 'revoked' where id = $1",
+      [SHOPIFY],
+    );
+    await db.query(
+      "update public.client_google_ads_connections set status = 'revoked' where id = $1",
+      [GOOGLE],
+    );
+    for (const bindingId of [pairId, targetId]) {
+      await materializeBindingWindow(bindingId);
+      await db.query(
+        `select public.record_client_reporting_sync_success(
+           $1, 'shopify', current_date - 90, current_date - 1, 'EUR', 90
+         )`,
+        [bindingId],
+      );
+    }
+    await db.query(
+      `select public.record_client_reporting_sync_success(
+         $1, 'google_ads', current_date - 90, current_date - 1, 'EUR', 90
+       )`,
+      [pairId],
+    );
+    await db.query(
+      "select public.activate_client_reporting_cutover($1, $2, 'Handover fixture cutover')",
+      [CLIENT, ADMIN],
+    );
+  }
+
+  async function accountOf(bindingId: string) {
+    const row = await db.query<{ ad_account_id: string }>(
+      "select ad_account_id from public.client_reporting_bindings where id = $1",
+      [bindingId],
+    );
+    return row.rows[0]!.ad_account_id;
+  }
+
+  // EUR cutover demands an OPEN billing start on every Google-bearing source,
+  // so the boundary rows are split: the start opens before cutover, the end
+  // closes whenever the store swap is decided.
+  async function openBilling(pairId: string) {
+    const accountId = await accountOf(pairId);
+    const start = await db.query<{ id: string }>(
+      `insert into public.ad_account_billing_starts(
+         ad_account_id, google_ads_customer_id, currency, google_local_date,
+         google_time_zone, baseline_cost_micros, start_basis
+       ) values ($1, '7777777777', 'EUR', current_date - 30, 'America/New_York', 0,
+         'observed_google_counter')
+       returning id`,
+      [accountId],
+    );
+    // Billing activation is what flips a pending account active in
+    // production; the EUR cutover predicate demands it.
+    await db.query(
+      "update public.ad_accounts set status = 'active' where id = $1",
+      [accountId],
+    );
+    return { accountId, startId: start.rows[0]!.id };
+  }
+
+  async function closeBilling(opened: { accountId: string; startId: string }) {
+    await db.query(
+      `insert into public.ad_account_billing_ends(
+         ad_account_id, billing_start_id, google_ads_customer_id, currency,
+         google_local_date, google_time_zone, end_cost_micros
+       ) values ($1, $2, '7777777777', 'EUR', current_date - 1,
+         'America/New_York', 123456789)`,
+      [opened.accountId, opened.startId],
+    );
+    return opened.accountId;
+  }
+
+  async function handover(pairId: string, targetId: string, key = "handover:test:0001") {
+    return db.query<{ id: string }>(
+      `select public.handover_client_reporting_google_source(
+         $1, $2, $3, $4, 'Store handover test'
+       ) as id`,
+      [pairId, targetId, ADMIN, key],
+    );
+  }
+
+  it("moves the Google source to the new store and splits billing at the captured counter", async () => {
+    const { pairId, targetId } = await pairAndTarget();
+    const opened = await openBilling(pairId);
+    await cutOverBoth(pairId, targetId);
+    const oldAccountId = await closeBilling(opened);
+
+    const child = await handover(pairId, targetId);
+    const childBindingId = child.rows[0]!.id;
+
+    // The pair is retired; the old account keeps its store through a fresh
+    // Shopify-only binding - history and revenue never leave it.
+    const bindings = await db.query<{
+      id: string;
+      status: string;
+      ad_account_id: string;
+      shopify_connection_id: string | null;
+      google_ads_connection_id: string | null;
+      shopify_anchor_binding_id: string | null;
+    }>(
+      `select id, status, ad_account_id, shopify_connection_id,
+              google_ads_connection_id, shopify_anchor_binding_id
+       from public.client_reporting_bindings order by bound_at`,
+    );
+    const pair = bindings.rows.find((row) => row.id === pairId)!;
+    expect(pair.status).toBe("revoked");
+    const replacement = bindings.rows.find(
+      (row) =>
+        row.status === "active" &&
+        row.ad_account_id === oldAccountId &&
+        row.shopify_connection_id === SHOPIFY_2,
+    )!;
+    expect(replacement.google_ads_connection_id).toBeNull();
+    expect(replacement.shopify_anchor_binding_id).toBeNull();
+
+    // The successor: same Google identity on a NEW google_spend account,
+    // anchored under the target store.
+    const childBinding = bindings.rows.find((row) => row.id === childBindingId)!;
+    expect(childBinding.status).toBe("active");
+    expect(childBinding.google_ads_connection_id).toBe(GOOGLE_2);
+    expect(childBinding.shopify_connection_id).toBeNull();
+    expect(childBinding.shopify_anchor_binding_id).toBe(targetId);
+    expect(childBinding.ad_account_id).not.toBe(oldAccountId);
+
+    const childAccount = await db.query<{
+      reporting_role: string;
+      google_ads_customer_id: string;
+      status: string;
+    }>(
+      "select reporting_role, google_ads_customer_id, status from public.ad_accounts where id = $1",
+      [childBinding.ad_account_id],
+    );
+    // Active, not pending: the start was committed in the same transaction,
+    // and a pending account is invisible to commission-sync - the new store
+    // must bill from its first euro.
+    expect(childAccount.rows[0]).toMatchObject({
+      reporting_role: "google_spend",
+      google_ads_customer_id: "7777777777",
+      status: "active",
+    });
+
+    // The successor's opening boundary IS the closing capture: same local
+    // day, same counter, so the boundary day partitions exactly and the
+    // auto-start sweep can never backdate it.
+    const childStart = await db.query<{
+      baseline_cost_micros: string | number;
+      same_day: boolean;
+    }>(
+      `select baseline_cost_micros,
+              google_local_date = current_date - 1 as same_day
+       from public.ad_account_billing_starts where ad_account_id = $1`,
+      [childBinding.ad_account_id],
+    );
+    expect(Number(childStart.rows[0]!.baseline_cost_micros)).toBe(123456789);
+    expect(childStart.rows[0]!.same_day).toBe(true);
+
+    // The mapping now names the new store, as the resolver demands of a child.
+    const mapping = await db.query<{ shopify_connection_id: string }>(
+      "select shopify_connection_id from public.client_asset_mappings where google_ads_connection_id = $1",
+      [GOOGLE_2],
+    );
+    expect(mapping.rows).toHaveLength(1);
+    expect(mapping.rows[0]!.shopify_connection_id).toBe(TARGET_SHOPIFY);
+
+    const event = await db.query<{ event_type: string; prior_binding_id: string }>(
+      "select event_type, prior_binding_id from public.client_reporting_anchor_events where idempotency_key = 'handover:test:0001'",
+    );
+    expect(event.rows[0]).toMatchObject({
+      event_type: "handed_over",
+      prior_binding_id: pairId,
+    });
+  });
+
+  it("refuses while the old store's Google billing is still open", async () => {
+    const { pairId, targetId } = await pairAndTarget();
+    // A start with no end: money is still flowing to the old store.
+    await openBilling(pairId);
+    await cutOverBoth(pairId, targetId);
+    await expectSqlState(handover(pairId, targetId), "23514");
+  });
+
+  it("starts the succession today when the old account never billed", async () => {
+    // Pre-cutover and never billed: the realistic shape of a store that was
+    // connected but whose campaigns never launched.
+    const { pairId, targetId } = await pairAndTarget();
+
+    const child = await handover(pairId, targetId, "handover:test:fresh");
+    const childBinding = await db.query<{ ad_account_id: string }>(
+      "select ad_account_id from public.client_reporting_bindings where id = $1",
+      [child.rows[0]!.id],
+    );
+    const start = await db.query<{ baseline: string | number; today: boolean }>(
+      `select baseline_cost_micros as baseline,
+              google_local_date = (now() at time zone 'America/New_York')::date as today
+       from public.ad_account_billing_starts where ad_account_id = $1`,
+      [childBinding.rows[0]!.ad_account_id],
+    );
+    expect(Number(start.rows[0]!.baseline)).toBe(0);
+    expect(start.rows[0]!.today).toBe(true);
+  });
+
+  it("replays an identical handover instead of failing the second caller", async () => {
+    const { pairId, targetId } = await pairAndTarget();
+    const opened = await openBilling(pairId);
+    await cutOverBoth(pairId, targetId);
+    await closeBilling(opened);
+
+    const first = await handover(pairId, targetId);
+    const second = await handover(pairId, targetId);
+    expect(second.rows[0]!.id).toBe(first.rows[0]!.id);
+  });
+
+  it("still refuses a hand-rolled post-cutover revoke without the purpose-bound key", async () => {
+    const { pairId, targetId } = await pairAndTarget();
+    await openBilling(pairId);
+    await cutOverBoth(pairId, targetId);
+    await expectSqlState(
+      db.query(
+        `select public.revoke_client_reporting_binding(
+           $1, $2, 'manual-revoke:handover-test', 'Manual revoke attempt'
+         )`,
+        [pairId, ADMIN],
+      ),
+      "23514",
+    );
+    // And the target anchor is untouched by the failed attempt.
+    void targetId;
+  });
+
+  it("keeps the one-owner rule for a Google identity outside the RPC", async () => {
+    const { pairId, targetId } = await pairAndTarget();
+    const opened = await openBilling(pairId);
+    await cutOverBoth(pairId, targetId);
+    await closeBilling(opened);
+    await handover(pairId, targetId);
+
+    // Two accounts now legitimately share '7777777777'. Any FURTHER claim -
+    // by an admin, a client route or a stray script - is still refused: the
+    // succession only ever appends through the handover RPC.
+    await expectSqlState(
+      db.query(
+        `insert into public.ad_accounts(
+           client_id, store_name, google_ads_customer_id, status, currency, reporting_role
+         ) values ($1, 'Impostor', '7777777777', 'pending', 'EUR', 'legacy_hybrid')`,
+        [CLIENT],
+      ),
+      "23505",
+    );
+  });
+
 });

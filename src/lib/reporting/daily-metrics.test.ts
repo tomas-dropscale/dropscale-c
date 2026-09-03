@@ -103,8 +103,53 @@ describe("daily reporting family merge", () => {
       "2026-08-13",
       "2026-08-14",
     ]);
-    expect(result.every((entry) => entry.ad_spend === 0 && entry.revenue === 0)).toBe(true);
+    expect(result.every((entry) => entry.ad_spend === 0)).toBe(true);
+    // The stored 08-13 Shopify values are carried: not_applicable means the
+    // binding has no such source NOW, never a licence to erase what was
+    // measured. The surrounding days never had a row and stay zero.
+    expect(result.map((entry) => entry.revenue)).toEqual([0, 99, 0]);
     expect(result.every((entry) => entry.computed_at === COMPUTED_AT)).toBe(true);
+  });
+
+  const shopifyOnly = (day: string, revenue: number) => ({
+    day,
+    revenue,
+    orders_count: 0,
+    units_sold: 0,
+    attributed_orders: 0,
+    attributed_revenue: 0,
+    refunds_amount: 0,
+    product_cost: 0,
+    payment_fees: 0,
+    shipping_cost: 0,
+    revenue_share_base: 0,
+    revenue_share_amount: 0,
+  });
+
+  it("carries stored Google history after a store handover removes the source", () => {
+    // A handover moves the Google source to another store: the old account's
+    // binding becomes Shopify-only, so the google family turns not_applicable
+    // while the window still covers days with real recorded spend.
+    const result = mergeDailyMetricFamilies({
+      adAccountId: ACCOUNT,
+      from: "2026-08-12",
+      to: "2026-08-13",
+      existing: [row("2026-08-12", { ad_spend: 218.64, revenue: 183.07 })],
+      google: { state: "not_applicable" },
+      shopify: {
+        state: "succeeded",
+        // Only Shopify-family fields, as the real adapter sends them: a full
+        // row here would smuggle google columns into the spread and mask the
+        // carry this test exists to prove.
+        rows: [shopifyOnly("2026-08-12", 200), shopifyOnly("2026-08-13", 50)],
+      },
+      computedAt: COMPUTED_AT,
+    });
+
+    // Spend history survives; revenue keeps refreshing; the day that never
+    // had a row gets zero spend, not an invented carry.
+    expect(result[0]).toMatchObject({ day: "2026-08-12", ad_spend: 218.64, revenue: 200 });
+    expect(result[1]).toMatchObject({ day: "2026-08-13", ad_spend: 0, revenue: 50 });
   });
 
   it("keeps refreshing stored days when a family fails and the newest day has no value yet", () => {

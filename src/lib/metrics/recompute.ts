@@ -481,42 +481,6 @@ function assertReportingSourceSyncable(
   }
 }
 
-function assertPartialLegacySourcePreservesFacts(
-  account: AdAccount,
-  source: CanonicalReportingSource,
-  existing: DailyMetricRow[],
-): void {
-  if (account.reporting_role !== "legacy_hybrid") return;
-
-  const hasGoogleFacts = existing.some(
-    (row) =>
-      Number(row.ad_spend) !== 0 ||
-      Number(row.impressions) !== 0 ||
-      Number(row.clicks) !== 0 ||
-      Number(row.conversions) !== 0 ||
-      Number(row.conversion_value) !== 0,
-  );
-  const hasShopifyFacts = existing.some(
-    (row) =>
-      Number(row.revenue) !== 0 ||
-      Number(row.orders_count) !== 0 ||
-      Number(row.units_sold) !== 0 ||
-      Number(row.attributed_orders) !== 0 ||
-      Number(row.attributed_revenue) !== 0 ||
-      Number(row.refunds_amount) !== 0 ||
-      Number(row.product_cost) !== 0 ||
-      Number(row.payment_fees) !== 0 ||
-      Number(row.shipping_cost) !== 0 ||
-      Number(row.revenue_share_base) !== 0 ||
-      Number(row.revenue_share_amount) !== 0,
-  );
-
-  if ((!source.googleAds && hasGoogleFacts) || (!source.shopify && hasShopifyFacts)) {
-    throw new Error(
-      "A partial V2 source would erase historical facts from its legacy reporting identity.",
-    );
-  }
-}
 
 async function syncReportingSourceWindow(
   service: Supabase,
@@ -529,7 +493,13 @@ async function syncReportingSourceWindow(
   assertReportingSourceSyncable(account, source);
 
   const existing = await fetchExistingWindow(service, account.id, from, to);
-  assertPartialLegacySourcePreservesFacts(account, source, existing);
+  // A partial source used to be rejected here outright: before the merge
+  // carried stored values for a not_applicable family, syncing a
+  // legacy_hybrid account whose source lost one side would have zeroed that
+  // side's recorded history. mergeDailyMetricFamilies now carries the stored
+  // family instead (see its tests), which is exactly what a store handover
+  // needs: the old account keeps its Google history while only its Shopify
+  // side keeps refreshing.
   const [google, shopify] = await Promise.all([
     reportingFamily(
       "Google",

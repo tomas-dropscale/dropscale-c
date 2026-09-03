@@ -576,4 +576,96 @@ describe("admin portal client persistence", () => {
       message: "The store mapping could not be saved.",
     });
   });
+
+  it("hands a paired Google source over when the admin picks a different store", async () => {
+    const PAIR_BINDING = "40000000-0000-4000-8000-0000000000c1";
+    const ANCHOR_BINDING = "40000000-0000-4000-8000-0000000000c2";
+    const OLD_SHOPIFY = "40000000-0000-4000-8000-0000000000c3";
+    const CLIENT_ID = "40000000-0000-4000-8000-0000000000c4";
+    const pairRow = {
+      id: PAIR_BINDING,
+      client_id: CLIENT_ID,
+      status: "active",
+      shopify_connection_id: OLD_SHOPIFY,
+      shopify_anchor_binding_id: null,
+    };
+    const anchorRow = {
+      id: ANCHOR_BINDING,
+      client_id: CLIENT_ID,
+      status: "active",
+      shopify_connection_id: SHOPIFY_ID,
+      shopify_anchor_binding_id: null,
+    };
+    // adopt reads first, then the handover branch re-reads, then the target.
+    mocks.eq
+      .mockReturnValueOnce({ data: [pairRow], error: null })
+      .mockReturnValueOnce({ data: [pairRow], error: null })
+      .mockReturnValueOnce({ data: [anchorRow], error: null });
+    mocks.rpc.mockResolvedValue({
+      data: "40000000-0000-4000-8000-0000000000c5",
+      error: null,
+    });
+
+    await mapGoogleAdsAccountToStore({
+      googleAdsConnectionId: GOOGLE_ID,
+      shopifyConnectionId: SHOPIFY_ID,
+      adminId: ADMIN_ID,
+    });
+
+    expect(mocks.rpc).toHaveBeenCalledTimes(1);
+    expect(mocks.rpc).toHaveBeenCalledWith("handover_client_reporting_google_source", {
+      p_source_binding_id: PAIR_BINDING,
+      p_target_anchor_binding_id: ANCHOR_BINDING,
+      p_admin_id: ADMIN_ID,
+      p_idempotency_key: `handover:${PAIR_BINDING}:${ANCHOR_BINDING}`,
+      p_reason: "Admin moved the Google source to the store it now advertises.",
+    });
+  });
+
+  it("refuses to move an already handed-over child to a third store, in words", async () => {
+    const childRow = {
+      id: "40000000-0000-4000-8000-0000000000c6",
+      client_id: "40000000-0000-4000-8000-0000000000c4",
+      status: "active",
+      shopify_connection_id: null,
+      shopify_anchor_binding_id: "40000000-0000-4000-8000-0000000000c7",
+    };
+    mocks.eq
+      .mockReturnValueOnce({ data: [childRow], error: null })
+      .mockReturnValueOnce({ data: [childRow], error: null });
+
+    await expect(
+      mapGoogleAdsAccountToStore({
+        googleAdsConnectionId: GOOGLE_ID,
+        shopifyConnectionId: SHOPIFY_ID,
+        adminId: ADMIN_ID,
+      }),
+    ).rejects.toMatchObject({
+      code: "invalid_state",
+      status: 409,
+      message: "A handed-over Google source cannot move to a third store yet.",
+    });
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+
+  it("treats re-picking the store a pair already reports to as done, not a move", async () => {
+    const pairRow = {
+      id: "40000000-0000-4000-8000-0000000000c1",
+      client_id: "40000000-0000-4000-8000-0000000000c4",
+      status: "active",
+      shopify_connection_id: SHOPIFY_ID,
+      shopify_anchor_binding_id: null,
+    };
+    mocks.eq
+      .mockReturnValueOnce({ data: [pairRow], error: null })
+      .mockReturnValueOnce({ data: [pairRow], error: null });
+
+    await mapGoogleAdsAccountToStore({
+      googleAdsConnectionId: GOOGLE_ID,
+      shopifyConnectionId: SHOPIFY_ID,
+      adminId: ADMIN_ID,
+    });
+
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
 });

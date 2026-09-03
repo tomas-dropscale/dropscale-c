@@ -590,6 +590,14 @@ export async function mapGoogleAdsAccountToStore(input: {
   const adopted = await adoptExistingBindingIfAny(service, input);
   if (adopted) return;
 
+  // A Google source already PAIRED with a store is a different move again: the
+  // client is swapping stores under the same Google account. The handover RPC
+  // retires the pair, keeps the old store's history on its own account, and
+  // re-binds the source as a child of the requested store's anchor - with the
+  // billing boundary as the split point.
+  const handed = await handoverExistingPairIfAny(service, input);
+  if (handed) return;
+
   const { data, error } = await service.rpc("map_client_google_ads_to_store", {
     p_google_ads_connection_id: input.googleAdsConnectionId,
     p_shopify_connection_id: input.shopifyConnectionId,
@@ -665,6 +673,81 @@ async function adoptExistingBindingIfAny(
   if (error) throw assetMappingWriteError(error);
   if (data !== child.id) {
     throw databaseError("The store link could not be verified.");
+  }
+  return true;
+}
+
+/**
+ * Move an already-paired Google source to another of the client's stores.
+ *
+ * Returns false when this connection has no active paired binding, leaving the
+ * caller on its other paths. The RPC is the authority on whether the move is
+ * legitimate - most importantly that the old store's Google billing boundary
+ * is already CLOSED (Stop counting), so no euro can bill twice.
+ */
+async function handoverExistingPairIfAny(
+  service: ReturnType<typeof serviceOrThrow>,
+  input: { googleAdsConnectionId: string; shopifyConnectionId: string; adminId: string },
+): Promise<boolean> {
+  type BindingRow = {
+    id: string;
+    client_id: string;
+    status: string;
+    shopify_connection_id: string | null;
+    shopify_anchor_binding_id: string | null;
+  };
+  const COLUMNS = "id, client_id, status, shopify_connection_id, shopify_anchor_binding_id";
+
+  const { data: byGoogle } = await service
+    .from("client_reporting_bindings")
+    .select(COLUMNS)
+    .eq("google_ads_connection_id", input.googleAdsConnectionId);
+  const rows = (byGoogle ?? []) as BindingRow[];
+  const child = rows.find(
+    (row) => row.status === "active" && row.shopify_anchor_binding_id !== null,
+  );
+  if (child) {
+    throw new ClientOnboardingError(
+      "invalid_state",
+      "A handed-over Google source cannot move to a third store yet.",
+      409,
+    );
+  }
+  const pair = rows.find(
+    (row) => row.status === "active" && row.shopify_connection_id !== null,
+  );
+  if (!pair) return false;
+  // Selecting the store it already reports to is not a move.
+  if (pair.shopify_connection_id === input.shopifyConnectionId) return true;
+
+  const { data: byShopify } = await service
+    .from("client_reporting_bindings")
+    .select(COLUMNS)
+    .eq("shopify_connection_id", input.shopifyConnectionId);
+  const anchor = ((byShopify ?? []) as BindingRow[]).find(
+    (row) =>
+      row.status === "active" &&
+      row.client_id === pair.client_id &&
+      row.shopify_anchor_binding_id === null,
+  );
+  if (!anchor) {
+    throw new ClientOnboardingError(
+      "invalid_state",
+      "That store has no active reporting anchor to attach this account to.",
+      409,
+    );
+  }
+
+  const { data, error } = await service.rpc("handover_client_reporting_google_source", {
+    p_source_binding_id: pair.id,
+    p_target_anchor_binding_id: anchor.id,
+    p_admin_id: input.adminId,
+    p_idempotency_key: `handover:${pair.id}:${anchor.id}`,
+    p_reason: "Admin moved the Google source to the store it now advertises.",
+  });
+  if (error) throw assetMappingWriteError(error);
+  if (typeof data !== "string" || !/^[0-9a-f-]{36}$/i.test(data)) {
+    throw databaseError("The store handover could not be verified.");
   }
   return true;
 }

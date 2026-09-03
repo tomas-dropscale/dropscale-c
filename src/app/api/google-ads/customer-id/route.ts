@@ -112,7 +112,11 @@ export async function PATCH(request: NextRequest) {
     .maybeSingle();
 
   if (updateError) {
-    const conflict = /duplicate|ledger history|unique/i.test(updateError.message);
+    // The one-owner rule now raises from a trigger with errcode 23505 and a
+    // sentence none of the old words match; the code is the stable signal.
+    const conflict =
+      updateError.code === "23505" ||
+      /duplicate|ledger history|unique|already belongs/i.test(updateError.message);
     return NextResponse.json(
       { error: updateError.message },
       { status: conflict ? 409 : 500 },
