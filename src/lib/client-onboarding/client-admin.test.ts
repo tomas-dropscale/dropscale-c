@@ -622,30 +622,58 @@ describe("admin portal client persistence", () => {
     });
   });
 
-  it("refuses to move an already handed-over child to a third store, in words", async () => {
+  it("moves an anchored child on to the next store through the same handover", async () => {
+    const CHILD_BINDING = "40000000-0000-4000-8000-0000000000c6";
+    const CURRENT_ANCHOR = "40000000-0000-4000-8000-0000000000c7";
+    const OLD_SHOPIFY = "40000000-0000-4000-8000-0000000000c8";
+    const NEXT_ANCHOR = "40000000-0000-4000-8000-0000000000c9";
+    const CLIENT_ID = "40000000-0000-4000-8000-0000000000c4";
     const childRow = {
-      id: "40000000-0000-4000-8000-0000000000c6",
-      client_id: "40000000-0000-4000-8000-0000000000c4",
+      id: CHILD_BINDING,
+      client_id: CLIENT_ID,
       status: "active",
       shopify_connection_id: null,
-      shopify_anchor_binding_id: "40000000-0000-4000-8000-0000000000c7",
+      shopify_anchor_binding_id: CURRENT_ANCHOR,
     };
+    const currentAnchorRow = {
+      id: CURRENT_ANCHOR,
+      client_id: CLIENT_ID,
+      status: "active",
+      shopify_connection_id: OLD_SHOPIFY,
+      shopify_anchor_binding_id: null,
+    };
+    const nextAnchorRow = {
+      id: NEXT_ANCHOR,
+      client_id: CLIENT_ID,
+      status: "active",
+      shopify_connection_id: SHOPIFY_ID,
+      shopify_anchor_binding_id: null,
+    };
+    // adopt read, handover read, current-anchor lookup, target-anchor lookup.
     mocks.eq
       .mockReturnValueOnce({ data: [childRow], error: null })
-      .mockReturnValueOnce({ data: [childRow], error: null });
-
-    await expect(
-      mapGoogleAdsAccountToStore({
-        googleAdsConnectionId: GOOGLE_ID,
-        shopifyConnectionId: SHOPIFY_ID,
-        adminId: ADMIN_ID,
-      }),
-    ).rejects.toMatchObject({
-      code: "invalid_state",
-      status: 409,
-      message: "A handed-over Google source cannot move to a third store yet.",
+      .mockReturnValueOnce({ data: [childRow], error: null })
+      .mockReturnValueOnce({ data: [currentAnchorRow], error: null })
+      .mockReturnValueOnce({ data: [nextAnchorRow], error: null });
+    mocks.rpc.mockResolvedValue({
+      data: "40000000-0000-4000-8000-0000000000ca",
+      error: null,
     });
-    expect(mocks.rpc).not.toHaveBeenCalled();
+
+    await mapGoogleAdsAccountToStore({
+      googleAdsConnectionId: GOOGLE_ID,
+      shopifyConnectionId: SHOPIFY_ID,
+      adminId: ADMIN_ID,
+    });
+
+    expect(mocks.rpc).toHaveBeenCalledTimes(1);
+    expect(mocks.rpc).toHaveBeenCalledWith("handover_client_reporting_google_source", {
+      p_source_binding_id: CHILD_BINDING,
+      p_target_anchor_binding_id: NEXT_ANCHOR,
+      p_admin_id: ADMIN_ID,
+      p_idempotency_key: `handover:${CHILD_BINDING}:${NEXT_ANCHOR}`,
+      p_reason: "Admin moved the Google source to the store it now advertises.",
+    });
   });
 
   it("treats re-picking the store a pair already reports to as done, not a move", async () => {

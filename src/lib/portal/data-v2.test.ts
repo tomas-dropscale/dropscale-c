@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   hasGoogleAdsEnv: vi.fn(),
   decryptToken: vi.fn(),
   fetchLiveCampaigns: vi.fn(),
+  retiredAccountIdsByAnchorBinding: vi.fn(),
 }));
 
 vi.mock("@/lib/portal/workspace", () => ({
@@ -48,6 +49,9 @@ vi.mock("@/lib/google-ads/portal", () => ({
   fetchLiveMetrics: vi.fn(),
 }));
 vi.mock("@/lib/google-ads/revoked", () => ({ markIfAuthRevoked: vi.fn() }));
+vi.mock("@/lib/reporting/retired-sources", () => ({
+  retiredAccountIdsByAnchorBinding: mocks.retiredAccountIdsByAnchorBinding,
+}));
 
 import {
   fetchAccount,
@@ -191,6 +195,7 @@ describe("portal V2 store projection", () => {
     mocks.activeWorkspaceId.mockResolvedValue("client-1");
     mocks.clientReportingAuthority.mockResolvedValue("v2");
     mocks.resolveReportingSources.mockResolvedValue([]);
+    mocks.retiredAccountIdsByAnchorBinding.mockResolvedValue(new Map());
   });
 
   it("presents an approved verified pre-cutover connection without enabling reporting", () => {
@@ -329,6 +334,54 @@ describe("portal V2 store projection", () => {
       clientIds: ["client-1"],
       includeShopifyCredentials: false,
     });
+  });
+
+  it("keeps a handover-retired account's rows in its store group", async () => {
+    const { client } = queryClient([
+      account(),
+      googleAccount("google-child-1"),
+      googleAccount("retired-1"),
+    ]);
+    mocks.createServiceClient.mockReturnValue(client);
+    mocks.resolveReportingSources.mockResolvedValue([
+      shopifySource(),
+      googleSource("google-child-1"),
+    ]);
+    mocks.retiredAccountIdsByAnchorBinding.mockResolvedValue(
+      new Map([["binding-anchor-1", ["retired-1"]]]),
+    );
+
+    const accounts = await fetchAccounts();
+
+    // The retired account never becomes a store of its own…
+    expect(accounts).toEqual([expect.objectContaining({ id: "anchor-1" })]);
+    // …but its frozen rows stay in the store's physical metric group, after
+    // every live source.
+    await expect(reportingMetricAccountIds(accounts)).resolves.toEqual([
+      "anchor-1",
+      "google-child-1",
+      "retired-1",
+    ]);
+    // A live-topology consumer (the Shopify funnel) gets the live accounts
+    // only: its loader fails closed on an id with no active source to resolve.
+    await expect(reportingMetricAccountIds(accounts, { scope: "live" })).resolves.toEqual([
+      "anchor-1",
+      "google-child-1",
+    ]);
+    const scope = await reportingMetricScope(accounts);
+    expect(scope.metricIdsByStore.get("anchor-1")).toEqual([
+      "anchor-1",
+      "google-child-1",
+      "retired-1",
+    ]);
+    expect(scope.metricAccountsById.get("retired-1")).toEqual(
+      expect.objectContaining({ id: "retired-1" }),
+    );
+    expect(mocks.retiredAccountIdsByAnchorBinding).toHaveBeenCalledWith(
+      client,
+      "client-1",
+      ["binding-anchor-1"],
+    );
   });
 
   it("reads every Google source grouped under the selected V2 Shopify anchor", async () => {

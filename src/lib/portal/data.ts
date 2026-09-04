@@ -37,6 +37,7 @@ import {
 } from "@/lib/google-ads/portal";
 import { markIfAuthRevoked } from "@/lib/google-ads/revoked";
 import { portalStoreSurface } from "@/lib/portal/client-rollout";
+import { retiredAccountIdsByAnchorBinding } from "@/lib/reporting/retired-sources";
 import {
   resolveReportingSources,
   type CanonicalReportingSource,
@@ -57,7 +58,15 @@ export type PortalAccount = AdAccount & {
 
 type PortalAccountProjection = {
   accounts: PortalAccount[];
+  /** Every physical account whose rows belong to the store, retired ones included. */
   metricIdsByStore: Map<string, string[]>;
+  /**
+   * The store's LIVE accounts only - each backed by an active binding. This is
+   * the list a live-topology consumer (the Shopify funnel, analytics) must
+   * receive: a handover-retired account has no source left to resolve, and
+   * those loaders fail closed on any id they cannot match to one.
+   */
+  liveMetricIdsByStore: Map<string, string[]>;
   metricAccountsById: Map<string, AdAccount>;
   unallocatedGoogleAccountIds: string[];
   googleSourcesByStore: Map<string, CanonicalReportingSource[]>;
@@ -266,18 +275,41 @@ const fetchV2Projection = cache(async function fetchV2Projection(
     return {
       accounts: [],
       metricIdsByStore: new Map(),
+      liveMetricIdsByStore: new Map(),
       metricAccountsById: new Map(),
       unallocatedGoogleAccountIds: [],
       googleSourcesByStore: new Map(),
     };
   }
 
+  // A store keeps the frozen history of every account a handover retired
+  // under its anchor. Retired ids join the store's metric group and account
+  // map only — they are not sources, so the topology invariants below
+  // intentionally never see them.
+  const retiredByAnchorBinding = await retiredAccountIdsByAnchorBinding(
+    service,
+    clientId,
+    anchors.map((source) => source.bindingId),
+  );
+  const sourceAccountIdSet = new Set(sourceAccountIds);
+  const retiredIdsByAnchorAccount = new Map<string, string[]>();
+  const retiredAccountIds: string[] = [];
+  for (const anchor of anchors) {
+    const retiredIds = (retiredByAnchorBinding.get(anchor.bindingId) ?? []).filter(
+      (id) => !sourceAccountIdSet.has(id) && !retiredAccountIds.includes(id),
+    );
+    if (retiredIds.length === 0) continue;
+    retiredAccountIds.push(...retiredIds);
+    retiredIdsByAnchorAccount.set(anchor.adAccountId, retiredIds);
+  }
+
+  const projectionAccountIds = [...sourceAccountIds, ...retiredAccountIds];
   const { data, error } = await service
     .from("ad_accounts")
     .select(ACCOUNT_COLUMNS)
-    .in("id", sourceAccountIds)
+    .in("id", projectionAccountIds)
     .eq("client_id", clientId);
-  if (error || !Array.isArray(data) || data.length !== sourceAccountIds.length) {
+  if (error || !Array.isArray(data) || data.length !== projectionAccountIds.length) {
     throw new PortalProjectionError("database_error");
   }
 
@@ -285,6 +317,7 @@ const fetchV2Projection = cache(async function fetchV2Projection(
     (data as AdAccount[]).map((account) => [account.id, account]),
   );
   const metricIdsByStore = new Map<string, string[]>();
+  const liveMetricIdsByStore = new Map<string, string[]>();
   const googleSourcesByStore = new Map<string, CanonicalReportingSource[]>();
   const assignedSourceIds = new Set<string>();
   const accounts = anchors
@@ -309,11 +342,16 @@ const fetchV2Projection = cache(async function fetchV2Projection(
         anchor.adAccountId,
         groupedSources.filter((source) => source.googleAds !== null),
       );
-      metricIdsByStore.set(anchor.adAccountId, [
+      const liveIds = [
         anchor.adAccountId,
         ...groupedSources
           .filter((source) => source.adAccountId !== anchor.adAccountId)
           .map((source) => source.adAccountId),
+      ];
+      liveMetricIdsByStore.set(anchor.adAccountId, liveIds);
+      metricIdsByStore.set(anchor.adAccountId, [
+        ...liveIds,
+        ...(retiredIdsByAnchorAccount.get(anchor.adAccountId) ?? []),
       ]);
 
       return {
@@ -349,6 +387,7 @@ const fetchV2Projection = cache(async function fetchV2Projection(
   return {
     accounts,
     metricIdsByStore,
+    liveMetricIdsByStore,
     metricAccountsById,
     unallocatedGoogleAccountIds,
     googleSourcesByStore,
@@ -423,10 +462,15 @@ export async function fetchAccount(accountId: string): Promise<PortalAccount | n
 
 /**
  * Expands selected portal stores to their physical daily_metrics rows. Legacy
- * stores remain one-to-one; a V2 anchor includes each mapped Google child.
+ * stores remain one-to-one; a V2 anchor includes each mapped Google child and,
+ * by default, every account a handover retired under it - their frozen rows
+ * are still the store's history. Ask for `scope: "live"` when the ids feed a
+ * live-topology loader (the Shopify funnel, analytics), which fails closed on
+ * an account with no active source to resolve.
  */
 export async function reportingMetricAccountIds(
   accountsOrAccountId: readonly Pick<AdAccount, "id">[] | string,
+  options: { scope?: "all" | "live" } = {},
 ): Promise<string[]> {
   const requested =
     typeof accountsOrAccountId === "string"
@@ -442,9 +486,9 @@ export async function reportingMetricAccountIds(
 
   const projection = await v2ProjectionOrNull(clientId);
   if (!projection) return [];
-  return [
-    ...new Set(requested.flatMap((id) => projection.metricIdsByStore.get(id) ?? [])),
-  ];
+  const byStore =
+    options.scope === "live" ? projection.liveMetricIdsByStore : projection.metricIdsByStore;
+  return [...new Set(requested.flatMap((id) => byStore.get(id) ?? []))];
 }
 
 /**

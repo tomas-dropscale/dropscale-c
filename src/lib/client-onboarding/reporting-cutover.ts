@@ -472,9 +472,18 @@ async function buildClientReportingCutoverQueue(
       .filter((event) => event.event_type === "source_abandoned")
       .map((event) => event.binding_id),
   );
+  // A post-cutover active binding carries its authority in an immutable anchor
+  // event. The staged lifecycle writes 'source_added' on promotion; a store
+  // handover writes 'handed_over' on BOTH bindings it creates — the successor
+  // under the new store, and the old store's remaining Shopify-only binding.
+  // Reading only 'source_added' here fails the entire client closed the moment
+  // it hands a Google account on, which is a sanctioned move, not a repair.
   const promotedBindingIds = new Set(
     snapshot.anchorEvents
-      .filter((event) => event.event_type === "source_added")
+      .filter(
+        (event) =>
+          event.event_type === "source_added" || event.event_type === "handed_over",
+      )
       .map((event) => event.binding_id),
   );
   const replacementRequiredClients = new Set<string>();
@@ -1144,7 +1153,7 @@ async function buildClientReportingCutoverQueue(
       : inconsistentMarker
         ? "Reporting marker and operational surface disagree; no write is available."
         : unsafePostCutoverActive
-          ? "A post-cutover active binding has no immutable source_added promotion event. Existing authority stays fail-closed until it is repaired."
+          ? "A post-cutover active binding has no immutable promotion event (source_added or handed_over). Existing authority stays fail-closed until it is repaired."
           : !authoritativeBindingsHealthy
             ? "An authoritative reporting binding no longer has its exact healthy connected source. Reporting remains blocked until that authority is repaired."
           : !billingCurrencySupported

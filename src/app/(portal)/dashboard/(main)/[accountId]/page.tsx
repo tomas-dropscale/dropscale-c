@@ -49,7 +49,13 @@ export default async function AccountPage({
   const account = await fetchAccount(accountId);
   if (!account) notFound();
 
-  const metricAccountIds = await reportingMetricAccountIds(account.id);
+  const [metricAccountIds, liveAccountIds] = await Promise.all([
+    reportingMetricAccountIds(account.id),
+    // The funnel loader resolves every id to an ACTIVE source and fails closed
+    // otherwise, so it must never see a handover-retired account - those only
+    // belong in the sums above.
+    reportingMetricAccountIds(account.id, { scope: "live" }),
+  ]);
   const [physicalRows, campaigns, referralRateSchedule, funnel, { d }] = await Promise.all([
     fetchDailyMetrics(metricAccountIds, range.from, range.to),
     fetchCampaigns(account, range),
@@ -60,7 +66,7 @@ export default async function AccountPage({
     fetchClientStoreFunnel({
       clientId: account.client_id,
       accountId: account.id,
-      activityAccountIds: metricAccountIds,
+      activityAccountIds: liveAccountIds,
       currency: account.currency,
       range: { from: range.from, to: range.to },
     }).catch(() => null),

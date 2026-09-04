@@ -227,7 +227,20 @@ function fakeDatabase(
       >
     | "error" = { [CLIENT]: "v2_active" },
   secretQuery: "ok" | "error" | "missing" = "ok",
+  extras: {
+    /** Binding statuses per account, for the runtime retirement probe. */
+    retiredBindings?: Record<string, string[]>;
+    /** Accounts whose closing billing counter is on file. */
+    billingEnds?: string[];
+    /**
+     * Accounts whose revoked binding a store handover named as the source it
+     * retired (a 'handed_over' anchor event with that binding as prior).
+     */
+    handedOver?: string[];
+  } = {},
 ) {
+  // The probe reads binding ids too; the fake derives one per account+status.
+  const bindingId = (accountId: string, status: string) => `${accountId}:${status}`;
   const upserts: DailyMetricRow[][] = [];
   const receipts: Record<string, unknown>[] = [];
   const rpcs: Array<{ name: string; args: Record<string, unknown> }> = [];
@@ -276,6 +289,45 @@ function fakeDatabase(
                 ),
                 error: null,
               })),
+            })),
+          })),
+          // The retirement probe reads every binding of the unbound accounts.
+          in: vi.fn(async (_column: string, accountIds: string[]) => ({
+            data: accountIds.flatMap((id) =>
+              (extras.retiredBindings?.[id] ?? []).map((status) => ({
+                id: bindingId(id, status),
+                ad_account_id: id,
+                status,
+              })),
+            ),
+            error: null,
+          })),
+        })),
+      };
+    }
+    if (table === "ad_account_billing_ends") {
+      return {
+        select: vi.fn(() => ({
+          in: vi.fn(async (_column: string, accountIds: string[]) => ({
+            data: accountIds
+              .filter((id) => (extras.billingEnds ?? []).includes(id))
+              .map((ad_account_id) => ({ ad_account_id })),
+            error: null,
+          })),
+        })),
+      };
+    }
+    if (table === "client_reporting_anchor_events") {
+      return {
+        select: vi.fn(() => ({
+          eq: vi.fn(() => ({
+            in: vi.fn(async (_column: string, priorBindingIds: string[]) => ({
+              data: priorBindingIds
+                .filter((id) =>
+                  (extras.handedOver ?? []).some((acct) => id === bindingId(acct, "revoked")),
+                )
+                .map((prior_binding_id) => ({ prior_binding_id })),
+              error: null,
             })),
           })),
         })),
@@ -847,6 +899,122 @@ describe("V2 daily-metrics recompute", () => {
     expect(db.receipts).toEqual([]);
     expect(mocks.fetchLiveDailyBreakdown).not.toHaveBeenCalled();
     expect(mocks.fetchDailySales).not.toHaveBeenCalled();
+  });
+
+  it("drops a handover-retired account from the close instead of failing it", async () => {
+    const RETIRED = "70000000-0000-4000-8000-000000000042";
+    const db = fakeDatabase(
+      [account(ANCHOR), account(RETIRED, { reporting_role: "google_spend" })],
+      [],
+      {},
+      { [CLIENT]: "v2_active" },
+      "ok",
+      // Retired for good: binding revoked and the closing counter captured.
+      { retiredBindings: { [RETIRED]: ["revoked"] }, billingEnds: [RETIRED] },
+    );
+    mocks.createClient.mockResolvedValue(db.client);
+    mocks.createServiceClient.mockReturnValue(db.client);
+    mocks.resolveReportingSources.mockResolvedValue([anchorSource()]);
+
+    await refreshAccountsNow([ANCHOR, RETIRED], {
+      client: db.client as never,
+      reportingClient: db.client as never,
+      from: DAY,
+      to: DAY,
+    });
+
+    // The live anchor synced; the retired account was neither fetched nor
+    // rewritten — its history stays frozen at the handover boundary.
+    expect([...new Set(db.upserts.flat().map((row) => row.ad_account_id))]).toEqual([
+      ANCHOR,
+    ]);
+  });
+
+  it("drops a never-billed child the handover retired on its own evidence", async () => {
+    // 0096 lets a child that never started billing hand over without a closing
+    // counter. The portal folds that account in on the 'handed_over' event
+    // alone, so the close must recognise the same evidence - otherwise the
+    // client's Refresh and the nightly close throw on an account the portal is
+    // showing.
+    const RETIRED = "70000000-0000-4000-8000-000000000042";
+    const db = fakeDatabase(
+      [account(ANCHOR), account(RETIRED, { reporting_role: "google_spend" })],
+      [],
+      {},
+      { [CLIENT]: "v2_active" },
+      "ok",
+      { retiredBindings: { [RETIRED]: ["revoked"] }, billingEnds: [], handedOver: [RETIRED] },
+    );
+    mocks.createClient.mockResolvedValue(db.client);
+    mocks.createServiceClient.mockReturnValue(db.client);
+    mocks.resolveReportingSources.mockResolvedValue([anchorSource()]);
+
+    await refreshAccountsNow([ANCHOR, RETIRED], {
+      client: db.client as never,
+      reportingClient: db.client as never,
+      from: DAY,
+      to: DAY,
+    });
+
+    expect([...new Set(db.upserts.flat().map((row) => row.ad_account_id))]).toEqual([
+      ANCHOR,
+    ]);
+  });
+
+  it("never drops a handed-over pair's account while its replacement binding is live", async () => {
+    // A pair handover names the revoked PAIR in its handed_over events, but
+    // the pair's account keeps an ACTIVE Shopify-only replacement. It is not
+    // a candidate at all, so the evidence must not drop it - it stays in the
+    // scope, and with no source for it the assertion still refuses to guess.
+    const KEPT = "70000000-0000-4000-8000-000000000043";
+    const db = fakeDatabase(
+      [account(ANCHOR), account(KEPT, { reporting_role: "legacy_hybrid" })],
+      [],
+      {},
+      { [CLIENT]: "v2_active" },
+      "ok",
+      { retiredBindings: { [KEPT]: ["revoked", "active"] }, billingEnds: [], handedOver: [KEPT] },
+    );
+    mocks.createClient.mockResolvedValue(db.client);
+    mocks.createServiceClient.mockReturnValue(db.client);
+    mocks.resolveReportingSources.mockResolvedValue([anchorSource()]);
+
+    await expect(
+      refreshAccountsNow([ANCHOR, KEPT], {
+        client: db.client as never,
+        reportingClient: db.client as never,
+        from: DAY,
+        to: DAY,
+      }),
+    ).rejects.toThrow("The requested V2 reporting scope is incomplete.");
+    expect(db.upserts).toEqual([]);
+  });
+
+  it("still fails the close when an unbound account has no closed retirement", async () => {
+    const RETIRED = "70000000-0000-4000-8000-000000000042";
+    const db = fakeDatabase(
+      [account(ANCHOR), account(RETIRED, { reporting_role: "google_spend" })],
+      [],
+      {},
+      { [CLIENT]: "v2_active" },
+      "ok",
+      // Revoked but never billed to a close: that is a lost binding, not a
+      // retirement, and the scope must refuse to guess.
+      { retiredBindings: { [RETIRED]: ["revoked"] }, billingEnds: [] },
+    );
+    mocks.createClient.mockResolvedValue(db.client);
+    mocks.createServiceClient.mockReturnValue(db.client);
+    mocks.resolveReportingSources.mockResolvedValue([anchorSource()]);
+
+    await expect(
+      refreshAccountsNow([ANCHOR, RETIRED], {
+        client: db.client as never,
+        reportingClient: db.client as never,
+        from: DAY,
+        to: DAY,
+      }),
+    ).rejects.toThrow("The requested V2 reporting scope is incomplete.");
+    expect(db.upserts).toEqual([]);
   });
 
   it("carries Shopify facts on a partial legacy Google binding instead of erasing them", async () => {

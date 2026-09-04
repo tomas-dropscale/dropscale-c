@@ -43,6 +43,7 @@ import {
 } from "@/lib/metrics/queries";
 import type { AdAccount } from "@/lib/supabase/types";
 import type { RangeSelection } from "@/lib/portal/range";
+import { retiredAccountIdsByAnchorBinding } from "@/lib/reporting/retired-sources";
 import {
   resolveReportingSources,
   type CanonicalReportingSource,
@@ -52,6 +53,13 @@ type OverviewScope = {
   stores: AdAccount[];
   recomputeAccounts: AdAccount[];
   metricIdsByStore: Map<string, string[]>;
+  /**
+   * Frozen accounts a handover retired under each store's anchor. Their rows
+   * join the store's totals and history, but they are never recomputed and
+   * never counted against the completeness grid — their rows legitimately
+   * stop at the handover boundary.
+   */
+  retiredMetricIdsByStore: Map<string, string[]>;
   allMetricIds: string[];
   googleConnectedByStore: Map<string, boolean>;
   service: NonNullable<ReturnType<typeof createServiceClient>>;
@@ -179,6 +187,7 @@ async function reportingScope(
       stores: await storesWithPublicDomains(service, clientId, accounts),
       recomputeAccounts: accounts,
       metricIdsByStore: new Map(accounts.map((account) => [account.id, [account.id]])),
+      retiredMetricIdsByStore: new Map(),
       allMetricIds: [...new Set(ids)],
       googleConnectedByStore: new Map(
         accounts.map((account) => [account.id, account.google_ads_connected]),
@@ -262,13 +271,44 @@ async function reportingScope(
     return account;
   });
 
+  // A store keeps the frozen history of every account a handover retired
+  // under its anchor. Those ids join fetches and totals only: nothing syncs a
+  // retired account, so it stays out of recomputeAccounts, and its rows stop
+  // at the handover boundary, so it stays out of the completeness grid.
+  const liveMetricIds = new Set(sources.map((source) => source.adAccountId));
+  const retiredByAnchorBinding = await retiredAccountIdsByAnchorBinding(
+    service,
+    clientId,
+    anchors.map((anchor) => anchor.bindingId),
+  );
+  const retiredMetricIdsByStore = new Map<string, string[]>();
+  const retiredMetricIds: string[] = [];
+  for (const anchor of anchors) {
+    const retiredIds = (retiredByAnchorBinding.get(anchor.bindingId) ?? []).filter(
+      (id) => !liveMetricIds.has(id) && !claimedMetricIds.has(id),
+    );
+    if (retiredIds.length === 0) continue;
+    for (const id of retiredIds) {
+      if (!accountById.has(id)) {
+        throw new Error("A retired reporting account is unavailable.");
+      }
+      claimedMetricIds.add(id);
+      retiredMetricIds.push(id);
+    }
+    retiredMetricIdsByStore.set(anchor.adAccountId, retiredIds);
+  }
+
   return {
     stores,
     recomputeAccounts,
     metricIdsByStore,
+    retiredMetricIdsByStore,
     // Standalone Google bindings cannot be attributed to a store, but their
     // spend is still agency spend and must remain in client totals/commission.
-    allMetricIds: recomputeAccounts.map((account) => account.id),
+    allMetricIds: [
+      ...recomputeAccounts.map((account) => account.id),
+      ...retiredMetricIds,
+    ],
     googleConnectedByStore,
     service,
   };
@@ -501,11 +541,19 @@ export async function fetchClientOverview(
     .map((account): AdminStoreOverview => {
       const metricIds = scope.metricIdsByStore.get(account.id);
       if (!metricIds) throw new Error("A client reporting store group is missing.");
-      const accountRows = metricIds.flatMap((id) => byAccount.get(id) ?? []);
-      const grid = exactStoreGrid(accountRows, metricIds, account.id, range);
+      const retiredIds = scope.retiredMetricIdsByStore.get(account.id) ?? [];
+      // The grid judges completeness on LIVE accounts only; retired accounts
+      // stopped writing at their handover boundary and still belong in every
+      // sum below.
+      const liveRows = metricIds.flatMap((id) => byAccount.get(id) ?? []);
+      const accountRows = [
+        ...liveRows,
+        ...retiredIds.flatMap((id) => byAccount.get(id) ?? []),
+      ];
+      const grid = exactStoreGrid(liveRows, metricIds, account.id, range);
       const updatedAt = freshness(accountRows).updatedAt;
       const totals = sumMetrics(accountRows);
-      const commission = metricIds.reduce((sum, id) => {
+      const commission = [...metricIds, ...retiredIds].reduce((sum, id) => {
         const physicalSpend = sumMetrics(byAccount.get(id) ?? []).adSpend;
         return sum + (physicalSpend * (rateById.get(id) ?? 0)) / 100;
       }, 0);

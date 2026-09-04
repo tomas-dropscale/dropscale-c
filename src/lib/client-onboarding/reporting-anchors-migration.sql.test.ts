@@ -36,6 +36,10 @@ const STORE_HANDOVER_MIGRATION = readFileSync(
   "supabase/migrations/0095_reporting_store_handover.sql",
   "utf8",
 );
+const CHILD_HANDOVER_MIGRATION = readFileSync(
+  "supabase/migrations/0096_reporting_child_handover.sql",
+  "utf8",
+);
 
 const ADMIN = "55000000-0000-4000-8000-000000000001";
 const CLIENT = "55000000-0000-4000-8000-000000000002";
@@ -466,6 +470,11 @@ beforeEach(async () => {
     await db.exec(STORE_HANDOVER_MIGRATION);
   } catch (error) {
     throw new Error("0095 migration failed", { cause: error });
+  }
+  try {
+    await db.exec(CHILD_HANDOVER_MIGRATION);
+  } catch (error) {
+    throw new Error("0096 migration failed", { cause: error });
   }
 
   await db.query(
@@ -3515,7 +3524,6 @@ describe("adopting an unanchored Google source (0094)", () => {
   });
 });
 
-describe("handing a Google source to a new store (0095)", () => {
   // A third store of its own: SHOPIFY_2's domain deliberately collides with
   // the seeded legacy pair for the adoption tests, and a handover target
   // must be a plain fresh anchor.
@@ -3653,6 +3661,8 @@ describe("handing a Google source to a new store (0095)", () => {
       [pairId, targetId, ADMIN, key],
     );
   }
+describe("handing a Google source to a new store (0095)", () => {
+
 
   it("moves the Google source to the new store and splits billing at the captured counter", async () => {
     const { pairId, targetId } = await pairAndTarget();
@@ -3744,6 +3754,22 @@ describe("handing a Google source to a new store (0095)", () => {
       event_type: "handed_over",
       prior_binding_id: pairId,
     });
+
+    // BOTH post-cutover bindings carry immutable evidence. Without the
+    // replacement's own event the cutover queue reads it as an unexplained
+    // post-cutover binding and fails the entire client closed.
+    const evidenced = await db.query<{ binding_id: string; event_type: string }>(
+      `select binding_id, event_type
+       from public.client_reporting_anchor_events
+       where binding_id in ($1, $2)`,
+      [childBindingId, replacement.id],
+    );
+    expect(
+      evidenced.rows.map((row) => row.event_type).every((type) => type === "handed_over"),
+    ).toBe(true);
+    expect(new Set(evidenced.rows.map((row) => row.binding_id))).toEqual(
+      new Set([childBindingId, replacement.id]),
+    );
   });
 
   it("refuses while the old store's Google billing is still open", async () => {
@@ -3823,4 +3849,282 @@ describe("handing a Google source to a new store (0095)", () => {
     );
   });
 
+});
+
+describe("handing an anchored child on to a third store (0096)", () => {
+  const THIRD_SHOPIFY = "55000000-0000-4000-8000-000000000023";
+
+  async function thirdStoreAnchor() {
+    await db.query(
+      `insert into public.client_shopify_connections(
+         id, session_id, client_id, status, shopify_shop_id, shopify_name,
+         shopify_domain, shopify_currency, credential_hint, last_verified_at
+       ) values ($1, $2, $3, 'connected', 'shop-4', 'Third Store',
+         'third-store.myshopify.com', 'EUR', 'hint', now())`,
+      [THIRD_SHOPIFY, SESSION, CLIENT],
+    );
+    await db.query(
+      `insert into public.client_shopify_credentials(
+         connection_id, shopify_client_id, client_secret_ciphertext
+       ) values ($1, 'client-id-4', 'secret-ciphertext-4')`,
+      [THIRD_SHOPIFY],
+    );
+    const anchor = await provision({
+      shopify: THIRD_SHOPIFY,
+      key: "anchor:handover:third",
+    });
+    return anchor.rows[0]!.id;
+  }
+
+  async function readyForCutover(bindingId: string) {
+    await materializeBindingWindow(bindingId);
+    await db.query(
+      `select public.record_client_reporting_sync_success(
+         $1, 'shopify', current_date - 90, current_date - 1, 'EUR', 90
+       )`,
+      [bindingId],
+    );
+  }
+
+  async function closeSuccessor(childBindingId: string) {
+    const accountId = await accountOf(childBindingId);
+    const start = await db.query<{ id: string }>(
+      "select id from public.ad_account_billing_starts where ad_account_id = $1",
+      [accountId],
+    );
+    await db.query(
+      `insert into public.ad_account_billing_ends(
+         ad_account_id, billing_start_id, google_ads_customer_id, currency,
+         google_local_date, google_time_zone, end_cost_micros
+       ) values ($1, $2, '7777777777', 'EUR', current_date,
+         'America/New_York', 987654321)`,
+      [accountId, start.rows[0]!.id],
+    );
+    return accountId;
+  }
+
+  it("moves the child again: the succession is repeatable, history frozen in place", async () => {
+    const { pairId, targetId } = await pairAndTarget();
+    // The third store exists before cutover in this fixture; in production a
+    // post-cutover store arrives through the staged lifecycle instead.
+    const thirdAnchorId = await thirdStoreAnchor();
+    await readyForCutover(thirdAnchorId);
+    const opened = await openBilling(pairId);
+    await cutOverBoth(pairId, targetId);
+    await closeBilling(opened);
+    const firstChildBinding = (await handover(pairId, targetId)).rows[0]!.id;
+    const firstSuccessorAccount = await accountOf(firstChildBinding);
+
+    // Stop counting on the successor: the second boundary in the chain.
+    await closeSuccessor(firstChildBinding);
+
+    const second = await db.query<{ id: string }>(
+      `select public.handover_client_reporting_google_source(
+         $1, $2, $3, 'handover:test:leg2', 'Second handover in the chain'
+       ) as id`,
+      [firstChildBinding, thirdAnchorId, ADMIN],
+    );
+    const secondChildBinding = second.rows[0]!.id;
+
+    // The first successor's binding is retired and NOT replaced: its store
+    // keeps its own anchor, and the account keeps its recorded history with
+    // no active binding writing it ever again.
+    const bindings = await db.query<{
+      id: string;
+      status: string;
+      ad_account_id: string;
+      shopify_anchor_binding_id: string | null;
+      google_ads_connection_id: string | null;
+    }>(
+      `select id, status, ad_account_id, shopify_anchor_binding_id, google_ads_connection_id
+       from public.client_reporting_bindings`,
+    );
+    expect(bindings.rows.find((row) => row.id === firstChildBinding)!.status).toBe("revoked");
+    expect(
+      bindings.rows.filter(
+        (row) => row.status === "active" && row.ad_account_id === firstSuccessorAccount,
+      ),
+    ).toHaveLength(0);
+
+    // The second successor: a fresh account, same Google identity, anchored
+    // under the third store, opening exactly at the second closing counter.
+    const child2 = bindings.rows.find((row) => row.id === secondChildBinding)!;
+    expect(child2.status).toBe("active");
+    expect(child2.shopify_anchor_binding_id).toBe(thirdAnchorId);
+    expect(child2.ad_account_id).not.toBe(firstSuccessorAccount);
+    const start2 = await db.query<{ baseline: string | number; today: boolean }>(
+      `select baseline_cost_micros as baseline, google_local_date = current_date as today
+       from public.ad_account_billing_starts where ad_account_id = $1`,
+      [child2.ad_account_id],
+    );
+    expect(Number(start2.rows[0]!.baseline)).toBe(987654321);
+    expect(start2.rows[0]!.today).toBe(true);
+
+    const mapping = await db.query<{ shopify_connection_id: string }>(
+      "select shopify_connection_id from public.client_asset_mappings where google_ads_connection_id = $1",
+      [GOOGLE_2],
+    );
+    expect(mapping.rows[0]!.shopify_connection_id).toBe(THIRD_SHOPIFY);
+
+    // Three accounts now share the identity; every retired holder is closed.
+    const holders = await db.query<{ n: string }>(
+      "select count(*)::text as n from public.ad_accounts where google_ads_customer_id = '7777777777'",
+    );
+    expect(Number(holders.rows[0]!.n)).toBe(3);
+  });
+
+  it("repairs a 0095 handover whose replacement binding was left unevidenced", async () => {
+    // Reproduces the exact production sequence (Lourenço): a handover run by
+    // the ORIGINAL 0095 function, which evidenced the successor and left the
+    // old store's replacement binding unexplained — so the cutover queue
+    // failed the whole client closed. Anchor events are append-only, so this
+    // downgrades the function rather than deleting the row afterwards. Both
+    // the v1 function and the repair statement are read out of the migrations
+    // themselves, never copied here, so neither can drift from what ships.
+    const v1Start = STORE_HANDOVER_MIGRATION.indexOf(
+      "create or replace function public.handover_client_reporting_google_source(",
+    );
+    const grantTail = ") to service_role;";
+    const V1_FUNCTION = STORE_HANDOVER_MIGRATION.slice(
+      v1Start,
+      STORE_HANDOVER_MIGRATION.indexOf(grantTail, v1Start) + grantTail.length,
+    );
+    const REPAIR = CHILD_HANDOVER_MIGRATION.slice(
+      CHILD_HANDOVER_MIGRATION.indexOf("-- Repair:"),
+    );
+    expect(v1Start).toBeGreaterThan(-1);
+    expect(REPAIR).toContain("replacementBindingId");
+
+    await db.exec(V1_FUNCTION);
+
+    const { pairId, targetId } = await pairAndTarget();
+    const opened = await openBilling(pairId);
+    await cutOverBoth(pairId, targetId);
+    const oldAccountId = await closeBilling(opened);
+    const childBindingId = (await handover(pairId, targetId)).rows[0]!.id;
+
+    const replacement = await db.query<{ id: string }>(
+      `select id from public.client_reporting_bindings
+       where status = 'active' and ad_account_id = $1 and shopify_connection_id = $2`,
+      [oldAccountId, SHOPIFY_2],
+    );
+    const replacementId = replacement.rows[0]!.id;
+
+    // The defect itself: v1 left this binding with no evidence at all.
+    const orphaned = await db.query<{ n: string }>(
+      "select count(*)::text as n from public.client_reporting_anchor_events where binding_id = $1",
+      [replacementId],
+    );
+    expect(Number(orphaned.rows[0]!.n)).toBe(0);
+
+    await db.exec(REPAIR);
+
+    const repaired = await db.query<{
+      event_type: string;
+      prior_binding_id: string;
+      ad_account_id: string;
+      details: Record<string, unknown>;
+    }>(
+      `select event_type, prior_binding_id, ad_account_id, details
+       from public.client_reporting_anchor_events where binding_id = $1`,
+      [replacementId],
+    );
+    expect(repaired.rows).toHaveLength(1);
+    expect(repaired.rows[0]).toMatchObject({
+      event_type: "handed_over",
+      prior_binding_id: pairId,
+      ad_account_id: oldAccountId,
+    });
+    expect(repaired.rows[0]!.details).toMatchObject({
+      successorBindingId: childBindingId,
+      repairedBy: "0096_reporting_child_handover",
+    });
+
+    // Re-running is a no-op, never a duplicate or a unique-key failure.
+    await db.exec(REPAIR);
+    const afterReplay = await db.query<{ n: string }>(
+      "select count(*)::text as n from public.client_reporting_anchor_events where binding_id = $1",
+      [replacementId],
+    );
+    expect(Number(afterReplay.rows[0]!.n)).toBe(1);
+  });
+
+  it("leaves a child handover alone: no replacement means nothing to repair", async () => {
+    // A child handover records replacementBindingId as a JSON null, so the
+    // repair must skip it rather than casting null to uuid or inventing a row.
+    const REPAIR = CHILD_HANDOVER_MIGRATION.slice(
+      CHILD_HANDOVER_MIGRATION.indexOf("-- Repair:"),
+    );
+    const { pairId, targetId } = await pairAndTarget();
+    const thirdAnchorId = await thirdStoreAnchor();
+    await readyForCutover(thirdAnchorId);
+    const opened = await openBilling(pairId);
+    await cutOverBoth(pairId, targetId);
+    await closeBilling(opened);
+    const firstChildBinding = (await handover(pairId, targetId)).rows[0]!.id;
+    await closeSuccessor(firstChildBinding);
+    await db.query(
+      `select public.handover_client_reporting_google_source(
+         $1, $2, $3, 'handover:test:child-null', 'Child handover, no replacement'
+       )`,
+      [firstChildBinding, thirdAnchorId, ADMIN],
+    );
+
+    const childEvent = await db.query<{ replacement: string | null }>(
+      `select details ->> 'replacementBindingId' as replacement
+       from public.client_reporting_anchor_events
+       where idempotency_key = 'handover:test:child-null'`,
+    );
+    expect(childEvent.rows[0]!.replacement).toBeNull();
+
+    const before = await db.query<{ n: string }>(
+      "select count(*)::text as n from public.client_reporting_anchor_events",
+    );
+    await db.exec(REPAIR);
+    const after = await db.query<{ n: string }>(
+      "select count(*)::text as n from public.client_reporting_anchor_events",
+    );
+    expect(after.rows[0]!.n).toBe(before.rows[0]!.n);
+  });
+
+  it("refuses the child move while the successor's billing is still open", async () => {
+    const { pairId, targetId } = await pairAndTarget();
+    const thirdAnchorId = await thirdStoreAnchor();
+    await readyForCutover(thirdAnchorId);
+    const opened = await openBilling(pairId);
+    await cutOverBoth(pairId, targetId);
+    await closeBilling(opened);
+    const firstChildBinding = (await handover(pairId, targetId)).rows[0]!.id;
+
+    // The successor has an open start (written by the first handover) and no
+    // end: money is still flowing to the second store.
+    await expectSqlState(
+      db.query(
+        `select public.handover_client_reporting_google_source(
+           $1, $2, $3, 'handover:test:leg2-open', 'Premature second handover'
+         )`,
+        [firstChildBinding, thirdAnchorId, ADMIN],
+      ),
+      "23514",
+    );
+  });
+
+  it("refuses moving the child to the store it already reports to", async () => {
+    const { pairId, targetId } = await pairAndTarget();
+    const opened = await openBilling(pairId);
+    await cutOverBoth(pairId, targetId);
+    await closeBilling(opened);
+    const firstChildBinding = (await handover(pairId, targetId)).rows[0]!.id;
+    await closeSuccessor(firstChildBinding);
+
+    await expectSqlState(
+      db.query(
+        `select public.handover_client_reporting_google_source(
+           $1, $2, $3, 'handover:test:same-store', 'Pointless move'
+         )`,
+        [firstChildBinding, targetId, ADMIN],
+      ),
+      "23514",
+    );
+  });
 });

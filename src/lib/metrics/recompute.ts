@@ -273,10 +273,95 @@ async function resolveRuntimeReportingScope(
   const v2AccountIds = new Set(v2Accounts.map((account) => account.id));
   const legacyAccounts = accounts.filter((account) => !v2AccountIds.has(account.id));
   const scope = await resolveRequestedReportingSources(service, v2Accounts);
-  // An active rollout may never silently fall through to legacy merely
-  // because a binding disappeared or became unreadable.
-  assertCompleteReportingScope(scope);
-  return { ...scope, legacyAccounts };
+  // A store handover retires an account for good: every binding revoked, the
+  // closing billing counter captured, its rows frozen where they stopped. The
+  // nightly close and page refreshes still pass retired accounts in — their
+  // client stays v2_active and their frozen history still renders — so drop
+  // them from the scope here. They never fall through to legacy, and the
+  // assertion below still refuses any OTHER unbound account: an active
+  // rollout may never silently lose a binding.
+  const boundAccountIds = new Set(scope.sources.map((source) => source.adAccountId));
+  const unbound = scope.accounts.filter((account) => !boundAccountIds.has(account.id));
+  const retired = unbound.length > 0 ? await retiredAccountIds(service, unbound) : null;
+  const settled = retired?.size
+    ? {
+        accounts: scope.accounts.filter((account) => !retired.has(account.id)),
+        sources: scope.sources,
+      }
+    : scope;
+  assertCompleteReportingScope(settled);
+  return { ...settled, legacyAccounts };
+}
+
+/**
+ * Of these sourceless v2 accounts, the ones nothing can ever sync again: no
+ * active or staged binding left, at least one revoked binding, and EITHER the
+ * closing billing counter on file OR a store handover's own 'handed_over'
+ * event naming one of those revoked bindings as the source it retired.
+ *
+ * The counter covers an abandoned staged source (0056 closes the meter before
+ * abandonment) and every handover that had billed. The event covers the leg
+ * 0096 allows without a counter - a child that never started billing - which
+ * the portal projections already fold in on that same evidence; the two
+ * predicates must agree, or the client's Refresh and the nightly close throw
+ * on an account the portal is happily showing. Anything matching neither
+ * stays in the scope and trips the completeness assertion, exactly as before.
+ */
+async function retiredAccountIds(
+  service: Supabase,
+  accounts: AdAccount[],
+): Promise<Set<string>> {
+  const ids = [...new Set(accounts.map((account) => account.id))];
+  const { data: bindings, error: bindingsError } = await service
+    .from("client_reporting_bindings")
+    .select("id, ad_account_id, status")
+    .in("ad_account_id", ids);
+  if (bindingsError) throw bindingsError;
+  const statusesByAccount = new Map<string, string[]>();
+  const accountByRevokedBinding = new Map<string, string>();
+  for (const row of bindings ?? []) {
+    statusesByAccount.set(row.ad_account_id, [
+      ...(statusesByAccount.get(row.ad_account_id) ?? []),
+      row.status,
+    ]);
+    if (row.status === "revoked") accountByRevokedBinding.set(row.id, row.ad_account_id);
+  }
+  const candidates = new Set(
+    ids.filter((id) => {
+      const statuses = statusesByAccount.get(id) ?? [];
+      return (
+        statuses.includes("revoked") &&
+        !statuses.some((status) => status === "active" || status === "staged")
+      );
+    }),
+  );
+  if (candidates.size === 0) return new Set();
+  const candidateBindingIds = [...accountByRevokedBinding.entries()]
+    .filter(([, accountId]) => candidates.has(accountId))
+    .map(([bindingId]) => bindingId);
+
+  const [endsResult, eventsResult] = await Promise.all([
+    service
+      .from("ad_account_billing_ends")
+      .select("ad_account_id")
+      .in("ad_account_id", [...candidates]),
+    service
+      .from("client_reporting_anchor_events")
+      .select("prior_binding_id")
+      .eq("event_type", "handed_over")
+      .in("prior_binding_id", candidateBindingIds),
+  ]);
+  if (endsResult.error) throw endsResult.error;
+  if (eventsResult.error) throw eventsResult.error;
+
+  const retired = new Set((endsResult.data ?? []).map((row) => row.ad_account_id));
+  for (const row of eventsResult.data ?? []) {
+    const accountId = row.prior_binding_id
+      ? accountByRevokedBinding.get(row.prior_binding_id)
+      : undefined;
+    if (accountId && candidates.has(accountId)) retired.add(accountId);
+  }
+  return retired;
 }
 
 async function fetchExistingWindow(

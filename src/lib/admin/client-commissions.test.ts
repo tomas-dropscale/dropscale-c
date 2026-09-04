@@ -33,7 +33,8 @@ type Table =
   | "portal_clients"
   | "profiles"
   | "ad_accounts"
-  | "ad_account_commission_terms";
+  | "ad_account_commission_terms"
+  | "ad_account_billing_ends";
 type Result = { data: Record<string, unknown>[] | null; error: { message: string } | null };
 
 const ADMIN = "40000000-0000-4000-8000-000000000001";
@@ -179,6 +180,7 @@ describe("admin client commission catalogue", () => {
         ],
         error: null,
       },
+      ad_account_billing_ends: { data: [], error: null },
     };
     mocks.requireAdmin.mockResolvedValue({ id: ADMIN, role: "admin" });
     mocks.clientReportingAuthority.mockImplementation(async (clientId: string) =>
@@ -266,6 +268,9 @@ describe("admin client commission catalogue", () => {
         "ad_account_commission_terms",
         "id, ad_account_id, effective_from, revision, supersedes_id, decision_id, list_rate, reviewed_by, created_at, sealed_at",
       ],
+      // Closed Google meters: a handed-over account keeps its customer id with
+      // no live Google source, and must not fail the catalogue closed.
+      ["ad_account_billing_ends", "ad_account_id"],
     ]);
     expect(mocks.clientReportingAuthority).toHaveBeenCalledWith(ALPHA);
     expect(mocks.clientReportingAuthority).toHaveBeenCalledWith(BETA);
@@ -377,6 +382,65 @@ describe("admin client commission catalogue", () => {
     );
 
     await expect(listAdminCommissionClients()).rejects.toThrow(/inconsistent/i);
+  });
+
+  it("keeps the catalogue up after a store handover closes an account's Google meter", async () => {
+    // The shape a handover leaves (Lourenço, 2026-09-03): the old account is
+    // still active and still carries its customer id, but its only source is
+    // now the Shopify-only replacement binding. Its meter is closed, so there
+    // is nothing here left to price - and failing the whole catalogue closed
+    // over it took the commercial-terms surface down for every client.
+    results.ad_accounts.data!.push(
+      account({
+        id: "handed-over",
+        store_name: "Old store, Google gone",
+        google_ads_customer_id: "5586446242",
+        shopify_url: "https://old-store.myshopify.com/admin",
+      }),
+    );
+    mocks.resolveReportingSources.mockResolvedValue([
+      ...(await mocks.resolveReportingSources()),
+      source({
+        bindingId: "replacement-binding",
+        adAccountId: "handed-over",
+        kind: "shopify",
+        group: {
+          id: "replacement-binding",
+          shopifyAnchorBindingId: "replacement-binding",
+          shopifyAnchorAdAccountId: "handed-over",
+        },
+        shopify: {
+          connectionId: "shopify-old",
+          shopId: "gid://shopify/Shop/2",
+          shopifyName: "Old Store",
+          domain: "old-store.myshopify.com",
+          primaryDomain: null,
+          currency: "EUR",
+          credential: null,
+          healthError: null,
+        },
+        googleAds: null,
+      }),
+    ]);
+
+    // Without the closing counter this is still an unrepresented billable
+    // account, and the catalogue must still refuse to guess.
+    await expect(listAdminCommissionClients()).rejects.toThrow(/inconsistent/i);
+
+    results.ad_account_billing_ends.data = [{ ad_account_id: "handed-over" }];
+    const clients = await listAdminCommissionClients();
+    const alpha = clients.find((client) => client.id === ALPHA)!;
+    expect(alpha.stores).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "handed-over",
+          name: "Old Store",
+          // The store stays on the catalogue; it simply has no Google
+          // billing account left to price.
+          billingAccounts: [],
+        }),
+      ]),
+    );
   });
 
   it("fails closed on unavailable authority, data, topology or term chains", async () => {

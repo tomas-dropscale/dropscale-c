@@ -703,22 +703,28 @@ async function handoverExistingPairIfAny(
     .select(COLUMNS)
     .eq("google_ads_connection_id", input.googleAdsConnectionId);
   const rows = (byGoogle ?? []) as BindingRow[];
-  const child = rows.find(
-    (row) => row.status === "active" && row.shopify_anchor_binding_id !== null,
+  // A pair carries its store directly; a child carries it through its anchor.
+  // Both are handovers - a child is simply what a previous handover left
+  // behind, which is exactly what makes the succession repeatable.
+  const source = rows.find(
+    (row) =>
+      row.status === "active" &&
+      (row.shopify_connection_id !== null || row.shopify_anchor_binding_id !== null),
   );
-  if (child) {
-    throw new ClientOnboardingError(
-      "invalid_state",
-      "A handed-over Google source cannot move to a third store yet.",
-      409,
-    );
+  if (!source) return false;
+
+  let currentShopify = source.shopify_connection_id;
+  if (!currentShopify && source.shopify_anchor_binding_id) {
+    const { data: anchorRows } = await service
+      .from("client_reporting_bindings")
+      .select(COLUMNS)
+      .eq("id", source.shopify_anchor_binding_id);
+    currentShopify =
+      ((anchorRows ?? []) as BindingRow[])[0]?.shopify_connection_id ?? null;
   }
-  const pair = rows.find(
-    (row) => row.status === "active" && row.shopify_connection_id !== null,
-  );
-  if (!pair) return false;
   // Selecting the store it already reports to is not a move.
-  if (pair.shopify_connection_id === input.shopifyConnectionId) return true;
+  if (currentShopify === input.shopifyConnectionId) return true;
+  const pair = source;
 
   const { data: byShopify } = await service
     .from("client_reporting_bindings")

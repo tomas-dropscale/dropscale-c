@@ -239,6 +239,7 @@ function v2Projection(
   accounts: AccountRow[],
   terms: CommissionTermRow[],
   sources: CanonicalReportingSource[],
+  closedGoogleAccountIds: ReadonlySet<string>,
 ): Pick<AdminCommissionClient, "stores" | "unallocatedBillingAccounts"> {
   if (sources.length === 0 || sources.some((source) => source.clientId !== clientId)) {
     inconsistent();
@@ -257,12 +258,20 @@ function v2Projection(
       .filter((source) => source.googleAds !== null)
       .map((source) => source.adAccountId),
   );
+  // A billable Google account must be represented by a live Google source -
+  // unless its meter is closed. A store handover leaves exactly that: the old
+  // account keeps its customer id as history while its only remaining source
+  // is the Shopify-only replacement (or, after a child handover, no source at
+  // all). Its captured end caps every invoice, so there is nothing here left
+  // to price; failing the whole catalogue closed over it took down the
+  // commercial-terms surface for every client.
   if (
     accounts.some(
       (account) =>
         (account.status === "active" || account.status === "suspended") &&
         account.google_ads_customer_id !== null &&
-        !authorizedGoogleAccountIds.has(account.id),
+        !authorizedGoogleAccountIds.has(account.id) &&
+        !closedGoogleAccountIds.has(account.id),
     )
   ) {
     inconsistent();
@@ -350,28 +359,36 @@ export async function listAdminCommissionClients(): Promise<AdminCommissionClien
   const service = createServiceClient();
   if (!service) throw new Error("The admin client commission catalogue is unavailable.");
 
-  const [clientsResult, profilesResult, accountsResult, termsResult] = await Promise.all([
-    service.from("portal_clients").select(CLIENT_COLUMNS),
-    service.from("profiles").select(PROFILE_COLUMNS),
-    service.from("ad_accounts").select(ACCOUNT_COLUMNS),
-    service.from("ad_account_commission_terms").select(TERM_COLUMNS),
-  ]);
+  const [clientsResult, profilesResult, accountsResult, termsResult, endsResult] =
+    await Promise.all([
+      service.from("portal_clients").select(CLIENT_COLUMNS),
+      service.from("profiles").select(PROFILE_COLUMNS),
+      service.from("ad_accounts").select(ACCOUNT_COLUMNS),
+      service.from("ad_account_commission_terms").select(TERM_COLUMNS),
+      service.from("ad_account_billing_ends").select("ad_account_id"),
+    ]);
   const clients = clientsResult.data;
   const profiles = profilesResult.data;
   const accounts = accountsResult.data;
   const terms = termsResult.data;
+  const ends = endsResult.data;
   if (
     clientsResult.error ||
     profilesResult.error ||
     accountsResult.error ||
     termsResult.error ||
+    endsResult.error ||
     !Array.isArray(clients) ||
     !Array.isArray(profiles) ||
     !Array.isArray(accounts) ||
-    !Array.isArray(terms)
+    !Array.isArray(terms) ||
+    !Array.isArray(ends)
   ) {
     throw new Error("The admin client commission catalogue is unavailable.");
   }
+  const closedGoogleAccountIds = new Set(
+    (ends as { ad_account_id: string }[]).map((end) => end.ad_account_id),
+  );
 
   const adminIds = new Set(
     (profiles as ProfileRow[])
@@ -423,6 +440,7 @@ export async function listAdminCommissionClients(): Promise<AdminCommissionClien
               owned,
               terms as CommissionTermRow[],
               v2Sources.filter((source) => source.clientId === client.id),
+              closedGoogleAccountIds,
             )
           : {
               stores: legacyStores(owned, terms as CommissionTermRow[]),

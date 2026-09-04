@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   createServiceClient: vi.fn(),
   fetchDailyMetrics: vi.fn(),
   resolveReportingSources: vi.fn(),
+  retiredAccountIdsByAnchorBinding: vi.fn(),
 }));
 
 vi.mock("@/lib/supabase/server", () => ({ createClient: mocks.createClient }));
@@ -144,6 +145,9 @@ vi.mock("@/lib/metrics/queries", () => ({
 }));
 vi.mock("@/lib/reporting/sources", () => ({
   resolveReportingSources: mocks.resolveReportingSources,
+}));
+vi.mock("@/lib/reporting/retired-sources", () => ({
+  retiredAccountIdsByAnchorBinding: mocks.retiredAccountIdsByAnchorBinding,
 }));
 
 import { fetchClientOverview } from "./client-overview";
@@ -321,6 +325,7 @@ describe("admin client overview V2 projection", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.fetchDailyMetrics.mockResolvedValue([]);
+    mocks.retiredAccountIdsByAnchorBinding.mockResolvedValue(new Map());
   });
 
   it("shows one Shopify anchor and sums its pair and Google child exactly once", async () => {
@@ -412,6 +417,71 @@ describe("admin client overview V2 projection", () => {
         commission: 6.5,
       }),
     );
+  });
+
+  it("folds a handover-retired account into its store's history without touching the grid", async () => {
+    const anchor = account("anchor", {
+      reporting_role: "shopify_anchor",
+      commission_rate: 10,
+    });
+    const retired = account("retired", {
+      reporting_role: "google_spend",
+      commission_rate: 20,
+    });
+    mocks.createClient.mockResolvedValue(session([anchor, retired]));
+    mocks.createServiceClient.mockReturnValue(
+      serviceWithRollout("v2_active", "2026-08-14T00:00:00Z"),
+    );
+    mocks.resolveReportingSources.mockResolvedValue([source("anchor", { anchor: true })]);
+    mocks.retiredAccountIdsByAnchorBinding.mockResolvedValue(
+      new Map([["binding-anchor", ["retired"]]]),
+    );
+    mocks.fetchDailyMetrics.mockResolvedValue([
+      metric("anchor", {
+        ad_spend: 10,
+        revenue: 100,
+        orders_count: 2,
+        attributed_orders: 2,
+        attributed_revenue: 100,
+      }),
+      // The retired account's last chapter: spend recorded before the store
+      // handed its Google account on.
+      metric("retired", { day: "2026-08-13", ad_spend: 20 }),
+    ]);
+
+    const overview = await fetchClientOverview("client-1", range);
+
+    expect(mocks.retiredAccountIdsByAnchorBinding).toHaveBeenCalledWith(
+      expect.anything(),
+      "client-1",
+      ["binding-anchor"],
+    );
+    expect(mocks.fetchDailyMetrics).toHaveBeenCalledWith(
+      expect.arrayContaining(["anchor", "retired"]),
+      range.from,
+      range.to,
+    );
+    expect(overview?.stores).toEqual([
+      expect.objectContaining({
+        accountId: "anchor",
+        // Live topology only: the analytics view resolves these ids to live
+        // sources and a retired account has none.
+        activityAccountIds: ["anchor"],
+        adSpend: 30,
+        commission: 5,
+        // The completeness grid expects rows from the live anchor alone; the
+        // retired account's rows stop at its handover boundary by design.
+        reportingCoverage: { rows: 1, expectedRows: 14 },
+        days: [
+          { day: "2026-08-13", adSpend: 20, revenue: 0 },
+          { day: "2026-08-14", adSpend: 10, revenue: 100 },
+        ],
+      }),
+    ]);
+    expect(overview?.totals).toEqual(
+      expect.objectContaining({ adSpend: 30, commission: 5 }),
+    );
+    expect(overview?.activityAccountIds).toEqual(["anchor", "retired"]);
   });
 
   it("keeps an old v2_active row without the durable marker on legacy topology", async () => {

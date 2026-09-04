@@ -1341,7 +1341,8 @@ export type ClientReportingAnchorEvent = {
     | "upgraded"
     | "restaged"
     | "source_added"
-    | "source_abandoned";
+    | "source_abandoned"
+    | "handed_over";
   idempotency_key: string;
   actor_id: string;
   reason: string;

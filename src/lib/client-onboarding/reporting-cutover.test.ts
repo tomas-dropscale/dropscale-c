@@ -74,6 +74,7 @@ const GOOGLE_2 = "65000000-0000-4000-8000-000000000031";
 const BINDING = "65000000-0000-4000-8000-000000000040";
 const NEW_BINDING = "65000000-0000-4000-8000-000000000041";
 const BINDING_2 = "65000000-0000-4000-8000-000000000042";
+const BINDING_3 = "65000000-0000-4000-8000-000000000043";
 const SESSION = "65000000-0000-4000-8000-000000000050";
 const BOUND_AT = "2026-05-01T00:00:00.000Z";
 
@@ -1269,7 +1270,7 @@ describe("Phase 2 admin reporting cutover workflow", () => {
       syncActionId: null,
       activateActionId: null,
       message:
-        "A post-cutover active binding has no immutable source_added promotion event. Existing authority stays fail-closed until it is repaired.",
+        "A post-cutover active binding has no immutable promotion event (source_added or handed_over). Existing authority stays fail-closed until it is repaired.",
     });
 
     data.syncStates.push({
@@ -1287,7 +1288,161 @@ describe("Phase 2 admin reporting cutover workflow", () => {
       syncActionId: null,
       activateActionId: null,
       message:
-        "A post-cutover active binding has no immutable source_added promotion event. Existing authority stays fail-closed until it is repaired.",
+        "A post-cutover active binding has no immutable promotion event (source_added or handed_over). Existing authority stays fail-closed until it is repaired.",
+    });
+  });
+
+  it("keeps a store handover's two post-cutover bindings authoritative", async () => {
+    // The exact shape a store handover leaves behind (Lourenço, 2026-09-03):
+    // the old pair is revoked, its store keeps a Shopify-only REPLACEMENT, and
+    // the Google source reappears as a SUCCESSOR child under another anchor.
+    // Both are bound after the cutover, and both carry 'handed_over' evidence
+    // instead of the staged lifecycle's 'source_added'.
+    const data = boundSnapshot(true);
+    const marker = "2026-08-14T02:00:00.000Z";
+    const handoverAt = "2026-08-14T03:00:00.000Z";
+    data.rolloutStates[0] = {
+      ...data.rolloutStates[0],
+      operational_surface: "v2_active",
+      reporting_cutover_at: marker,
+      reporting_cutover_by: ADMIN,
+      reporting_cutover_reason: "Initial reporting cutover",
+    };
+    // The pre-handover pair is retired.
+    const pair = data.bindings[0];
+    data.bindings[0] = { ...pair, status: "revoked" };
+    // The old store keeps reporting on the same account, Shopify only.
+    data.bindings.push({
+      id: BINDING_2,
+      client_id: CLIENT,
+      ad_account_id: pair.ad_account_id,
+      shopify_connection_id: pair.shopify_connection_id,
+      google_ads_connection_id: null,
+      shopify_anchor_binding_id: null,
+      status: "active",
+      bound_at: handoverAt,
+    });
+    // The Google source's successor, anchored under the same store's binding.
+    data.adAccounts.push(
+      account({
+        id: ACCOUNT_2,
+        store_name: "Successor source",
+        reporting_role: "google_spend",
+        google_ads_customer_id: "1234567890",
+      }),
+    );
+    data.bindings.push({
+      id: BINDING_3,
+      client_id: CLIENT,
+      ad_account_id: ACCOUNT_2,
+      shopify_connection_id: null,
+      google_ads_connection_id: pair.google_ads_connection_id,
+      shopify_anchor_binding_id: BINDING_2,
+      status: "active",
+      bound_at: handoverAt,
+    });
+    const handoverEvent = {
+      prior_binding_id: pair.id,
+      event_type: "handed_over" as const,
+      actor_id: ADMIN,
+      reason: "Admin moved the Google source to the store it now advertises.",
+      details: {},
+      created_at: handoverAt,
+    };
+    data.anchorEvents.push(
+      {
+        ...handoverEvent,
+        binding_id: BINDING_3,
+        ad_account_id: ACCOUNT_2,
+        idempotency_key: "handover:pair:anchor",
+      },
+      {
+        ...handoverEvent,
+        binding_id: BINDING_2,
+        ad_account_id: pair.ad_account_id,
+        idempotency_key: "handover:pair:anchor:keep-store",
+      },
+    );
+    data.syncStates.push({
+      binding_id: BINDING_3,
+      source_type: "google_ads",
+      last_success_at: "2026-08-14T04:00:00.000Z",
+      last_success_from: day(-90),
+      last_success_to: day(-1),
+      source_currency: "EUR",
+      row_count: 90,
+    });
+
+    // Both bindings are authority, so the client stays live rather than
+    // failing closed on "no immutable source_added promotion event".
+    expect((await projectClientReportingCutover(data)).clients[0]).toMatchObject({
+      status: "active",
+      message: "Reporting cutover is active.",
+    });
+  });
+
+  it("still fails closed when only ONE of the handover's bindings is evidenced", async () => {
+    // The 0095 defect exactly: the successor carried 'handed_over' but the
+    // replacement carried nothing, so the client failed closed anyway. The
+    // repair in 0096 backfills that second event; this test keeps the
+    // predicate honest if it ever goes missing again.
+    const data = boundSnapshot(true);
+    const marker = "2026-08-14T02:00:00.000Z";
+    const handoverAt = "2026-08-14T03:00:00.000Z";
+    data.rolloutStates[0] = {
+      ...data.rolloutStates[0],
+      operational_surface: "v2_active",
+      reporting_cutover_at: marker,
+      reporting_cutover_by: ADMIN,
+      reporting_cutover_reason: "Initial reporting cutover",
+    };
+    const pair = data.bindings[0];
+    data.bindings[0] = { ...pair, status: "revoked" };
+    data.bindings.push({
+      id: BINDING_2,
+      client_id: CLIENT,
+      ad_account_id: pair.ad_account_id,
+      shopify_connection_id: pair.shopify_connection_id,
+      google_ads_connection_id: null,
+      shopify_anchor_binding_id: null,
+      status: "active",
+      bound_at: handoverAt,
+    });
+    data.adAccounts.push(
+      account({
+        id: ACCOUNT_2,
+        store_name: "Successor source",
+        reporting_role: "google_spend",
+        google_ads_customer_id: "1234567890",
+      }),
+    );
+    data.bindings.push({
+      id: BINDING_3,
+      client_id: CLIENT,
+      ad_account_id: ACCOUNT_2,
+      shopify_connection_id: null,
+      google_ads_connection_id: pair.google_ads_connection_id,
+      shopify_anchor_binding_id: BINDING_2,
+      status: "active",
+      bound_at: handoverAt,
+    });
+    // Only the successor is evidenced — the replacement is the orphan.
+    data.anchorEvents.push({
+      binding_id: BINDING_3,
+      prior_binding_id: pair.id,
+      ad_account_id: ACCOUNT_2,
+      event_type: "handed_over",
+      idempotency_key: "handover:pair:anchor",
+      actor_id: ADMIN,
+      reason: "Admin moved the Google source to the store it now advertises.",
+      details: {},
+      created_at: handoverAt,
+    });
+
+    expect((await projectClientReportingCutover(data)).clients[0]).toMatchObject({
+      status: "blocked",
+      message:
+        "A post-cutover active binding has no immutable promotion event (source_added or handed_over). Existing authority stays fail-closed until it is repaired.",
     });
   });
 
