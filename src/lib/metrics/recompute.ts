@@ -296,16 +296,19 @@ async function resolveRuntimeReportingScope(
 /**
  * Of these sourceless v2 accounts, the ones nothing can ever sync again: no
  * active or staged binding left, at least one revoked binding, and EITHER the
- * closing billing counter on file OR a store handover's own 'handed_over'
- * event naming one of those revoked bindings as the source it retired.
+ * closing billing counter on file OR a lifecycle RPC's own immutable evidence
+ * naming one of those revoked bindings: a store handover's 'handed_over'
+ * (prior_binding_id = the Google source it retired) or a store retirement's
+ * 'store_retired' (binding_id = the Shopify anchor it retired).
  *
  * The counter covers an abandoned staged source (0056 closes the meter before
- * abandonment) and every handover that had billed. The event covers the leg
- * 0096 allows without a counter - a child that never started billing - which
- * the portal projections already fold in on that same evidence; the two
- * predicates must agree, or the client's Refresh and the nightly close throw
- * on an account the portal is happily showing. Anything matching neither
- * stays in the scope and trips the completeness assertion, exactly as before.
+ * abandonment) and every handover that had billed. The events cover what has
+ * no counter: the never-billed child leg 0096 allows, and a retired store,
+ * whose anchor account never had a Google meter at all. The portal folds
+ * handed-over accounts in on that same evidence; the predicates must agree, or
+ * the client's Refresh and the nightly close throw on an account the portal is
+ * happily showing. Anything matching none stays in the scope and trips the
+ * completeness assertion, exactly as before.
  */
 async function retiredAccountIds(
   service: Supabase,
@@ -340,7 +343,7 @@ async function retiredAccountIds(
     .filter(([, accountId]) => candidates.has(accountId))
     .map(([bindingId]) => bindingId);
 
-  const [endsResult, eventsResult] = await Promise.all([
+  const [endsResult, handoverResult, retirementResult] = await Promise.all([
     service
       .from("ad_account_billing_ends")
       .select("ad_account_id")
@@ -350,15 +353,25 @@ async function retiredAccountIds(
       .select("prior_binding_id")
       .eq("event_type", "handed_over")
       .in("prior_binding_id", candidateBindingIds),
+    service
+      .from("client_reporting_anchor_events")
+      .select("binding_id")
+      .eq("event_type", "store_retired")
+      .in("binding_id", candidateBindingIds),
   ]);
   if (endsResult.error) throw endsResult.error;
-  if (eventsResult.error) throw eventsResult.error;
+  if (handoverResult.error) throw handoverResult.error;
+  if (retirementResult.error) throw retirementResult.error;
 
   const retired = new Set((endsResult.data ?? []).map((row) => row.ad_account_id));
-  for (const row of eventsResult.data ?? []) {
-    const accountId = row.prior_binding_id
-      ? accountByRevokedBinding.get(row.prior_binding_id)
-      : undefined;
+  const evidencedBindingIds = [
+    ...(handoverResult.data ?? []).flatMap((row) =>
+      row.prior_binding_id ? [row.prior_binding_id] : [],
+    ),
+    ...(retirementResult.data ?? []).map((row) => row.binding_id),
+  ];
+  for (const bindingId of evidencedBindingIds) {
+    const accountId = accountByRevokedBinding.get(bindingId);
     if (accountId && candidates.has(accountId)) retired.add(accountId);
   }
   return retired;

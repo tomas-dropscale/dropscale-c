@@ -40,6 +40,14 @@ const CHILD_HANDOVER_MIGRATION = readFileSync(
   "supabase/migrations/0096_reporting_child_handover.sql",
   "utf8",
 );
+const STORE_RETIREMENT_MIGRATION = readFileSync(
+  "supabase/migrations/0097_reporting_store_retirement.sql",
+  "utf8",
+);
+const FX_CHILDREN_MIGRATION = readFileSync(
+  "supabase/migrations/0098_reporting_fx_convertible_children.sql",
+  "utf8",
+);
 
 const ADMIN = "55000000-0000-4000-8000-000000000001";
 const CLIENT = "55000000-0000-4000-8000-000000000002";
@@ -475,6 +483,16 @@ beforeEach(async () => {
     await db.exec(CHILD_HANDOVER_MIGRATION);
   } catch (error) {
     throw new Error("0096 migration failed", { cause: error });
+  }
+  try {
+    await db.exec(STORE_RETIREMENT_MIGRATION);
+  } catch (error) {
+    throw new Error("0097 migration failed", { cause: error });
+  }
+  try {
+    await db.exec(FX_CHILDREN_MIGRATION);
+  } catch (error) {
+    throw new Error("0098 migration failed", { cause: error });
   }
 
   await db.query(
@@ -4127,4 +4145,282 @@ describe("handing an anchored child on to a third store (0096)", () => {
       "23514",
     );
   });
+
+describe("retiring a store after the cutover (0097)", () => {
+  async function retire(anchorId: string, key = "retire:test:0001") {
+    return db.query<{ id: string }>(
+      `select public.retire_client_reporting_store(
+         $1, $2, $3, 'Store closed; retired from reporting'
+       ) as id`,
+      [anchorId, ADMIN, key],
+    );
+  }
+
+  async function bindingStatus(id: string) {
+    const row = await db.query<{ status: string }>(
+      "select status from public.client_reporting_bindings where id = $1",
+      [id],
+    );
+    return row.rows[0]!.status;
+  }
+
+  it("retires a Shopify-only anchor whole: binding, connection and evidence in one go, rows kept", async () => {
+    const { pairId, targetId } = await pairAndTarget();
+    // The EUR cutover gate demands an open billing start on the pair.
+    await openBilling(pairId);
+    await cutOverBoth(pairId, targetId);
+    const accountId = await accountOf(targetId);
+    const rowsBefore = await db.query<{ n: string }>(
+      "select count(*)::text as n from public.daily_metrics where ad_account_id = $1",
+      [accountId],
+    );
+    expect(Number(rowsBefore.rows[0]!.n)).toBeGreaterThan(0);
+
+    const retired = await retire(targetId);
+    expect(retired.rows[0]!.id).toBe(targetId);
+
+    expect(await bindingStatus(targetId)).toBe("revoked");
+    const store = await db.query<{ status: string; revoked_at: string | null; credential_hint: string | null }>(
+      "select status, revoked_at, credential_hint from public.client_shopify_connections where id = $1",
+      [TARGET_SHOPIFY],
+    );
+    expect(store.rows[0]).toMatchObject({ status: "revoked", credential_hint: null });
+    expect(store.rows[0]!.revoked_at).not.toBeNull();
+    const credentials = await db.query<{ n: string }>(
+      "select count(*)::text as n from public.client_shopify_credentials where connection_id = $1",
+      [TARGET_SHOPIFY],
+    );
+    expect(Number(credentials.rows[0]!.n)).toBe(0);
+
+    const event = await db.query<{ event_type: string; ad_account_id: string; details: { shopifyConnectionId: string } }>(
+      `select event_type, ad_account_id, details from public.client_reporting_anchor_events
+       where binding_id = $1 and event_type = 'store_retired'`,
+      [targetId],
+    );
+    expect(event.rows).toHaveLength(1);
+    expect(event.rows[0]!.ad_account_id).toBe(accountId);
+    expect(event.rows[0]!.details.shopifyConnectionId).toBe(TARGET_SHOPIFY);
+
+    // History frozen in place: not one row of the retired store is touched.
+    const rowsAfter = await db.query<{ n: string }>(
+      "select count(*)::text as n from public.daily_metrics where ad_account_id = $1",
+      [accountId],
+    );
+    expect(rowsAfter.rows[0]!.n).toBe(rowsBefore.rows[0]!.n);
+
+    // The other store is untouched and still the client's authority.
+    expect(await bindingStatus(pairId)).toBe("active");
+  });
+
+  it("replays idempotently on the same key and refuses a reused key", async () => {
+    const { pairId, targetId } = await pairAndTarget();
+    // The EUR cutover gate demands an open billing start on the pair.
+    await openBilling(pairId);
+    await cutOverBoth(pairId, targetId);
+    await retire(targetId);
+    const again = await retire(targetId);
+    expect(again.rows[0]!.id).toBe(targetId);
+    const events = await db.query<{ n: string }>(
+      "select count(*)::text as n from public.client_reporting_anchor_events where event_type = 'store_retired'",
+    );
+    expect(Number(events.rows[0]!.n)).toBe(1);
+    await expectSqlState(retire(pairId, "retire:test:0001"), "23505");
+  });
+
+  it("refuses a pair that still carries its Google account", async () => {
+    const { pairId, targetId } = await pairAndTarget();
+    // The EUR cutover gate demands an open billing start on the pair.
+    await openBilling(pairId);
+    await cutOverBoth(pairId, targetId);
+    await expectSqlState(retire(pairId, "retire:test:pair"), "23514");
+    expect(await bindingStatus(pairId)).toBe("active");
+  });
+
+  it("refuses before the cutover: that is what Remove is for", async () => {
+    const { targetId } = await pairAndTarget();
+    await expectSqlState(retire(targetId, "retire:test:early"), "23514");
+    expect(await bindingStatus(targetId)).toBe("active");
+  });
+
+  it("after a handover, the old store retires and the new store cannot while it still hosts the child", async () => {
+    // Diogo e Patricia's exact sequence: the store's Google account was handed
+    // to the successor store, then the old store died.
+    const { pairId, targetId } = await pairAndTarget();
+    const opened = await openBilling(pairId);
+    await cutOverBoth(pairId, targetId);
+    await closeBilling(opened);
+    const childBinding = (await handover(pairId, targetId)).rows[0]!.id;
+    const replacement = await db.query<{ id: string }>(
+      `select id from public.client_reporting_bindings
+       where status = 'active' and shopify_connection_id = $1 and google_ads_connection_id is null`,
+      [SHOPIFY_2],
+    );
+    const oldStoreAnchor = replacement.rows[0]!.id;
+
+    // The successor store still hosts a live Google child: not retirable.
+    await expectSqlState(retire(targetId, "retire:test:hosting"), "23514");
+    expect(await bindingStatus(targetId)).toBe("active");
+    expect(await bindingStatus(childBinding)).toBe("active");
+
+    // The old store, Google gone, retires cleanly.
+    const retired = await retire(oldStoreAnchor, "retire:test:old-store");
+    expect(retired.rows[0]!.id).toBe(oldStoreAnchor);
+    expect(await bindingStatus(oldStoreAnchor)).toBe("revoked");
+    const store = await db.query<{ status: string }>(
+      "select status from public.client_shopify_connections where id = $1",
+      [SHOPIFY_2],
+    );
+    expect(store.rows[0]!.status).toBe("revoked");
+    // The successor keeps counting for the new store.
+    expect(await bindingStatus(childBinding)).toBe("active");
+  });
+
+  it("keeps the retired shop reusable: reconnecting it restages the SAME account, history intact", async () => {
+    const { pairId, targetId } = await pairAndTarget();
+    await openBilling(pairId);
+    await cutOverBoth(pairId, targetId);
+    const accountId = await accountOf(targetId);
+    await retire(targetId, "retire:test:reuse");
+
+    // The shop comes back as a fresh connection on the same domain.
+    const REBORN = "55000000-0000-4000-8000-000000000024";
+    const domain = await db.query<{ shopify_domain: string; shopify_shop_id: string }>(
+      "select shopify_domain, shopify_shop_id from public.client_shopify_connections where id = $1",
+      [TARGET_SHOPIFY],
+    );
+    await db.query(
+      `insert into public.client_shopify_connections(
+         id, session_id, client_id, status, shopify_shop_id, shopify_name,
+         shopify_domain, shopify_currency, credential_hint, last_verified_at
+       ) values ($1, $2, $3, 'connected', $4, 'Target Store again', $5, 'EUR', 'hint', now())`,
+      [REBORN, SESSION, CLIENT, domain.rows[0]!.shopify_shop_id, domain.rows[0]!.shopify_domain],
+    );
+    await db.query(
+      `insert into public.client_shopify_credentials(connection_id, shopify_client_id, client_secret_ciphertext)
+       values ($1, 'client-id-reborn', 'secret-ciphertext-reborn')`,
+      [REBORN],
+    );
+
+    // The staged lifecycle accepts the retired account as an explicitly
+    // reusable identity - the same door an abandoned staged source uses.
+    const staged = await db.query<{ id: string }>(
+      `select public.stage_client_reporting_source(
+         $1, $2, null, null, $3, 'stage:reborn:target', $4, 'Reviewed reconnect of a retired store'
+       ) as id`,
+      [CLIENT, REBORN, accountId, ADMIN],
+    );
+    const binding = await db.query<{ status: string; ad_account_id: string; shopify_connection_id: string }>(
+      "select status, ad_account_id, shopify_connection_id from public.client_reporting_bindings where id = $1",
+      [staged.rows[0]!.id],
+    );
+    expect(binding.rows[0]).toEqual({
+      status: "staged",
+      ad_account_id: accountId,
+      shopify_connection_id: REBORN,
+    });
+  });
+});
+
+describe("binding a Google account in another ECB-convertible currency before the cutover (0098)", () => {
+  // The seeded Google connections bill in USD (America/New_York) - exactly the
+  // David e Tiago shape: an EUR Shopify-only anchor and a USD Google account
+  // mapped to that store.
+  async function eurAnchor() {
+    const anchor = await provision({ shopify: SHOPIFY, key: "anchor:fx-child:store" });
+    return anchor.rows[0]!.id;
+  }
+  async function mapToStore(googleId: string) {
+    await db.query(
+      `insert into public.client_asset_mappings(session_id, shopify_connection_id, google_ads_connection_id)
+       values ($1, $2, $3)`,
+      [SESSION, SHOPIFY, googleId],
+    );
+  }
+  async function accountRow(bindingId: string) {
+    const row = await db.query<{ currency: string; reporting_role: string; status: string; google_ads_customer_id: string | null }>(
+      `select account.currency, account.reporting_role, account.status, account.google_ads_customer_id
+       from public.client_reporting_bindings binding
+       join public.ad_accounts account on account.id = binding.ad_account_id
+       where binding.id = $1`,
+      [bindingId],
+    );
+    return row.rows[0]!;
+  }
+
+  it("provisions a USD Google child under an EUR anchor, in the STORE's currency", async () => {
+    const anchorId = await eurAnchor();
+    await mapToStore(GOOGLE);
+
+    const child = await provision({ shopify: null, google: GOOGLE, anchor: anchorId, key: "anchor:fx-child:usd" });
+    const account = await accountRow(child.rows[0]!.id);
+
+    expect(account).toMatchObject({
+      currency: "EUR",
+      reporting_role: "google_spend",
+      status: "pending",
+      google_ads_customer_id: "1111111111",
+    });
+    const binding = await db.query<{ status: string; shopify_anchor_binding_id: string }>(
+      "select status, shopify_anchor_binding_id from public.client_reporting_bindings where id = $1",
+      [child.rows[0]!.id],
+    );
+    expect(binding.rows[0]).toEqual({ status: "active", shopify_anchor_binding_id: anchorId });
+  });
+
+  it("then activates the client without an EUR billing baseline (0093), spend converted at sync", async () => {
+    const anchorId = await eurAnchor();
+    await mapToStore(GOOGLE);
+    const child = (await provision({ shopify: null, google: GOOGLE, anchor: anchorId, key: "anchor:fx-child:usd" })).rows[0]!.id;
+    // Cutover demands every connected source be covered exactly once.
+    await db.query("update public.client_shopify_connections set status = 'revoked' where id = $1", [SHOPIFY_2]);
+    await db.query("update public.client_google_ads_connections set status = 'revoked' where id = $1", [GOOGLE_2]);
+    for (const bindingId of [anchorId, child]) await materializeBindingWindow(bindingId);
+    await db.query(
+      `select public.record_client_reporting_sync_success($1, 'shopify', current_date - 90, current_date - 1, 'USD', 90)`,
+      [anchorId],
+    );
+    // The receipt keeps the Google account's NATIVE currency.
+    await db.query(
+      `select public.record_client_reporting_sync_success($1, 'google_ads', current_date - 90, current_date - 1, 'USD', 90)`,
+      [child],
+    );
+
+    await db.query(
+      "select public.activate_client_reporting_cutover($1, $2, 'USD child under an EUR store')",
+      [CLIENT, ADMIN],
+    );
+
+    const rollout = await db.query<{ operational_surface: string; cutover: boolean }>(
+      "select operational_surface, reporting_cutover_at is not null as cutover from public.client_rollout_states where client_id = $1",
+      [CLIENT],
+    );
+    expect(rollout.rows[0]).toEqual({ operational_surface: "v2_active", cutover: true });
+    // No billing start was ever needed or written for the USD account.
+    const starts = await db.query<{ n: string }>(
+      `select count(*)::text as n from public.ad_account_billing_starts start
+       join public.client_reporting_bindings binding on binding.ad_account_id = start.ad_account_id
+       where binding.id = $1`,
+      [child],
+    );
+    expect(Number(starts.rows[0]!.n)).toBe(0);
+  });
+
+  it("still refuses a currency the ECB cannot convert", async () => {
+    const anchorId = await eurAnchor();
+    await db.query("update public.client_google_ads_connections set currency = 'TWD' where id = $1", [GOOGLE_2]);
+    await mapToStore(GOOGLE_2);
+    await expectSqlState(
+      provision({ shopify: null, google: GOOGLE_2, anchor: anchorId, key: "anchor:fx-child:twd" }),
+      "23514",
+    );
+  });
+
+  it("leaves an equal-currency child exactly as before", async () => {
+    const anchorId = await eurAnchor();
+    await db.query("update public.client_google_ads_connections set currency = 'EUR', time_zone = 'Europe/Lisbon' where id = $1", [GOOGLE]);
+    await mapToStore(GOOGLE);
+    const child = await provision({ shopify: null, google: GOOGLE, anchor: anchorId, key: "anchor:fx-child:eur" });
+    expect((await accountRow(child.rows[0]!.id)).currency).toBe("EUR");
+  });
+});
 });

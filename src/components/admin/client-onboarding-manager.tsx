@@ -901,6 +901,19 @@ export function ClientOnboardingManager({
           errorMessage(body, "The reporting binding could not be revoked."),
         );
       }
+      if (bindingWasRetired(body)) {
+        // A live client's store leaves through its retirement RPC, which
+        // revoked the Shopify connection in the same transaction as the
+        // anchor: the asset endpoint has nothing left to remove, and calling
+        // it would only report the store as already gone.
+        setBusy(null);
+        await settleRemoval(
+          target,
+          `${target.name} retired`,
+          "The store left the client's reporting with its history kept. Other stores, billing and the client's dashboard are unchanged.",
+        );
+        return;
+      }
     } catch (error) {
       setDialogError(
         error instanceof Error
@@ -912,6 +925,45 @@ export function ClientOnboardingManager({
     }
     setBusy(null);
     await disconnectAsset(target);
+  }
+
+  /** The reporting-binding endpoint says so when a live client's store was retired whole. */
+  function bindingWasRetired(body: unknown): boolean {
+    if (typeof body !== "object" || body === null) return false;
+    const binding = (body as { binding?: unknown }).binding;
+    return (
+      typeof binding === "object" &&
+      binding !== null &&
+      (binding as { retired?: unknown }).retired === true
+    );
+  }
+
+  /** What every successful removal does after the asset is gone. */
+  async function settleRemoval(target: DisconnectTarget, title: string, detail: string) {
+    try {
+      await refreshClients();
+    } catch (refreshError) {
+      setDisconnectTarget(null);
+      showNotice(
+        "error",
+        `${target.name} was disconnected, but the list is stale`,
+        refreshError instanceof Error
+          ? refreshError.message
+          : "Refresh the page before taking another action.",
+      );
+      return;
+    }
+    setDisconnectTarget(null);
+    const key =
+      target.kind === "shopify"
+        ? assetConnectionKey("shopify", target.source, target.id)
+        : assetConnectionKey("google_ads", "onboarding", target.id);
+    setConnectionStates((current) => {
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+    showNotice("success", title, detail);
   }
 
   /**
@@ -1068,31 +1120,8 @@ export function ClientOnboardingManager({
       if (!response.ok) {
         throw new Error(errorMessage(body, `${target.name} could not be disconnected.`));
       }
-      try {
-        await refreshClients();
-      } catch (refreshError) {
-        setDisconnectTarget(null);
-        showNotice(
-          "error",
-          `${target.name} was disconnected, but the list is stale`,
-          refreshError instanceof Error
-            ? refreshError.message
-            : "Refresh the page before taking another action.",
-        );
-        return;
-      }
-      setDisconnectTarget(null);
-      const key =
-        target.kind === "shopify"
-          ? assetConnectionKey("shopify", target.source, target.id)
-          : assetConnectionKey("google_ads", "onboarding", target.id);
-      setConnectionStates((current) => {
-        const next = { ...current };
-        delete next[key];
-        return next;
-      });
-      showNotice(
-        "success",
+      await settleRemoval(
+        target,
         `${target.name} removed`,
         target.kind === "shopify"
           ? "The Shopify connection was removed. The client, other connections, billing and history are unchanged."

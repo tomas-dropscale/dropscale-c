@@ -452,8 +452,14 @@ async function buildClientReportingCutoverQueue(
   // The immutable Google billing baseline is currently EUR-only. Keep
   // non-EUR sources visible in client readiness, but never offer an action
   // that would create an identity which cannot complete its billing lifecycle.
+  // A Google account in any ECB-convertible currency can be bound BEFORE the
+  // cutover (0098: the child takes its store's currency and the sync converts
+  // at the day's rate; 0093 then lets the client activate without the EUR
+  // billing baseline). After the cutover the staged lifecycle still needs
+  // that baseline, so addCandidate keeps post-cutover candidates EUR-only.
   const healthyGoogle = connectedGoogle.filter(
-    (connection) => validGoogle(connection) && connection.currency === "EUR",
+    (connection) =>
+      validGoogle(connection) && FX_SUPPORTED_CURRENCIES.has(connection.currency ?? ""),
   );
   // Lifecycle projection needs the immutable identity even after a source is
   // disconnected, so an unhealthy staged reservation can still be abandoned.
@@ -550,6 +556,15 @@ async function buildClientReportingCutoverQueue(
       replacementRequiredClients.add(bundle.clientId);
       return;
     }
+    // The staged post-cutover lifecycle still pins Google sources to EUR: its
+    // promotion needs the immutable EUR billing baseline that non-EUR accounts
+    // can never capture. Offering the candidate would only hand the admin the
+    // stage RPC's refusal, so post-cutover candidates stay EUR-only here.
+    if (postCutover && bundle.google && bundle.google.currency !== "EUR") return;
+    const nativeCurrencyNote =
+      bundle.google && bundle.google.currency && bundle.google.currency !== "EUR"
+        ? ` It bills in ${bundle.google.currency}: its spend reaches the store converted at the day's ECB rate, and the account is not billed automatically.`
+        : "";
     if (!postCutover && action.kind === "restage") return;
     const resolvedAction: ProvisionAction | UpgradeAction =
       action.kind === "upgrade"
@@ -580,7 +595,7 @@ async function buildClientReportingCutoverQueue(
       requiresExplicitReview: explicit,
       message: postCutover
         ? `${message} It will remain staged and non-operational until its explicit 90-day sync and promotion.`
-        : message,
+        : `${message}${nativeCurrencyNote}`,
     });
   };
 
@@ -765,9 +780,24 @@ async function buildClientReportingCutoverQueue(
       .map((id) => googleById.get(id))
       .filter((google): google is GoogleRow => Boolean(google));
     if (mapped.some((google) => bindingByGoogle.has(google.id))) continue;
+    // Before the cutover any ECB-convertible Google joins its store as a pair
+    // (0098). After it, the staged lifecycle is still EUR-only, so a non-EUR
+    // Google must NOT be folded into the bundle: it would turn the whole thing
+    // into a pair that addCandidate then drops, and the store would lose the
+    // Shopify-only staged candidate it always had. Left out here, the store
+    // goes in alone, exactly as before.
+    const storeRollout = rolloutByClient.get(shopify.client_id);
+    const storePostCutover = Boolean(
+      storeRollout?.operational_surface === "v2_active" &&
+        storeRollout.reporting_cutover_at &&
+        Number.isFinite(Date.parse(storeRollout.reporting_cutover_at)),
+    );
     const unboundHealthyGoogle = mapped.filter(
       (google) =>
-        !bindingByGoogle.has(google.id) && validGoogle(google) && google.currency === "EUR",
+        !bindingByGoogle.has(google.id) &&
+        validGoogle(google) &&
+        (google.currency === "EUR" ||
+          (!storePostCutover && FX_SUPPORTED_CURRENCIES.has(google.currency ?? ""))),
     );
     const google = unboundHealthyGoogle.length === 1 ? unboundHealthyGoogle[0] : null;
     if (google) handledGoogleIds.add(google.id);

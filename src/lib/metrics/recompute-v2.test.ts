@@ -237,6 +237,11 @@ function fakeDatabase(
      * retired (a 'handed_over' anchor event with that binding as prior).
      */
     handedOver?: string[];
+    /**
+     * Accounts whose revoked binding a store retirement named as the anchor
+     * it retired (a 'store_retired' anchor event on that binding).
+     */
+    retiredStores?: string[];
   } = {},
 ) {
   // The probe reads binding ids too; the fake derives one per account+status.
@@ -320,15 +325,28 @@ function fakeDatabase(
     if (table === "client_reporting_anchor_events") {
       return {
         select: vi.fn(() => ({
-          eq: vi.fn(() => ({
-            in: vi.fn(async (_column: string, priorBindingIds: string[]) => ({
-              data: priorBindingIds
-                .filter((id) =>
-                  (extras.handedOver ?? []).some((acct) => id === bindingId(acct, "revoked")),
-                )
-                .map((prior_binding_id) => ({ prior_binding_id })),
-              error: null,
-            })),
+          // The probe asks one event type at a time; each names the retired
+          // binding through a different column.
+          eq: vi.fn((_column: string, eventType: string) => ({
+            in: vi.fn(async (column: string, ids: string[]) => {
+              const named =
+                eventType === "handed_over"
+                  ? { accounts: extras.handedOver ?? [], column: "prior_binding_id" }
+                  : eventType === "store_retired"
+                    ? { accounts: extras.retiredStores ?? [], column: "binding_id" }
+                    : { accounts: [] as string[], column };
+              return {
+                data:
+                  column === named.column
+                    ? ids
+                        .filter((id) =>
+                          named.accounts.some((acct) => id === bindingId(acct, "revoked")),
+                        )
+                        .map((id) => ({ [named.column]: id }))
+                    : [],
+                error: null,
+              };
+            }),
           })),
         })),
       };
@@ -950,6 +968,40 @@ describe("V2 daily-metrics recompute", () => {
     mocks.resolveReportingSources.mockResolvedValue([anchorSource()]);
 
     await refreshAccountsNow([ANCHOR, RETIRED], {
+      client: db.client as never,
+      reportingClient: db.client as never,
+      from: DAY,
+      to: DAY,
+    });
+
+    expect([...new Set(db.upserts.flat().map((row) => row.ad_account_id))]).toEqual([
+      ANCHOR,
+    ]);
+  });
+
+  it("drops a retired store's anchor account on the retirement's own evidence", async () => {
+    // A retired store leaves its anchor account with a revoked binding and no
+    // Google meter at all - no billing end can ever exist for it. The
+    // 'store_retired' event on that binding is the only evidence, and it must
+    // be enough: otherwise the first retired store aborts the nightly close.
+    const RETIRED_STORE = "70000000-0000-4000-8000-000000000044";
+    const db = fakeDatabase(
+      [account(ANCHOR), account(RETIRED_STORE, { reporting_role: "shopify_anchor" })],
+      [],
+      {},
+      { [CLIENT]: "v2_active" },
+      "ok",
+      {
+        retiredBindings: { [RETIRED_STORE]: ["revoked"] },
+        billingEnds: [],
+        retiredStores: [RETIRED_STORE],
+      },
+    );
+    mocks.createClient.mockResolvedValue(db.client);
+    mocks.createServiceClient.mockReturnValue(db.client);
+    mocks.resolveReportingSources.mockResolvedValue([anchorSource()]);
+
+    await refreshAccountsNow([ANCHOR, RETIRED_STORE], {
       client: db.client as never,
       reportingClient: db.client as never,
       from: DAY,

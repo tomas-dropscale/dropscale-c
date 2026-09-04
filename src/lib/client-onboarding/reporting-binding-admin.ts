@@ -1,6 +1,7 @@
 import "server-only";
 
 import { ClientOnboardingError } from "@/lib/client-onboarding/sessions";
+import { clientReportingAuthority } from "@/lib/portal/client-rollout";
 import { createServiceClient } from "@/lib/supabase/service";
 
 /**
@@ -32,10 +33,18 @@ export type ReportingBindingCoverage = {
   covers: Array<{ kind: ReportingAssetKind; id: string; name: string }>;
   /** Child bindings that must be revoked before this anchor can be. */
   blockingChildren: Array<{ bindingId: string; name: string }>;
+  /**
+   * True when a live client's store was retired whole: the anchor AND its
+   * Shopify connection left in one transaction, so the asset endpoint has
+   * nothing left to remove.
+   */
+  retired?: boolean;
 };
 
 const REVOKE_REASON =
   "Admin unbound this reporting source to remove the asset from Dropscale.";
+const RETIRE_REASON =
+  "Admin retired this store from the client's reporting; its history is kept.";
 
 function serviceOrThrow() {
   const service = createServiceClient();
@@ -194,6 +203,40 @@ export async function revokeReportingBindingForAsset(input: {
         .join(", ")}.`,
       409,
     );
+  }
+
+  // After the cutover an operational anchor is immutable: the guards refuse a
+  // plain revoke, and a dead store's anchor would block the whole client in
+  // the reporting queue forever. A live client's Shopify anchor therefore
+  // leaves through its retirement RPC (0097), which revokes the anchor and
+  // the store's connection together and records the evidence.
+  if (
+    input.kind === "shopify" &&
+    binding.shopify_connection_id !== null &&
+    binding.shopify_anchor_binding_id === null &&
+    (await clientReportingAuthority(binding.client_id)) === "v2"
+  ) {
+    const { data: retiredId, error: retireError } = await service.rpc(
+      "retire_client_reporting_store",
+      {
+        p_anchor_binding_id: binding.id,
+        p_admin_id: input.adminId,
+        p_idempotency_key: `store-retire:${binding.id}`,
+        p_reason: RETIRE_REASON,
+      },
+    );
+    if (retireError || retiredId !== binding.id) {
+      throw new ClientOnboardingError(
+        retireError?.code === "23514" || retireError?.code === "23505"
+          ? "invalid_state"
+          : retireError?.code === "22023"
+            ? "invalid_request"
+            : "database_error",
+        retireError?.message?.trim() || "The store could not be retired.",
+        retireError?.code?.startsWith("23") ? 409 : retireError?.code === "22023" ? 400 : 500,
+      );
+    }
+    return { ...coverage, retired: true };
   }
 
   // Deterministic key: an exact retry of this revocation returns the original

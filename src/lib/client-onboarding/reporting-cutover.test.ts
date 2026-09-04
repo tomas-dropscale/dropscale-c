@@ -343,21 +343,105 @@ describe("Phase 2 admin reporting cutover workflow", () => {
     expect(mocks.rpc).not.toHaveBeenCalled();
   });
 
-  it("keeps queue provisioning EUR-only but no longer currency-blocks an ECB-convertible source", async () => {
-    // DKK converts with the day's ECB rate, so the client is not blocked —
-    // the source is simply awaiting a binding (Rebind sources is the path;
-    // queue candidates deliberately stay EUR-only because provisioning pins
-    // the pair to the Google billing currency).
+  it("offers an ECB-convertible Google source before the cutover, saying how it bills", async () => {
+    // DKK converts with the day's ECB rate: 0098 lets provisioning bind it as
+    // a spend child in the store's currency, and 0093 then activates the
+    // client without the EUR billing baseline. The candidate says so.
     const data = snapshot();
     data.googleConnections[0].currency = "DKK";
 
     const queue = await projectClientReportingCutover(data);
 
-    expect(queue.candidates.some((candidate) => candidate.sourceLabel.includes("1234567890"))).toBe(
-      false,
-    );
+    const candidate = queue.candidates.find((entry) => entry.sourceLabel.includes("1234567890"));
+    expect(candidate).toBeDefined();
+    expect(candidate?.message).toContain("bills in DKK");
+    expect(candidate?.message).toContain("not billed automatically");
     expect(queue.clients[0].status).toBe("bindings_required");
     expect(queue.clients[0].message).not.toContain("ECB publishes no rate");
+  });
+
+  describe("a new store mapped to a USD Google account", () => {
+    const NEW_SHOPIFY = "65000000-0000-4000-8000-000000000021";
+    function withNewStore() {
+      const data = snapshot({
+        adAccounts: [
+          account({
+            status: "active",
+            reporting_role: "legacy_hybrid",
+            google_ads_customer_id: "1234567890",
+            shopify_url: "northwind.myshopify.com",
+          }),
+        ],
+        // The client's existing authority: the Northwind pair, bound long
+        // before any cutover.
+        bindings: [
+          {
+            id: BINDING,
+            client_id: CLIENT,
+            ad_account_id: ACCOUNT,
+            shopify_connection_id: SHOPIFY,
+            google_ads_connection_id: GOOGLE,
+            shopify_anchor_binding_id: null,
+            status: "active",
+            bound_at: BOUND_AT,
+          },
+        ],
+      });
+      data.shopifyConnections.push({
+        ...data.shopifyConnections[0],
+        id: NEW_SHOPIFY,
+        shopify_name: "New Store",
+        shopify_domain: "new-store.myshopify.com",
+      });
+      data.shopifyCredentials.push({ connection_id: NEW_SHOPIFY });
+      data.googleConnections.push({
+        ...data.googleConnections[0],
+        id: GOOGLE_2,
+        windsor_account_id: "111-222-3333",
+        account_name: "New Store Ads",
+        currency: "USD",
+        time_zone: "America/New_York",
+      });
+      data.mappings.push({ shopify_connection_id: NEW_SHOPIFY, google_ads_connection_id: GOOGLE_2 });
+      return data;
+    }
+
+    it("before the cutover, offers the store and its USD account together, saying how it bills", async () => {
+      const queue = await projectClientReportingCutover(withNewStore());
+
+      const candidate = queue.candidates.find((entry) =>
+        entry.sourceLabel.includes("new-store.myshopify.com"),
+      );
+      expect(candidate).toBeDefined();
+      expect(candidate?.sourceLabel).toContain("1112223333");
+      expect(candidate?.message).toContain("bills in USD");
+    });
+
+    it("after the cutover, still offers the store alone as a staged source (the USD account stays out)", async () => {
+      // The staged lifecycle is EUR-only, so the USD account must not be
+      // folded into the bundle: that would turn it into a pair the queue then
+      // drops, and the store would lose the Shopify-only staged candidate it
+      // has always had.
+      const data = withNewStore();
+      data.rolloutStates[0] = {
+        ...data.rolloutStates[0],
+        operational_surface: "v2_active",
+        reporting_cutover_at: "2026-08-14T00:00:00.000Z",
+        reporting_cutover_by: ADMIN,
+        reporting_cutover_reason: "Reporting cutover",
+      };
+
+      const queue = await projectClientReportingCutover(data);
+
+      const store = queue.candidates.filter((entry) =>
+        entry.sourceLabel.includes("new-store.myshopify.com"),
+      );
+      expect(store).toHaveLength(1);
+      expect(store[0].kind).toBe("provision");
+      expect(store[0].sourceLabel).not.toContain("1112223333");
+      expect(store[0].message).toContain("staged and non-operational");
+      expect(queue.candidates.some((entry) => entry.sourceLabel.includes("1112223333"))).toBe(false);
+    });
   });
 
   it("still blocks a Google source billing in a currency the ECB cannot convert", async () => {
