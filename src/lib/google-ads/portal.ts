@@ -183,6 +183,14 @@ export type LiveCampaign = Campaign & {
   googleRoas: number | null;
   /** Exact ad landing pages reported by Google; absent when the provider does not expose them. */
   finalUrls?: string[];
+  /**
+   * The currency the daily budget is set in - the Google account's own. Set
+   * only when the row's money columns were converted into another currency
+   * for display, so the budget can keep being shown and edited in its own.
+   */
+  budgetCurrency?: string;
+  /** The rate the money columns were converted at into the store's currency; absent when untouched. */
+  fxRate?: number;
 };
 
 export type GoogleCampaignTimelinePoint = {

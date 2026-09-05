@@ -45,6 +45,7 @@ const clients: CampaignViewClient[] = [
             spend: 100,
             dailyBudget: "50.000000",
             currency: "EUR",
+            budgetCurrency: "EUR",
             type: "DGEN",
             shoppingFeed: false,
             googleRoas: 2.4,

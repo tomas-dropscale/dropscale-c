@@ -17,7 +17,13 @@ export type CampaignViewCampaign = {
   status: CampaignViewStatus;
   spend: number;
   dailyBudget: string | null;
+  /** Currency of every money figure on the row: the store's. */
   currency: string;
+  /**
+   * Currency the daily budget is set and edited in: the Google account's own,
+   * which differs from `currency` only when the account bills in another.
+   */
+  budgetCurrency: string;
   type: string;
   shoppingFeed: boolean;
   googleRoas: number | null;
@@ -311,6 +317,7 @@ export function projectAdminCampaignsView(
           spend: campaign.spend,
           dailyBudget: liveBudget(campaign.daily_budget),
           currency: entry.account.currency,
+          budgetCurrency: campaign.budgetCurrency ?? entry.account.currency,
           type: campaign.advertisingChannelType,
           shoppingFeed: campaign.shoppingFeed,
           googleRoas: Number.isFinite(campaign.googleRoas) ? campaign.googleRoas : null,

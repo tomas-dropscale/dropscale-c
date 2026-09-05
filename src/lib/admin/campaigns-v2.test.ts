@@ -70,6 +70,13 @@ vi.mock("@/lib/portal/range", () => ({
 vi.mock("@/lib/reporting/sources", () => ({
   resolveReportingSources: mocks.resolveReportingSources,
 }));
+vi.mock("@/lib/reporting/google-currency", () => ({
+  // Passthrough: these suites test EUR stores, where the module is a no-op.
+  reportingMoneyRates: async () => null,
+  convertCampaigns: (rows: unknown[]) => rows,
+  convertCampaignTimeline: (points: unknown[]) => points,
+  convertBreakdownAtParentRate: (rows: unknown[]) => rows,
+}));
 vi.mock("@/lib/reporting/google", () => ({
   fetchGoogleReportingCampaigns: mocks.fetchGoogleReportingCampaigns,
 }));

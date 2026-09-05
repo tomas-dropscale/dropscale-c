@@ -19,6 +19,7 @@ import type { AdAccount, Database, Json } from "@/lib/supabase/types";
 import { rangeDays, type RangeSelection } from "@/lib/portal/range";
 import { hasWindsorEnv } from "@/lib/windsor/client";
 import { fetchGoogleReportingCampaigns } from "@/lib/reporting/google";
+import { convertCampaigns, reportingMoneyRates } from "@/lib/reporting/google-currency";
 import {
   resolveReportingSources,
   type CanonicalReportingSource,
@@ -894,15 +895,28 @@ export async function fetchAdminCampaigns(
           }
         } else {
           const sourceResults = await Promise.allSettled(
-            googleSources.map(async (source) =>
-              (await fetchGoogleReportingCampaigns(source, range.from, range.to)).map(
-                (campaign) => ({
-                  ...campaign,
-                  reportingBindingId: campaignControlsEnabled ? source.bindingId : null,
-                  googleAdsConnectionId: source.googleAds!.connectionId,
-                }),
-              ),
-            ),
+            googleSources.map(async (source) => {
+              const [rows, rates] = await Promise.all([
+                fetchGoogleReportingCampaigns(source, range.from, range.to),
+                reportingMoneyRates(source, account.currency, range.from, range.to),
+              ]);
+              // Money in the store's currency (see google-currency.ts); the
+              // daily budget stays in the Google account's own, and says so.
+              const converted = rates
+                ? convertCampaigns(
+                    rows,
+                    rates,
+                    null,
+                    range.to,
+                    source.googleAds?.currency ?? account.currency,
+                  )
+                : rows;
+              return converted.map((campaign) => ({
+                ...campaign,
+                reportingBindingId: campaignControlsEnabled ? source.bindingId : null,
+                googleAdsConnectionId: source.googleAds!.connectionId,
+              }));
+            }),
           );
           const succeeded: AdminLiveCampaign[][] = [];
           for (const result of sourceResults) {

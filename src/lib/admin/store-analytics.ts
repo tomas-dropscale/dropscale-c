@@ -26,6 +26,12 @@ import {
   fetchGoogleReportingPmaxProducts,
 } from "@/lib/reporting/google";
 import {
+  convertBreakdownAtParentRate,
+  convertCampaignTimeline,
+  convertCampaigns,
+  reportingMoneyRates,
+} from "@/lib/reporting/google-currency";
+import {
   createLegacyShopifyReportingAdapter,
   createShopifyReportingAdapter,
   ShopifyReportingAdapterError,
@@ -789,6 +795,8 @@ type GoogleCampaignLoad = {
 async function loadGoogleCampaigns(
   topology: StoreTopology,
   range: Pick<RangeSelection, "from" | "to">,
+  /** The store's reporting currency: every money figure returned is in it. */
+  targetCurrency: string,
 ): Promise<Attempt<GoogleCampaignLoad>> {
   if (topology.kind === "v2") {
     if (!hasWindsorEnv() || topology.googleSources.length === 0) {
@@ -801,11 +809,26 @@ async function loadGoogleCampaigns(
     try {
       const results = await Promise.allSettled(
         topology.googleSources.map(async (source) => {
-          const [rows, timeline] = await Promise.all([
+          const [rows, timeline, rates] = await Promise.all([
             fetchGoogleReportingCampaigns(source, range.from, range.to),
             fetchGoogleReportingCampaignTimeline(source, range.from, range.to),
+            reportingMoneyRates(source, targetCurrency, range.from, range.to),
           ]);
-          return { rows, timeline };
+          // A Google account billing in another currency than its store: its
+          // money is converted with the same per-day ECB rates the sync uses,
+          // so Real ROAS divides like by like and the store's label tells the
+          // truth. Same currency: returned untouched.
+          if (!rates) return { rows, timeline };
+          return {
+            rows: convertCampaigns(
+              rows,
+              rates,
+              timeline,
+              range.to,
+              source.googleAds?.currency ?? targetCurrency,
+            ),
+            timeline: convertCampaignTimeline(timeline, rates),
+          };
         }),
       );
       const succeeded = results.flatMap((result) =>
@@ -1280,8 +1303,12 @@ function campaignBreakdown(
       reason: "Google campaign breakdown rows escaped their exact account scope.",
     };
   } else {
-    googleRows = googleAttempt.value
-      .filter((row) => row.campaignId === campaign.providerCampaignId)
+    // Breakdown money converts at the parent campaign's own rate, so ads and
+    // products still add up to the campaign they sit under.
+    googleRows = convertBreakdownAtParentRate(
+      googleAttempt.value.filter((row) => row.campaignId === campaign.providerCampaignId),
+      campaign,
+    )
       .map((row) => ({
         provider: "google_ads" as const,
         kind: row.kind,
@@ -1819,7 +1846,7 @@ async function buildLiveAdminStoreAnalytics(
   topology: StoreTopology,
 ): Promise<AdminStoreAnalytics> {
   const accountIds = [...new Set(input.store.activityAccountIds)];
-  const googlePromise = loadGoogleCampaigns(topology, input.range);
+  const googlePromise = loadGoogleCampaigns(topology, input.range, input.store.currency);
   const breakdownPromise = loadGoogleBreakdowns(topology, input.range);
   // Shopify used to start only after Google, breakdown, activity and rollup
   // completed. Keep every independent provider in the same request phase.

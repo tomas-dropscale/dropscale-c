@@ -265,7 +265,7 @@ function BudgetControl({
     }
     if (!dailyBudgetWithinLimit(nextDailyBudget)) {
       setError(
-        `Daily budgets must be between ${money(MIN_CAMPAIGN_DAILY_BUDGET, campaign.currency)} and ${money(MAX_CAMPAIGN_DAILY_BUDGET, campaign.currency)} per day.`,
+        `Daily budgets must be between ${money(MIN_CAMPAIGN_DAILY_BUDGET, campaign.budgetCurrency)} and ${money(MAX_CAMPAIGN_DAILY_BUDGET, campaign.budgetCurrency)} per day.`,
       );
       return;
     }
@@ -331,7 +331,7 @@ function BudgetControl({
     <div className="flex min-w-0 items-center gap-1.5 xl:grid xl:grid-cols-[1.75rem_max-content_1.75rem] xl:justify-center">
       <span className="hidden size-7 xl:block" aria-hidden />
       <span className="whitespace-nowrap text-[13px] font-semibold tabular-nums text-[var(--text-primary)]">
-        {campaign.dailyBudget === null ? "—" : money(campaign.dailyBudget, campaign.currency)}
+        {campaign.dailyBudget === null ? "—" : money(campaign.dailyBudget, campaign.budgetCurrency)}
         {campaign.dailyBudget !== null && (
           <span className="ml-1 text-[11px] font-normal text-[var(--text-muted)]">/ day</span>
         )}
@@ -466,7 +466,7 @@ function BudgetControl({
                 }}
               />
               <span className="pointer-events-none absolute top-1/2 right-3 -translate-y-1/2 text-[11px] font-medium text-[var(--text-muted)]">
-                {campaign.currency}
+                {campaign.budgetCurrency}
               </span>
             </div>
             {error && (
@@ -604,9 +604,16 @@ function StoreGroup({
   const budgets = store.campaigns.map((campaign) =>
     campaign.dailyBudget === null ? null : Number(campaign.dailyBudget),
   );
+  // Budgets are set in each Google account's own currency. A store total is
+  // only a figure when every campaign's budget shares one currency, and it is
+  // shown in that currency - never summed across currencies or relabelled.
+  const budgetCurrencies = new Set(store.campaigns.map((campaign) => campaign.budgetCurrency));
+  const budgetCurrency =
+    budgetCurrencies.size === 1 ? [...budgetCurrencies][0] : null;
   const dailyBudget =
     store.campaignState === "ready" &&
     budgets.length > 0 &&
+    budgetCurrency !== null &&
     budgets.every((budget): budget is number => budget !== null)
     ? budgets.reduce((sum, budget) => sum + budget, 0)
     : null;
@@ -682,7 +689,9 @@ function StoreGroup({
             {spend === null ? "—" : money(spend, store.currency)}
           </CampaignMetric>
           <CampaignMetric label="Daily budget">
-            {dailyBudget === null ? "—" : money(dailyBudget, store.currency)}
+            {dailyBudget === null || budgetCurrency === null
+              ? "—"
+              : money(dailyBudget, budgetCurrency)}
             {dailyBudget !== null && (
               <span className="ml-1 text-[11px] font-normal text-[var(--text-muted)]">
                 / day
