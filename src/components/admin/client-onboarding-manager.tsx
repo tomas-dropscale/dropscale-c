@@ -749,7 +749,7 @@ export function ClientOnboardingManager({
         ],
         revoke: [
           "Link cancelled",
-          `The link for ${purpose} and any connections added through it have been removed. Other open links and the client’s dashboard access are unchanged.`,
+          `The link for ${purpose} no longer works, and the connections it added that reporting is not using were removed. Anything already reporting stays connected. Other open links and the client’s dashboard access are unchanged.`,
         ],
       };
       showNotice("success", ...messages[action]);
@@ -1781,7 +1781,7 @@ export function ClientOnboardingManager({
           <DialogHeader>
             <DialogTitle>{selectedAction === "rotate" ? "Replace this open link?" : "Cancel this open link?"}</DialogTitle>
             <DialogDescription>
-              {selectedAction === "rotate" ? `Only this link (${selectedActionPurpose}) will stop working immediately. The replacement will be shown once; other open links and client access are unchanged.` : `Only this link (${selectedActionPurpose}) and connections added through it will be removed. Other open links and the client’s dashboard access are unchanged.`}
+              {selectedAction === "rotate" ? `Only this link (${selectedActionPurpose}) will stop working immediately. The replacement will be shown once; other open links and client access are unchanged.` : `Only this link (${selectedActionPurpose}) and the connections it added that reporting is not using will be removed. Anything already reporting stays connected. Other open links and the client’s dashboard access are unchanged.`}
             </DialogDescription>
           </DialogHeader>
           {selectedActionSession && <div className="rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-3 text-[12px] text-[var(--text-secondary)]"><strong className="font-medium text-[var(--text-primary)]">{clientName(selectedActionSession)}</strong><br />{selectedActionPurpose}{selectedActionSession.reconnectTarget?.domain && <><br /><span className="break-all">{selectedActionSession.reconnectTarget.domain}</span></>}</div>}

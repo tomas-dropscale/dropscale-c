@@ -247,14 +247,27 @@ export function buildClientCards(
   });
 
   for (const client of rosterByClient.values()) {
+    // A client with no surviving link still has its connected assets: a
+    // cancelled link keeps whatever reporting is using (migration 0099), and
+    // those assets belong to the client, not to the link. Listing them here is
+    // what keeps Test, Reconnect and Remove reachable for a live store whose
+    // only link was cancelled.
+    const shopify = new Map<string, CardShopifyAsset>();
+    for (const store of client.onboardingShopify) {
+      shopify.set(normalizedDomain(store.domain), { ...store, source: "onboarding" });
+    }
+    for (const store of client.shopify) {
+      const domain = normalizedDomain(store.domain);
+      if (!shopify.has(domain)) shopify.set(domain, store);
+    }
     cards.push({
       key: client.clientId,
       clientId: client.clientId,
       roster: client,
       session: null,
       sessions: [],
-      shopify: client.shopify,
-      googleAds: [],
+      shopify: [...shopify.values()],
+      googleAds: client.onboardingGoogleAds,
     });
   }
 

@@ -23,9 +23,9 @@ import type {
 const SAFE_SESSION_COLUMNS =
   "id, mode, requested_assets, status, invite_expires_at, failed_attempts, target_client_id, reconnect_legacy_ad_account_id, reconnect_shopify_connection_id, reconnect_completed_at, claimed_user_id, first_name, last_name, email, discord_handle, created_at, updated_at, identity_created_at, submitted_at, reviewed_at, activated_at, last_error_code" as const;
 const AUTH_SESSION_COLUMNS = `${SAFE_SESSION_COLUMNS}, invite_token_hash, created_by` as const;
-const SAFE_SHOPIFY_COLUMNS =
+export const SAFE_SHOPIFY_COLUMNS =
   "id, session_id, client_id, status, shopify_name, shopify_domain, primary_domain, shopify_currency, granted_scopes, connected_at, last_verified_at, last_error_code" as const;
-const SAFE_GOOGLE_COLUMNS =
+export const SAFE_GOOGLE_COLUMNS =
   "id, session_id, client_id, status, windsor_account_id, account_name, admin_label, currency, time_zone, connected_at, last_verified_at, last_error_code" as const;
 
 export type ClientOnboardingPublicStatus =
@@ -174,7 +174,7 @@ function publicStatus(
   return status;
 }
 
-function asShopifyDTO(row: ClientShopifyConnection): ClientOnboardingShopifyDTO {
+export function asShopifyDTO(row: ClientShopifyConnection): ClientOnboardingShopifyDTO {
   return {
     id: row.id,
     sessionId: row.session_id,
@@ -189,7 +189,7 @@ function asShopifyDTO(row: ClientShopifyConnection): ClientOnboardingShopifyDTO 
   };
 }
 
-function asGoogleDTO(row: ClientGoogleAdsConnection): ClientOnboardingGoogleDTO {
+export function asGoogleDTO(row: ClientGoogleAdsConnection): ClientOnboardingGoogleDTO {
   return {
     id: row.id,
     sessionId: row.session_id,

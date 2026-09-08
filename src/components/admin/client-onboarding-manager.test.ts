@@ -44,6 +44,8 @@ function roster(): ExistingClientRosterDTO {
         connectedAt: "2026-01-02T00:00:00.000Z",
       },
     ],
+    onboardingShopify: [],
+    onboardingGoogleAds: [],
   };
 }
 
@@ -131,6 +133,57 @@ describe("client roster merge", () => {
     expect(card.shopify).toHaveLength(1);
     expect(card.shopify[0].source).toBe("legacy");
     expect(card.googleAds).toEqual([]);
+  });
+
+  it("keeps a live store on the card when the client's only link was cancelled", () => {
+    // Cancelling a link now keeps whatever reporting is using (migration
+    // 0099). If that link was the client's only one, no session survives to
+    // carry the store - it comes from the client instead, so Test, Reconnect
+    // and Remove stay reachable for a store that is still reporting.
+    const [card] = buildClientCards(
+      [],
+      [
+        {
+          ...roster(),
+          onboardingShopify: [
+            {
+              id: "40000000-0000-4000-8000-000000000001",
+              sessionId: "50000000-0000-4000-8000-000000000001",
+              name: "Mayfair Rose",
+              domain: "mayfair-rose.myshopify.com",
+              primaryDomain: null,
+              currency: "EUR",
+              grantedScopes: ["read_orders"],
+              connectedAt: "2026-09-07T23:19:00.000Z",
+              lastVerifiedAt: "2026-09-07T23:19:00.000Z",
+              lastErrorCode: null,
+            },
+          ],
+          onboardingGoogleAds: [
+            {
+              id: "40000000-0000-4000-8000-000000000002",
+              sessionId: "50000000-0000-4000-8000-000000000001",
+              customerId: "123-456-7890",
+              accountName: "Mayfair Ads",
+              adminLabel: null,
+              currency: "EUR",
+              timeZone: "Europe/Lisbon",
+              connectedAt: "2026-09-07T23:19:00.000Z",
+              lastVerifiedAt: "2026-09-07T23:19:00.000Z",
+              lastErrorCode: null,
+            },
+          ],
+        },
+      ],
+    );
+
+    expect(card.session).toBeNull();
+    expect(card.shopify.map((store) => [store.source, store.domain])).toEqual([
+      ["onboarding", "mayfair-rose.myshopify.com"],
+      ["legacy", "northwind-demo.myshopify.com"],
+    ]);
+    expect(card.googleAds).toHaveLength(1);
+    expect(card.googleAds[0].customerId).toBe("123-456-7890");
   });
 
   it("hides the old Shopify projection when the same domain is reconnected", () => {

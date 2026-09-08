@@ -35,6 +35,8 @@ const PREVIEW_ROSTER: ExistingClientRosterDTO[] = [
         connectedAt: "2026-02-02T10:00:00.000Z",
       },
     ],
+    onboardingShopify: [],
+    onboardingGoogleAds: [],
   },
   {
     clientId: "1a1a08e0-d87a-45f7-beb7-e1b6c112495a",
@@ -55,6 +57,8 @@ const PREVIEW_ROSTER: ExistingClientRosterDTO[] = [
         connectedAt: "2026-03-01T10:00:00.000Z",
       },
     ],
+    onboardingShopify: [],
+    onboardingGoogleAds: [],
   },
   {
     clientId: "69aa2e3c-d3d1-48c2-83d7-692255bde599",
@@ -65,6 +69,8 @@ const PREVIEW_ROSTER: ExistingClientRosterDTO[] = [
     accessBlocked: false,
     createdAt: "2026-08-11T09:00:00.000Z",
     shopify: [],
+    onboardingShopify: [],
+    onboardingGoogleAds: [],
   },
 ];
 

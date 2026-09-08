@@ -19,6 +19,20 @@ vi.mock("@/lib/client-onboarding/sessions", () => ({
     }
   },
   requireClientOnboardingAdmin: mocks.requireClientOnboardingAdmin,
+  // The roster reads the client's own connected assets through the same
+  // columns and mappers the onboarding list uses.
+  SAFE_SHOPIFY_COLUMNS:
+    "id, session_id, client_id, status, shopify_name, shopify_domain, primary_domain, shopify_currency, granted_scopes, connected_at, last_verified_at, last_error_code",
+  SAFE_GOOGLE_COLUMNS:
+    "id, session_id, client_id, status, windsor_account_id, account_name, admin_label, currency, time_zone, connected_at, last_verified_at, last_error_code",
+  asShopifyDTO: (row: { id: string; shopify_domain: string }) => ({
+    id: row.id,
+    domain: row.shopify_domain,
+  }),
+  asGoogleDTO: (row: { id: string; windsor_account_id: string }) => ({
+    id: row.id,
+    customerId: row.windsor_account_id,
+  }),
 }));
 vi.mock("@/lib/supabase/service", () => ({
   createServiceClient: mocks.createServiceClient,
@@ -43,7 +57,13 @@ const REJECTED = "40000000-0000-4000-8000-000000000004";
 const MEMBER = "40000000-0000-4000-8000-000000000005";
 const MEMBER_OWNER = "40000000-0000-4000-8000-000000000006";
 
-type TableName = "portal_clients" | "profiles" | "client_members" | "ad_accounts";
+type TableName =
+  | "portal_clients"
+  | "profiles"
+  | "client_members"
+  | "ad_accounts"
+  | "client_shopify_connections"
+  | "client_google_ads_connections";
 type Result = { data: Record<string, unknown>[]; error: null | { message: string } };
 let results: Record<TableName, Result>;
 
@@ -86,12 +106,23 @@ describe("existing client roster", () => {
       profiles: { data: [], error: null },
       client_members: { data: [], error: null },
       ad_accounts: { data: [], error: null },
+      client_shopify_connections: { data: [], error: null },
+      client_google_ads_connections: { data: [], error: null },
     };
     mocks.requireClientOnboardingAdmin.mockResolvedValue({ id: ADMIN, role: "admin" });
     mocks.from.mockImplementation((table: TableName) => ({
       select: (columns: string) => {
         mocks.select(table, columns);
-        return Promise.resolve(results[table]);
+        // The connection reads narrow by status before awaiting.
+        const chain: {
+          eq: () => typeof chain;
+          then: Promise<Result>["then"];
+        } = {
+          eq: () => chain,
+          then: (resolve, reject) =>
+            Promise.resolve(results[table]).then(resolve, reject),
+        };
+        return chain;
       },
     }));
     mocks.createServiceClient.mockReturnValue({ from: mocks.from });
@@ -125,6 +156,16 @@ describe("existing client roster", () => {
       [
         "ad_accounts",
         "id, client_id, store_name, status, currency, shopify_url, shopify_connected, shopify_scopes, shopify_connected_at, created_at",
+      ],
+      // The client's own connected assets, so a store whose only onboarding
+      // link was cancelled still appears on its card.
+      [
+        "client_shopify_connections",
+        "id, session_id, client_id, status, shopify_name, shopify_domain, primary_domain, shopify_currency, granted_scopes, connected_at, last_verified_at, last_error_code",
+      ],
+      [
+        "client_google_ads_connections",
+        "id, session_id, client_id, status, windsor_account_id, account_name, admin_label, currency, time_zone, connected_at, last_verified_at, last_error_code",
       ],
     ]);
     const selectedColumns = mocks.select.mock.calls.map(([, columns]) => columns).join(" ");

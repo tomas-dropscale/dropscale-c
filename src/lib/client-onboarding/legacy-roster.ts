@@ -1,8 +1,14 @@
 import "server-only";
 
 import {
+  asGoogleDTO,
+  asShopifyDTO,
   ClientOnboardingError,
   requireClientOnboardingAdmin,
+  SAFE_GOOGLE_COLUMNS,
+  SAFE_SHOPIFY_COLUMNS,
+  type ClientOnboardingGoogleDTO,
+  type ClientOnboardingShopifyDTO,
 } from "@/lib/client-onboarding/sessions";
 import { normalizeShopDomain } from "@/lib/shopify/client";
 import { createServiceClient } from "@/lib/supabase/service";
@@ -10,7 +16,9 @@ import type {
   AdAccount,
   Client,
   ClientApprovalStatus,
+  ClientGoogleAdsConnection,
   ClientMember,
+  ClientShopifyConnection,
   Profile,
 } from "@/lib/supabase/types";
 
@@ -68,6 +76,15 @@ export type ExistingClientRosterDTO = {
   createdAt: string;
   partnerOf?: string[];
   shopify: LegacyShopifyAssetDTO[];
+  /**
+   * The client's connected onboarding assets, listed here because they belong
+   * to the CLIENT, not to a link. A cancelled link leaves its live assets in
+   * place (migration 0099), and a client whose only link was cancelled has no
+   * session row for the onboarding list to hang them on - without these the
+   * store would vanish from the admin page while still reporting.
+   */
+  onboardingShopify: ClientOnboardingShopifyDTO[];
+  onboardingGoogleAds: ClientOnboardingGoogleDTO[];
 };
 
 function compareText(left: string, right: string) {
@@ -147,15 +164,32 @@ export async function listExistingClientRoster(): Promise<ExistingClientRosterDT
     );
   }
 
-  const [clientsResult, profilesResult, membersResult, accountsResult] =
+  const [
+    clientsResult,
+    profilesResult,
+    membersResult,
+    accountsResult,
+    onboardingShopifyResult,
+    onboardingGoogleResult,
+  ] =
     await Promise.all([
       service.from("portal_clients").select(SAFE_CLIENT_COLUMNS),
       service.from("profiles").select(SAFE_PROFILE_COLUMNS),
       service.from("client_members").select(SAFE_MEMBER_COLUMNS),
       service.from("ad_accounts").select(SAFE_ACCOUNT_COLUMNS),
+      service
+        .from("client_shopify_connections")
+        .select(SAFE_SHOPIFY_COLUMNS)
+        .eq("status", "connected"),
+      service
+        .from("client_google_ads_connections")
+        .select(SAFE_GOOGLE_COLUMNS)
+        .eq("status", "connected"),
     ]);
 
   if (
+    onboardingShopifyResult.error ||
+    onboardingGoogleResult.error ||
     clientsResult.error ||
     profilesResult.error ||
     membersResult.error ||
@@ -191,6 +225,18 @@ export async function listExistingClientRoster(): Promise<ExistingClientRosterDT
     owned.push(account);
     accountsByClient.set(account.client_id, owned);
   }
+  const onboardingShopifyByClient = new Map<string, ClientOnboardingShopifyDTO[]>();
+  for (const row of (onboardingShopifyResult.data ?? []) as ClientShopifyConnection[]) {
+    const owned = onboardingShopifyByClient.get(row.client_id) ?? [];
+    owned.push(asShopifyDTO(row));
+    onboardingShopifyByClient.set(row.client_id, owned);
+  }
+  const onboardingGoogleByClient = new Map<string, ClientOnboardingGoogleDTO[]>();
+  for (const row of (onboardingGoogleResult.data ?? []) as ClientGoogleAdsConnection[]) {
+    const owned = onboardingGoogleByClient.get(row.client_id) ?? [];
+    owned.push(asGoogleDTO(row));
+    onboardingGoogleByClient.set(row.client_id, owned);
+  }
 
   return clients
     .filter(
@@ -214,6 +260,11 @@ export async function listExistingClientRoster(): Promise<ExistingClientRosterDT
         client.approval_status === "approved"
           ? projectShopifyAssets(accountsByClient.get(client.id) ?? [])
           : [],
+      // Not gated on approval: the onboarding list shows a client's connected
+      // assets from the moment they arrive, and this is the same truth read
+      // from the client instead of from a link.
+      onboardingShopify: onboardingShopifyByClient.get(client.id) ?? [],
+      onboardingGoogleAds: onboardingGoogleByClient.get(client.id) ?? [],
     }))
     .sort(
       (left, right) =>
