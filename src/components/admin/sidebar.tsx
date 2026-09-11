@@ -19,6 +19,7 @@ import {
   TrendingUp,
   Truck,
   UserPlus,
+  Table2,
   type LucideIcon,
 } from "lucide-react";
 
@@ -54,6 +55,8 @@ const NAV_GROUPS: Group[] = [
       { href: "/admin/revenue", icon: TrendingUp, label: (d) => d.nav.revenue },
       { href: "/admin/billing", icon: FileText, label: (d) => d.nav.billing },
       { href: "/admin/expenses", icon: Receipt, label: (d) => d.nav.expenses },
+      // Each client's own P&L, as they see it - how their money is doing.
+      { href: "/admin/pnl", icon: Table2, label: () => "Client P&L" },
       // A brand name — the same word in every locale, so no dictionary entry.
       { href: "/admin/hst", icon: Truck, label: () => "HST" },
     ],

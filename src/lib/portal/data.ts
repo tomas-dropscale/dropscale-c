@@ -418,7 +418,22 @@ async function v2ProjectionOrNull(clientId: string): Promise<PortalAccountProjec
 export async function fetchAccounts(): Promise<PortalAccount[]> {
   const clientId = await activeWorkspaceId();
   if (!clientId) return [];
+  return workspaceAccounts(clientId);
+}
 
+/**
+ * The stores the portal shows a NAMED workspace - the same surface decision,
+ * the same projection, resolved without a session. The agency reads a
+ * client's P&L through this so it sees the very stores the client sees.
+ *
+ * Nothing here checks the viewer: the caller has either pinned the workspace
+ * to the session (fetchAccounts) or verified the viewer is an admin first.
+ * The reads still ride the viewer's RLS, and an admin's grant is WIDER than a
+ * member's - 0055 hides the normalized surrogates (shopify_anchor,
+ * google_spend) from the legacy portal through the member policy alone - so
+ * the legacy branch states that rule itself instead of inheriting it.
+ */
+export async function workspaceAccounts(clientId: string): Promise<PortalAccount[]> {
   const reporting = await portalStoreSurface(clientId);
   if (reporting === "unavailable") return [];
   if (reporting === "v2") {
@@ -430,6 +445,7 @@ export async function fetchAccounts(): Promise<PortalAccount[]> {
     .from("ad_accounts")
     .select(ACCOUNT_COLUMNS)
     .eq("client_id", clientId)
+    .eq("reporting_role", "legacy_hybrid")
     .order("created_at", { ascending: true });
   return projectLegacyConnectionState(clientId, (data as AdAccount[] | null) ?? []);
 }
@@ -455,6 +471,7 @@ export async function fetchAccount(accountId: string): Promise<PortalAccount | n
     .select(ACCOUNT_COLUMNS)
     .eq("id", accountId)
     .eq("client_id", clientId)
+    .eq("reporting_role", "legacy_hybrid")
     .maybeSingle();
   const account = (data as AdAccount | null) ?? null;
   return account ? (await projectLegacyConnectionState(clientId, [account]))[0] ?? null : null;
@@ -500,17 +517,33 @@ export async function reportingMetricScope(
   accounts: readonly AdAccount[],
   options: { includeUnallocated?: boolean } = {},
 ): Promise<PortalMetricScope> {
-  const requested = [...new Set(accounts.map((account) => account.id))];
-  const empty = (): PortalMetricScope => ({
-    metricAccountIds: [],
-    metricIdsByStore: new Map(),
-    metricAccountsById: new Map(),
-    unallocatedGoogleAccountIds: [],
-  });
-  if (requested.length === 0) return empty();
-
+  if (accounts.length === 0) return emptyMetricScope();
   const clientId = await activeWorkspaceId();
-  if (!clientId || accounts.some((account) => account.client_id !== clientId)) return empty();
+  if (!clientId) return emptyMetricScope();
+  return workspaceMetricScope(clientId, accounts, options);
+}
+
+const emptyMetricScope = (): PortalMetricScope => ({
+  metricAccountIds: [],
+  metricIdsByStore: new Map(),
+  metricAccountsById: new Map(),
+  unallocatedGoogleAccountIds: [],
+});
+
+/**
+ * The same scope for a NAMED workspace, session-free - see workspaceAccounts.
+ * The accounts must be that workspace's own, as returned by it; a store of
+ * another client empties the scope rather than widening it.
+ */
+export async function workspaceMetricScope(
+  clientId: string,
+  accounts: readonly AdAccount[],
+  options: { includeUnallocated?: boolean } = {},
+): Promise<PortalMetricScope> {
+  const requested = [...new Set(accounts.map((account) => account.id))];
+  const empty = emptyMetricScope;
+  if (requested.length === 0) return empty();
+  if (accounts.some((account) => account.client_id !== clientId)) return empty();
   const reporting = await portalStoreSurface(clientId);
   if (reporting === "unavailable") return empty();
   if (reporting !== "v2") {

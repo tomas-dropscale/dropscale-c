@@ -61,6 +61,8 @@ import {
   projectVerifiedPreCutoverConnection,
   reportingMetricAccountIds,
   reportingMetricScope,
+  workspaceAccounts,
+  workspaceMetricScope,
 } from "./data";
 
 function account(overrides: Partial<AdAccount> = {}): AdAccount {
@@ -382,6 +384,67 @@ describe("portal V2 store projection", () => {
       "client-1",
       ["binding-anchor-1"],
     );
+  });
+
+  it("serves a named workspace to the agency exactly as it serves the session, without the session", async () => {
+    const { client } = queryClient([
+      account(),
+      googleAccount("google-child-1"),
+      googleAccount("retired-1"),
+      googleAccount("unallocated-1"),
+    ]);
+    mocks.createServiceClient.mockReturnValue(client);
+    mocks.resolveReportingSources.mockResolvedValue([
+      shopifySource(),
+      googleSource("google-child-1"),
+      googleSource("unallocated-1", null),
+    ]);
+    mocks.retiredAccountIdsByAnchorBinding.mockResolvedValue(
+      new Map([["binding-anchor-1", ["retired-1"]]]),
+    );
+
+    const viaSession = await fetchAccounts();
+    const sessionScope = await reportingMetricScope(viaSession, { includeUnallocated: true });
+    mocks.activeWorkspaceId.mockClear();
+
+    // The admin's read of the same client: same stores, same physical scope -
+    // retired history and the unallocated Google bucket included - and the
+    // session is never consulted.
+    const named = await workspaceAccounts("client-1");
+    const namedScope = await workspaceMetricScope("client-1", named, { includeUnallocated: true });
+    expect(named).toEqual(viaSession);
+    expect(namedScope).toEqual(sessionScope);
+    expect(namedScope.metricAccountIds).toEqual([
+      "anchor-1",
+      "google-child-1",
+      "retired-1",
+      "unallocated-1",
+    ]);
+    expect(namedScope.unallocatedGoogleAccountIds).toEqual(["unallocated-1"]);
+    expect(mocks.activeWorkspaceId).not.toHaveBeenCalled();
+
+    // Another client's name never widens the scope to these stores.
+    await expect(workspaceMetricScope("client-2", named)).resolves.toEqual(
+      expect.objectContaining({ metricAccountIds: [] }),
+    );
+  });
+
+  it("shows the agency only the legacy accounts the legacy portal shows its member", async () => {
+    // 0055 hides a client's normalized surrogates from the legacy portal
+    // through the MEMBER policy; an admin's grant sees every row. The rule
+    // therefore has to be in the query, or the agency would read stores the
+    // client never sees.
+    const { client, query } = queryClient([account({ reporting_role: "legacy_hybrid" })]);
+    mocks.clientReportingAuthority.mockResolvedValue("legacy");
+    mocks.createClient.mockResolvedValue(client);
+
+    const named = await workspaceAccounts("client-1");
+
+    expect(named).toEqual([expect.objectContaining({ id: "anchor-1" })]);
+    expect(query.eq).toHaveBeenCalledWith("client_id", "client-1");
+    expect(query.eq).toHaveBeenCalledWith("reporting_role", "legacy_hybrid");
+    expect(mocks.activeWorkspaceId).not.toHaveBeenCalled();
+    expect(mocks.resolveReportingSources).not.toHaveBeenCalled();
   });
 
   it("reads every Google source grouped under the selected V2 Shopify anchor", async () => {
