@@ -241,6 +241,8 @@ export type SyncedOrder = {
   paid: boolean;
   /** Path the customer FIRST landed on (rev-share landing rule), or null. */
   landingPath: string | null;
+  /** What has been refunded on this order so far, store base currency. */
+  refunded: number;
   lines: SyncedOrderLine[];
 };
 
@@ -622,6 +624,7 @@ export async function fetchDailySales(
       total,
       paid,
       landingPath: visit?.landingPage ?? null,
+      refunded,
       lines,
     });
   }

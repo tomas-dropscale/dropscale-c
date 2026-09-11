@@ -217,6 +217,7 @@ describe("V2 Shopify reporting adapter", () => {
           total: 120.5,
           paid: true,
           landingPath: "/collections/summer",
+          refunded: 5,
           lines: [
             {
               productKey: "SUMMER-1",

@@ -42,9 +42,11 @@ import {
   type ShopifyLandingSessionsRow,
   type ShopifyReportingAdapter,
 } from "@/lib/reporting/shopify";
-import { collectionHandleFromUrl } from "@/lib/finance/rev-share";
+import { collectionHandleFromUrl, normalizePath } from "@/lib/finance/rev-share";
 import { loadCostContext } from "@/lib/cogs/context";
-import { resolveUnitCost, type CostContext } from "@/lib/cogs/engine";
+import { orderCogs, type CostContext } from "@/lib/cogs/engine";
+import { fxDailyRates, rateOn } from "@/lib/shopify/fx";
+import type { SyncedOrder } from "@/lib/shopify/client";
 import {
   resolveReportingSources,
   type CanonicalReportingSource,
@@ -1575,12 +1577,13 @@ function campaignFamily(
                 const dayFigures = landed.byDay.get(day) ?? null;
                 const figures = carries ? dayFigures : null;
                 const nothing = (known: boolean) => (known ? 0 : null);
-                const landingKnown = dayFigures ? dayFigures.orders !== null : true;
+                const salesKnown = dayFigures ? dayFigures.revenue !== null : true;
+                const landingKnown = dayFigures ? dayFigures.addedToCart !== null : true;
                 const cogsKnown = dayFigures ? dayFigures.cogs !== null : landed.costsKnown;
                 return {
-                  collectionRevenue: figures?.revenue ?? 0,
-                  collectionUnits: figures?.units ?? 0,
-                  collectionOrders: figures ? figures.orders : nothing(landingKnown),
+                  collectionRevenue: figures ? figures.revenue : nothing(salesKnown),
+                  collectionUnits: figures ? figures.units : nothing(salesKnown),
+                  collectionOrders: figures ? figures.orders : nothing(salesKnown),
                   collectionAddedToCart: figures ? figures.addedToCart : nothing(landingKnown),
                   cogs: figures ? figures.cogs : nothing(cogsKnown),
                 };
@@ -1651,6 +1654,8 @@ async function shopifyFamilies(
   collectionSales: Attempt<ShopifyCollectionSalesSeriesRow[]>;
   /** Google sessions by landing page, for the same attribution. */
   landing: Attempt<ShopifyLandingSessionsRow[]>;
+  /** The range's orders with the page each one landed on, in the store's base currency. */
+  orders: Attempt<{ currency: string; orders: SyncedOrder[] }>;
   /** The store's verified IANA zone, or null when the store could not be opened. */
   timeZone: string | null;
 }> {
@@ -1666,12 +1671,13 @@ async function shopifyFamilies(
       collections: family("Collection sales"),
       collectionSales: adapterAttempt,
       landing: adapterAttempt,
+      orders: adapterAttempt,
       timeZone: null,
     };
   }
   const invoke = <T>(operation: () => Promise<T>) =>
     Promise.resolve().then(operation);
-  const [funnelResult, attributionResult, productResult, collectionsResult, landingResult] =
+  const [funnelResult, attributionResult, productResult, collectionsResult, landingResult, ordersResult] =
     await Promise.allSettled([
       invoke(() => adapterAttempt.value.fetchFunnelSeries(range.from, range.to)),
       invoke(() =>
@@ -1688,6 +1694,10 @@ async function shopifyFamilies(
           targetCurrency,
         )),
       invoke(() => adapterAttempt.value.fetchLandingSessionsSeries(range.from, range.to)),
+      invoke(async () => {
+        const sales = await adapterAttempt.value.fetchDailySales(range.from, range.to);
+        return { currency: String(sales.currency ?? "").trim().toUpperCase(), orders: sales.orders };
+      }),
     ]);
   const settledAttempt = <T,>(
     result: PromiseSettledResult<T>,
@@ -1709,6 +1719,11 @@ async function shopifyFamilies(
     landingResult,
     "Shopify landing page sessions could not be loaded.",
     "Shopify has not granted report access.",
+  );
+  const orders = settledAttempt(
+    ordersResult,
+    "Shopify orders could not be loaded.",
+    "Shopify has not granted order access.",
   );
 
   let funnel: AdminStoreAnalytics["funnel"];
@@ -1814,6 +1829,7 @@ async function shopifyFamilies(
     collections,
     collectionSales,
     landing,
+    orders,
     timeZone: adapterAttempt.value.timeZone,
   };
 }
@@ -1821,10 +1837,12 @@ async function shopifyFamilies(
 const GOOGLE_LANDING_PLATFORMS = new Set(["google", "alphabet"]);
 
 export type CampaignCollectionDay = {
-  revenue: number;
-  units: number;
-  /** null when the landing sessions could not be read: unknown, not none. */
+  /** null when the range's orders could not be read: unknown, not none. */
+  revenue: number | null;
+  units: number | null;
+  /** Orders the collection earned, by the landing-or-lines rule; null with revenue. */
   orders: number | null;
+  /** null when the landing sessions could not be read. */
   addedToCart: number | null;
   /** null when the store's costs could not be read. */
   cogs: number | null;
@@ -1848,32 +1866,44 @@ function normalizedLandingPath(path: string): string {
 }
 
 /**
- * Which collection each campaign lands on, and what that collection did each
- * day, shared out between the campaigns that land there.
+ * Which collection each campaign lands on, and what that collection earned
+ * each day, shared out between the campaigns that land there.
  *
  * The campaign's final URLs name the collection page (one handle, or the
- * campaign is left out). The collection's product sales for the day are real
- * Shopify money - every channel, not only this campaign - and are split
- * between the campaigns landing on the same page by their share of that day's
- * Google spend, equally when none of them spent. Cart additions and orders are
- * the Google sessions that landed on the collection page, split the same way.
- * COGS is the attributed units priced by the store's own product costs - a
- * product's manual cost when one is set for any of its variants, otherwise
- * the store's default percentage of the day's average selling price. Order
- * tiers are not applied here: a tier is a property of one order's quantities,
- * which a day's total cannot recover.
+ * campaign is left out). What the collection earned is read from the orders
+ * themselves, by the rule the revenue share already applies:
+ *  - an order that LANDED on the collection page counts whole - every line,
+ *    the whole total;
+ *  - any other order counts only the lines whose product is in the collection.
+ * Cart additions and orders-from-landing are the Google sessions that landed
+ * on the collection page. COGS is what those same lines cost, priced by the
+ * store's own product costs order by order - manual cost, tiers and cost
+ * collections included, exactly as the store's P&L prices them.
  *
- * Within one collection the campaigns landing on it split each day with
- * shares that sum to one. Across collections nothing is additive: a product
- * in two collections sells once and is counted in both, exactly as the
- * collections family itself warns.
+ * Amounts arrive in the store's base currency and are converted to the
+ * reporting currency with the day's ECB rate, like every other Shopify
+ * figure on this page; costs are priced in the reporting currency directly,
+ * from lines converted first. Campaigns sharing a page split each day by
+ * their share of that day's Google spend, equally when none of them spent.
+ *
+ * The landing match is a little wider than the revenue share's: a page under
+ * the collection (a product opened from it) counts as landing on it, where
+ * the revenue share wants the collection page itself. And a landed order is
+ * counted net of its refunds, where the revenue share bills it gross.
+ *
+ * Within one collection the shares sum to one. Across collections nothing is
+ * additive: an order that landed on one page and bought another collection's
+ * items counts for both, exactly as the collections family itself warns.
  */
-export function attributeCampaignCollections(input: {
+export async function attributeCampaignCollections(input: {
   google: Attempt<GoogleCampaignLoad>;
   collectionSales: Attempt<ShopifyCollectionSalesSeriesRow[]>;
   landing: Attempt<ShopifyLandingSessionsRow[]>;
+  orders: Attempt<{ currency: string; orders: SyncedOrder[] }>;
   costs: CostContext | null;
-}): CampaignCollectionAttribution {
+  targetCurrency: string;
+  range: Pick<RangeSelection, "from" | "to">;
+}): Promise<CampaignCollectionAttribution> {
   const attribution: CampaignCollectionAttribution = new Map();
   if (!input.google.ok || !input.collectionSales.ok) return attribution;
   const collectionByHandle = new Map(
@@ -1925,29 +1955,67 @@ export function attributeCampaignCollections(input: {
     }
   }
 
-  const unitCostFor = (
-    product: ShopifyCollectionSalesSeriesRow["products"][number],
-    day: string,
-    unitPrice: number,
-  ): number | null => {
-    if (!input.costs) return null;
-    const keyed = product.costKeys.find((key) => (input.costs?.manualCosts.get(key)?.length ?? 0) > 0);
-    return resolveUnitCost(
-      { productKey: keyed ?? product.costKeys[0] ?? product.title, quantity: 1, unitPrice },
-      day,
-      input.costs,
-    ).cost;
-  };
+  // What each collection earned per day, from the orders, by the agreed rule.
+  type EarnedDay = { revenue: number; units: number; orders: number; cogs: number | null };
+  const earnedByHandleDay = new Map<string, EarnedDay>();
+  if (input.orders.ok) {
+    const rates = input.orders.value.currency === input.targetCurrency || input.orders.value.orders.length === 0
+      ? null
+      : await fxDailyRates(input.orders.value.currency, input.targetCurrency, input.range.from, input.range.to);
+    const convert = (amount: number, day: string) => amount * (rates ? rateOn(rates, day) : 1);
+    const deals = [...campaignsByHandle.keys()].map((handle) => {
+      const collection = collectionByHandle.get(handle);
+      return {
+        handle,
+        path: `/collections/${handle}`,
+        productKeys: new Set(collection ? collection.products.flatMap((product) => product.costKeys) : []),
+      };
+    });
+    for (const order of input.orders.value.orders) {
+      const landing = normalizePath(order.landingPath);
+      for (const deal of deals) {
+        const landedHere = landing !== null && (landing === deal.path || landing.startsWith(`${deal.path}/`));
+        const lines = landedHere
+          ? order.lines
+          : order.lines.filter((line) => deal.productKeys.has(line.productKey));
+        if (lines.length === 0) continue;
+        // A landed order counts whole, net of what was refunded on it; a
+        // line-matched order counts its lines at their price - a refund is
+        // not allocated to lines, so it stays with the whole-order rule.
+        const revenue = landedHere
+          ? Math.max(0, order.total - order.refunded)
+          : lines.reduce((sum, line) => sum + line.unitPrice * line.quantity, 0);
+        const key = `${deal.handle}|${order.date}`;
+        const current = earnedByHandleDay.get(key) ?? { revenue: 0, units: 0, orders: 0, cogs: input.costs ? 0 : null };
+        current.revenue += convert(revenue, order.date);
+        current.units += lines.reduce((sum, line) => sum + line.quantity, 0);
+        current.orders += 1;
+        if (current.cogs !== null && input.costs) {
+          // The cost context is already in the reporting currency - a manual
+          // cost is stored in euros on a forint store - so the engine must run
+          // there: convert the line PRICES first and take its answer as it is,
+          // exactly as the store's own P&L prices an order. Converting the
+          // result instead would rate a euro cost a second time.
+          const priced = lines.map((line) => ({
+            ...line,
+            unitPrice: convert(line.unitPrice, order.date),
+          }));
+          current.cogs += orderCogs(priced, order.date, input.costs);
+        }
+        earnedByHandleDay.set(key, current);
+      }
+    }
+  }
 
   for (const [handle, campaignKeys] of campaignsByHandle) {
-    const collection = collectionByHandle.get(handle);
-    if (!collection) continue;
     const days = new Set<string>([
-      ...collection.timeline.map((point) => point.bucket.slice(0, 10)),
       ...[...spendByCampaignDay.keys()]
         .filter((dayKey) => campaignKeys.some((key) => dayKey.startsWith(`${key}|`)))
         .map((dayKey) => dayKey.slice(dayKey.indexOf("|") + 1)),
       ...[...landingByHandleDay.keys()]
+        .filter((key) => key.startsWith(`${handle}|`))
+        .map((key) => key.slice(handle.length + 1)),
+      ...[...earnedByHandleDay.keys()]
         .filter((key) => key.startsWith(`${handle}|`))
         .map((key) => key.slice(handle.length + 1)),
     ]);
@@ -1957,22 +2025,12 @@ export function attributeCampaignCollections(input: {
       const shares = campaignKeys.map((_key, index) =>
         totalSpend > 0 ? (spends[index] ?? 0) / totalSpend : 1 / campaignKeys.length,
       );
-
-      // The day's collection figures, once: sales and units from the
-      // collection's own day, which is the whole of what it sold; costs from
-      // its products, which is where a unit cost lives.
-      const collectionDay = collection.timeline.find((entry) => entry.bucket.slice(0, 10) === day);
-      const revenue = collectionDay?.revenue ?? 0;
-      const units = collectionDay?.units ?? 0;
-      let cogs: number | null = input.costs ? 0 : null;
-      for (const product of collection.products) {
-        const point = product.timeline.find((entry) => entry.bucket.slice(0, 10) === day);
-        if (!point) continue;
-        if (cogs !== null && point.units > 0) {
-          const unitCost = unitCostFor(product, day, point.revenue / point.units);
-          cogs = unitCost === null ? null : cogs + unitCost * point.units;
-        }
-      }
+      const earned = earnedByHandleDay.get(`${handle}|${day}`) ?? {
+        revenue: 0,
+        units: 0,
+        orders: 0,
+        cogs: input.costs ? 0 : null,
+      };
       const landed = landingByHandleDay.get(`${handle}|${day}`) ?? { addedToCart: 0, completedCheckout: 0 };
 
       campaignKeys.forEach((key, index) => {
@@ -1984,11 +2042,11 @@ export function attributeCampaignCollections(input: {
           byDay: new Map<string, CampaignCollectionDay>(),
         };
         entry.byDay.set(day, {
-          revenue: revenue * share,
-          units: units * share,
-          orders: input.landing.ok ? landed.completedCheckout * share : null,
+          revenue: input.orders.ok ? earned.revenue * share : null,
+          units: input.orders.ok ? earned.units * share : null,
+          orders: input.orders.ok ? earned.orders * share : null,
           addedToCart: input.landing.ok ? landed.addedToCart * share : null,
-          cogs: cogs === null ? null : cogs * share,
+          cogs: earned.cogs === null || !input.orders.ok ? null : earned.cogs * share,
         });
         attribution.set(key, entry);
       });
@@ -2149,6 +2207,11 @@ function failedShopifyFamilies(): ShopifyFamilies {
       state: "failed",
       message: "Shopify landing page sessions could not be loaded.",
     },
+    orders: {
+      ok: false,
+      state: "failed",
+      message: "Shopify orders could not be loaded.",
+    },
     timeZone: null,
   };
 }
@@ -2270,11 +2333,14 @@ async function buildLiveAdminStoreAnalytics(
       shopify.attribution,
       shopify.products,
       shopify.timeZone ? localDayIn(shopify.timeZone) : null,
-      attributeCampaignCollections({
+      await attributeCampaignCollections({
         google,
         collectionSales: shopify.collectionSales,
         landing: shopify.landing,
+        orders: shopify.orders,
         costs,
+        targetCurrency: input.store.currency,
+        range: input.range,
       }),
     );
   } catch (error) {

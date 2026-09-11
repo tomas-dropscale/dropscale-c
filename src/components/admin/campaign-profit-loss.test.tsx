@@ -183,11 +183,11 @@ describe("a campaign's profit and loss by day", () => {
         }}
       />,
     );
-    expect(html).toContain("/collections/kenyelmes-ruhak");
+    expect(html).toContain("/collections/kenyelmes-ruhak or a page under it");
     expect(html).toContain("shared by 4 campaigns");
     expect(html).toContain("COGS");
     expect(html).toContain("EUR 90.00");
-    expect(html).toContain("and product costs");
+    expect(html).toContain("the product costs of those lines");
 
     // Costs unreadable: the caption says so instead of promising a subtraction.
     const noCosts = renderToStaticMarkup(
@@ -212,7 +212,7 @@ describe("a campaign's profit and loss by day", () => {
       />,
     );
     expect(noCosts).toContain("product costs could not be read");
-    expect(noCosts).not.toContain("and product costs");
+    expect(noCosts).not.toContain("the product costs of those lines");
   });
 
   it("does not trust a revenue of 0 from a point written before the sheet existed", () => {

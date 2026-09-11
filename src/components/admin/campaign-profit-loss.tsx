@@ -28,11 +28,13 @@ import { cn } from "@/lib/utils";
  *    sales of this campaign, last non-direct click.
  *  - "collection": the ads carry no utm_campaign (every visit lands as plain
  *    Google traffic, which Shopify labels "google" or "alphabet"), but the
- *    campaign sends people to one collection page. Its sales are that
- *    collection's real Shopify sales, shared out between the campaigns landing
- *    there by spend; cart additions and orders are the Google visits that
- *    landed on that page; and the store's product costs price the units, so
- *    profit is revenue minus spend minus COGS.
+ *    campaign sends people to one collection page. Its sales are read from
+ *    the orders by the rule the revenue share already applies - an order that
+ *    landed on the page counts whole, any other order counts the lines whose
+ *    product is in the collection - shared out between the campaigns landing
+ *    there by spend; cart additions are the Google visits that landed on the
+ *    page; and the store's product costs price those same lines order by
+ *    order, so profit is revenue minus spend minus COGS.
  *  - "google": neither is known, so Google's own conversion value stands in.
  */
 
@@ -329,18 +331,18 @@ export function CampaignProfitLossSheet({
             : sheet.revenueBasis === "shopify"
             ? "Profit on Shopify's real sales for this campaign (last non-direct click) · Google delivery"
             : sheet.revenueBasis === "collection"
-              ? `Profit on Shopify's sales of /collections/${campaign.collectionHandle ?? ""} - the page this campaign lands on${
+              ? `Profit on orders that landed on /collections/${campaign.collectionHandle ?? ""} or a page under it (whole order, net of refunds) or bought its items elsewhere (those lines)${
                   (campaign.collectionSharedWith ?? 1) > 1
                     ? `, shared by ${campaign.collectionSharedWith} campaigns in proportion to spend, so orders and units are shares and need not be whole`
                     : ""
                 } - minus ad spend${
                   sheet.total.cogs !== null
-                    ? " and product costs"
+                    ? " and the product costs of those lines"
                     : " · product costs could not be read, so COGS reads “—” and is not subtracted"
                 }${
-                  sheet.total.orders !== null
-                    ? " · cart additions and orders are Google visits that landed there"
-                    : " · landing sessions could not be read, so cart additions and orders read “—”"
+                  sheet.total.addedToCart !== null
+                    ? " · cart additions are Google visits that landed there"
+                    : " · landing sessions could not be read, so cart additions read “—”"
                 }`
               : campaign.attributionState === "unmatched"
                 ? `Profit on Google's reported conversion value · Shopify sees no utm_campaign on this campaign's traffic${

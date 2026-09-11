@@ -10,6 +10,12 @@ vi.mock("@/lib/cogs/context", () => ({
   }),
 }));
 vi.mock("@/lib/cogs/engine", () => import("../cogs/engine"));
+// The rate table is fixed here so a forint store can be priced in euros
+// without the network: a flat 0.0025 EUR per HUF for every day.
+vi.mock("@/lib/shopify/fx", async () => {
+  const real = await import("../shopify/fx");
+  return { ...real, fxDailyRates: vi.fn(async () => [["2026-01-01", 0.0025]] as [string, number][]) };
+});
 
 const mocks = vi.hoisted(() => ({
   requireAdmin: vi.fn(),
@@ -73,10 +79,9 @@ vi.mock("@/lib/reporting/shopify", () => ({
   createLegacyShopifyReportingAdapter: mocks.createLegacyShopifyReportingAdapter,
   createShopifyReportingAdapter: mocks.createShopifyReportingAdapter,
 }));
-vi.mock("@/lib/finance/rev-share", () => ({
-  collectionHandleFromUrl: (url: string | null | undefined) =>
-    url?.match(/\/collections\/([^/?#]+)/i)?.[1] ?? null,
-}));
+// The landing rule is the real one: the sheet must match orders the way the
+// revenue share does, so both read the same normalizePath.
+vi.mock("@/lib/finance/rev-share", () => import("../finance/rev-share"));
 vi.mock("@/lib/reporting/sources", () => ({
   resolveReportingSources: mocks.resolveReportingSources,
 }));
@@ -235,7 +240,7 @@ function supplementalCredential(overrides: Record<string, unknown> = {}) {
 function shopifyAdapter() {
   return {
     timeZone: "Europe/Lisbon",
-    fetchDailySales: vi.fn(),
+    fetchDailySales: vi.fn().mockResolvedValue({ currency: "EUR", timeZone: "Europe/Lisbon", days: [], orders: [] }),
     fetchCollectionProductKeys: vi.fn(),
     fetchFunnelSeries: vi.fn().mockResolvedValue({
       granularity: "day",
@@ -294,6 +299,39 @@ function shopifyAdapter() {
       },
     ]),
     fetchLandingSessionsSeries: vi.fn().mockResolvedValue([]),
+  };
+}
+
+/** Two orders for the fixture collection: one landed on it, one bought one of its items elsewhere. */
+function collectionOrders() {
+  return {
+    currency: "EUR",
+    timeZone: "Europe/Lisbon",
+    days: [],
+    orders: [
+      {
+        date: "2026-08-14",
+        total: 100,
+        paid: true,
+        landingPath: "/collections/best-sellers?utm_source=google",
+        refunded: 0,
+        lines: [
+          { productKey: "LAMP-1", title: "Lamp", quantity: 2, unitPrice: 40 },
+          { productKey: "VASE-1", title: "Vase", quantity: 1, unitPrice: 20 },
+        ],
+      },
+      {
+        date: "2026-08-14",
+        total: 60,
+        paid: true,
+        landingPath: "/",
+        refunded: 0,
+        lines: [
+          { productKey: "LAMP-1", title: "Lamp", quantity: 1, unitPrice: 40 },
+          { productKey: "VASE-1", title: "Vase", quantity: 1, unitPrice: 20 },
+        ],
+      },
+    ],
   };
 }
 
@@ -648,6 +686,7 @@ describe("admin store analytics DAL", () => {
     const adapter = shopifyAdapter();
     adapter.fetchCampaignAttributionSeries.mockResolvedValue([]);
     adapter.fetchCampaignProductSeries.mockResolvedValue([]);
+    adapter.fetchDailySales.mockResolvedValue(collectionOrders());
     adapter.fetchLandingSessionsSeries.mockResolvedValue([
       { bucket: "2026-08-14", landingPath: "/collections/best-sellers", platform: "alphabet", sessions: 100, addedToCart: 9, completedCheckout: 2 },
       { bucket: "2026-08-14", landingPath: "/collections/best-sellers/products/lamp", platform: "google", sessions: 10, addedToCart: 1, completedCheckout: 1 },
@@ -681,11 +720,13 @@ describe("admin store analytics DAL", () => {
                 bucket: "2026-08-14",
                 shopifyRevenue: null,
                 addedToCart: null,
-                collectionRevenue: 625,
-                collectionUnits: 8,
+                // The order that landed on the page counts whole (100, 3 units);
+                // the one that landed elsewhere counts its Lamp line only (40, 1).
+                collectionRevenue: 140,
+                collectionUnits: 4,
+                collectionOrders: 2,
                 // Google visits that landed on the page, product pages within it included.
                 collectionAddedToCart: 10,
-                collectionOrders: 3,
                 // The service fake has no cost tables, so costs could not be read.
                 cogs: null,
               }),
@@ -704,6 +745,7 @@ describe("admin store analytics DAL", () => {
     const adapter = shopifyAdapter();
     adapter.fetchCampaignAttributionSeries.mockResolvedValue([]);
     adapter.fetchCampaignProductSeries.mockResolvedValue([]);
+    adapter.fetchDailySales.mockResolvedValue(collectionOrders());
     adapter.fetchLandingSessionsSeries.mockResolvedValue([
       { bucket: "2026-08-14", landingPath: "/collections/best-sellers", platform: "google", sessions: 40, addedToCart: 4, completedCheckout: 1 },
     ]);
@@ -724,11 +766,11 @@ describe("admin store analytics DAL", () => {
 
     const timeline = (result.campaigns as { data: { rows: Array<{ timeline: Array<Record<string, unknown>> }> } }).data.rows[0]!.timeline;
     expect(timeline.map((point) => point.bucket)).toEqual(["2026-08-14T00:00:00", "2026-08-14T13:00:00"]);
-    expect(timeline[0]).toMatchObject({ collectionRevenue: 625, collectionOrders: 1, collectionAddedToCart: 4, cogs: null });
+    expect(timeline[0]).toMatchObject({ collectionRevenue: 140, collectionOrders: 2, collectionAddedToCart: 4, cogs: null });
     expect(timeline[1]).toMatchObject({ collectionRevenue: 0, collectionOrders: 0, collectionAddedToCart: 0, cogs: null });
   });
 
-  it("shares a collection between the campaigns landing on it, by spend, and prices the units", () => {
+  it("shares a collection between the campaigns landing on it, by spend, and prices the units", async () => {
     const costs = {
       manualCosts: new Map([["LAMP-1", [{ cost: 20, effectiveFrom: "2026-01-01" }]]]),
       tiers: new Map(),
@@ -741,7 +783,10 @@ describe("admin store analytics DAL", () => {
       // Lands on no single collection: left out.
       { ...googleCampaign(), providerCampaignId: "222", finalUrls: ["https://northwind.example/"] },
     ];
-    const attribution = attributeCampaignCollections({
+    const attribution = await attributeCampaignCollections({
+      orders: { ok: true, value: collectionOrders() },
+      targetCurrency: "EUR",
+      range: RANGE,
       google: {
         ok: true,
         value: {
@@ -787,25 +832,198 @@ describe("admin store analytics DAL", () => {
     const second = attribution.get(`${STORE_ID}:111`)!;
     expect(first.sharedWith).toBe(2);
     expect(first.costsKnown).toBe(true);
-    // 150 of 200 spent -> three quarters of everything; 3 units at the manual 20.
+    // The collection earned 140 on 4 units over 2 orders. COGS per order: the
+    // landed order prices Lamp x2 at the manual 20 and Vase x1 at 30% of 20
+    // (46); the other order's Lamp line alone is 20. 150 of 200 spent gives
+    // the first campaign three quarters of everything.
     expect(first.byDay.get("2026-08-14")).toEqual({
-      revenue: 225,
-      units: 2.25,
-      orders: 3,
+      revenue: 105,
+      units: 3,
+      orders: 1.5,
       addedToCart: 6,
-      cogs: 45,
+      cogs: 49.5,
     });
     expect(second.byDay.get("2026-08-14")).toEqual({
-      revenue: 75,
-      units: 0.75,
-      orders: 1,
+      revenue: 35,
+      units: 1,
+      orders: 0.5,
       addedToCart: 2,
-      cogs: 15,
+      cogs: 16.5,
     });
   });
 
-  it("marks orders and cart additions unknown, not zero, when the landing sessions could not be read", () => {
-    const attribution = attributeCampaignCollections({
+  it("marks orders and cart additions unknown, not zero, when the landing sessions could not be read", async () => {
+    const attribution = await attributeCampaignCollections({
+      orders: { ok: true, value: collectionOrders() },
+      targetCurrency: "EUR",
+      range: RANGE,
+      google: {
+        ok: true,
+        value: {
+          rows: [{ ...googleCampaign(), finalUrls: ["https://northwind.example/collections/best-sellers"] }] as never,
+          granularity: "day",
+          timeline: [deliveredDay()],
+        },
+      },
+      collectionSales: {
+        ok: true,
+        value: [
+          {
+            collectionId: "gid://shopify/Collection/20",
+            handle: "best-sellers",
+            title: "Best sellers",
+            revenue: 300,
+            units: 3,
+            timeline: [{ bucket: "2026-08-14", revenue: 300, units: 3, orders: 3 }],
+            products: [
+              {
+                productId: "gid://shopify/Product/10",
+                title: "Lamp",
+                revenue: 300,
+                units: 3,
+                costKeys: ["LAMP-1", "Lamp"],
+                timeline: [{ bucket: "2026-08-14", revenue: 300, units: 3, orders: 3 }],
+              },
+            ],
+          },
+        ],
+      },
+      landing: { ok: false, state: "failed", message: "Shopify landing page sessions could not be loaded." },
+      costs: null,
+    });
+
+    expect(attribution.get(`${STORE_ID}:987654321`)!.byDay.get("2026-08-14")).toEqual({
+      revenue: 140,
+      units: 4,
+      orders: 2,
+      addedToCart: null,
+      cogs: null,
+    });
+  });
+
+  it("prices a forint store's costs in euros exactly once", async () => {
+    // A HUF store reporting in EUR: the manual cost is stored in euros already
+    // (11 EUR a lamp), so a landed order of two lamps at 20,000 HUF must read
+    // revenue 100 EUR and COGS 22 EUR - not 22 rated down to 0.055.
+    const attribution = await attributeCampaignCollections({
+      orders: {
+        ok: true,
+        value: {
+          currency: "HUF",
+          orders: [
+            {
+              date: "2026-08-14",
+              total: 40_000,
+              paid: true,
+              landingPath: "/collections/best-sellers",
+              refunded: 0,
+              lines: [{ productKey: "LAMP-1", title: "Lamp", quantity: 2, unitPrice: 20_000 }],
+            },
+          ],
+        },
+      },
+      targetCurrency: "EUR",
+      range: RANGE,
+      google: {
+        ok: true,
+        value: {
+          rows: [{ ...googleCampaign(), finalUrls: ["https://northwind.example/collections/best-sellers"] }] as never,
+          granularity: "day",
+          timeline: [deliveredDay()],
+        },
+      },
+      collectionSales: {
+        ok: true,
+        value: [
+          {
+            collectionId: "gid://shopify/Collection/20",
+            handle: "best-sellers",
+            title: "Best sellers",
+            revenue: 100,
+            units: 2,
+            timeline: [{ bucket: "2026-08-14", revenue: 100, units: 2, orders: 1 }],
+            products: [
+              {
+                productId: "gid://shopify/Product/10",
+                title: "Lamp",
+                revenue: 100,
+                units: 2,
+                costKeys: ["LAMP-1", "Lamp"],
+                timeline: [{ bucket: "2026-08-14", revenue: 100, units: 2, orders: 1 }],
+              },
+            ],
+          },
+        ],
+      },
+      landing: { ok: true, value: [] },
+      costs: {
+        manualCosts: new Map([["LAMP-1", [{ cost: 11, effectiveFrom: "2026-01-01" }]]]),
+        tiers: new Map(),
+        collections: [],
+        defaultCostPct: 30,
+      },
+    });
+
+    const day = attribution.get(`${STORE_ID}:987654321`)!.byDay.get("2026-08-14")!;
+    expect(day.revenue).toBeCloseTo(100, 6);
+    expect(day.cogs).toBeCloseTo(22, 6);
+  });
+
+  it("counts a landed order net of its refunds", async () => {
+    const orders = collectionOrders();
+    orders.orders[0]!.refunded = 30;
+    const attribution = await attributeCampaignCollections({
+      orders: { ok: true, value: orders },
+      targetCurrency: "EUR",
+      range: RANGE,
+      google: {
+        ok: true,
+        value: {
+          rows: [{ ...googleCampaign(), finalUrls: ["https://northwind.example/collections/best-sellers"] }] as never,
+          granularity: "day",
+          timeline: [deliveredDay()],
+        },
+      },
+      collectionSales: {
+        ok: true,
+        value: [
+          {
+            collectionId: "gid://shopify/Collection/20",
+            handle: "best-sellers",
+            title: "Best sellers",
+            revenue: 300,
+            units: 3,
+            timeline: [{ bucket: "2026-08-14", revenue: 300, units: 3, orders: 3 }],
+            products: [
+              {
+                productId: "gid://shopify/Product/10",
+                title: "Lamp",
+                revenue: 300,
+                units: 3,
+                costKeys: ["LAMP-1", "Lamp"],
+                timeline: [{ bucket: "2026-08-14", revenue: 300, units: 3, orders: 3 }],
+              },
+            ],
+          },
+        ],
+      },
+      landing: { ok: true, value: [] },
+      costs: null,
+    });
+
+    // 100 landed minus 30 refunded, plus the other order's Lamp line at 40.
+    expect(attribution.get(`${STORE_ID}:987654321`)!.byDay.get("2026-08-14")).toMatchObject({
+      revenue: 110,
+      units: 4,
+      orders: 2,
+    });
+  });
+
+  it("marks the collection's sales unknown, not zero, when the orders could not be read", async () => {
+    const attribution = await attributeCampaignCollections({
+      orders: { ok: false, state: "failed", message: "Shopify orders could not be loaded." },
+      targetCurrency: "EUR",
+      range: RANGE,
       google: {
         ok: true,
         value: {
@@ -828,15 +1046,20 @@ describe("admin store analytics DAL", () => {
           },
         ],
       },
-      landing: { ok: false, state: "failed", message: "Shopify landing page sessions could not be loaded." },
+      landing: {
+        ok: true,
+        value: [
+          { bucket: "2026-08-14", landingPath: "/collections/best-sellers", platform: "google", sessions: 40, addedToCart: 8, completedCheckout: 4 },
+        ],
+      },
       costs: null,
     });
 
     expect(attribution.get(`${STORE_ID}:987654321`)!.byDay.get("2026-08-14")).toEqual({
-      revenue: 300,
-      units: 3,
+      revenue: null,
+      units: null,
       orders: null,
-      addedToCart: null,
+      addedToCart: 8,
       cogs: null,
     });
   });
