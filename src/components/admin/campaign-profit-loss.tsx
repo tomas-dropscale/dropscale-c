@@ -68,6 +68,12 @@ export type CampaignProfitLoss = {
   total: Omit<CampaignProfitLossRow, "day" | "inProgress" | "cumulative">;
   /** Which revenue profit is measured against - Shopify's real sales when the campaign has them, else Google's conversion value. */
   revenueBasis: CampaignRevenueBasis;
+  /**
+   * The timeline was written before the sheet existed: no point carries the
+   * fields it reads, so the dashes mean "not yet computed", not "not known".
+   * Snapshots are rewritten every hour, so this clears on its own.
+   */
+  predatesSheet: boolean;
 };
 
 function ratio(numerator: number | null, denominator: number | null): number | null {
@@ -202,6 +208,12 @@ export function buildCampaignProfitLoss(
   const orders = sumNullable(rows.map((row) => row.orders));
   const units = sumNullable(rows.map((row) => row.units));
   const cogs = sumNullable(rows.map((row) => row.cogs));
+  const predatesSheet =
+    campaign.timeline.length > 0 &&
+    campaign.timeline.every(
+      (point) => point.shopifyOrders === undefined && point.collectionRevenue === undefined,
+    );
+
   // The total is the sum of the rows it stands under - not basis revenue
   // minus every day's spend, which would charge the spend of a day whose
   // revenue is unknown and end the column on a number the rows never reach.
@@ -210,6 +222,7 @@ export function buildCampaignProfitLoss(
   return {
     rows,
     revenueBasis,
+    predatesSheet,
     total: {
       spend,
       clicks,
@@ -311,7 +324,9 @@ export function CampaignProfitLossSheet({
         <p className="text-[10.5px] text-[var(--text-muted)]">
           {/* Said from the sheet itself, so the caption can never promise a
               basis the cells do not use. */}
-          {sheet.revenueBasis === "shopify"
+          {sheet.predatesSheet
+            ? "This period's snapshot was taken before the sheet existed, so the Shopify columns and COGS are not computed yet. Snapshots refresh every hour; profit reads Google's conversion value until then."
+            : sheet.revenueBasis === "shopify"
             ? "Profit on Shopify's real sales for this campaign (last non-direct click) · Google delivery"
             : sheet.revenueBasis === "collection"
               ? `Profit on Shopify's sales of /collections/${campaign.collectionHandle ?? ""} - the page this campaign lands on${

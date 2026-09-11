@@ -240,8 +240,37 @@ describe("a campaign's profit and loss by day", () => {
     );
 
     expect(sheet.revenueBasis).toBe("google");
+    expect(sheet.predatesSheet).toBe(true);
     expect(sheet.rows[0]).toMatchObject({ revenue: null, orders: null, googleRevenue: 159.8 });
     expect(sheet.rows[0]!.profit).toBeCloseTo(159.8 - 62.76, 6);
+
+    // And the caption says why the columns are empty, rather than blaming the
+    // campaign's UTMs or its landing page.
+    const html = renderToStaticMarkup(
+      <CampaignProfitLossSheet
+        title="BOHO - HU - 30/07"
+        currency="EUR"
+        today="2026-09-11"
+        campaign={{
+          attributionState: "unmatched",
+          timeline: [
+            {
+              bucket: "2026-09-05",
+              spend: 62.76,
+              impressions: 5_246,
+              clicks: 419,
+              conversions: 2,
+              shopifyRevenue: 0,
+              googleRevenue: 159.8,
+              realRoas: 0,
+              googleRoas: 2.55,
+            },
+          ],
+        }}
+      />,
+    );
+    expect(html).toContain("before the sheet existed");
+    expect(html).not.toContain("lands on no single collection");
   });
 
   it("folds an hourly timeline into days and marks the day still running", () => {
