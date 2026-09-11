@@ -38,9 +38,13 @@ import {
   type ShopifyCampaignAttributionSeriesRow,
   type ShopifyCampaignProductAttribution,
   type ShopifyCampaignProductSeriesRow,
+  type ShopifyCollectionSalesSeriesRow,
+  type ShopifyLandingSessionsRow,
   type ShopifyReportingAdapter,
 } from "@/lib/reporting/shopify";
 import { collectionHandleFromUrl } from "@/lib/finance/rev-share";
+import { loadCostContext } from "@/lib/cogs/context";
+import { resolveUnitCost, type CostContext } from "@/lib/cogs/engine";
 import {
   resolveReportingSources,
   type CanonicalReportingSource,
@@ -97,6 +101,18 @@ export type AdminAnalyticsCampaignTimelinePoint = {
   shopifyOrders?: number | null;
   /** Net units after returns across the campaign's products; null when the product series is unavailable. */
   units?: number | null;
+  /**
+   * Sales of the collection this campaign lands on, split between the
+   * campaigns that land there by their share of the day's spend; ATC and
+   * orders are the Google sessions that landed on that collection page. null
+   * when the campaign lands on no single collection the store reports.
+   */
+  collectionRevenue?: number | null;
+  collectionUnits?: number | null;
+  collectionOrders?: number | null;
+  collectionAddedToCart?: number | null;
+  /** Cost of the collection units attributed here, from the store's product costs; null when costs could not be read. */
+  cogs?: number | null;
   googleRevenue: number;
   realRoas: number | null;
   googleRoas: number | null;
@@ -174,6 +190,10 @@ export type AdminAnalyticsCampaign = {
   shopifyRevenue: number | null;
   /** Net units after returns across the campaign's products; null when unavailable. */
   shopifyUnits?: number | null;
+  /** The collection page the campaign sends people to, when its final URLs name exactly one. */
+  collectionHandle?: string | null;
+  /** How many campaigns land on that same collection, this one included. */
+  collectionSharedWith?: number | null;
   ctr: number | null;
   cpc: number | null;
   cpm: number | null;
@@ -1421,6 +1441,7 @@ function campaignFamily(
   attribution: Attempt<ShopifyCampaignAttributionSeriesRow[]>,
   shopifyProducts: Attempt<ShopifyCampaignProductSeriesRow[]>,
   storeToday: string | null = null,
+  collectionAttribution: CampaignCollectionAttribution | null = null,
 ): AdminStoreAnalytics["campaigns"] {
   if (!google.ok) {
     return google.state === "unavailable"
@@ -1454,7 +1475,10 @@ function campaignFamily(
     // reports per product; summed here they answer for the whole campaign.
     // Unavailable when the product series failed, or when the campaign id is
     // repeated across accounts and the UTM rows cannot be told apart.
-    const unitRows = !ambiguousCampaignId && shopifyProducts.ok
+    // Product rows are keyed by the same utm_campaign as the sales, so a
+    // campaign Shopify never matched has none - and "none" is not a measured
+    // zero. Units follow the match, like every other Shopify column.
+    const unitRows = matched && shopifyProducts.ok
       ? shopifyProducts.value.filter((row) => row.campaignId === campaign.providerCampaignId)
       : null;
     const unitsByBucket = new Map<string, number>();
@@ -1463,11 +1487,30 @@ function campaignFamily(
         unitsByBucket.set(point.bucket, (unitsByBucket.get(point.bucket) ?? 0) + point.units);
       }
     }
-    const buckets = [...new Set([
+    const landed = collectionAttribution?.get(`${campaign.ad_account_id}:${campaign.providerCampaignId}`) ?? null;
+    const ownBuckets = [...new Set([
       ...googleTimeline.map((point) => point.bucket),
       ...shopifyTimeline.map((point) => point.bucket),
       ...unitsByBucket.keys(),
+    ])];
+    // Collection figures are per DAY. A day the campaign has no bucket for
+    // joins the timeline as its own day bucket - on a daily timeline only: an
+    // hourly one keeps its hours, and a day-shaped bucket among them would be
+    // a point the charts never asked for.
+    const hourly = ownBuckets.some((bucket) => bucket.length > 10);
+    const buckets = [...new Set([
+      ...ownBuckets,
+      ...(landed && !hourly ? [...landed.byDay.keys()] : []),
     ])].sort();
+    // On an hourly timeline the day's figures ride on its first bucket, so a
+    // sheet that folds hours into days sums them exactly once; every other
+    // bucket of that day carries zero - or null, when the day's own answer is
+    // null, so an unknown never folds into a measured zero.
+    const firstBucketOfDay = new Map<string, string>();
+    for (const bucket of buckets) {
+      const day = bucket.slice(0, 10);
+      if (!firstBucketOfDay.has(day)) firstBucketOfDay.set(day, bucket);
+    }
     return {
       accountId: campaign.ad_account_id,
       campaignId: campaign.providerCampaignId,
@@ -1486,6 +1529,8 @@ function campaignFamily(
       shopifyOrders: matched?.orders ?? null,
       shopifyRevenue: matched?.revenue ?? null,
       shopifyUnits: unitRows ? unitRows.reduce((sum, row) => sum + row.units, 0) : null,
+      collectionHandle: landed?.handle ?? null,
+      collectionSharedWith: landed?.sharedWith ?? null,
       ctr: campaign.impressions > 0 ? campaign.clicks / campaign.impressions : null,
       cpc: campaign.clicks > 0 ? spend / campaign.clicks : null,
       cpm: campaign.impressions > 0 ? (spend / campaign.impressions) * 1000 : null,
@@ -1523,6 +1568,30 @@ function campaignFamily(
           addedToCart: matched ? shopifyPoint?.addedToCart ?? 0 : null,
           shopifyOrders: matched ? shopifyPoint?.orders ?? 0 : null,
           units: unitRows ? unitsByBucket.get(bucket) ?? 0 : null,
+          ...(landed
+            ? (() => {
+                const day = bucket.slice(0, 10);
+                const carries = firstBucketOfDay.get(day) === bucket;
+                const dayFigures = landed.byDay.get(day) ?? null;
+                const figures = carries ? dayFigures : null;
+                const nothing = (known: boolean) => (known ? 0 : null);
+                const landingKnown = dayFigures ? dayFigures.orders !== null : true;
+                const cogsKnown = dayFigures ? dayFigures.cogs !== null : landed.costsKnown;
+                return {
+                  collectionRevenue: figures?.revenue ?? 0,
+                  collectionUnits: figures?.units ?? 0,
+                  collectionOrders: figures ? figures.orders : nothing(landingKnown),
+                  collectionAddedToCart: figures ? figures.addedToCart : nothing(landingKnown),
+                  cogs: figures ? figures.cogs : nothing(cogsKnown),
+                };
+              })()
+            : {
+                collectionRevenue: null,
+                collectionUnits: null,
+                collectionOrders: null,
+                collectionAddedToCart: null,
+                cogs: null,
+              }),
           googleRevenue,
           realRoas: pointSpend > 0 && shopifyRevenue !== null
             ? shopifyRevenue / pointSpend
@@ -1578,6 +1647,10 @@ async function shopifyFamilies(
   attribution: Attempt<ShopifyCampaignAttributionSeriesRow[]>;
   products: Attempt<ShopifyCampaignProductSeriesRow[]>;
   collections: AdminStoreAnalytics["collections"];
+  /** The raw collection sales, kept for the campaign sheet's collection attribution. */
+  collectionSales: Attempt<ShopifyCollectionSalesSeriesRow[]>;
+  /** Google sessions by landing page, for the same attribution. */
+  landing: Attempt<ShopifyLandingSessionsRow[]>;
   /** The store's verified IANA zone, or null when the store could not be opened. */
   timeZone: string | null;
 }> {
@@ -1591,12 +1664,14 @@ async function shopifyFamilies(
       attribution: adapterAttempt,
       products: adapterAttempt,
       collections: family("Collection sales"),
+      collectionSales: adapterAttempt,
+      landing: adapterAttempt,
       timeZone: null,
     };
   }
   const invoke = <T>(operation: () => Promise<T>) =>
     Promise.resolve().then(operation);
-  const [funnelResult, attributionResult, productResult, collectionsResult] =
+  const [funnelResult, attributionResult, productResult, collectionsResult, landingResult] =
     await Promise.allSettled([
       invoke(() => adapterAttempt.value.fetchFunnelSeries(range.from, range.to)),
       invoke(() =>
@@ -1612,7 +1687,29 @@ async function shopifyFamilies(
           range.to,
           targetCurrency,
         )),
+      invoke(() => adapterAttempt.value.fetchLandingSessionsSeries(range.from, range.to)),
     ]);
+  const settledAttempt = <T,>(
+    result: PromiseSettledResult<T>,
+    failedMessage: string,
+    unavailableMessage: string,
+  ): Attempt<T> =>
+    result.status === "fulfilled"
+      ? { ok: true, value: result.value }
+      : result.reason instanceof ShopifyReportingAdapterError &&
+          result.reason.code === "missing_scope"
+        ? { ok: false, state: "unavailable", message: unavailableMessage }
+        : { ok: false, state: "failed", message: failedMessage };
+  const collectionSales = settledAttempt(
+    collectionsResult,
+    "Shopify collection sales could not be loaded.",
+    "Shopify has not granted product or report access.",
+  );
+  const landing = settledAttempt(
+    landingResult,
+    "Shopify landing page sessions could not be loaded.",
+    "Shopify has not granted report access.",
+  );
 
   let funnel: AdminStoreAnalytics["funnel"];
   if (funnelResult.status === "rejected") {
@@ -1710,7 +1807,194 @@ async function shopifyFamilies(
         "Shopify net sales and net units use the selected reporting days and current official collection membership. A product can belong to more than one collection, so collection rows are not additive. Spend and ROAS require a verified Google offer-to-Shopify product mapping that is not configured.",
     };
   }
-  return { funnel, attribution, products, collections, timeZone: adapterAttempt.value.timeZone };
+  return {
+    funnel,
+    attribution,
+    products,
+    collections,
+    collectionSales,
+    landing,
+    timeZone: adapterAttempt.value.timeZone,
+  };
+}
+
+const GOOGLE_LANDING_PLATFORMS = new Set(["google", "alphabet"]);
+
+export type CampaignCollectionDay = {
+  revenue: number;
+  units: number;
+  /** null when the landing sessions could not be read: unknown, not none. */
+  orders: number | null;
+  addedToCart: number | null;
+  /** null when the store's costs could not be read. */
+  cogs: number | null;
+};
+
+export type CampaignCollectionAttribution = Map<
+  string,
+  {
+    handle: string;
+    sharedWith: number;
+    /** Whether the store's product costs were readable at all. */
+    costsKnown: boolean;
+    /** Keyed by reporting DAY, never by hour. */
+    byDay: Map<string, CampaignCollectionDay>;
+  }
+>;
+
+function normalizedLandingPath(path: string): string {
+  const bare = path.split(/[?#]/)[0] ?? "";
+  return bare.toLowerCase().replace(/\/+$/, "");
+}
+
+/**
+ * Which collection each campaign lands on, and what that collection did each
+ * day, shared out between the campaigns that land there.
+ *
+ * The campaign's final URLs name the collection page (one handle, or the
+ * campaign is left out). The collection's product sales for the day are real
+ * Shopify money - every channel, not only this campaign - and are split
+ * between the campaigns landing on the same page by their share of that day's
+ * Google spend, equally when none of them spent. Cart additions and orders are
+ * the Google sessions that landed on the collection page, split the same way.
+ * COGS is the attributed units priced by the store's own product costs - a
+ * product's manual cost when one is set for any of its variants, otherwise
+ * the store's default percentage of the day's average selling price. Order
+ * tiers are not applied here: a tier is a property of one order's quantities,
+ * which a day's total cannot recover.
+ *
+ * Within one collection the campaigns landing on it split each day with
+ * shares that sum to one. Across collections nothing is additive: a product
+ * in two collections sells once and is counted in both, exactly as the
+ * collections family itself warns.
+ */
+export function attributeCampaignCollections(input: {
+  google: Attempt<GoogleCampaignLoad>;
+  collectionSales: Attempt<ShopifyCollectionSalesSeriesRow[]>;
+  landing: Attempt<ShopifyLandingSessionsRow[]>;
+  costs: CostContext | null;
+}): CampaignCollectionAttribution {
+  const attribution: CampaignCollectionAttribution = new Map();
+  if (!input.google.ok || !input.collectionSales.ok) return attribution;
+  const collectionByHandle = new Map(
+    input.collectionSales.value.flatMap((row) => (row.handle ? [[row.handle, row] as const] : [])),
+  );
+
+  // Which campaigns land where.
+  const handleByCampaign = new Map<string, string>();
+  const campaignsByHandle = new Map<string, string[]>();
+  for (const campaign of input.google.value.rows) {
+    const handles = new Set(
+      [...(campaign.finalUrls ?? []), campaign.name]
+        .map(collectionHandleFromUrl)
+        .filter((handle): handle is string => Boolean(handle)),
+    );
+    if (handles.size !== 1) continue;
+    const handle = handles.values().next().value as string;
+    if (!collectionByHandle.has(handle)) continue;
+    const key = `${campaign.ad_account_id}:${campaign.providerCampaignId}`;
+    handleByCampaign.set(key, handle);
+    campaignsByHandle.set(handle, [...(campaignsByHandle.get(handle) ?? []), key]);
+  }
+  if (handleByCampaign.size === 0) return attribution;
+
+  // Each campaign's Google spend per DAY, for the shares.
+  const spendByCampaignDay = new Map<string, number>();
+  for (const point of input.google.value.timeline) {
+    const key = `${point.accountId}:${point.campaignId}`;
+    if (!handleByCampaign.has(key)) continue;
+    const dayKey = `${key}|${point.bucket.slice(0, 10)}`;
+    spendByCampaignDay.set(dayKey, (spendByCampaignDay.get(dayKey) ?? 0) + point.spend);
+  }
+
+  // Google sessions that landed on each collection page, per day.
+  const landingByHandleDay = new Map<string, { addedToCart: number; completedCheckout: number }>();
+  if (input.landing.ok) {
+    for (const row of input.landing.value) {
+      if (!GOOGLE_LANDING_PLATFORMS.has(row.platform)) continue;
+      const path = normalizedLandingPath(row.landingPath);
+      for (const handle of campaignsByHandle.keys()) {
+        const page = `/collections/${handle}`;
+        if (path !== page && !path.startsWith(`${page}/`)) continue;
+        const key = `${handle}|${row.bucket}`;
+        const current = landingByHandleDay.get(key) ?? { addedToCart: 0, completedCheckout: 0 };
+        current.addedToCart += row.addedToCart;
+        current.completedCheckout += row.completedCheckout;
+        landingByHandleDay.set(key, current);
+      }
+    }
+  }
+
+  const unitCostFor = (
+    product: ShopifyCollectionSalesSeriesRow["products"][number],
+    day: string,
+    unitPrice: number,
+  ): number | null => {
+    if (!input.costs) return null;
+    const keyed = product.costKeys.find((key) => (input.costs?.manualCosts.get(key)?.length ?? 0) > 0);
+    return resolveUnitCost(
+      { productKey: keyed ?? product.costKeys[0] ?? product.title, quantity: 1, unitPrice },
+      day,
+      input.costs,
+    ).cost;
+  };
+
+  for (const [handle, campaignKeys] of campaignsByHandle) {
+    const collection = collectionByHandle.get(handle);
+    if (!collection) continue;
+    const days = new Set<string>([
+      ...collection.timeline.map((point) => point.bucket.slice(0, 10)),
+      ...[...spendByCampaignDay.keys()]
+        .filter((dayKey) => campaignKeys.some((key) => dayKey.startsWith(`${key}|`)))
+        .map((dayKey) => dayKey.slice(dayKey.indexOf("|") + 1)),
+      ...[...landingByHandleDay.keys()]
+        .filter((key) => key.startsWith(`${handle}|`))
+        .map((key) => key.slice(handle.length + 1)),
+    ]);
+    for (const day of days) {
+      const spends = campaignKeys.map((key) => spendByCampaignDay.get(`${key}|${day}`) ?? 0);
+      const totalSpend = spends.reduce((sum, value) => sum + value, 0);
+      const shares = campaignKeys.map((_key, index) =>
+        totalSpend > 0 ? (spends[index] ?? 0) / totalSpend : 1 / campaignKeys.length,
+      );
+
+      // The day's collection figures, once: sales and units from the
+      // collection's own day, which is the whole of what it sold; costs from
+      // its products, which is where a unit cost lives.
+      const collectionDay = collection.timeline.find((entry) => entry.bucket.slice(0, 10) === day);
+      const revenue = collectionDay?.revenue ?? 0;
+      const units = collectionDay?.units ?? 0;
+      let cogs: number | null = input.costs ? 0 : null;
+      for (const product of collection.products) {
+        const point = product.timeline.find((entry) => entry.bucket.slice(0, 10) === day);
+        if (!point) continue;
+        if (cogs !== null && point.units > 0) {
+          const unitCost = unitCostFor(product, day, point.revenue / point.units);
+          cogs = unitCost === null ? null : cogs + unitCost * point.units;
+        }
+      }
+      const landed = landingByHandleDay.get(`${handle}|${day}`) ?? { addedToCart: 0, completedCheckout: 0 };
+
+      campaignKeys.forEach((key, index) => {
+        const share = shares[index] ?? 0;
+        const entry = attribution.get(key) ?? {
+          handle,
+          sharedWith: campaignKeys.length,
+          costsKnown: input.costs !== null,
+          byDay: new Map<string, CampaignCollectionDay>(),
+        };
+        entry.byDay.set(day, {
+          revenue: revenue * share,
+          units: units * share,
+          orders: input.landing.ok ? landed.completedCheckout * share : null,
+          addedToCart: input.landing.ok ? landed.addedToCart * share : null,
+          cogs: cogs === null ? null : cogs * share,
+        });
+        attribution.set(key, entry);
+      });
+    }
+  }
+  return attribution;
 }
 
 /** Attribute spend only through exact provider URLs or verified Shopify product IDs. */
@@ -1855,8 +2139,48 @@ function failedShopifyFamilies(): ShopifyFamilies {
       message: "Shopify campaign products could not be loaded.",
     },
     collections: failed("Collection performance could not be loaded for this store."),
+    collectionSales: {
+      ok: false,
+      state: "failed",
+      message: "Shopify collection sales could not be loaded.",
+    },
+    landing: {
+      ok: false,
+      state: "failed",
+      message: "Shopify landing page sessions could not be loaded.",
+    },
     timeZone: null,
   };
+}
+
+/**
+ * The store's product costs, for the campaign sheet's COGS column. Read on a
+ * best-effort basis: a store whose costs cannot be read still gets its sheet,
+ * with the column reading "—".
+ */
+async function loadStoreCostContext(
+  service: NonNullable<ReturnType<typeof createServiceClient>>,
+  accountId: string,
+  currency: string,
+): Promise<CostContext | null> {
+  try {
+    const { data, error } = await service
+      .from("ad_accounts")
+      .select("default_product_cost_pct")
+      .eq("id", accountId)
+      .maybeSingle();
+    if (error) throw error;
+    const defaultPct = Number(data?.default_product_cost_pct ?? 30);
+    return await loadCostContext(
+      service,
+      accountId,
+      Number.isFinite(defaultPct) ? defaultPct : 30,
+      currency,
+    );
+  } catch (error) {
+    console.error("Admin store analytics could not read product costs:", error);
+    return null;
+  }
 }
 
 /** Today's date in a zone, as the ISO day the reporting buckets use. */
@@ -1911,6 +2235,11 @@ async function buildLiveAdminStoreAnalytics(
       return failedShopifyFamilies();
     });
   const rollupPromise = rollupFamilies(topology, accountIds, input.range);
+  const costsPromise = loadStoreCostContext(
+    topology.service,
+    input.store.accountId,
+    input.store.currency,
+  );
   const activityPromise = listCampaignActionActivity(
     input.clientId,
     accountIds,
@@ -1924,12 +2253,13 @@ async function buildLiveAdminStoreAnalytics(
     }),
   );
 
-  const [google, breakdowns, shopify, activityResult, rollup] = await Promise.all([
+  const [google, breakdowns, shopify, activityResult, rollup, costs] = await Promise.all([
     googlePromise,
     breakdownPromise,
     shopifyPromise,
     activityPromise,
     rollupPromise,
+    costsPromise,
   ]);
 
   let campaigns: AdminStoreAnalytics["campaigns"];
@@ -1940,6 +2270,12 @@ async function buildLiveAdminStoreAnalytics(
       shopify.attribution,
       shopify.products,
       shopify.timeZone ? localDayIn(shopify.timeZone) : null,
+      attributeCampaignCollections({
+        google,
+        collectionSales: shopify.collectionSales,
+        landing: shopify.landing,
+        costs,
+      }),
     );
   } catch (error) {
     console.error("Admin store campaign analytics composition failed:", error);

@@ -693,6 +693,167 @@ describe("V2 Shopify reporting adapter", () => {
     expect(exactQueries.every((query) => query.includes("UNTIL 2026-08-13"))).toBe(true);
   });
 
+  it("reads where visits landed and what they did, one row per page, platform and day", async () => {
+    mocks.verifyReportingShop.mockResolvedValue(
+      verifiedShop({
+        scopes: {
+          granted: ["read_orders", "read_products", "read_reports"],
+          missing: [],
+          missingPermissionGated: [],
+          writeScopes: [],
+          unexpectedReadScopes: [],
+          valid: true,
+        },
+      }),
+    );
+    mocks.reportingShopifyGraphql.mockImplementation(
+      async ({ variables }: { variables?: Record<string, unknown> }) => {
+        const shopifyQl = String(variables?.query ?? "");
+        if (!shopifyQl.includes("GROUP BY landing_page_path, referring_platform")) {
+          return { shopifyqlQuery: { tableData: { columns: [], rows: [] }, parseErrors: [] } };
+        }
+        return {
+          shopifyqlQuery: {
+            tableData: {
+              columns: [
+                { name: "day" },
+                { name: "landing_page_path" },
+                { name: "referring_platform" },
+                { name: "sessions" },
+                { name: "sessions_with_cart_additions" },
+                { name: "sessions_that_completed_checkout" },
+              ],
+              rows: [
+                {
+                  day: "2026-09-05",
+                  landing_page_path: "/collections/kenyelmes-ruhak",
+                  referring_platform: "Alphabet",
+                  sessions: "6009",
+                  sessions_with_cart_additions: "199",
+                  sessions_that_completed_checkout: "23",
+                },
+                // A blank landing path is a visit Shopify could not place; it is skipped.
+                {
+                  day: "2026-09-05",
+                  landing_page_path: null,
+                  referring_platform: "direct",
+                  sessions: "4",
+                  sessions_with_cart_additions: "0",
+                  sessions_that_completed_checkout: "0",
+                },
+              ],
+            },
+            parseErrors: [],
+          },
+        };
+      },
+    );
+    const adapter = await createShopifyReportingAdapter(source());
+
+    await expect(adapter.fetchLandingSessionsSeries("2026-09-05", "2026-09-06")).resolves.toEqual([
+      {
+        bucket: "2026-09-05",
+        landingPath: "/collections/kenyelmes-ruhak",
+        platform: "alphabet",
+        sessions: 6009,
+        addedToCart: 199,
+        completedCheckout: 23,
+      },
+    ]);
+    const query = String(mocks.reportingShopifyGraphql.mock.calls.at(-1)?.[0]?.variables?.query ?? "");
+    expect(query).toContain("FROM sessions");
+    expect(query).toContain("WHERE human_or_bot_session = 'human'");
+    expect(query).toContain("TIMESERIES day");
+  });
+
+  it("counts a campaign whose Google traffic Shopify labels \"alphabet\"", async () => {
+    // Measured on a live store on 2026-09-11: every Google session of the
+    // month carried referring_platform "alphabet", not "google". A numeric
+    // utm_campaign under that label is the same Google campaign, and reading
+    // it as foreign traffic would leave the campaign unmatched for ever.
+    mocks.verifyReportingShop.mockResolvedValue(
+      verifiedShop({
+        scopes: {
+          granted: ["read_orders", "read_products", "read_reports"],
+          missing: [],
+          missingPermissionGated: [],
+          writeScopes: [],
+          unexpectedReadScopes: [],
+          valid: true,
+        },
+      }),
+    );
+    mocks.reportingShopifyGraphql.mockImplementation(
+      async ({ variables }: { variables?: Record<string, unknown> }) => {
+        const shopifyQl = String(variables?.query ?? "");
+        const row = (fields: Record<string, string>) => ({
+          utm_campaign: "555555555",
+          referring_platform: "alphabet",
+          day: "2026-08-13",
+          ...fields,
+        });
+        if (shopifyQl.includes("FROM campaign_sales")) {
+          return {
+            shopifyqlQuery: {
+              tableData: {
+                columns: [
+                  { name: "utm_campaign" },
+                  { name: "referring_platform" },
+                  { name: "day" },
+                  { name: "campaign_last_non_direct_click_total_sales" },
+                  { name: "campaign_last_non_direct_click_order_count" },
+                ],
+                rows: [
+                  row({
+                    campaign_last_non_direct_click_total_sales: "40",
+                    campaign_last_non_direct_click_order_count: "2",
+                  }),
+                  // A foreign platform with a numeric campaign is still not ours.
+                  row({
+                    referring_platform: "meta",
+                    campaign_last_non_direct_click_total_sales: "999",
+                    campaign_last_non_direct_click_order_count: "9",
+                  }),
+                ],
+              },
+              parseErrors: [],
+            },
+          };
+        }
+        if (shopifyQl.includes("FROM campaign_sessions")) {
+          return {
+            shopifyqlQuery: {
+              tableData: {
+                columns: [
+                  { name: "utm_campaign" },
+                  { name: "referring_platform" },
+                  { name: "day" },
+                  { name: "campaign_sessions" },
+                  { name: "campaign_sessions_with_cart_additions" },
+                ],
+                rows: [row({ campaign_sessions: "30", campaign_sessions_with_cart_additions: "4" })],
+              },
+              parseErrors: [],
+            },
+          };
+        }
+        return { shopifyqlQuery: { tableData: { columns: [], rows: [] }, parseErrors: [] } };
+      },
+    );
+    const adapter = await createShopifyReportingAdapter(source());
+
+    await expect(adapter.fetchCampaignAttribution("2026-08-13", "2026-08-14")).resolves.toEqual([
+      {
+        campaignId: "555555555",
+        attributionModel: "last_non_direct_click",
+        sessions: 30,
+        addedToCart: 4,
+        revenue: 40,
+        orders: 2,
+      },
+    ]);
+  });
+
   it("fills leading, middle and trailing zero days in the exact funnel range", async () => {
     mocks.verifyReportingShop.mockResolvedValue(
       verifiedShop({

@@ -20,6 +20,20 @@ import { cn } from "@/lib/utils";
  *
  * A day Shopify has not answered for reads "—", never 0: a zero is a fact, a
  * dash is the absence of one, and a P&L that prints the two alike is wrong.
+ *
+ * Profit and its running total are the point of the sheet, and they need a
+ * revenue to subtract the spend from. Three bases, tried in order and stated
+ * once in the caption, never mixed day by day:
+ *  - "shopify": Shopify matched the campaign's own utm_campaign - the real
+ *    sales of this campaign, last non-direct click.
+ *  - "collection": the ads carry no utm_campaign (every visit lands as plain
+ *    Google traffic, which Shopify labels "google" or "alphabet"), but the
+ *    campaign sends people to one collection page. Its sales are that
+ *    collection's real Shopify sales, shared out between the campaigns landing
+ *    there by spend; cart additions and orders are the Google visits that
+ *    landed on that page; and the store's product costs price the units, so
+ *    profit is revenue minus spend minus COGS.
+ *  - "google": neither is known, so Google's own conversion value stands in.
  */
 
 export type CampaignProfitLossRow = {
@@ -35,13 +49,25 @@ export type CampaignProfitLossRow = {
   cvr: number | null;
   roas: number | null;
   cpa: number | null;
+  /** Google's own reported conversion value for the day. */
+  googleRevenue: number;
+  /** Cost of the units sold, from the store's product costs; only on the collection basis. */
+  cogs: number | null;
+  /** Revenue on the sheet's basis minus ad spend and COGS; null when the basis has no answer. */
+  profit: number | null;
+  /** Running sum of profit up to and including this day. */
+  cumulative: number | null;
   /** The reporting day has not closed: the figures are still moving. */
   inProgress: boolean;
 };
 
+export type CampaignRevenueBasis = "shopify" | "collection" | "google";
+
 export type CampaignProfitLoss = {
   rows: CampaignProfitLossRow[];
-  total: Omit<CampaignProfitLossRow, "day" | "inProgress">;
+  total: Omit<CampaignProfitLossRow, "day" | "inProgress" | "cumulative">;
+  /** Which revenue profit is measured against - Shopify's real sales when the campaign has them, else Google's conversion value. */
+  revenueBasis: CampaignRevenueBasis;
 };
 
 function ratio(numerator: number | null, denominator: number | null): number | null {
@@ -59,13 +85,38 @@ function dayOf(bucket: string): string {
   return bucket.slice(0, 10);
 }
 
+type DayFacts = {
+  utm: { addedToCart: number | null; revenue: number | null; orders: number | null; units: number | null };
+  collection: {
+    addedToCart: number | null;
+    revenue: number | null;
+    orders: number | null;
+    units: number | null;
+    cogs: number | null;
+  };
+};
+
 export function buildCampaignProfitLoss(
   campaign: Pick<AdminAnalyticsCampaign, "timeline">,
   today: string,
 ): CampaignProfitLoss {
   const byDay = new Map<string, CampaignProfitLossRow>();
+  const facts = new Map<string, DayFacts>();
   for (const point of campaign.timeline) {
     const day = dayOf(point.bucket);
+    const fact = facts.get(day) ?? {
+      utm: { addedToCart: null, revenue: null, orders: null, units: null },
+      collection: { addedToCart: null, revenue: null, orders: null, units: null, cogs: null },
+    };
+    fact.collection.revenue = sumNullable([fact.collection.revenue, point.collectionRevenue ?? null]);
+    fact.collection.units = sumNullable([fact.collection.units, point.collectionUnits ?? null]);
+    fact.collection.orders = sumNullable([fact.collection.orders, point.collectionOrders ?? null]);
+    fact.collection.addedToCart = sumNullable([
+      fact.collection.addedToCart,
+      point.collectionAddedToCart ?? null,
+    ]);
+    fact.collection.cogs = sumNullable([fact.collection.cogs, point.cogs ?? null]);
+    facts.set(day, fact);
     const row = byDay.get(day) ?? {
       day,
       spend: 0,
@@ -79,37 +130,86 @@ export function buildCampaignProfitLoss(
       cvr: null,
       roas: null,
       cpa: null,
+      googleRevenue: 0,
+      cogs: null,
+      profit: null,
+      cumulative: null,
       inProgress: day >= today,
     };
     row.spend += point.spend;
     row.clicks += point.clicks ?? 0;
     row.impressions += point.impressions ?? 0;
+    row.googleRevenue += point.googleRevenue;
     row.addedToCart = sumNullable([row.addedToCart, point.addedToCart ?? null]);
-    row.revenue = sumNullable([row.revenue, point.shopifyRevenue]);
-    row.orders = sumNullable([row.orders, point.shopifyOrders ?? null]);
-    row.units = sumNullable([row.units, point.units ?? null]);
+    // A point with no orders field at all was written before this sheet
+    // existed, by a producer that wrote 0 for a campaign Shopify never
+    // matched. That 0 is not a fact, so it is not read as one; the point's
+    // revenue counts only once the snapshot has been rewritten with the
+    // orders beside it. (Snapshots refresh every hour, so this is a window.)
+    const shopifyRevenue = point.shopifyOrders === undefined ? null : point.shopifyRevenue;
+    fact.utm.addedToCart = row.addedToCart;
+    fact.utm.revenue = sumNullable([fact.utm.revenue, shopifyRevenue]);
+    fact.utm.orders = sumNullable([fact.utm.orders, point.shopifyOrders ?? null]);
+    fact.utm.units = sumNullable([fact.utm.units, point.units ?? null]);
     byDay.set(day, row);
   }
 
+  // One basis for the whole sheet, chosen by what any day could answer:
+  // Shopify's own match first, the landing collection next, Google last. A day
+  // left unanswered on a Shopify or collection basis keeps its dash rather
+  // than borrowing the next basis's number.
+  const allFacts = [...facts.values()];
+  const revenueBasis: CampaignRevenueBasis = allFacts.some((fact) => fact.utm.revenue !== null)
+    ? "shopify"
+    : allFacts.some((fact) => fact.collection.revenue !== null)
+      ? "collection"
+      : "google";
+
+  let running: number | null = null;
   const rows = [...byDay.values()]
     .sort((left, right) => left.day.localeCompare(right.day))
-    .map((row) => ({
-      ...row,
-      ctr: ratio(row.clicks, row.impressions),
-      cvr: ratio(row.orders, row.addedToCart),
-      roas: ratio(row.revenue, row.spend > 0 ? row.spend : null),
-      cpa: row.orders !== null && row.orders > 0 ? row.spend / row.orders : null,
-    }));
+    .map((partial) => {
+      const fact = facts.get(partial.day);
+      const shopify = revenueBasis === "collection" ? fact?.collection : fact?.utm;
+      const row = {
+        ...partial,
+        addedToCart: revenueBasis === "google" ? null : shopify?.addedToCart ?? null,
+        revenue: revenueBasis === "google" ? null : shopify?.revenue ?? null,
+        orders: revenueBasis === "google" ? null : shopify?.orders ?? null,
+        units: revenueBasis === "google" ? null : shopify?.units ?? null,
+        cogs: revenueBasis === "collection" ? fact?.collection.cogs ?? null : null,
+      };
+      const revenue = revenueBasis === "google" ? row.googleRevenue : row.revenue;
+      const profit = revenue === null ? null : revenue - row.spend - (row.cogs ?? 0);
+      if (profit !== null) running = (running ?? 0) + profit;
+      return {
+        ...row,
+        ctr: ratio(row.clicks, row.impressions),
+        cvr: ratio(row.orders, row.addedToCart),
+        roas: ratio(row.revenue, row.spend > 0 ? row.spend : null),
+        cpa: row.orders !== null && row.orders > 0 ? row.spend / row.orders : null,
+        profit,
+        cumulative: profit === null ? null : running,
+      };
+    });
 
   const spend = rows.reduce((sum, row) => sum + row.spend, 0);
   const clicks = rows.reduce((sum, row) => sum + row.clicks, 0);
   const impressions = rows.reduce((sum, row) => sum + row.impressions, 0);
+  const googleRevenue = rows.reduce((sum, row) => sum + row.googleRevenue, 0);
   const addedToCart = sumNullable(rows.map((row) => row.addedToCart));
   const revenue = sumNullable(rows.map((row) => row.revenue));
   const orders = sumNullable(rows.map((row) => row.orders));
   const units = sumNullable(rows.map((row) => row.units));
+  const cogs = sumNullable(rows.map((row) => row.cogs));
+  // The total is the sum of the rows it stands under - not basis revenue
+  // minus every day's spend, which would charge the spend of a day whose
+  // revenue is unknown and end the column on a number the rows never reach.
+  const rowProfits = rows.map((row) => row.profit);
+  const totalProfit = sumNullable(rowProfits);
   return {
     rows,
+    revenueBasis,
     total: {
       spend,
       clicks,
@@ -122,6 +222,9 @@ export function buildCampaignProfitLoss(
       cvr: ratio(orders, addedToCart),
       roas: ratio(revenue, spend > 0 ? spend : null),
       cpa: orders !== null && orders > 0 ? spend / orders : null,
+      googleRevenue,
+      cogs,
+      profit: totalProfit,
     },
   };
 }
@@ -155,12 +258,30 @@ const HEADERS: Array<{ label: string; align: "left" | "right" }> = [
   { label: "CTR", align: "right" },
   { label: "Add to cart", align: "right" },
   { label: "Revenue (Shopify)", align: "right" },
+  { label: "Revenue (Google)", align: "right" },
   { label: "Orders", align: "right" },
   { label: "Units", align: "right" },
   { label: "CVR (cart → order)", align: "right" },
   { label: "ROAS", align: "right" },
   { label: "CPA", align: "right" },
+  { label: "COGS", align: "right" },
+  { label: "Profit", align: "right" },
+  { label: "Cumulative", align: "right" },
 ];
+
+/** Profit and its running total read green or red, as the store's own P&L does. */
+function ProfitCell({ value, currency }: { value: number | null; currency: string }) {
+  return (
+    <td
+      className={cn(
+        "px-2.5 py-2 text-right tabular-nums",
+        value !== null && (value >= 0 ? "font-medium text-[var(--success-green)]" : "font-medium text-[var(--danger-red)]"),
+      )}
+    >
+      {amount(value, currency)}
+    </td>
+  );
+}
 
 export function CampaignProfitLossSheet({
   campaign,
@@ -168,7 +289,10 @@ export function CampaignProfitLossSheet({
   today,
   title,
 }: {
-  campaign: Pick<AdminAnalyticsCampaign, "timeline" | "attributionState">;
+  campaign: Pick<
+    AdminAnalyticsCampaign,
+    "timeline" | "attributionState" | "collectionHandle" | "collectionSharedWith"
+  >;
   currency: string;
   today: string;
   title: string;
@@ -186,19 +310,35 @@ export function CampaignProfitLossSheet({
         <p className="text-[12px] font-semibold text-[var(--text-primary)]">Profit &amp; loss by day</p>
         <p className="text-[10.5px] text-[var(--text-muted)]">
           {/* Said from the sheet itself, so the caption can never promise a
-              dash the cells do not print. */}
-          {sheet.total.revenue !== null
-            ? "Google delivery · Shopify last-non-direct-click sales for this campaign"
-            : campaign.attributionState === "unmatched"
-              ? "Google delivery only · no Shopify UTM match for this campaign, so sales read “—”"
-              : "Google delivery only · Shopify attribution unavailable, so sales read “—”"}
+              basis the cells do not use. */}
+          {sheet.revenueBasis === "shopify"
+            ? "Profit on Shopify's real sales for this campaign (last non-direct click) · Google delivery"
+            : sheet.revenueBasis === "collection"
+              ? `Profit on Shopify's sales of /collections/${campaign.collectionHandle ?? ""} - the page this campaign lands on${
+                  (campaign.collectionSharedWith ?? 1) > 1
+                    ? `, shared by ${campaign.collectionSharedWith} campaigns in proportion to spend, so orders and units are shares and need not be whole`
+                    : ""
+                } - minus ad spend${
+                  sheet.total.cogs !== null
+                    ? " and product costs"
+                    : " · product costs could not be read, so COGS reads “—” and is not subtracted"
+                }${
+                  sheet.total.orders !== null
+                    ? " · cart additions and orders are Google visits that landed there"
+                    : " · landing sessions could not be read, so cart additions and orders read “—”"
+                }`
+              : campaign.attributionState === "unmatched"
+                ? `Profit on Google's reported conversion value · Shopify sees no utm_campaign on this campaign's traffic${
+                    campaign.collectionHandle ? "" : " and it lands on no single collection the store reports"
+                  }, so its sales read “—”. Tag the ads with utm_campaign={campaignid} to measure real sales.`
+                : "Profit on Google's reported conversion value · Shopify attribution unavailable, so its sales read “—”"}
         </p>
       </div>
       {sheet.rows.length === 0 ? (
         <p className="px-4 py-3 text-[11px] text-[var(--text-muted)]">No days were returned for this period.</p>
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[1080px] text-[11.5px]">
+          <table className="w-full min-w-[1400px] text-[11.5px]">
             <thead>
               <tr className="label-caps border-b border-[var(--border-subtle)]">
                 {HEADERS.map((header) => (
@@ -231,11 +371,15 @@ export function CampaignProfitLossSheet({
                   <td className={cell}>{percent(row.ctr)}</td>
                   <td className={cell}>{count(row.addedToCart)}</td>
                   <td className={cell}>{amount(row.revenue, currency)}</td>
+                  <td className={cn(cell, "text-[var(--text-secondary)]")}>{money(row.googleRevenue, currency)}</td>
                   <td className={cell}>{count(row.orders)}</td>
                   <td className={cell}>{count(row.units)}</td>
                   <td className={cell}>{percent(row.cvr)}</td>
                   <td className={cell}>{times(row.roas)}</td>
                   <td className={cell}>{amount(row.cpa, currency)}</td>
+                  <td className={cn(cell, "text-[var(--text-secondary)]")}>{amount(row.cogs, currency)}</td>
+                  <ProfitCell value={row.profit} currency={currency} />
+                  <ProfitCell value={row.cumulative} currency={currency} />
                 </tr>
               ))}
             </tbody>
@@ -248,11 +392,15 @@ export function CampaignProfitLossSheet({
                 <td className={cell}>{percent(sheet.total.ctr)}</td>
                 <td className={cell}>{count(sheet.total.addedToCart)}</td>
                 <td className={cell}>{amount(sheet.total.revenue, currency)}</td>
+                <td className={cn(cell, "text-[var(--text-secondary)]")}>{money(sheet.total.googleRevenue, currency)}</td>
                 <td className={cell}>{count(sheet.total.orders)}</td>
                 <td className={cell}>{count(sheet.total.units)}</td>
                 <td className={cell}>{percent(sheet.total.cvr)}</td>
                 <td className={cell}>{times(sheet.total.roas)}</td>
                 <td className={cell}>{amount(sheet.total.cpa, currency)}</td>
+                <td className={cn(cell, "text-[var(--text-secondary)]")}>{amount(sheet.total.cogs, currency)}</td>
+                <ProfitCell value={sheet.total.profit} currency={currency} />
+                <ProfitCell value={sheet.total.profit} currency={currency} />
               </tr>
             </tfoot>
           </table>

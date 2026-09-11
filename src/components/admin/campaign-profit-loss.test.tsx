@@ -64,6 +64,184 @@ describe("a campaign's profit and loss by day", () => {
     expect(sheet.total.cvr).toBeCloseTo(1 / 56, 6);
     expect(sheet.total.roas).toBeCloseTo(164.8 / 200.19, 6);
     expect(sheet.total.cpa).toBeCloseTo(200.19, 6);
+
+    // Profit is Shopify's sales minus spend, and the running total carries
+    // the loss of the second day on from the first day's gain.
+    expect(sheet.revenueBasis).toBe("shopify");
+    expect(first!.profit).toBeCloseTo(164.8 - 120.06, 6);
+    expect(first!.cumulative).toBeCloseTo(164.8 - 120.06, 6);
+    expect(second!.profit).toBeCloseTo(-80.13, 6);
+    expect(second!.cumulative).toBeCloseTo(164.8 - 200.19, 6);
+    expect(sheet.total.profit).toBeCloseTo(164.8 - 200.19, 6);
+  });
+
+  it("measures profit on Google's conversion value when Shopify never answered", () => {
+    // The Emma Gyor case: the ads carry no utm_campaign, Shopify sees plain
+    // Google traffic, and the campaign has no Shopify sales to show - but
+    // Google reports a conversion value every day, and a sheet of dashes
+    // helps nobody. The basis is stated once for the whole sheet.
+    const sheet = buildCampaignProfitLoss(
+      {
+        timeline: [
+          point({ bucket: "2026-09-01", spend: 99.84, googleRevenue: 150, addedToCart: null, shopifyRevenue: null, shopifyOrders: null, units: null }),
+          point({ bucket: "2026-09-02", spend: 113.44, googleRevenue: 60, addedToCart: null, shopifyRevenue: null, shopifyOrders: null, units: null }),
+        ],
+      },
+      "2026-09-11",
+    );
+
+    expect(sheet.revenueBasis).toBe("google");
+    expect(sheet.rows[0]).toMatchObject({ revenue: null, googleRevenue: 150 });
+    expect(sheet.rows[0]!.profit).toBeCloseTo(150 - 99.84, 6);
+    expect(sheet.rows[1]!.profit).toBeCloseTo(60 - 113.44, 6);
+    expect(sheet.rows[1]!.cumulative).toBeCloseTo(210 - 213.28, 6);
+    expect(sheet.total.profit).toBeCloseTo(210 - 213.28, 6);
+    // Shopify's own columns keep their dash: the basis changed, the facts did not.
+    expect(sheet.total).toMatchObject({ revenue: null, orders: null, roas: null });
+  });
+
+  it("keeps a Shopify-basis sheet honest on a day Shopify left unanswered", () => {
+    // One day answered, one not: the basis is Shopify, and the unanswered day
+    // does not borrow Google's number - its profit and the running total read
+    // "—" for that day and pick up again after.
+    const sheet = buildCampaignProfitLoss(
+      {
+        timeline: [
+          point({ bucket: "2026-09-01", spend: 10, googleRevenue: 30, shopifyRevenue: 40, shopifyOrders: 1 }),
+          point({ bucket: "2026-09-02", spend: 10, googleRevenue: 30, shopifyRevenue: null, shopifyOrders: null, addedToCart: null, units: null }),
+          point({ bucket: "2026-09-03", spend: 10, googleRevenue: 30, shopifyRevenue: 5, shopifyOrders: 1 }),
+        ],
+      },
+      "2026-09-11",
+    );
+
+    expect(sheet.revenueBasis).toBe("shopify");
+    expect(sheet.rows.map((row) => row.profit)).toEqual([30, null, -5]);
+    expect(sheet.rows.map((row) => row.cumulative)).toEqual([30, null, 25]);
+    // The total is the sum of the rows, so the column and its foot agree: the
+    // unanswered day's spend is not charged against a revenue nobody knows.
+    expect(sheet.total.profit).toBe(25);
+  });
+
+  it("measures profit on the landing collection, minus product costs, when there is no UTM match", () => {
+    // BOHO - HU lands on /collections/kenyelmes-ruhak. Shopify never matched
+    // the campaign, but it knows what that page sold and what it cost.
+    const sheet = buildCampaignProfitLoss(
+      {
+        timeline: [
+          point({
+            bucket: "2026-09-05",
+            spend: 104.2,
+            googleRevenue: 300,
+            shopifyRevenue: null, shopifyOrders: null, addedToCart: null, units: null,
+            collectionRevenue: 450, collectionUnits: 3, collectionOrders: 2, collectionAddedToCart: 40, cogs: 90,
+          }),
+          point({
+            bucket: "2026-09-06",
+            spend: 117.81,
+            googleRevenue: 100,
+            shopifyRevenue: null, shopifyOrders: null, addedToCart: null, units: null,
+            collectionRevenue: 0, collectionUnits: 0, collectionOrders: 0, collectionAddedToCart: 12, cogs: 0,
+          }),
+        ],
+      },
+      "2026-09-11",
+    );
+
+    expect(sheet.revenueBasis).toBe("collection");
+    expect(sheet.rows[0]).toMatchObject({ revenue: 450, units: 3, orders: 2, addedToCart: 40, cogs: 90 });
+    expect(sheet.rows[0]!.cvr).toBeCloseTo(2 / 40, 6);
+    expect(sheet.rows[0]!.roas).toBeCloseTo(450 / 104.2, 6);
+    expect(sheet.rows[0]!.cpa).toBeCloseTo(104.2 / 2, 6);
+    // Revenue minus spend minus COGS, day by day and in the running total.
+    expect(sheet.rows[0]!.profit).toBeCloseTo(450 - 104.2 - 90, 6);
+    expect(sheet.rows[1]!.profit).toBeCloseTo(-117.81, 6);
+    expect(sheet.rows[1]!.cumulative).toBeCloseTo(450 - 104.2 - 90 - 117.81, 6);
+    expect(sheet.total).toMatchObject({ revenue: 450, orders: 2, units: 3, addedToCart: 52, cogs: 90 });
+    expect(sheet.total.profit).toBeCloseTo(450 - 104.2 - 90 - 117.81, 6);
+  });
+
+  it("names the collection basis in the caption", () => {
+    const html = renderToStaticMarkup(
+      <CampaignProfitLossSheet
+        title="BOHO - HU - 30/07"
+        currency="EUR"
+        today="2026-09-11"
+        campaign={{
+          attributionState: "unmatched",
+          collectionHandle: "kenyelmes-ruhak",
+          collectionSharedWith: 4,
+          timeline: [
+            point({
+              bucket: "2026-09-05",
+              spend: 104.2,
+              googleRevenue: 300,
+              shopifyRevenue: null, shopifyOrders: null, addedToCart: null, units: null,
+              collectionRevenue: 450, collectionUnits: 3, collectionOrders: 2, collectionAddedToCart: 40, cogs: 90,
+            }),
+          ],
+        }}
+      />,
+    );
+    expect(html).toContain("/collections/kenyelmes-ruhak");
+    expect(html).toContain("shared by 4 campaigns");
+    expect(html).toContain("COGS");
+    expect(html).toContain("EUR 90.00");
+    expect(html).toContain("and product costs");
+
+    // Costs unreadable: the caption says so instead of promising a subtraction.
+    const noCosts = renderToStaticMarkup(
+      <CampaignProfitLossSheet
+        title="BOHO - HU - 30/07"
+        currency="EUR"
+        today="2026-09-11"
+        campaign={{
+          attributionState: "unmatched",
+          collectionHandle: "kenyelmes-ruhak",
+          collectionSharedWith: 1,
+          timeline: [
+            point({
+              bucket: "2026-09-05",
+              spend: 104.2,
+              googleRevenue: 300,
+              shopifyRevenue: null, shopifyOrders: null, addedToCart: null, units: null,
+              collectionRevenue: 450, collectionUnits: 3, collectionOrders: 2, collectionAddedToCart: 40, cogs: null,
+            }),
+          ],
+        }}
+      />,
+    );
+    expect(noCosts).toContain("product costs could not be read");
+    expect(noCosts).not.toContain("and product costs");
+  });
+
+  it("does not trust a revenue of 0 from a point written before the sheet existed", () => {
+    // Snapshots written by the earlier producer carry shopifyRevenue 0 for a
+    // campaign Shopify never matched, and no orders field at all. Read as a
+    // fact, that 0 would put the sheet on a Shopify basis and print every day
+    // as a loss. The missing orders field is the tell.
+    const sheet = buildCampaignProfitLoss(
+      {
+        timeline: [
+          {
+            bucket: "2026-09-05",
+            spend: 62.76,
+            impressions: 5_246,
+            clicks: 419,
+            conversions: 2,
+            shopifyRevenue: 0,
+            googleRevenue: 159.8,
+            realRoas: 0,
+            googleRoas: 2.55,
+          },
+        ],
+      },
+      "2026-09-11",
+    );
+
+    expect(sheet.revenueBasis).toBe("google");
+    expect(sheet.rows[0]).toMatchObject({ revenue: null, orders: null, googleRevenue: 159.8 });
+    expect(sheet.rows[0]!.profit).toBeCloseTo(159.8 - 62.76, 6);
   });
 
   it("folds an hourly timeline into days and marks the day still running", () => {
@@ -138,9 +316,13 @@ describe("a campaign's profit and loss by day", () => {
     expect(html).toContain("2026-09-05");
     expect(html).toContain("in progress");
     expect(html).toContain("Total");
+    expect(html).toContain("Profit on Shopify");
+    expect(html).toContain("Cumulative");
     // Two orders on 57 cart additions, and 159.80 over 62.76.
     expect(html).toContain("3.5%");
     expect(html).toContain("2.55x");
+    // A gain reads green, as in the store's own P&L.
+    expect(html).toContain("--success-green");
     // The unanswered day prints a dash, not a zero, for Shopify's columns.
     expect((html.match(/—/g) ?? []).length).toBeGreaterThanOrEqual(6);
   });
@@ -156,11 +338,12 @@ describe("a campaign's profit and loss by day", () => {
         today="2026-09-11"
         campaign={{
           attributionState: "unmatched",
-          timeline: [point({ bucket: "2026-09-05", spend: 10, clicks: 5, impressions: 50, addedToCart: null, shopifyRevenue: null, shopifyOrders: null, units: null })],
+          timeline: [point({ bucket: "2026-09-05", spend: 10, clicks: 5, impressions: 50, googleRevenue: 12, addedToCart: null, shopifyRevenue: null, shopifyOrders: null, units: null })],
         }}
       />,
     );
-    expect(unmatched).toContain("so sales read “—”");
+    expect(unmatched).toContain("Profit on Google");
+    expect(unmatched).toContain("utm_campaign={campaignid}");
     expect(unmatched).not.toContain("EUR 0.00");
 
     const answered = renderToStaticMarkup(
@@ -174,7 +357,7 @@ describe("a campaign's profit and loss by day", () => {
         }}
       />,
     );
-    expect(answered).not.toContain("so sales read “—”");
+    expect(answered).toContain("Profit on Shopify");
     expect(answered).toContain("EUR 0.00");
   });
 });

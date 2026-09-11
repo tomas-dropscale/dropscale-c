@@ -1,6 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
+// The store's product costs are read on a best-effort basis; here they cannot be
+// read at all, so every sheet prices its units as unknown. The engine that
+// prices them is the real one - the attribution test proves a manual cost.
+vi.mock("@/lib/cogs/context", () => ({
+  loadCostContext: vi.fn(async () => {
+    throw new Error("no cost tables in this harness");
+  }),
+}));
+vi.mock("@/lib/cogs/engine", () => import("../cogs/engine"));
 
 const mocks = vi.hoisted(() => ({
   requireAdmin: vi.fn(),
@@ -85,6 +94,7 @@ vi.mock("@/lib/admin/reporting-snapshots", () => ({
 }));
 
 import {
+  attributeCampaignCollections,
   attributeCollectionSpend,
   ensureAdminAnalyticsRollupCoverage,
   fetchAdminStoreAnalytics,
@@ -270,18 +280,35 @@ function shopifyAdapter() {
         title: "Best sellers",
         revenue: 625,
         units: 8,
-        timeline: [{ bucket: "2026-08-14", revenue: 625, units: 8 }],
+        timeline: [{ bucket: "2026-08-14", revenue: 625, units: 8, orders: 7 }],
         products: [
           {
             productId: "gid://shopify/Product/10",
             title: "Lamp",
             revenue: 300,
             units: 3,
-            timeline: [{ bucket: "2026-08-14", revenue: 300, units: 3 }],
+            costKeys: ["LAMP-1", "Lamp"],
+            timeline: [{ bucket: "2026-08-14", revenue: 300, units: 3, orders: 3 }],
           },
         ],
       },
     ]),
+    fetchLandingSessionsSeries: vi.fn().mockResolvedValue([]),
+  };
+}
+
+/** One Google-delivered day for the fixture campaign, as the timeline reports it. */
+function deliveredDay(accountId = STORE_ID, campaignId = "987654321", spend = 250) {
+  return {
+    accountId,
+    campaignId,
+    bucket: "2026-08-14",
+    granularity: "day" as const,
+    spend,
+    impressions: 10_000,
+    clicks: 400,
+    conversions: 12,
+    googleRevenue: 800,
   };
 }
 
@@ -611,6 +638,207 @@ describe("admin store analytics DAL", () => {
     expect(result.campaigns).toMatchObject({ state: "ready" });
     expect(result.spend).toMatchObject({ state: "ready" });
     expect(result.activity).toMatchObject({ state: "empty" });
+  });
+
+  it("attributes the landing collection's sales to a campaign Shopify never matched", async () => {
+    // The ads carry no utm_campaign, so Shopify's own campaign attribution is
+    // empty - but the campaign lands on /collections/best-sellers, and that
+    // page's real sales, cart additions and orders can stand for it.
+    mocks.createServiceClient.mockReturnValue(service([account()], null));
+    const adapter = shopifyAdapter();
+    adapter.fetchCampaignAttributionSeries.mockResolvedValue([]);
+    adapter.fetchCampaignProductSeries.mockResolvedValue([]);
+    adapter.fetchLandingSessionsSeries.mockResolvedValue([
+      { bucket: "2026-08-14", landingPath: "/collections/best-sellers", platform: "alphabet", sessions: 100, addedToCart: 9, completedCheckout: 2 },
+      { bucket: "2026-08-14", landingPath: "/collections/best-sellers/products/lamp", platform: "google", sessions: 10, addedToCart: 1, completedCheckout: 1 },
+      // Not Google, and not this page: neither counts.
+      { bucket: "2026-08-14", landingPath: "/collections/best-sellers", platform: "meta", sessions: 50, addedToCart: 5, completedCheckout: 5 },
+      { bucket: "2026-08-14", landingPath: "/collections/other", platform: "alphabet", sessions: 50, addedToCart: 5, completedCheckout: 5 },
+    ]);
+    mocks.createLegacyShopifyReportingAdapter.mockResolvedValue(adapter);
+    mocks.fetchLiveCampaignsDetailed.mockResolvedValue([
+      { ...googleCampaign(), finalUrls: ["https://northwind.example/collections/best-sellers?utm_source=google"] },
+    ]);
+    mocks.fetchLiveCampaignTimeline.mockResolvedValue([deliveredDay()]);
+
+    const result = await fetchAdminStoreAnalytics({
+      clientId: CLIENT_ID,
+      store: { accountId: STORE_ID, activityAccountIds: [STORE_ID], currency: "EUR", days: [] },
+      range: RANGE,
+    });
+
+    expect(result.campaigns).toMatchObject({
+      data: {
+        rows: [
+          {
+            campaignId: "987654321",
+            attributionState: "unmatched",
+            shopifyRevenue: null,
+            collectionHandle: "best-sellers",
+            collectionSharedWith: 1,
+            timeline: [
+              expect.objectContaining({
+                bucket: "2026-08-14",
+                shopifyRevenue: null,
+                addedToCart: null,
+                collectionRevenue: 625,
+                collectionUnits: 8,
+                // Google visits that landed on the page, product pages within it included.
+                collectionAddedToCart: 10,
+                collectionOrders: 3,
+                // The service fake has no cost tables, so costs could not be read.
+                cogs: null,
+              }),
+            ],
+          },
+        ],
+      },
+    });
+  });
+
+  it("keeps an hourly timeline hourly, and an unknown cost unknown on every hour", async () => {
+    // A single-day range reports by hour. The day's collection figures ride on
+    // the first hour once; no day-shaped bucket is invented among the hours;
+    // and when costs could not be read, no hour prints a measured 0 for them.
+    mocks.createServiceClient.mockReturnValue(service([account()], null));
+    const adapter = shopifyAdapter();
+    adapter.fetchCampaignAttributionSeries.mockResolvedValue([]);
+    adapter.fetchCampaignProductSeries.mockResolvedValue([]);
+    adapter.fetchLandingSessionsSeries.mockResolvedValue([
+      { bucket: "2026-08-14", landingPath: "/collections/best-sellers", platform: "google", sessions: 40, addedToCart: 4, completedCheckout: 1 },
+    ]);
+    mocks.createLegacyShopifyReportingAdapter.mockResolvedValue(adapter);
+    mocks.fetchLiveCampaignsDetailed.mockResolvedValue([
+      { ...googleCampaign(), finalUrls: ["https://northwind.example/collections/best-sellers"] },
+    ]);
+    mocks.fetchLiveCampaignTimeline.mockResolvedValue([
+      { ...deliveredDay(), bucket: "2026-08-14T00:00:00", granularity: "hour" as const, spend: 100 },
+      { ...deliveredDay(), bucket: "2026-08-14T13:00:00", granularity: "hour" as const, spend: 150 },
+    ]);
+
+    const result = await fetchAdminStoreAnalytics({
+      clientId: CLIENT_ID,
+      store: { accountId: STORE_ID, activityAccountIds: [STORE_ID], currency: "EUR", days: [] },
+      range: { from: "2026-08-14", to: "2026-08-14" },
+    });
+
+    const timeline = (result.campaigns as { data: { rows: Array<{ timeline: Array<Record<string, unknown>> }> } }).data.rows[0]!.timeline;
+    expect(timeline.map((point) => point.bucket)).toEqual(["2026-08-14T00:00:00", "2026-08-14T13:00:00"]);
+    expect(timeline[0]).toMatchObject({ collectionRevenue: 625, collectionOrders: 1, collectionAddedToCart: 4, cogs: null });
+    expect(timeline[1]).toMatchObject({ collectionRevenue: 0, collectionOrders: 0, collectionAddedToCart: 0, cogs: null });
+  });
+
+  it("shares a collection between the campaigns landing on it, by spend, and prices the units", () => {
+    const costs = {
+      manualCosts: new Map([["LAMP-1", [{ cost: 20, effectiveFrom: "2026-01-01" }]]]),
+      tiers: new Map(),
+      collections: [],
+      defaultCostPct: 30,
+    };
+    const rows = [
+      { ...googleCampaign(), finalUrls: ["https://northwind.example/collections/best-sellers"] },
+      { ...googleCampaign(), providerCampaignId: "111", finalUrls: ["https://northwind.example/collections/best-sellers/"] },
+      // Lands on no single collection: left out.
+      { ...googleCampaign(), providerCampaignId: "222", finalUrls: ["https://northwind.example/"] },
+    ];
+    const attribution = attributeCampaignCollections({
+      google: {
+        ok: true,
+        value: {
+          rows: rows as never,
+          granularity: "day",
+          timeline: [deliveredDay(STORE_ID, "987654321", 150), deliveredDay(STORE_ID, "111", 50)],
+        },
+      },
+      collectionSales: {
+        ok: true,
+        value: [
+          {
+            collectionId: "gid://shopify/Collection/20",
+            handle: "best-sellers",
+            title: "Best sellers",
+            revenue: 300,
+            units: 3,
+            timeline: [{ bucket: "2026-08-14", revenue: 300, units: 3, orders: 3 }],
+            products: [
+              {
+                productId: "gid://shopify/Product/10",
+                title: "Lamp",
+                revenue: 300,
+                units: 3,
+                costKeys: ["LAMP-1", "Lamp"],
+                timeline: [{ bucket: "2026-08-14", revenue: 300, units: 3, orders: 3 }],
+              },
+            ],
+          },
+        ],
+      },
+      landing: {
+        ok: true,
+        value: [
+          { bucket: "2026-08-14", landingPath: "/collections/best-sellers", platform: "google", sessions: 40, addedToCart: 8, completedCheckout: 4 },
+        ],
+      },
+      costs,
+    });
+
+    expect(attribution.has(`${STORE_ID}:222`)).toBe(false);
+    const first = attribution.get(`${STORE_ID}:987654321`)!;
+    const second = attribution.get(`${STORE_ID}:111`)!;
+    expect(first.sharedWith).toBe(2);
+    expect(first.costsKnown).toBe(true);
+    // 150 of 200 spent -> three quarters of everything; 3 units at the manual 20.
+    expect(first.byDay.get("2026-08-14")).toEqual({
+      revenue: 225,
+      units: 2.25,
+      orders: 3,
+      addedToCart: 6,
+      cogs: 45,
+    });
+    expect(second.byDay.get("2026-08-14")).toEqual({
+      revenue: 75,
+      units: 0.75,
+      orders: 1,
+      addedToCart: 2,
+      cogs: 15,
+    });
+  });
+
+  it("marks orders and cart additions unknown, not zero, when the landing sessions could not be read", () => {
+    const attribution = attributeCampaignCollections({
+      google: {
+        ok: true,
+        value: {
+          rows: [{ ...googleCampaign(), finalUrls: ["https://northwind.example/collections/best-sellers"] }] as never,
+          granularity: "day",
+          timeline: [deliveredDay()],
+        },
+      },
+      collectionSales: {
+        ok: true,
+        value: [
+          {
+            collectionId: "gid://shopify/Collection/20",
+            handle: "best-sellers",
+            title: "Best sellers",
+            revenue: 300,
+            units: 3,
+            timeline: [{ bucket: "2026-08-14", revenue: 300, units: 3, orders: 3 }],
+            products: [],
+          },
+        ],
+      },
+      landing: { ok: false, state: "failed", message: "Shopify landing page sessions could not be loaded." },
+      costs: null,
+    });
+
+    expect(attribution.get(`${STORE_ID}:987654321`)!.byDay.get("2026-08-14")).toEqual({
+      revenue: 300,
+      units: 3,
+      orders: null,
+      addedToCart: null,
+      cogs: null,
+    });
   });
 
   it("uses the exact inclusive range for every legacy source and only exact campaign IDs", async () => {

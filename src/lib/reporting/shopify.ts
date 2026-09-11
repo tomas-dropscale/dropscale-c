@@ -81,6 +81,26 @@ export type ShopifyReportingAdapter = {
     to: string,
     targetCurrency?: string,
   ) => Promise<ShopifyCollectionSalesSeriesRow[]>;
+  fetchLandingSessionsSeries: (
+    from: string,
+    to: string,
+  ) => Promise<ShopifyLandingSessionsRow[]>;
+};
+
+/**
+ * Where a visit landed and what it did, one row per landing path, referring
+ * platform and reporting day. The campaign sheet reads the Google rows for the
+ * collection page a campaign sends people to: with no utm_campaign on the ads,
+ * the landing page is the one thing the campaign and the visit still share.
+ */
+export type ShopifyLandingSessionsRow = {
+  bucket: string;
+  landingPath: string;
+  /** Lower-cased as Shopify reports it: "google", "alphabet", "meta", "direct"... */
+  platform: string;
+  sessions: number;
+  addedToCart: number;
+  completedCheckout: number;
 };
 
 export type LegacyShopifyReportingSource = {
@@ -154,7 +174,12 @@ export type ShopifyCollectionProductSales = {
 };
 
 export type ShopifyCollectionProductSalesSeriesRow = ShopifyCollectionProductSales & {
-  timeline: Array<{ bucket: string; revenue: number; units: number }>;
+  timeline: Array<{ bucket: string; revenue: number; units: number; orders: number }>;
+  /**
+   * The keys the COGS engine knows this product by: its variants' SKUs, and its
+   * title, which is the key an order line falls back to when the SKU is blank.
+   */
+  costKeys: string[];
 };
 
 export type ShopifyCollectionSales = {
@@ -167,7 +192,7 @@ export type ShopifyCollectionSales = {
 
 export type ShopifyCollectionSalesSeriesRow = Omit<ShopifyCollectionSales, "products"> & {
   handle: string | null;
-  timeline: Array<{ bucket: string; revenue: number; units: number }>;
+  timeline: Array<{ bucket: string; revenue: number; units: number; orders: number }>;
   products: ShopifyCollectionProductSalesSeriesRow[];
 };
 
@@ -289,6 +314,13 @@ function integer(value: unknown, field: string): number {
   return parsed;
 }
 
+/**
+ * Shopify names the referring platform "google" on some stores and "alphabet"
+ * on others - measured 2026-09-11: 9,315 September sessions on one store,
+ * every one labelled "alphabet". Both are Google Ads traffic.
+ */
+const GOOGLE_PLATFORMS = new Set(["google", "alphabet"]);
+
 function exactGoogleCampaign(row: Record<string, unknown>): string | null {
   const platform = typeof row.referring_platform === "string"
     ? row.referring_platform.trim().toLowerCase()
@@ -298,7 +330,7 @@ function exactGoogleCampaign(row: Record<string, unknown>): string | null {
   const utmCampaign = typeof row.utm_campaign === "string"
     ? row.utm_campaign.trim()
     : "";
-  return platform === "google" && /^\d{1,30}$/.test(utmCampaign)
+  return GOOGLE_PLATFORMS.has(platform) && /^\d{1,30}$/.test(utmCampaign)
     ? utmCampaign
     : null;
 }
@@ -519,6 +551,7 @@ async function fetchCollectionSalesSeries(
           __typename: "Product";
           id: string;
           title: string;
+          variants?: { nodes: Array<{ sku: string | null }> } | null;
           collections: {
             pageInfo: { hasNextPage: boolean };
             nodes: Array<{ id: string; title: string; handle?: string }>;
@@ -538,7 +571,7 @@ async function fetchCollectionSalesSeries(
     from,
     to,
     (chunkFrom, chunkTo) => `FROM sales
-SHOW net_sales, net_items_sold
+SHOW net_sales, net_items_sold, orders
 GROUP BY product_id
 TIMESERIES day
 SINCE ${chunkFrom}
@@ -557,7 +590,7 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
     {
       revenue: number;
       units: number;
-      timeline: Map<string, { bucket: string; revenue: number; units: number }>;
+      timeline: Map<string, { bucket: string; revenue: number; units: number; orders: number }>;
     }
   >();
   for (const row of rows) {
@@ -572,6 +605,9 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
     if (!productId) continue;
     const nativeRevenue = finiteMoney(row.net_sales, "product net sales");
     const units = integer(row.net_items_sold, "product net items sold");
+    // Orders that contained the product. Absent on a store whose report omits
+    // the column, in which case the day reads as no orders rather than failing.
+    const orders = row.orders == null ? 0 : integer(row.orders, "product orders");
     const revenue = nativeRevenue * (rates ? rateOn(rates, day) : 1);
     const current = productSales.get(productId) ?? {
       revenue: 0,
@@ -580,9 +616,10 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
     };
     current.revenue += revenue;
     current.units += units;
-    const point = current.timeline.get(bucket) ?? { bucket, revenue: 0, units: 0 };
+    const point = current.timeline.get(bucket) ?? { bucket, revenue: 0, units: 0, orders: 0 };
     point.revenue += revenue;
     point.units += units;
+    point.orders += orders;
     current.timeline.set(bucket, point);
     if (!Number.isFinite(current.revenue) || !Number.isSafeInteger(current.units)) {
       invalidResponse("Shopify returned invalid product sales totals.");
@@ -594,6 +631,7 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
     string,
     {
       title: string;
+      costKeys: string[];
       collections: Array<{ id: string; title: string; handle: string | null }>;
     }
   >();
@@ -616,6 +654,7 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
             ... on Product {
               id
               title
+              variants(first: 100) { nodes { sku } }
               collections(first: 100) {
                 pageInfo { hasNextPage }
                 nodes { id title handle }
@@ -685,8 +724,16 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
         seenCollections.add(collection.id);
         return { id: collection.id, title, handle };
       });
+      // The COGS engine keys an order line by its SKU, falling back to the
+      // line title when the store sets none - so a product answers to every
+      // variant SKU it has and to its title. Variants sit under the same
+      // read_products scope this report already requires.
+      const skus = (node.variants?.nodes ?? [])
+        .map((variant) => (typeof variant.sku === "string" ? variant.sku.trim() : ""))
+        .filter((sku) => sku.length > 0);
       productMembership.set(node.id, {
         title: node.title.trim(),
+        costKeys: [...new Set([...skus, node.title.trim()])],
         collections: memberships,
       });
     }
@@ -702,7 +749,7 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
       handle: string | null;
       revenue: number;
       units: number;
-      timeline: Map<string, { bucket: string; revenue: number; units: number }>;
+      timeline: Map<string, { bucket: string; revenue: number; units: number; orders: number }>;
       products: Map<string, ShopifyCollectionProductSalesSeriesRow>;
     }
   >();
@@ -729,6 +776,7 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
         title: product.title,
         revenue: sales.revenue,
         units: sales.units,
+        costKeys: product.costKeys,
         timeline: [...sales.timeline.values()].sort((left, right) =>
           left.bucket.localeCompare(right.bucket)),
       });
@@ -739,9 +787,14 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
           bucket: productPoint.bucket,
           revenue: 0,
           units: 0,
+          orders: 0,
         };
         point.revenue += productPoint.revenue;
         point.units += productPoint.units;
+        // Summed over products, so an order holding two of the collection's
+        // products counts twice here. The campaign sheet takes its orders from
+        // the landing sessions instead; this total is for the products list.
+        point.orders += productPoint.orders;
         current.timeline.set(point.bucket, point);
       }
       if (!Number.isFinite(current.revenue) || !Number.isSafeInteger(current.units)) {
@@ -1230,8 +1283,54 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
       );
       return rows.map(({ handle: _handle, timeline: _timeline, products, ...row }) => ({
         ...row,
-        products: products.map(({ timeline: _productTimeline, ...product }) => product),
+        // The range totals keep the public product shape: no timeline, and no
+        // cost keys, which only the day-by-day attribution reads.
+        products: products.map(({ timeline: _productTimeline, costKeys: _costKeys, ...product }) => product),
       }));
+    },
+    async fetchLandingSessionsSeries(from, to) {
+      validateRange(from, to);
+      requireScopes(granted, ["read_reports"]);
+      // Always Shopify's daily grain: the campaign sheet is by day, and a
+      // landing page is not a thing a visit does twice in an hour.
+      const rows = await fetchBoundedShopifyQlRows(
+        shopDomain,
+        accessToken,
+        from,
+        to,
+        (chunkFrom, chunkTo) => `FROM sessions
+SHOW sessions, sessions_with_cart_additions, sessions_that_completed_checkout
+WHERE human_or_bot_session = 'human'
+GROUP BY landing_page_path, referring_platform
+TIMESERIES day
+SINCE ${chunkFrom}
+UNTIL ${chunkTo}
+ORDER BY day ASC
+LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
+        "A single reporting day has too many landing page rows for an exact report.",
+        graphql,
+      );
+      const series: ShopifyLandingSessionsRow[] = [];
+      for (const row of rows) {
+        const day = rowDay(row.day, from, to);
+        const landingPath = typeof row.landing_page_path === "string" ? row.landing_page_path.trim() : "";
+        if (!landingPath) continue;
+        const platform = typeof row.referring_platform === "string"
+          ? row.referring_platform.trim().toLowerCase()
+          : "";
+        series.push({
+          bucket: day,
+          landingPath,
+          platform,
+          sessions: nonNegativeInteger(row.sessions, "landing sessions"),
+          addedToCart: nonNegativeInteger(row.sessions_with_cart_additions, "landing cart additions"),
+          completedCheckout: nonNegativeInteger(
+            row.sessions_that_completed_checkout,
+            "landing completed checkouts",
+          ),
+        });
+      }
+      return series;
     },
     async fetchCollectionSalesSeries(from, to, targetCurrency = verifiedCurrency) {
       validateRange(from, to);
