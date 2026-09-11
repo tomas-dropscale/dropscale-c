@@ -36,6 +36,8 @@ export class ShopifyReportingAdapterError extends Error {
 }
 
 export type ShopifyReportingAdapter = {
+  /** The store's IANA time zone as Shopify verified it; its reporting days are cut here. */
+  timeZone: string;
   fetchDailySales: (
     from: string,
     to: string,
@@ -112,6 +114,8 @@ export type ShopifyCampaignAttribution = {
   campaignId: string;
   attributionModel: "last_non_direct_click";
   sessions: number | null;
+  /** Sessions that added to cart - Shopify's own count, the same source as sessions. */
+  addedToCart: number | null;
   orders: number | null;
   revenue: number | null;
 };
@@ -119,6 +123,7 @@ export type ShopifyCampaignAttribution = {
 export type ShopifyCampaignAttributionPoint = {
   bucket: string;
   sessions: number | null;
+  addedToCart: number | null;
   orders: number | null;
   revenue: number | null;
 };
@@ -787,6 +792,7 @@ function boundAdapter({
   };
 
   return {
+    timeZone: verifiedTimeZone,
     async fetchDailySales(from, to) {
       validateRange(from, to);
       requireScopes(granted, ["read_orders"]);
@@ -936,7 +942,7 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
           from,
           to,
           (chunkFrom, chunkTo) => `FROM campaign_sessions
-SHOW campaign_sessions
+SHOW campaign_sessions, campaign_sessions_with_cart_additions
 GROUP BY utm_campaign, referring_platform
 TIMESERIES day
 SINCE ${chunkFrom}
@@ -959,6 +965,7 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
           campaignId,
           attributionModel: "last_non_direct_click",
           sessions: null,
+          addedToCart: null,
           orders: null,
           revenue: null,
         };
@@ -982,12 +989,17 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
           campaignId,
           attributionModel: "last_non_direct_click",
           sessions: null,
+          addedToCart: null,
           orders: null,
           revenue: null,
         };
         current.sessions = (current.sessions ?? 0) + nonNegativeInteger(
           row.campaign_sessions,
           "campaign sessions",
+        );
+        current.addedToCart = (current.addedToCart ?? 0) + nonNegativeInteger(
+          row.campaign_sessions_with_cart_additions,
+          "campaign sessions with cart additions",
         );
         byCampaign.set(campaignId, current);
       }
@@ -1014,7 +1026,7 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`;
         ),
         fetchBoundedShopifyQlRows(
           shopDomain, accessToken, from, to,
-          (a, b) => q("campaign_sessions", "campaign_sessions", a, b),
+          (a, b) => q("campaign_sessions", "campaign_sessions, campaign_sessions_with_cart_additions", a, b),
           "A single reporting day has too many campaign session rows for an exact report.", graphql,
         ),
       ]);
@@ -1031,6 +1043,7 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`;
           campaignId,
           attributionModel: "last_non_direct_click" as const,
           sessions: null,
+          addedToCart: null,
           orders: null,
           revenue: null,
           timeline: [],
@@ -1043,6 +1056,7 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`;
         const point = current.pointByBucket.get(bucket) ?? {
           bucket,
           sessions: null,
+          addedToCart: null,
           orders: null,
           revenue: null,
         };
@@ -1070,8 +1084,14 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`;
         const current = currentFor(campaignId);
         const point = pointFor(current, bucket);
         const sessions = nonNegativeInteger(row.campaign_sessions, "campaign sessions");
+        const addedToCart = nonNegativeInteger(
+          row.campaign_sessions_with_cart_additions,
+          "campaign sessions with cart additions",
+        );
         current.sessions = (current.sessions ?? 0) + sessions;
+        current.addedToCart = (current.addedToCart ?? 0) + addedToCart;
         point.sessions = (point.sessions ?? 0) + sessions;
+        point.addedToCart = (point.addedToCart ?? 0) + addedToCart;
       }
       return [...campaigns.values()].map(({ pointByBucket, ...row }) => ({
         ...row,

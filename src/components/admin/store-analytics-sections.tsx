@@ -18,6 +18,7 @@ import {
   type FunnelChartPoint,
   type RoasEvolutionWindows,
 } from "@/components/admin/performance-charts";
+import { CampaignProfitLossSheet } from "./campaign-profit-loss";
 import { Badge } from "@/components/ui/badge";
 import type {
   AdminAnalyticsFamily,
@@ -405,17 +406,20 @@ export function CampaignPerformanceSection({
   rangeEnd: string;
 }) {
   const [openCampaigns, setOpenCampaigns] = React.useState<Set<string>>(new Set());
+  const [openSheets, setOpenSheets] = React.useState<Set<string>>(new Set());
   const hasData = "data" in campaigns;
   const rows = hasData ? campaigns.data.rows : [];
 
-  function toggleCampaign(key: string) {
-    setOpenCampaigns((current) => {
+  function toggleIn(setter: React.Dispatch<React.SetStateAction<Set<string>>>, key: string) {
+    setter((current) => {
       const next = new Set(current);
       if (next.has(key)) next.delete(key);
       else next.add(key);
       return next;
     });
   }
+  const toggleCampaign = (key: string) => toggleIn(setOpenCampaigns, key);
+  const toggleSheet = (key: string) => toggleIn(setOpenSheets, key);
 
   return (
     <section className="panel overflow-hidden" aria-labelledby="campaign-performance-title">
@@ -424,7 +428,7 @@ export function CampaignPerformanceSection({
           Campaign Performance
         </h2>
         <p className="mt-0.5 text-[11px] text-[var(--text-muted)]">
-          Google delivery and Shopify last-non-direct-click UTM attribution for the selected period.
+          Google delivery and Shopify last-non-direct-click UTM attribution for the selected period. Open a campaign for its assets, or its P&amp;L for the day-by-day sheet.
         </p>
       </header>
 
@@ -462,6 +466,7 @@ export function CampaignPerformanceSection({
               {rows.map((campaign) => {
                 const key = `${campaign.accountId}:${campaign.campaignId}`;
                 const open = openCampaigns.has(key);
+                const sheetOpen = openSheets.has(key);
                 const breakdownWarnings = campaign.breakdown.sources
                   .filter((source) => source.state === "failed" || source.state === "unavailable")
                   .map((source) => source.reason)
@@ -507,19 +512,48 @@ export function CampaignPerformanceSection({
                       <td className="px-2.5 py-3 text-center tabular-nums">{campaign.conversions === null ? "—" : integer(campaign.conversions)}</td>
                       <td className="px-2.5 py-3 text-center tabular-nums">{campaign.googleRoas === null ? "—" : multiplier(campaign.googleRoas)}</td>
                       <td className="px-5 py-2 text-center">
-                        <RoasEvolutionHover
-                          label="Google ROAS evolution"
-                          windows={roasEvolutionWindows(
-                            (campaign.trackingTimeline ?? campaign.timeline).map((point) => ({
-                              bucket: point.bucket,
-                              spend: point.spend,
-                              revenue: point.googleRevenue,
-                            })),
-                            lisbonToday(),
-                          )}
-                        />
+                        <div className="flex items-center justify-center gap-2">
+                          <RoasEvolutionHover
+                            label="Google ROAS evolution"
+                            windows={roasEvolutionWindows(
+                              (campaign.trackingTimeline ?? campaign.timeline).map((point) => ({
+                                bucket: point.bucket,
+                                spend: point.spend,
+                                revenue: point.googleRevenue,
+                              })),
+                              lisbonToday(),
+                            )}
+                          />
+                          <button
+                            type="button"
+                            aria-expanded={sheetOpen}
+                            aria-label={`P&L: ${sheetOpen ? "hide" : "show"} ${campaign.name} profit and loss by day`}
+                            onClick={() => toggleSheet(key)}
+                            className={cn(
+                              "transition-smooth rounded-[8px] border px-2 py-1 text-[10.5px] font-medium outline-none focus-visible:border-[var(--accent-gold)]",
+                              sheetOpen
+                                ? "border-[var(--accent-gold)]/40 bg-[var(--accent-gold-dim)] text-[var(--accent-gold-strong)]"
+                                : "border-[var(--border-subtle)] text-[var(--text-secondary)] hover:bg-[var(--bg-panel-hover)]",
+                            )}
+                          >
+                            P&amp;L
+                          </button>
+                        </div>
                       </td>
                     </tr>
+
+                    {sheetOpen ? (
+                      <tr className="border-t border-[var(--border-subtle)] bg-[var(--bg-base)]">
+                        <td colSpan={11} className="px-5 py-3">
+                          <CampaignProfitLossSheet
+                            campaign={campaign}
+                            currency={currency}
+                            today={(hasData ? campaigns.data.storeToday : null) ?? lisbonToday()}
+                            title={campaign.name}
+                          />
+                        </td>
+                      </tr>
+                    ) : null}
 
                     {open && campaign.breakdown.rows.map((row) => {
                       const cpc = row.spend !== null && row.clicks && row.clicks > 0

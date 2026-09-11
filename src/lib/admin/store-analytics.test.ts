@@ -224,6 +224,7 @@ function supplementalCredential(overrides: Record<string, unknown> = {}) {
 
 function shopifyAdapter() {
   return {
+    timeZone: "Europe/Lisbon",
     fetchDailySales: vi.fn(),
     fetchCollectionProductKeys: vi.fn(),
     fetchFunnelSeries: vi.fn().mockResolvedValue({
@@ -244,10 +245,11 @@ function shopifyAdapter() {
         campaignId: "987654321",
         attributionModel: "last_non_direct_click",
         sessions: null,
+        addedToCart: 12,
         orders: 8,
         revenue: 625,
         timeline: [
-          { bucket: "2026-08-14", sessions: null, orders: 8, revenue: 625 },
+          { bucket: "2026-08-14", sessions: null, addedToCart: 12, orders: 8, revenue: 625 },
         ],
       },
     ]),
@@ -700,9 +702,23 @@ describe("admin store analytics DAL", () => {
           {
             campaignId: "987654321",
             shopifyOrders: 8,
+            addedToCart: 12,
+            shopifyUnits: 3,
             shopifyRevenue: 625,
             realRoas: 2.5,
             attributionState: "matched",
+            // The daily sheet reads these per bucket: Shopify's own cart
+            // additions and orders next to Google's delivery, and the net
+            // units summed across the campaign's products.
+            timeline: expect.arrayContaining([
+              expect.objectContaining({
+                bucket: "2026-08-14",
+                addedToCart: 12,
+                shopifyOrders: 8,
+                units: 3,
+                shopifyRevenue: 625,
+              }),
+            ]),
             breakdown: {
               state: "ready",
               rows: expect.arrayContaining([
@@ -1101,6 +1117,22 @@ describe("admin store analytics DAL", () => {
     mocks.fetchGoogleReportingCampaigns
       .mockResolvedValueOnce([googleCampaign(CHILD_ID)])
       .mockResolvedValueOnce([googleCampaign(CHILD_TWO_ID)]);
+    // A delivered day for each account, so the sheet has points to read: the
+    // Shopify columns on those points must be withheld too.
+    const deliveredDay = (accountId: string) => ({
+      accountId,
+      campaignId: "987654321",
+      bucket: "2026-08-14",
+      granularity: "day" as const,
+      spend: 120,
+      impressions: 1_000,
+      clicks: 40,
+      conversions: 1,
+      googleRevenue: 0,
+    });
+    mocks.fetchGoogleReportingCampaignTimeline
+      .mockResolvedValueOnce([deliveredDay(CHILD_ID)])
+      .mockResolvedValueOnce([deliveredDay(CHILD_TWO_ID)]);
 
     const result = await fetchAdminStoreAnalytics({
       clientId: CLIENT_ID,
@@ -1144,6 +1176,23 @@ describe("admin store analytics DAL", () => {
         ],
       },
     });
+    // Withheld is withheld all the way down: the day-by-day sheet reads these
+    // points, and a zero there would present Shopify data that was never
+    // attributed as a measured nothing.
+    const withheld = (result.campaigns as { data: { rows: Array<{ timeline: Array<Record<string, unknown>> }> } }).data.rows;
+    expect(withheld.length).toBe(2);
+    for (const row of withheld) {
+      expect(row.timeline.length).toBeGreaterThan(0);
+      for (const point of row.timeline) {
+        expect(point).toMatchObject({
+          shopifyRevenue: null,
+          shopifySessions: null,
+          addedToCart: null,
+          shopifyOrders: null,
+          units: null,
+        });
+      }
+    }
   });
 
   it("uses an exact materialized spend window without refreshing during page render", async () => {

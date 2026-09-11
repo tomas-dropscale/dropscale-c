@@ -91,6 +91,12 @@ export type AdminAnalyticsCampaignTimelinePoint = {
   clicks?: number;
   conversions?: number;
   shopifyRevenue: number | null;
+  /** Shopify last-non-direct-click sessions, cart additions and orders; null when attribution is unavailable. */
+  shopifySessions?: number | null;
+  addedToCart?: number | null;
+  shopifyOrders?: number | null;
+  /** Net units after returns across the campaign's products; null when the product series is unavailable. */
+  units?: number | null;
   googleRevenue: number;
   realRoas: number | null;
   googleRoas: number | null;
@@ -163,8 +169,11 @@ export type AdminAnalyticsCampaign = {
   conversions: number | null;
   googleRevenue: number;
   shopifySessions: number | null;
+  addedToCart?: number | null;
   shopifyOrders: number | null;
   shopifyRevenue: number | null;
+  /** Net units after returns across the campaign's products; null when unavailable. */
+  shopifyUnits?: number | null;
   ctr: number | null;
   cpc: number | null;
   cpm: number | null;
@@ -219,6 +228,8 @@ export type AdminStoreAnalytics = {
   campaigns: AdminAnalyticsFamily<{
     granularity: AdminAnalyticsGranularity;
     rows: AdminAnalyticsCampaign[];
+    /** The store's current local day; null when its zone could not be read. */
+    storeToday?: string | null;
   }>;
   collections: AdminAnalyticsFamily<{
     granularity: AdminAnalyticsGranularity;
@@ -1409,6 +1420,7 @@ function campaignFamily(
   breakdowns: GoogleBreakdownAttempts,
   attribution: Attempt<ShopifyCampaignAttributionSeriesRow[]>,
   shopifyProducts: Attempt<ShopifyCampaignProductSeriesRow[]>,
+  storeToday: string | null = null,
 ): AdminStoreAnalytics["campaigns"] {
   if (!google.ok) {
     return google.state === "unavailable"
@@ -1438,9 +1450,23 @@ function campaignFamily(
         point.campaignId === campaign.providerCampaignId,
     );
     const shopifyTimeline = matched?.timeline ?? [];
+    // Units per bucket come from the campaign's product rows, which Shopify
+    // reports per product; summed here they answer for the whole campaign.
+    // Unavailable when the product series failed, or when the campaign id is
+    // repeated across accounts and the UTM rows cannot be told apart.
+    const unitRows = !ambiguousCampaignId && shopifyProducts.ok
+      ? shopifyProducts.value.filter((row) => row.campaignId === campaign.providerCampaignId)
+      : null;
+    const unitsByBucket = new Map<string, number>();
+    for (const row of unitRows ?? []) {
+      for (const point of row.timeline) {
+        unitsByBucket.set(point.bucket, (unitsByBucket.get(point.bucket) ?? 0) + point.units);
+      }
+    }
     const buckets = [...new Set([
       ...googleTimeline.map((point) => point.bucket),
       ...shopifyTimeline.map((point) => point.bucket),
+      ...unitsByBucket.keys(),
     ])].sort();
     return {
       accountId: campaign.ad_account_id,
@@ -1456,8 +1482,10 @@ function campaignFamily(
       googleRevenue: campaign.conversionValue,
       shoppingFeed: campaign.shoppingFeed,
       shopifySessions: matched?.sessions ?? null,
+      addedToCart: matched?.addedToCart ?? null,
       shopifyOrders: matched?.orders ?? null,
       shopifyRevenue: matched?.revenue ?? null,
+      shopifyUnits: unitRows ? unitRows.reduce((sum, row) => sum + row.units, 0) : null,
       ctr: campaign.impressions > 0 ? campaign.clicks / campaign.impressions : null,
       cpc: campaign.clicks > 0 ? spend / campaign.clicks : null,
       cpm: campaign.impressions > 0 ? (spend / campaign.impressions) * 1000 : null,
@@ -1476,9 +1504,13 @@ function campaignFamily(
         const googlePoint = googleTimeline.find((point) => point.bucket === bucket);
         const shopifyPoint = shopifyTimeline.find((point) => point.bucket === bucket);
         const pointSpend = googlePoint?.spend ?? 0;
-        const shopifyRevenue = attribution.ok
-          ? shopifyPoint?.revenue ?? 0
-          : null;
+        // A day Shopify answered for is a number, zero included. A campaign
+        // with no match - the attribution never loaded, the UTM never matched,
+        // or the id is repeated across accounts and was withheld - has no
+        // answer, and its days read null all the way to the sheet's "—".
+        // Gating on the load alone printed zeros for the withheld case, next
+        // to a header row that said "—" for the same campaign.
+        const shopifyRevenue = matched ? shopifyPoint?.revenue ?? 0 : null;
         const googleRevenue = googlePoint?.googleRevenue ?? 0;
         return {
           bucket,
@@ -1487,6 +1519,10 @@ function campaignFamily(
           clicks: googlePoint?.clicks ?? 0,
           conversions: googlePoint?.conversions ?? 0,
           shopifyRevenue,
+          shopifySessions: matched ? shopifyPoint?.sessions ?? 0 : null,
+          addedToCart: matched ? shopifyPoint?.addedToCart ?? 0 : null,
+          shopifyOrders: matched ? shopifyPoint?.orders ?? 0 : null,
+          units: unitRows ? unitsByBucket.get(bucket) ?? 0 : null,
           googleRevenue,
           realRoas: pointSpend > 0 && shopifyRevenue !== null
             ? shopifyRevenue / pointSpend
@@ -1522,13 +1558,13 @@ function campaignFamily(
   if (partial) {
     return {
       state: "partial",
-      data: { rows, granularity: google.value.granularity },
+      data: { rows, granularity: google.value.granularity, storeToday },
       message: messages.join(" ") || "Some campaign detail sources are partial.",
     };
   }
   return {
     state: rows.length === 0 ? "empty" : "ready",
-    data: { rows, granularity: google.value.granularity },
+    data: { rows, granularity: google.value.granularity, storeToday },
     message: messages.length > 0 ? messages.join(" ") : null,
   };
 }
@@ -1542,6 +1578,8 @@ async function shopifyFamilies(
   attribution: Attempt<ShopifyCampaignAttributionSeriesRow[]>;
   products: Attempt<ShopifyCampaignProductSeriesRow[]>;
   collections: AdminStoreAnalytics["collections"];
+  /** The store's verified IANA zone, or null when the store could not be opened. */
+  timeZone: string | null;
 }> {
   if (!adapterAttempt.ok) {
     const family = <T>(operation: string): AdminAnalyticsFamily<T> =>
@@ -1553,6 +1591,7 @@ async function shopifyFamilies(
       attribution: adapterAttempt,
       products: adapterAttempt,
       collections: family("Collection sales"),
+      timeZone: null,
     };
   }
   const invoke = <T>(operation: () => Promise<T>) =>
@@ -1671,7 +1710,7 @@ async function shopifyFamilies(
         "Shopify net sales and net units use the selected reporting days and current official collection membership. A product can belong to more than one collection, so collection rows are not additive. Spend and ROAS require a verified Google offer-to-Shopify product mapping that is not configured.",
     };
   }
-  return { funnel, attribution, products, collections };
+  return { funnel, attribution, products, collections, timeZone: adapterAttempt.value.timeZone };
 }
 
 /** Attribute spend only through exact provider URLs or verified Shopify product IDs. */
@@ -1816,7 +1855,22 @@ function failedShopifyFamilies(): ShopifyFamilies {
       message: "Shopify campaign products could not be loaded.",
     },
     collections: failed("Collection performance could not be loaded for this store."),
+    timeZone: null,
   };
+}
+
+/** Today's date in a zone, as the ISO day the reporting buckets use. */
+function localDayIn(timeZone: string, at = new Date()): string {
+  try {
+    return new Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(at);
+  } catch {
+    return at.toISOString().slice(0, 10);
+  }
 }
 
 function failedStoreAnalytics(input: FetchAdminStoreAnalyticsInput): AdminStoreAnalytics {
@@ -1885,6 +1939,7 @@ async function buildLiveAdminStoreAnalytics(
       breakdowns,
       shopify.attribution,
       shopify.products,
+      shopify.timeZone ? localDayIn(shopify.timeZone) : null,
     );
   } catch (error) {
     console.error("Admin store campaign analytics composition failed:", error);
@@ -2018,6 +2073,7 @@ type FunnelSnapshotData = {
 type CampaignSnapshotData = {
   granularity: AdminAnalyticsGranularity;
   rows: AdminAnalyticsCampaign[];
+  storeToday?: string | null;
 };
 
 type CollectionSnapshotData = {
@@ -2089,6 +2145,12 @@ function slicedCampaignFamily(
     const impressions = sumOptionalCampaignMetric(timeline, "impressions");
     const clicks = sumOptionalCampaignMetric(timeline, "clicks");
     const conversions = sumOptionalCampaignMetric(timeline, "conversions");
+    const addedToCart = timeline.every((point) => typeof point.addedToCart === "number")
+      ? timeline.reduce((sum, point) => sum + (point.addedToCart ?? 0), 0)
+      : null;
+    const shopifyUnits = timeline.every((point) => typeof point.units === "number")
+      ? timeline.reduce((sum, point) => sum + (point.units ?? 0), 0)
+      : null;
     const breakdown: AdminAnalyticsCampaignBreakdown =
       campaign.breakdown.state === "ready" || campaign.breakdown.state === "empty"
         ? {
@@ -2114,6 +2176,8 @@ function slicedCampaignFamily(
       googleRevenue,
       shopifySessions: null,
       shopifyOrders: null,
+      addedToCart,
+      shopifyUnits,
       shopifyRevenue,
       ctr: impressions && impressions > 0 && clicks !== null ? clicks / impressions : null,
       cpc: clicks && clicks > 0 ? spend / clicks : null,

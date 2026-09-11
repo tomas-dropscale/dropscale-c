@@ -523,6 +523,7 @@ describe("V2 Shopify reporting adapter", () => {
                   { name: "referring_platform" },
                   { name: "day" },
                   { name: "campaign_sessions" },
+                  { name: "campaign_sessions_with_cart_additions" },
                 ],
                 rows: [
                   {
@@ -531,6 +532,7 @@ describe("V2 Shopify reporting adapter", () => {
                     day: "2026-08-13",
                     hour: "2026-08-13T12:00:00Z",
                     campaign_sessions: "190",
+                    campaign_sessions_with_cart_additions: "21",
                   },
                 ],
               },
@@ -632,6 +634,7 @@ describe("V2 Shopify reporting adapter", () => {
         campaignId: "123456789",
         attributionModel: "last_non_direct_click",
         sessions: 190,
+        addedToCart: 21,
         revenue: 625.5,
         orders: 8,
       },
@@ -641,11 +644,13 @@ describe("V2 Shopify reporting adapter", () => {
     ).resolves.toMatchObject([{
       campaignId: "123456789",
       sessions: 190,
+      addedToCart: 21,
       revenue: 625.5,
       orders: 8,
       timeline: [{
         bucket: "2026-08-13T12:00:00",
         sessions: 190,
+        addedToCart: 21,
         revenue: 625.5,
         orders: 8,
       }],
