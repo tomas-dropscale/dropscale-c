@@ -52,6 +52,9 @@ function requestsGoogle(session: ClientOnboardingSessionDTO) {
   return session.requestedAssets.includes("google_ads");
 }
 
+/** How often the Google step asks Windsor by itself while the page is in view. */
+const WINDSOR_AUTO_CHECK_MS = 5_000;
+
 function hasCurrentGoogleAds(session: ClientOnboardingSessionDTO) {
   return session.googleAds.some((account) => account.sessionId === session.id);
 }
@@ -667,42 +670,49 @@ export function ClientOnboardingFlow({ sessionId }: { sessionId: string }) {
     }
   }
 
+  /**
+   * Ask once whether Windsor has finished. "connected" means the accounts are
+   * saved and the page has moved on (or the whole link completed); "pending"
+   * means nothing yet. Shared by the button and the automatic check below, so
+   * both see exactly the same answer.
+   */
+  const probeWindsor = React.useCallback(async (): Promise<"connected" | "pending"> => {
+    const response = await fetch(`/api/client-onboarding/${sessionId}/windsor`, {
+      method: "GET",
+      cache: "no-store",
+      headers: requestHeaders(false),
+    });
+    const body = (await response.json().catch(() => null)) as {
+      status?: string;
+      accounts?: unknown[];
+      completed?: boolean;
+    } | null;
+    if (!response.ok) {
+      throw new Error(responseError(body, "Google Ads could not be checked."));
+    }
+    if (body?.status !== "connected" || (body.accounts?.length ?? 0) === 0) {
+      return "pending";
+    }
+    if (body.completed) {
+      tokenRef.current = "";
+      setComplete(true);
+      setFeedback(null);
+      return "connected";
+    }
+    await fetchSession();
+    setFeedback({
+      tone: "success",
+      message: "Google Ads accounts connected successfully.",
+    });
+    return "connected";
+  }, [fetchSession, requestHeaders, sessionId]);
+
   async function checkWindsor() {
     setPolling(true);
     setFeedback(null);
     try {
       for (let attempt = 0; attempt < 6; attempt += 1) {
-        const response = await fetch(
-          `/api/client-onboarding/${sessionId}/windsor`,
-          {
-            method: "GET",
-            cache: "no-store",
-            headers: requestHeaders(false),
-          },
-        );
-        const body = (await response.json().catch(() => null)) as {
-          status?: string;
-          accounts?: unknown[];
-          completed?: boolean;
-        } | null;
-        if (!response.ok)
-          throw new Error(
-            responseError(body, "Google Ads could not be checked."),
-          );
-        if (body?.status === "connected" && (body.accounts?.length ?? 0) > 0) {
-          if (body.completed) {
-            tokenRef.current = "";
-            setComplete(true);
-            setFeedback(null);
-            return;
-          }
-          await fetchSession();
-          setFeedback({
-            tone: "success",
-            message: "Google Ads accounts connected successfully.",
-          });
-          return;
-        }
+        if ((await probeWindsor()) === "connected") return;
         if (attempt < 5)
           await new Promise((resolve) => window.setTimeout(resolve, 2_000));
       }
@@ -723,6 +733,50 @@ export function ClientOnboardingFlow({ sessionId }: { sessionId: string }) {
       setPolling(false);
     }
   }
+
+  // Clients click Finish in Windsor and never come back to press the button,
+  // and the link then sits open until someone notices. So once a Google link
+  // exists the page checks by itself: the moment this tab is looked at again
+  // (that is when they have just come back from Windsor), and every few
+  // seconds while it stays in view. A quiet "not yet" stays quiet - only a
+  // real failure is shown - and the button keeps working exactly as before.
+  const awaitingWindsor =
+    step === 3 && Boolean(windsorUrl) && !complete && Boolean(session) &&
+    !hasCurrentGoogleAds(session as ClientOnboardingSessionDTO);
+  React.useEffect(() => {
+    if (!awaitingWindsor) return;
+    let active = true;
+    let inFlight = false;
+    const check = async () => {
+      if (!active || inFlight || document.visibilityState !== "visible") return;
+      inFlight = true;
+      try {
+        if ((await probeWindsor()) === "connected") active = false;
+      } catch (error) {
+        if (active) {
+          setFeedback({
+            tone: "error",
+            message:
+              error instanceof Error ? error.message : "Google Ads could not be checked.",
+          });
+        }
+      } finally {
+        inFlight = false;
+      }
+    };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void check();
+    };
+    const timer = window.setInterval(() => void check(), WINDSOR_AUTO_CHECK_MS);
+    window.addEventListener("focus", onVisible);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", onVisible);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [awaitingWindsor, probeWindsor]);
 
   async function finishOnboarding() {
     if (!session) return;
@@ -1481,7 +1535,7 @@ export function ClientOnboardingFlow({ sessionId }: { sessionId: string }) {
               <div className="rounded-[12px] border border-[var(--accent-gold)]/25 bg-[var(--accent-gold-dim)] p-4">
                 <p className="text-[12.5px] font-medium text-[var(--text-primary)]">
                   {windsorUrl
-                    ? "Open Windsor and complete Google authorization, then return here and check your accounts."
+                    ? "Open Windsor and complete Google authorization. This page checks by itself once you come back - or press Check accounts."
                     : "Already completed Google authorization? Check your accounts. Otherwise, create a Google link above."}
                 </p>
                 <div className="mt-3 flex flex-wrap gap-2">

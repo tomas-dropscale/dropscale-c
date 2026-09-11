@@ -71,6 +71,9 @@ vi.mock("@/lib/metrics/recompute", () => ({
 vi.mock("@/lib/billing/auto-start", () => ({
   ensureAutomaticBillingStarts: mocks.ensureAutomaticBillingStarts,
 }));
+vi.mock("@/lib/client-onboarding/windsor-sweep", () => ({
+  finishAbandonedWindsorAuthorizations: vi.fn(async () => ({ attempted: 0, completed: 0, failed: 0 })),
+}));
 vi.mock("@/lib/client-onboarding/google-metadata", () => ({
   ensureGoogleConnectionMetadata: mocks.ensureGoogleConnectionMetadata,
 }));

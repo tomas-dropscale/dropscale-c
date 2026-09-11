@@ -7,6 +7,7 @@ import {
 import { ClientOnboardingError } from "@/lib/client-onboarding/sessions";
 import { ensureAutomaticBillingStarts } from "@/lib/billing/auto-start";
 import { ensureGoogleConnectionMetadata } from "@/lib/client-onboarding/google-metadata";
+import { finishAbandonedWindsorAuthorizations } from "@/lib/client-onboarding/windsor-sweep";
 import {
   advanceEligibleClientReportingCutovers,
   provisionReviewedClientReportingSources,
@@ -239,6 +240,9 @@ async function refreshAll(
   const deadline = startedAt + REPORTING_ROUTE_BUDGET_MS;
   const service = createServiceClient();
   if (!service) return response({ error: "Reporting sync is not configured." }, 503);
+  // A client who clicked Finish in Windsor and never came back to press
+  // Check accounts leaves the link open; this closes it for them.
+  await finishAbandonedWindsorAuthorizations(service).catch(() => undefined);
   await ensureGoogleConnectionMetadata(service).catch(() => undefined);
   const provisioning = await provisionReviewedClientReportingSources(service).catch(() => ({
     attempted: 0,
