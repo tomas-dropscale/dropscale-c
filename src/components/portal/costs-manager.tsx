@@ -237,8 +237,17 @@ export function CostsManager({
     timers.current.set(
       productId,
       setTimeout(async () => {
-        const value = Number(raw);
-        if (raw.trim() === "" || !Number.isFinite(value) || value < 0) return;
+        // Silence was the bug here too: an unparseable cost simply vanished,
+        // the box kept showing what was typed, and nothing was ever saved.
+        const trimmed = raw.trim();
+        if (trimmed === "") return;
+        const value = trimmed.includes(",") ? Number.NaN : Number(trimmed);
+        if (!Number.isFinite(value) || value < 0) {
+          setError(
+            "That cost is not a number. Write it with a point for decimals, like 12.50.",
+          );
+          return;
+        }
         setError(null);
         // A NEW effective-dated record — never an update. Editing a cost
         // today must not rewrite what June's orders resolved to.
@@ -530,18 +539,50 @@ function CostSettings({
 
   async function save() {
     setSaving(true);
-    const { error } = await supabase()
-      .from("ad_accounts")
-      .update({
-        default_product_cost_pct: Number(pct) || 0,
-        payment_fee_pct: Number(feePct) || 0,
-        payment_fee_fixed: Number(feeFixed) || 0,
-        shipping_cost_per_order: Number(shipping) || 0,
-      })
-      .eq("id", account.id);
+    // Through the RPC, not a direct update on ad_accounts. The table's own
+    // policy refuses a client write once the client is on V2 - correctly, to
+    // keep reporting fields immutable - and an update it filters out matches no
+    // rows and returns SUCCESS. That is why this form appeared to save and then
+    // show the old numbers again. The function writes these four columns and
+    // nothing else, and answers with the row it wrote.
+    // Parsed, not coerced. "Number(x) || 0" turns a typo and an empty box into
+    // a real zero, which is a legitimate figure here - a client can genuinely
+    // pay no card fee - so the mistake would be stored and believed, and every
+    // profit number on this page would quietly follow it.
+    // A comma is refused rather than guessed at. "1,5" means one and a half to
+    // a Portuguese reader and "1,000" means a thousand to an English one, and
+    // there is no way to tell them apart from the digits: turning the comma
+    // into a point would store 1 where the client typed a thousand. Asking for
+    // a point costs one sentence; guessing wrong costs a wrong profit figure on
+    // every order.
+    const parsed = [pct, feePct, feeFixed, shipping].map((raw) => {
+      const trimmed = raw.trim();
+      if (trimmed === "" || trimmed.includes(",")) return null;
+      const value = Number(trimmed);
+      return Number.isFinite(value) ? value : null;
+    });
+    if (parsed.some((value) => value === null)) {
+      setSaving(false);
+      onError(
+        "Every figure has to be a number, written with a point for decimals. Check the fields and try again.",
+      );
+      return;
+    }
+    const [costPct, cardPct, cardFixed, shippingCost] = parsed as number[];
+    const { data, error } = await supabase().rpc("set_ad_account_cost_settings", {
+      p_ad_account_id: account.id,
+      p_default_product_cost_pct: costPct,
+      p_payment_fee_pct: cardPct,
+      p_payment_fee_fixed: cardFixed,
+      p_shipping_cost_per_order: shippingCost,
+    });
     setSaving(false);
     if (error) {
       onError(error.message);
+      return;
+    }
+    if (!data || (Array.isArray(data) && data.length === 0)) {
+      onError("The settings were not saved. Reload the page and try again.");
       return;
     }
     await onSaved();

@@ -3423,6 +3423,21 @@ export type Database = {
         };
         Returns: string;
       };
+      set_ad_account_cost_settings: {
+        Args: {
+          p_ad_account_id: string;
+          p_default_product_cost_pct: number;
+          p_payment_fee_pct: number;
+          p_payment_fee_fixed: number;
+          p_shipping_cost_per_order: number;
+        };
+        Returns: {
+          default_product_cost_pct: number;
+          payment_fee_pct: number;
+          payment_fee_fixed: number;
+          shipping_cost_per_order: number;
+        }[];
+      };
       retire_client_reporting_store: {
         Args: {
           p_anchor_binding_id: string;
