@@ -391,3 +391,101 @@ export function matchesAuthoritativeGoogleSpend(
     return micros === BigInt(0) || present.has(day.date);
   });
 }
+
+export type ReportingBindingDomainRow = {
+  id: string;
+  ad_account_id: string;
+  shopify_connection_id: string | null;
+  shopify_anchor_binding_id: string | null;
+  status: string;
+  bound_at: string | null;
+  revoked_at: string | null;
+};
+
+/**
+ * Newest binding first, compared as INSTANTS rather than as text. Timestamps
+ * arrive as whatever the database serialises: fractional digits vary and an
+ * offset may be written "+00:00" or as a real zone, so string order is not time
+ * order. A missing timestamp sorts oldest instead of throwing the order away,
+ * and the id is the last resort so two bindings stamped alike rank the same way
+ * twice.
+ */
+function bindingInstant(value: string | null): number {
+  const parsed = value === null ? Number.NaN : Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
+}
+
+function newestBindingFirst(
+  left: ReportingBindingDomainRow,
+  right: ReportingBindingDomainRow,
+): number {
+  const bound = bindingInstant(right.bound_at) - bindingInstant(left.bound_at);
+  if (bound !== 0 && Number.isFinite(bound)) return bound;
+  const revoked = bindingInstant(right.revoked_at) - bindingInstant(left.revoked_at);
+  if (revoked !== 0 && Number.isFinite(revoked)) return revoked;
+  return left.id < right.id ? 1 : left.id > right.id ? -1 : 0;
+}
+
+/**
+ * Which binding says whose spend a Google account carries, and which accounts
+ * have lost the store they had.
+ *
+ * The ledger filters a shared Google account's campaigns down to the store
+ * under contract, and it reads that store from the account's binding. A RETIRED
+ * source has no live binding left, and its account stays readable on purpose so
+ * its own history can still be certified - so the revoked binding it left
+ * behind has to answer for the store, or an account shared with a store outside
+ * this contract gets billed whole to the one that remains.
+ *
+ * Three rules keep that fallback honest:
+ *  - A LIVE binding always decides, even one that names no store. An account
+ *    deliberately bound to no store reads whole; letting a dead store-naming
+ *    binding outvote it would filter live spend to a store it left. A STAGED
+ *    binding counts as live: a source in flight, not a discarded one.
+ *  - A revoked binding only answers when a lifecycle RPC NAMED it in the
+ *    append-only anchor events. Row shape is not enough, and this is the rule
+ *    that matters most: an ordinary pre-cutover unbind leaves an identical
+ *    revoked row on an account still under contract and still billing, and
+ *    attributing it to the store it just left would rewrite live commissions
+ *    down to campaigns that store no longer runs.
+ *  - Among several evidenced revoked bindings - an account can be rebound from
+ *    one store to another before it is retired - the most recent one wins. Row
+ *    arrival order is not an answer: it decides which store gets billed and it
+ *    can differ between two runs of the same query.
+ *
+ * retiredBoundAccountIds is the other half: an account whose evidenced revoked
+ * binding named a store and which has no live binding left. For those, and only
+ * those, an empty domain list means "nothing left to attribute this to" rather
+ * than "this account was never tied to a store", so the caller must refuse to
+ * read instead of billing the whole account. A legacy account with no reporting
+ * binding at all, an unallocated source and a plainly unbound account are all
+ * outside this set and read exactly as they always did.
+ */
+export function storeBindingsForLedger(
+  rows: readonly ReportingBindingDomainRow[],
+  retiredBindingIds: ReadonlySet<string>,
+): {
+  bindings: ReportingBindingDomainRow[];
+  retiredBoundAccountIds: Set<string>;
+} {
+  const namesStore = (row: ReportingBindingDomainRow) =>
+    row.shopify_connection_id !== null || row.shopify_anchor_binding_id !== null;
+  const rowsByAccount = new Map<string, ReportingBindingDomainRow[]>();
+  for (const row of rows) {
+    rowsByAccount.set(row.ad_account_id, [...(rowsByAccount.get(row.ad_account_id) ?? []), row]);
+  }
+
+  const bindings: ReportingBindingDomainRow[] = [];
+  const retiredBoundAccountIds = new Set<string>();
+  for (const [accountId, accountRows] of rowsByAccount) {
+    const live = accountRows.filter((row) => row.status === "active" || row.status === "staged");
+    const retired = accountRows.filter(
+      (row) => row.status === "revoked" && retiredBindingIds.has(row.id),
+    );
+    const deciding = live.length > 0 ? live : retired;
+    const named = deciding.filter(namesStore).sort(newestBindingFirst);
+    if (named[0]) bindings.push(named[0]);
+    if (live.length === 0 && retired.some(namesStore)) retiredBoundAccountIds.add(accountId);
+  }
+  return { bindings, retiredBoundAccountIds };
+}

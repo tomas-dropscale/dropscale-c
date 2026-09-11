@@ -9,9 +9,13 @@ type Row = Record<string, unknown>;
 function service(
   bindings: Row[],
   events: Row[],
-  errors: { bindings?: unknown; events?: unknown } = {},
+  errors: { bindings?: unknown; events?: unknown; lineage?: unknown } = {},
+  lineage: Row[] = [],
 ) {
-  const chain = (data: Row[], error: unknown) => {
+  // One chain per call, answering by the query it actually built: the lineage
+  // walk filters event_type with .in(), the evidence reads with .eq().
+  const chain = (answer: (usedEqEventType: boolean) => { data: Row[]; error: unknown }) => {
+    let eqEventType = false;
     const q: Record<string, ReturnType<typeof vi.fn>> & {
       then?: Promise<unknown>["then"];
     } = {
@@ -21,16 +25,23 @@ function service(
       in: vi.fn(),
     };
     q.select.mockReturnValue(q);
-    q.eq.mockReturnValue(q);
+    q.eq.mockImplementation((column: string) => {
+      if (column === "event_type") eqEventType = true;
+      return q;
+    });
     q.is.mockReturnValue(q);
     q.in.mockReturnValue(q);
-    q.then = (resolve, reject) => Promise.resolve({ data, error }).then(resolve, reject);
+    q.then = (resolve, reject) => Promise.resolve(answer(eqEventType)).then(resolve, reject);
     return q;
   };
   const from = vi.fn((table: string) =>
     table === "client_reporting_bindings"
-      ? chain(bindings, errors.bindings ?? null)
-      : chain(events, errors.events ?? null),
+      ? chain(() => ({ data: bindings, error: errors.bindings ?? null }))
+      : chain((usedEq) =>
+          usedEq
+            ? { data: events, error: errors.events ?? null }
+            : { data: lineage, error: errors.lineage ?? null },
+        ),
   );
   return { from };
 }
@@ -73,9 +84,23 @@ describe("retired reporting accounts by anchor", () => {
       ]),
     );
     // The evidence is asked for by the exact revoked bindings, never fleet-wide.
-    const eventsQuery = svc.from.mock.results[1]!.value;
+    // [0] is the anchor lineage walk, [1] the revoked children, [2] the evidence.
+    const eventsQuery = svc.from.mock.results[2]!.value;
     expect(eventsQuery.eq).toHaveBeenCalledWith("event_type", "handed_over");
     expect(eventsQuery.in).toHaveBeenCalledWith("prior_binding_id", ["b1", "b2"]);
+  });
+
+  it("keeps the history of a Google account the client closed, under the store that spent it", async () => {
+    // A retirement names the binding itself, where a handover names the
+    // binding it moved. Both mean the same thing to a store: this account is
+    // gone, and what it spent stays here.
+    const svc = service(
+      [revokedChild("b1", "acct-closed", "anchor-a")],
+      [{ binding_id: "b1", event_type: "source_retired" }],
+    );
+    await expect(
+      retiredAccountIdsByAnchorBinding(svc as never, "client-1", ["anchor-a"]),
+    ).resolves.toEqual(new Map([["anchor-a", ["acct-closed"]]]));
   });
 
   it("keeps an abandoned staged source out: same row shape, no handover evidence", async () => {
@@ -114,7 +139,49 @@ describe("retired reporting accounts by anchor", () => {
     await expect(
       retiredAccountIdsByAnchorBinding(svc as never, "client-1", ["anchor-a"]),
     ).resolves.toEqual(new Map());
-    expect(svc.from).toHaveBeenCalledTimes(1);
+    // The lineage walk and the children read; no evidence is asked for.
+    expect(svc.from).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a child retired under a store's PREVIOUS anchor binding", async () => {
+    // Retiring a pair's Google side (0100) - and a store handover before it -
+    // revokes the pair binding and mints a replacement with a NEW id. A child
+    // retired earlier still names the old binding for ever, so without the
+    // lineage its recorded spend would leave the store's totals silently.
+    const svc = service(
+      [revokedChild("b1", "acct-closed", "old-anchor")],
+      [{ binding_id: "b1", event_type: "source_retired" }],
+      {},
+      [{ binding_id: "anchor-a", prior_binding_id: "old-anchor", event_type: "source_retired" }],
+    );
+    await expect(
+      retiredAccountIdsByAnchorBinding(svc as never, "client-1", ["anchor-a"]),
+    ).resolves.toEqual(new Map([["anchor-a", ["acct-closed"]]]));
+    // Reported under the anchor the caller asked about, never the retired one.
+    const childrenAt = svc.from.mock.calls.findIndex(
+      ([table]) => table === "client_reporting_bindings",
+    );
+    const childrenQuery = svc.from.mock.results[childrenAt]!.value;
+    expect(childrenQuery.in).toHaveBeenCalledWith(
+      "shopify_anchor_binding_id",
+      expect.arrayContaining(["anchor-a", "old-anchor"]),
+    );
+  });
+
+  it("follows a RESTAGED store back to the anchor its children were retired under", async () => {
+    // 0097 retires a store and leaves its identity reusable on purpose. When
+    // the shop reconnects and the admin restages it, 0056 mints a new binding
+    // whose event supersedes the old one - the same edge a handover and a pair
+    // retirement leave. Following only two of the three loses the history.
+    const svc = service(
+      [revokedChild("b1", "acct-closed", "old-anchor")],
+      [{ binding_id: "b1", event_type: "source_retired" }],
+      {},
+      [{ binding_id: "anchor-a", prior_binding_id: "old-anchor", event_type: "restaged" }],
+    );
+    await expect(
+      retiredAccountIdsByAnchorBinding(svc as never, "client-1", ["anchor-a"]),
+    ).resolves.toEqual(new Map([["anchor-a", ["acct-closed"]]]));
   });
 
   it("asks nothing for a client with no anchors and fails closed on errors", async () => {

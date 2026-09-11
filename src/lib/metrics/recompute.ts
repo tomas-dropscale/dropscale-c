@@ -298,8 +298,8 @@ async function resolveRuntimeReportingScope(
  * active or staged binding left, at least one revoked binding, and EITHER the
  * closing billing counter on file OR a lifecycle RPC's own immutable evidence
  * naming one of those revoked bindings: a store handover's 'handed_over'
- * (prior_binding_id = the Google source it retired) or a store retirement's
- * 'store_retired' (binding_id = the Shopify anchor it retired).
+ * (prior_binding_id = the Google source it retired), or a retirement's
+ * 'store_retired' / 'source_retired' (binding_id = the binding it retired).
  *
  * The counter covers an abandoned staged source (0056 closes the meter before
  * abandonment) and every handover that had billed. The events cover what has
@@ -356,7 +356,7 @@ async function retiredAccountIds(
     service
       .from("client_reporting_anchor_events")
       .select("binding_id")
-      .eq("event_type", "store_retired")
+      .in("event_type", ["store_retired", "source_retired"])
       .in("binding_id", candidateBindingIds),
   ]);
   if (endsResult.error) throw endsResult.error;

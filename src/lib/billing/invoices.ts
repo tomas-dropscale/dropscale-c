@@ -11,6 +11,7 @@ import "server-only";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
+import { googleSourceBindingsForAccounts } from "@/lib/admin/commission-sync-bindings";
 import { createServiceClient } from "@/lib/supabase/service";
 import {
   allowedLocalStatusesForStripeUpdate,
@@ -1973,19 +1974,18 @@ async function fetchAdminBillingPositions(
   const bindingService = createServiceClient();
   if (accountIds.length > 0 && bindingService) {
     try {
-      const { data: boundRows, error: boundError } = await bindingService
-        .from("client_reporting_bindings")
-        .select("ad_account_id, google_ads_connection_id")
-        .in("ad_account_id", accountIds)
-        .eq("status", "active")
-        .not("google_ads_connection_id", "is", null);
-      if (boundError) throw boundError;
+      // Read from LIVE bindings alone this gate would let go of an account
+      // the moment its non-EUR source was retired, and the position would
+      // start showing a commission on spend already recorded - money the
+      // EUR-only chain can never issue, which is the one thing the gate exists
+      // to prevent. A retired source still answers here, on the same evidence
+      // the ledger uses.
+      const boundRows = await googleSourceBindingsForAccounts(
+        bindingService,
+        accountIds,
+      );
       const googleIds = [
-        ...new Set(
-          (boundRows ?? []).flatMap((row) =>
-            row.google_ads_connection_id ? [row.google_ads_connection_id] : [],
-          ),
-        ),
+        ...new Set(boundRows.map((row) => row.google_ads_connection_id)),
       ];
       if (googleIds.length > 0) {
         const { data: googleRows, error: googleError } = await bindingService
@@ -1996,10 +1996,8 @@ async function fetchAdminBillingPositions(
         const currencyByGoogle = new Map(
           (googleRows ?? []).map((row) => [row.id, row.currency]),
         );
-        for (const row of boundRows ?? []) {
-          const currency = row.google_ads_connection_id
-            ? currencyByGoogle.get(row.google_ads_connection_id)
-            : null;
+        for (const row of boundRows) {
+          const currency = currencyByGoogle.get(row.google_ads_connection_id);
           if (currency && currency.toUpperCase() !== "EUR") {
             accountsWithNonEurGoogleSource.add(row.ad_account_id);
           }

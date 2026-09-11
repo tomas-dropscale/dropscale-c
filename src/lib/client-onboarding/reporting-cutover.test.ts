@@ -1354,7 +1354,7 @@ describe("Phase 2 admin reporting cutover workflow", () => {
       syncActionId: null,
       activateActionId: null,
       message:
-        "A post-cutover active binding has no immutable promotion event (source_added or handed_over). Existing authority stays fail-closed until it is repaired.",
+        "A post-cutover active binding has no immutable promotion event (source_added, handed_over or source_retired). Existing authority stays fail-closed until it is repaired.",
     });
 
     data.syncStates.push({
@@ -1372,7 +1372,7 @@ describe("Phase 2 admin reporting cutover workflow", () => {
       syncActionId: null,
       activateActionId: null,
       message:
-        "A post-cutover active binding has no immutable promotion event (source_added or handed_over). Existing authority stays fail-closed until it is repaired.",
+        "A post-cutover active binding has no immutable promotion event (source_added, handed_over or source_retired). Existing authority stays fail-closed until it is repaired.",
     });
   });
 
@@ -1465,6 +1465,76 @@ describe("Phase 2 admin reporting cutover workflow", () => {
     });
   });
 
+  it("keeps a client live after a closed Google account is retired off its pair", async () => {
+    // Miguel Casal's remedy (0100): the client shut the Google account down,
+    // so the pair is revoked and the store keeps reporting through a
+    // Shopify-only REPLACEMENT bound after the cutover. It carries
+    // 'source_retired', and reading a narrower list here would put the client
+    // straight back in the block the retirement exists to lift.
+    const data = boundSnapshot(true);
+    const marker = "2026-08-14T02:00:00.000Z";
+    const retiredAt = "2026-08-14T03:00:00.000Z";
+    data.rolloutStates[0] = {
+      ...data.rolloutStates[0],
+      operational_surface: "v2_active",
+      reporting_cutover_at: marker,
+      reporting_cutover_by: ADMIN,
+      reporting_cutover_reason: "Initial reporting cutover",
+    };
+    const pair = data.bindings[0];
+    data.bindings[0] = { ...pair, status: "revoked" };
+    data.bindings.push({
+      id: BINDING_2,
+      client_id: CLIENT,
+      ad_account_id: pair.ad_account_id,
+      shopify_connection_id: pair.shopify_connection_id,
+      google_ads_connection_id: null,
+      shopify_anchor_binding_id: null,
+      status: "active",
+      bound_at: retiredAt,
+    });
+    // Retirement revokes the connection, and its MAPPING to the store stays
+    // behind. Both matter here: the revoked status is what takes the account
+    // out of every list the queue derives, and the surviving mapping is what
+    // could put it back - so the fixture keeps it, and the client must still
+    // read active. The health error is the state a closed account really
+    // latches, so this proves the queue stops reading the source altogether
+    // rather than merely tolerating a sick one.
+    data.googleConnections = data.googleConnections.map((row) =>
+      row.id === pair.google_ads_connection_id
+        ? { ...row, status: "revoked", last_error_code: "not_connected" }
+        : row,
+    );
+    const retirement = {
+      event_type: "source_retired" as const,
+      actor_id: ADMIN,
+      reason: "Admin retired this closed Google account from the client's reporting; its history is kept.",
+      details: {},
+      created_at: retiredAt,
+    };
+    data.anchorEvents.push(
+      {
+        ...retirement,
+        binding_id: pair.id,
+        prior_binding_id: null,
+        ad_account_id: pair.ad_account_id,
+        idempotency_key: "source-retire:pair",
+      },
+      {
+        ...retirement,
+        binding_id: BINDING_2,
+        prior_binding_id: pair.id,
+        ad_account_id: pair.ad_account_id,
+        idempotency_key: "source-retire:pair:keep-store",
+      },
+    );
+
+    expect((await projectClientReportingCutover(data)).clients[0]).toMatchObject({
+      status: "active",
+      message: "Reporting cutover is active.",
+    });
+  });
+
   it("still fails closed when only ONE of the handover's bindings is evidenced", async () => {
     // The 0095 defect exactly: the successor carried 'handed_over' but the
     // replacement carried nothing, so the client failed closed anyway. The
@@ -1526,7 +1596,7 @@ describe("Phase 2 admin reporting cutover workflow", () => {
     expect((await projectClientReportingCutover(data)).clients[0]).toMatchObject({
       status: "blocked",
       message:
-        "A post-cutover active binding has no immutable promotion event (source_added or handed_over). Existing authority stays fail-closed until it is repaired.",
+        "A post-cutover active binding has no immutable promotion event (source_added, handed_over or source_retired). Existing authority stays fail-closed until it is repaired.",
     });
   });
 

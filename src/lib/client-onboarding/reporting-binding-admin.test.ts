@@ -58,9 +58,10 @@ function service(singles: Record<string, unknown>, lists: Record<string, unknown
   const from = vi.fn((table: string) => {
     const chain: Record<string, ReturnType<typeof vi.fn>> & {
       then?: Promise<unknown>["then"];
-    } = { select: vi.fn(), eq: vi.fn(), maybeSingle: vi.fn() };
+    } = { select: vi.fn(), eq: vi.fn(), in: vi.fn(), maybeSingle: vi.fn() };
     chain.select.mockReturnValue(chain);
     chain.eq.mockReturnValue(chain);
+    chain.in.mockReturnValue(chain);
     chain.maybeSingle.mockResolvedValue({ data: singles[table] ?? null, error: null });
     chain.then = (resolve, reject) =>
       Promise.resolve({ data: lists[table] ?? [], error: null }).then(resolve, reject);
@@ -138,6 +139,100 @@ describe("unbinding a Shopify anchor", () => {
       status: 409,
       message: "Hand over or remove the Google sources still reporting to this store first.",
     });
+  });
+
+  it("retires a live client's closed Google account instead of a plain revoke", async () => {
+    // Miguel Casal's shape: the client shut the account down, so removing it
+    // must take it out of reporting rather than be refused for being
+    // operational - which is what left the whole client blocked.
+    const GOOGLE = "40000000-0000-4000-8000-000000000061";
+    mocks.clientReportingAuthority.mockResolvedValue("v2");
+    mocks.createServiceClient.mockReturnValue(
+      service({
+        client_reporting_bindings: anchorRow({
+          shopify_connection_id: null,
+          google_ads_connection_id: GOOGLE,
+          shopify_anchor_binding_id: "40000000-0000-4000-8000-000000000071",
+        }),
+        client_google_ads_connections: {
+          account_name: "Kinu Ito",
+          windsor_account_id: "163-954-1537",
+        },
+      }),
+    );
+    mocks.rpc.mockResolvedValue({ data: BINDING, error: null });
+
+    const coverage = await revokeReportingBindingForAsset({
+      kind: "google_ads",
+      connectionId: GOOGLE,
+      adminId: ADMIN,
+    });
+
+    expect(mocks.rpc).toHaveBeenCalledTimes(1);
+    expect(mocks.rpc).toHaveBeenCalledWith("retire_client_reporting_google_source", {
+      p_binding_id: BINDING,
+      p_admin_id: ADMIN,
+      p_idempotency_key: `source-retire:${BINDING}`,
+      p_reason:
+        "Admin removed this Google account from the client's reporting; its history is kept.",
+    });
+    expect(coverage).toMatchObject({ bindingId: BINDING, retired: true });
+  });
+
+  it("relays the Google retirement's own refusal, so the admin reads the next step", async () => {
+    const GOOGLE = "40000000-0000-4000-8000-000000000061";
+    mocks.clientReportingAuthority.mockResolvedValue("v2");
+    mocks.createServiceClient.mockReturnValue(
+      service({
+        client_reporting_bindings: anchorRow({
+          shopify_connection_id: null,
+          google_ads_connection_id: GOOGLE,
+        }),
+        client_google_ads_connections: { account_name: "Kinu Ito", windsor_account_id: "163-954-1537" },
+      }),
+    );
+    mocks.rpc.mockResolvedValue({
+      data: null,
+      error: {
+        code: "23514",
+        message: "Stop counting this Google account first: its billing is still open.",
+      },
+    });
+
+    await expect(
+      revokeReportingBindingForAsset({ kind: "google_ads", connectionId: GOOGLE, adminId: ADMIN }),
+    ).rejects.toMatchObject({
+      code: "invalid_state",
+      status: 409,
+      message: "Stop counting this Google account first: its billing is still open.",
+    });
+  });
+
+  it("keeps the plain revoke for a Google account before the cutover", async () => {
+    const GOOGLE = "40000000-0000-4000-8000-000000000061";
+    mocks.clientReportingAuthority.mockResolvedValue("legacy");
+    mocks.createServiceClient.mockReturnValue(
+      service({
+        client_reporting_bindings: anchorRow({
+          shopify_connection_id: null,
+          google_ads_connection_id: GOOGLE,
+        }),
+        client_google_ads_connections: { account_name: "Kinu Ito", windsor_account_id: "163-954-1537" },
+      }),
+    );
+    mocks.rpc.mockResolvedValue({ data: BINDING, error: null });
+
+    const coverage = await revokeReportingBindingForAsset({
+      kind: "google_ads",
+      connectionId: GOOGLE,
+      adminId: ADMIN,
+    });
+
+    expect(mocks.rpc).toHaveBeenCalledWith(
+      "revoke_client_reporting_binding",
+      expect.objectContaining({ p_binding_id: BINDING }),
+    );
+    expect(coverage.retired).toBeUndefined();
   });
 
   it("sends a live client's pair to the retire RPC too, so its refusal explains the next step", async () => {

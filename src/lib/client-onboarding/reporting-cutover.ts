@@ -252,6 +252,12 @@ type SourceBundle = {
   anchorBinding: BindingRow | null;
 };
 
+/** The anchor events that authorise an active binding born after the cutover. */
+const PROMOTING_EVENT_TYPES: readonly string[] = [
+  "source_added",
+  "handed_over",
+  "source_retired",
+];
 const ACTION_ID = /^rw_[0-9a-f]{64}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const PROVISION_REASON = "Admin-reviewed reporting anchor provisioning";
@@ -443,6 +449,11 @@ async function buildClientReportingCutoverQueue(
   const connectedShopify = snapshot.shopifyConnections.filter(
     (connection) => connection.status === "connected",
   );
+  // A retired Google source needs no special case here: retirement revokes its
+  // connection like any other removal, so it leaves this filter - and every
+  // list derived from it - by the ordinary route. The ledger reaches it again
+  // through its own read, which falls back to a revoked connection when an
+  // account has no connected one.
   const connectedGoogle = snapshot.googleConnections.filter(
     (connection) => connection.status === "connected",
   );
@@ -479,17 +490,17 @@ async function buildClientReportingCutoverQueue(
       .map((event) => event.binding_id),
   );
   // A post-cutover active binding carries its authority in an immutable anchor
-  // event. The staged lifecycle writes 'source_added' on promotion; a store
-  // handover writes 'handed_over' on BOTH bindings it creates — the successor
-  // under the new store, and the old store's remaining Shopify-only binding.
-  // Reading only 'source_added' here fails the entire client closed the moment
-  // it hands a Google account on, which is a sanctioned move, not a repair.
+  // event, and every sanctioned writer of one leaves its own. The staged
+  // lifecycle writes 'source_added' on promotion. A store handover writes
+  // 'handed_over' on BOTH bindings it creates: the successor under the new
+  // store, and the old store's remaining Shopify-only binding. Retiring a
+  // pair's Google source writes 'source_retired' on the Shopify-only binding
+  // its store keeps reporting through. Read a narrower list here and the whole
+  // client fails closed the moment an admin makes a sanctioned move - which is
+  // exactly the block those moves exist to lift.
   const promotedBindingIds = new Set(
     snapshot.anchorEvents
-      .filter(
-        (event) =>
-          event.event_type === "source_added" || event.event_type === "handed_over",
-      )
+      .filter((event) => PROMOTING_EVENT_TYPES.includes(event.event_type))
       .map((event) => event.binding_id),
   );
   const replacementRequiredClients = new Set<string>();
@@ -776,6 +787,9 @@ async function buildClientReportingCutoverQueue(
   const handledGoogleIds = new Set<string>();
   for (const shopify of healthyShopify) {
     if (bindingByShopify.has(shopify.id) || upgradedShopifyIds.has(shopify.id)) continue;
+    // A retired source keeps its mapping to the store it spent for, so it is
+    // still reachable from here - and harmless: validGoogle below admits only a
+    // CONNECTED source, which a retired one no longer is.
     const mapped = (googleIdsByShopify.get(shopify.id) ?? [])
       .map((id) => googleById.get(id))
       .filter((google): google is GoogleRow => Boolean(google));
@@ -1183,7 +1197,7 @@ async function buildClientReportingCutoverQueue(
       : inconsistentMarker
         ? "Reporting marker and operational surface disagree; no write is available."
         : unsafePostCutoverActive
-          ? "A post-cutover active binding has no immutable promotion event (source_added or handed_over). Existing authority stays fail-closed until it is repaired."
+          ? "A post-cutover active binding has no immutable promotion event (source_added, handed_over or source_retired). Existing authority stays fail-closed until it is repaired."
           : !authoritativeBindingsHealthy
             ? "An authoritative reporting binding no longer has its exact healthy connected source. Reporting remains blocked until that authority is repaired."
           : !billingCurrencySupported

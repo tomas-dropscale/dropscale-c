@@ -242,6 +242,11 @@ function fakeDatabase(
      * it retired (a 'store_retired' anchor event on that binding).
      */
     retiredStores?: string[];
+    /**
+     * Accounts whose revoked binding a source retirement named (a
+     * 'source_retired' event on that binding: the client closed the account).
+     */
+    retiredSources?: string[];
   } = {},
 ) {
   // The probe reads binding ids too; the fake derives one per account+status.
@@ -324,31 +329,49 @@ function fakeDatabase(
     }
     if (table === "client_reporting_anchor_events") {
       return {
-        select: vi.fn(() => ({
-          // The probe asks one event type at a time; each names the retired
-          // binding through a different column.
-          eq: vi.fn((_column: string, eventType: string) => ({
-            in: vi.fn(async (column: string, ids: string[]) => {
-              const named =
-                eventType === "handed_over"
-                  ? { accounts: extras.handedOver ?? [], column: "prior_binding_id" }
-                  : eventType === "store_retired"
-                    ? { accounts: extras.retiredStores ?? [], column: "binding_id" }
-                    : { accounts: [] as string[], column };
-              return {
-                data:
-                  column === named.column
-                    ? ids
-                        .filter((id) =>
-                          named.accounts.some((acct) => id === bindingId(acct, "revoked")),
-                        )
-                        .map((id) => ({ [named.column]: id }))
-                    : [],
-                error: null,
-              };
-            }),
-          })),
-        })),
+        // The probe asks for a handover by prior_binding_id and for the two
+        // retirements by binding_id, so the fake accumulates whatever
+        // filters it is given and answers from the fixture.
+        select: vi.fn(() => {
+          const filters: Array<{ column: string; values: string[] }> = [];
+          const chain = {
+            eq: (column: string, value: string) => {
+              filters.push({ column, values: [value] });
+              return chain;
+            },
+            in: (column: string, values: string[]) => {
+              filters.push({ column, values });
+              return chain;
+            },
+            then: (
+              resolve: (value: {
+                data: Record<string, string>[];
+                error: null;
+              }) => unknown,
+            ) => {
+              const types = filters.find((f) => f.column === "event_type")?.values ?? [];
+              const named = filters.find((f) => f.column !== "event_type");
+              const column = named?.column ?? "binding_id";
+              const accounts = new Set<string>();
+              if (types.includes("handed_over")) {
+                for (const account of extras.handedOver ?? []) accounts.add(account);
+              }
+              if (types.includes("store_retired")) {
+                for (const account of extras.retiredStores ?? []) accounts.add(account);
+              }
+              if (types.includes("source_retired")) {
+                for (const account of extras.retiredSources ?? []) accounts.add(account);
+              }
+              const data = (named?.values ?? [])
+                .filter((id) =>
+                  [...accounts].some((account) => id === bindingId(account, "revoked")),
+                )
+                .map((id) => ({ [column]: id }));
+              return Promise.resolve({ data, error: null }).then(resolve);
+            },
+          };
+          return chain;
+        }),
       };
     }
     if (table === "client_rollout_states") {
@@ -1002,6 +1025,40 @@ describe("V2 daily-metrics recompute", () => {
     mocks.resolveReportingSources.mockResolvedValue([anchorSource()]);
 
     await refreshAccountsNow([ANCHOR, RETIRED_STORE], {
+      client: db.client as never,
+      reportingClient: db.client as never,
+      from: DAY,
+      to: DAY,
+    });
+
+    expect([...new Set(db.upserts.flat().map((row) => row.ad_account_id))]).toEqual([
+      ANCHOR,
+    ]);
+  });
+
+  it("drops the account of a Google source the client closed, on its retirement evidence", async () => {
+    // Miguel Casal's shape: the Google account was shut down and retired out
+    // of reporting. It never billed, so no closing counter exists - the
+    // retirement event is the only evidence, and the close must honour it
+    // instead of aborting for the whole fleet.
+    const RETIRED_SOURCE = "70000000-0000-4000-8000-000000000045";
+    const db = fakeDatabase(
+      [account(ANCHOR), account(RETIRED_SOURCE, { reporting_role: "google_spend" })],
+      [],
+      {},
+      { [CLIENT]: "v2_active" },
+      "ok",
+      {
+        retiredBindings: { [RETIRED_SOURCE]: ["revoked"] },
+        billingEnds: [],
+        retiredSources: [RETIRED_SOURCE],
+      },
+    );
+    mocks.createClient.mockResolvedValue(db.client);
+    mocks.createServiceClient.mockReturnValue(db.client);
+    mocks.resolveReportingSources.mockResolvedValue([anchorSource()]);
+
+    await refreshAccountsNow([ANCHOR, RETIRED_SOURCE], {
       client: db.client as never,
       reportingClient: db.client as never,
       from: DAY,

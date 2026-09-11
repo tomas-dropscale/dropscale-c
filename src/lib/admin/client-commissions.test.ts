@@ -34,7 +34,8 @@ type Table =
   | "profiles"
   | "ad_accounts"
   | "ad_account_commission_terms"
-  | "ad_account_billing_ends";
+  | "ad_account_billing_ends"
+  | "ad_account_billing_starts";
 type Result = { data: Record<string, unknown>[] | null; error: { message: string } | null };
 
 const ADMIN = "40000000-0000-4000-8000-000000000001";
@@ -181,6 +182,16 @@ describe("admin client commission catalogue", () => {
         error: null,
       },
       ad_account_billing_ends: { data: [], error: null },
+      // Every account in these fixtures has priced euros: it is the metered
+      // ones the catalogue must be able to account for.
+      ad_account_billing_starts: {
+        data: [
+          { ad_account_id: "handed-over" },
+          { ad_account_id: "acct-1" },
+          { ad_account_id: "acct-2" },
+        ],
+        error: null,
+      },
     };
     mocks.requireAdmin.mockResolvedValue({ id: ADMIN, role: "admin" });
     mocks.clientReportingAuthority.mockImplementation(async (clientId: string) =>
@@ -271,6 +282,9 @@ describe("admin client commission catalogue", () => {
       // Closed Google meters: a handed-over account keeps its customer id with
       // no live Google source, and must not fail the catalogue closed.
       ["ad_account_billing_ends", "ad_account_id"],
+      // Metered accounts: only an account that ever opened a Google meter can
+      // be billable, so only that one has to be represented or closed.
+      ["ad_account_billing_starts", "ad_account_id"],
     ]);
     expect(mocks.clientReportingAuthority).toHaveBeenCalledWith(ALPHA);
     expect(mocks.clientReportingAuthority).toHaveBeenCalledWith(BETA);
@@ -380,6 +394,11 @@ describe("admin client commission catalogue", () => {
         status: "suspended",
       }),
     );
+    // Metered: it opened a Google meter, so it priced euros and must be
+    // accounted for. An account that never opened one has nothing to hide.
+    results.ad_account_billing_starts.data!.push({
+      ad_account_id: "google-without-active-source",
+    });
 
     await expect(listAdminCommissionClients()).rejects.toThrow(/inconsistent/i);
   });
@@ -426,6 +445,17 @@ describe("admin client commission catalogue", () => {
     // Without the closing counter this is still an unrepresented billable
     // account, and the catalogue must still refuse to guess.
     await expect(listAdminCommissionClients()).rejects.toThrow(/inconsistent/i);
+
+    // An account that never opened a meter has nothing to price at all, so it
+    // cannot fail the catalogue closed. Retiring a dead Google source leaves
+    // exactly that shape, and demanding evidence of it took the commercial
+    // surface down for every client.
+    results.ad_account_billing_starts.data = [{ ad_account_id: "acct-1" }];
+    await expect(listAdminCommissionClients()).resolves.toBeInstanceOf(Array);
+    results.ad_account_billing_starts.data = [
+      { ad_account_id: "handed-over" },
+      { ad_account_id: "acct-1" },
+    ];
 
     results.ad_account_billing_ends.data = [{ ad_account_id: "handed-over" }];
     const clients = await listAdminCommissionClients();

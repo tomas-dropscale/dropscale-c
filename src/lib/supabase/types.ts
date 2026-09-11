@@ -1343,7 +1343,8 @@ export type ClientReportingAnchorEvent = {
     | "source_added"
     | "source_abandoned"
     | "handed_over"
-    | "store_retired";
+    | "store_retired"
+    | "source_retired";
   idempotency_key: string;
   actor_id: string;
   reason: string;
@@ -3417,6 +3418,15 @@ export type Database = {
         Args: {
           p_source_binding_id: string;
           p_target_anchor_binding_id: string;
+          p_admin_id: string;
+          p_idempotency_key: string;
+          p_reason: string;
+        };
+        Returns: string;
+      };
+      retire_client_reporting_google_source: {
+        Args: {
+          p_binding_id: string;
           p_admin_id: string;
           p_idempotency_key: string;
           p_reason: string;

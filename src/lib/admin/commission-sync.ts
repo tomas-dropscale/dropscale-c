@@ -5,7 +5,6 @@ import {
   fetchGoogleAdsDailyBreakdownForStore,
   normalizeGoogleAdsCustomerId,
 } from "@/lib/windsor/client";
-import { storeDomainsForSource } from "@/lib/reporting/store-domain-match";
 import {
   addIsoDays,
   decimalToMicros,
@@ -22,6 +21,7 @@ import {
   NOTE_DETAIL_SEPARATOR,
   REV_SHARE_NOTE_PREFIX,
 } from "@/lib/finance/config";
+import { ledgerStoreDomainsByAccount } from "@/lib/admin/commission-sync-bindings";
 import {
   accountCommissionTermsForDate,
   billableGoogleSpendWindow,
@@ -417,12 +417,25 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
     // from the connected Windsor source whose Google customer id matches the
     // account (owner rule: Windsor is the platform's Google data source —
     // never the agency MCC). Ambiguity resolves to the latest verification.
+    //
+    // A REVOKED connection still answers here, and only here. The ledger can be
+    // asked to re-read any past week - an admin forcing an older period does
+    // exactly that - so an account that left reporting must stay certifiable
+    // for the weeks it billed, or its client's invoice for the week it closed
+    // in is unissuable for ever. That is why retirement may revoke the
+    // connection at all: reach is a property of this read, not of the row's
+    // status, and a frozen row costs far more elsewhere.
+    //
+    // A connected match always wins, so nothing changes for an account that
+    // still has one; the revoked row is consulted only where today there would
+    // be no evidence at all. It grants no new billing: what is billable is
+    // decided upstream by the commission terms and the billing meter.
     const { data: windsorRows, error: windsorRowsError } = await supabase
       .from("client_google_ads_connections")
       .select(
-        "client_id, windsor_account_id, currency, time_zone, last_verified_at",
+        "client_id, windsor_account_id, currency, time_zone, last_verified_at, status",
       )
-      .eq("status", "connected")
+      .in("status", ["connected", "revoked"])
       .in("client_id", [
         ...new Set(billable.map((account) => account.client_id)),
       ]);
@@ -433,6 +446,7 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
       currency: string;
       time_zone: string;
       last_verified_at: string | null;
+      status: string;
     };
     const windsorConnectionByAccount = new Map<string, WindsorConnectionRow>();
     for (const account of billable) {
@@ -454,94 +468,22 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
             return false;
           }
         })
-        .sort((left, right) =>
-          (right.last_verified_at ?? "").localeCompare(
+        .sort((left, right) => {
+          const liveFirst =
+            Number(right.status === "connected") - Number(left.status === "connected");
+          if (liveFirst !== 0) return liveFirst;
+          return (right.last_verified_at ?? "").localeCompare(
             left.last_verified_at ?? "",
-          ),
-        );
+          );
+        });
       if (matches[0]) windsorConnectionByAccount.set(account.id, matches[0]);
     }
 
-    // Owner rule (2026-08-18): a shared Google account can host another
-    // store's campaigns, so Windsor ledger evidence only counts campaigns
-    // whose final URLs point at this store's domain. The domain comes from
-    // the account's own active binding — or, for a Google spend child, from
-    // the anchor that binding names: the child exists to hold that store's
-    // spend, and leaving it unfiltered would bill the whole shared account to
-    // one store, another store's campaigns included. That is the same
-    // coalesce(binding, anchor) reading the database guards already use.
-    const { data: bindingDomainRows, error: bindingDomainRowsError } =
-      await supabase
-        .from("client_reporting_bindings")
-        .select("ad_account_id, shopify_connection_id, shopify_anchor_binding_id")
-        .eq("status", "active")
-        .in("ad_account_id", billable.map((account) => account.id));
-    if (bindingDomainRowsError) throw bindingDomainRowsError;
-    type BindingDomainRow = {
-      ad_account_id: string;
-      shopify_connection_id: string | null;
-      shopify_anchor_binding_id: string | null;
-    };
-    const accountBindings = ((bindingDomainRows ?? []) as unknown as BindingDomainRow[]).filter(
-      (row) => row.shopify_connection_id !== null || row.shopify_anchor_binding_id !== null,
-    );
-    const anchorBindingIds = [
-      ...new Set(
-        accountBindings
-          .filter((row) => !row.shopify_connection_id && row.shopify_anchor_binding_id)
-          .map((row) => row.shopify_anchor_binding_id as string),
-      ),
-    ];
-    const anchorShopifyByBinding = new Map<string, string>();
-    if (anchorBindingIds.length > 0) {
-      const { data: anchorRows, error: anchorRowsError } = await supabase
-        .from("client_reporting_bindings")
-        .select("id, shopify_connection_id")
-        .eq("status", "active")
-        .in("id", anchorBindingIds);
-      if (anchorRowsError) throw anchorRowsError;
-      for (const row of (anchorRows ?? []) as unknown as { id: string; shopify_connection_id: string | null }[]) {
-        if (row.shopify_connection_id) anchorShopifyByBinding.set(row.id, row.shopify_connection_id);
-      }
-    }
-    const boundShopifyConnections = accountBindings.flatMap((row) => {
-      const connectionId =
-        row.shopify_connection_id ??
-        (row.shopify_anchor_binding_id
-          ? anchorShopifyByBinding.get(row.shopify_anchor_binding_id) ?? null
-          : null);
-      return connectionId
-        ? [{ ad_account_id: row.ad_account_id, shopify_connection_id: connectionId }]
-        : [];
-    });
-    const shopifyConnectionIds = [
-      ...new Set(boundShopifyConnections.map((row) => row.shopify_connection_id)),
-    ];
-    const storeDomainsByAccount = new Map<string, string[]>();
-    if (shopifyConnectionIds.length > 0) {
-      const { data: shopifyRows, error: shopifyRowsError } = await supabase
-        .from("client_shopify_connections")
-        .select("id, shopify_domain, primary_domain")
-        .in("id", shopifyConnectionIds);
-      if (shopifyRowsError) throw shopifyRowsError;
-      type ShopifyDomainRow = {
-        id: string;
-        shopify_domain: string;
-        primary_domain: string | null;
-      };
-      const domainsByConnection = new Map(
-        ((shopifyRows ?? []) as unknown as ShopifyDomainRow[]).map((row) => [
-          row.id,
-          storeDomainsForSource({
-            shopify: { domain: row.shopify_domain, primaryDomain: row.primary_domain },
-          }),
-        ]),
+    const { storeDomainsByAccount, retiredBoundAccountIds } =
+      await ledgerStoreDomainsByAccount(
+        supabase,
+        billable.map((account) => account.id),
       );
-      for (const row of boundShopifyConnections) {
-        const domains = domainsByConnection.get(row.shopify_connection_id) ?? [];
-        if (domains.length > 0) storeDomainsByAccount.set(row.ad_account_id, domains);
-      }
-    }
 
     // Portal login → CRM record, for the finance rows' client attribution.
     //
@@ -627,11 +569,23 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
             : null;
           const windsorReportedDays = connection
             ? async (windowFrom: string, windowTo: string) => {
+                const storeDomains = storeDomainsByAccount.get(account.id) ?? [];
+                // An empty list means "read the whole account". That is right
+                // for an account never tied to a store - a legacy one, or an
+                // unallocated source - and wrong for one whose binding named a
+                // store and was then retired: its campaigns can share a Google
+                // account with a store outside this contract, and the fee would
+                // be charged on that store's spend too.
+                if (storeDomains.length === 0 && retiredBoundAccountIds.has(account.id)) {
+                  throw new Error(
+                    "A retired Google account has no store left to attribute its spend to.",
+                  );
+                }
                 const rows = await fetchGoogleAdsDailyBreakdownForStore(
                   connection.windsor_account_id,
                   windowFrom,
                   windowTo,
-                  storeDomainsByAccount.get(account.id) ?? [],
+                  storeDomains,
                 );
                 return rows.map((row) => {
                   if (

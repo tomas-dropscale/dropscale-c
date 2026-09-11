@@ -48,6 +48,10 @@ const FX_CHILDREN_MIGRATION = readFileSync(
   "supabase/migrations/0098_reporting_fx_convertible_children.sql",
   "utf8",
 );
+const SOURCE_RETIREMENT_MIGRATION = readFileSync(
+  "supabase/migrations/0100_reporting_google_source_retirement.sql",
+  "utf8",
+);
 
 const ADMIN = "55000000-0000-4000-8000-000000000001";
 const CLIENT = "55000000-0000-4000-8000-000000000002";
@@ -493,6 +497,11 @@ beforeEach(async () => {
     await db.exec(FX_CHILDREN_MIGRATION);
   } catch (error) {
     throw new Error("0098 migration failed", { cause: error });
+  }
+  try {
+    await db.exec(SOURCE_RETIREMENT_MIGRATION);
+  } catch (error) {
+    throw new Error("0100 migration failed", { cause: error });
   }
 
   await db.query(
@@ -3645,8 +3654,10 @@ describe("adopting an unanchored Google source (0094)", () => {
       `insert into public.ad_account_billing_starts(
          ad_account_id, google_ads_customer_id, currency, google_local_date,
          google_time_zone, baseline_cost_micros, start_basis
-       ) values ($1, '7777777777', 'EUR', current_date - 30, 'America/New_York', 0,
-         'observed_google_counter')
+       )
+       select account.id, account.google_ads_customer_id, 'EUR', current_date - 30,
+              'America/New_York', 0, 'observed_google_counter'
+       from public.ad_accounts account where account.id = $1
        returning id`,
       [accountId],
     );
@@ -3659,14 +3670,19 @@ describe("adopting an unanchored Google source (0094)", () => {
     return { accountId, startId: start.rows[0]!.id };
   }
 
-  async function closeBilling(opened: { accountId: string; startId: string }) {
+  async function closeBilling(
+    opened: { accountId: string; startId: string },
+    daysAgo = 1,
+  ) {
     await db.query(
       `insert into public.ad_account_billing_ends(
          ad_account_id, billing_start_id, google_ads_customer_id, currency,
          google_local_date, google_time_zone, end_cost_micros
-       ) values ($1, $2, '7777777777', 'EUR', current_date - 1,
-         'America/New_York', 123456789)`,
-      [opened.accountId, opened.startId],
+       )
+       select account.id, $2, account.google_ads_customer_id, 'EUR',
+              current_date - $3::integer, 'America/New_York', 123456789
+       from public.ad_accounts account where account.id = $1`,
+      [opened.accountId, opened.startId, daysAgo],
     );
     return opened.accountId;
   }
@@ -4421,6 +4437,463 @@ describe("binding a Google account in another ECB-convertible currency before th
     await mapToStore(GOOGLE);
     const child = await provision({ shopify: null, google: GOOGLE, anchor: anchorId, key: "anchor:fx-child:eur" });
     expect((await accountRow(child.rows[0]!.id)).currency).toBe("EUR");
+  });
+});
+
+describe("retiring a Google source the client closed (0100)", () => {
+  const CLOSED_REASON = "Client closed this Google account for good";
+
+  async function retireSource(bindingId: string, key = "source-retire:test:0001") {
+    return db.query<{ id: string }>(
+      `select public.retire_client_reporting_google_source(
+         $1, $2, $3, $4
+       ) as id`,
+      [bindingId, ADMIN, key, CLOSED_REASON],
+    );
+  }
+
+  /**
+   * pairAndTarget's twin for the OTHER pair shape in the fleet: a store and
+   * its Google account provisioned together through the anchor RPC, which
+   * names the account 'shopify_anchor'. The role is immutable once written,
+   * so this shape can only be built the way production builds it - on its own
+   * pair of connections, since the seeded ones already answer to an account.
+   */
+  const ANCHOR_SHOPIFY = "55000000-0000-4000-8000-000000000024";
+  const ANCHOR_GOOGLE = "55000000-0000-4000-8000-000000000034";
+
+  async function anchorPairAndTarget() {
+    // The seeded pair's connections belong to the legacy account, so they
+    // leave this scenario entirely and the cutover still covers everything.
+    await db.query(
+      "update public.client_shopify_connections set status = 'revoked' where id = $1",
+      [SHOPIFY_2],
+    );
+    await db.query(
+      "update public.client_google_ads_connections set status = 'revoked' where id = $1",
+      [GOOGLE_2],
+    );
+    await db.query(
+      `insert into public.client_shopify_connections(
+         id, session_id, client_id, status, shopify_shop_id, shopify_name,
+         shopify_domain, shopify_currency, credential_hint, last_verified_at
+       ) values ($1, $2, $3, 'connected', 'shop-5', 'Anchor Pair Store',
+         'anchor-pair.myshopify.com', 'EUR', 'hint', now())`,
+      [ANCHOR_SHOPIFY, SESSION, CLIENT],
+    );
+    await db.query(
+      `insert into public.client_shopify_credentials(
+         connection_id, shopify_client_id, client_secret_ciphertext
+       ) values ($1, 'client-id-5', 'secret-ciphertext-5')`,
+      [ANCHOR_SHOPIFY],
+    );
+    await db.query(
+      `insert into public.client_google_ads_connections(
+         id, session_id, client_id, status, windsor_account_id, account_name,
+         currency, time_zone, last_verified_at
+       ) values ($1, $2, $3, 'connected', '555-555-5555', 'Anchor Pair Ads',
+         'EUR', 'America/New_York', now())`,
+      [ANCHOR_GOOGLE, SESSION, CLIENT],
+    );
+    await db.query(
+      `insert into public.client_asset_mappings(session_id, shopify_connection_id, google_ads_connection_id)
+       values ($1, $2, $3)`,
+      [SESSION, ANCHOR_SHOPIFY, ANCHOR_GOOGLE],
+    );
+    const pair = await provision({
+      shopify: ANCHOR_SHOPIFY,
+      google: ANCHOR_GOOGLE,
+      key: "anchor:retire:anchor-pair",
+    });
+    await db.query(
+      `insert into public.client_shopify_connections(
+         id, session_id, client_id, status, shopify_shop_id, shopify_name,
+         shopify_domain, shopify_currency, credential_hint, last_verified_at
+       ) values ($1, $2, $3, 'connected', 'shop-3', 'Target Store',
+         'target-store.myshopify.com', 'EUR', 'hint', now())`,
+      [TARGET_SHOPIFY, SESSION, CLIENT],
+    );
+    await db.query(
+      `insert into public.client_shopify_credentials(
+         connection_id, shopify_client_id, client_secret_ciphertext
+       ) values ($1, 'client-id-3', 'secret-ciphertext-3')`,
+      [TARGET_SHOPIFY],
+    );
+    const target = await provision({
+      shopify: TARGET_SHOPIFY,
+      key: "anchor:retire:anchor-target",
+    });
+    return { pairId: pair.rows[0]!.id, targetId: target.rows[0]!.id };
+  }
+
+  /**
+   * A post-cutover client whose Google source is bound to no store at all -
+   * the shape 0056's own candidate note warns about ("its spend will report as
+   * unallocated"). Built the only way production builds it: provisioned with
+   * neither a Shopify connection nor an anchor, then cut over.
+   */
+  async function unallocatedAndTarget() {
+    await db.query(
+      "update public.client_shopify_connections set status = 'revoked' where id = $1",
+      [SHOPIFY_2],
+    );
+    await db.query(
+      "update public.client_google_ads_connections set status = 'revoked' where id = $1",
+      [GOOGLE_2],
+    );
+    await db.query(
+      "update public.client_google_ads_connections set currency = 'EUR' where id = $1",
+      [GOOGLE],
+    );
+    await db.query(
+      "update public.client_shopify_connections set shopify_currency = 'EUR' where id = $1",
+      [SHOPIFY],
+    );
+    const anchor = await provision({ shopify: SHOPIFY, key: "anchor:retire:loose-store" });
+    const loose = await provision({
+      shopify: null,
+      google: GOOGLE,
+      key: "anchor:retire:loose",
+    });
+    const anchorId = anchor.rows[0]!.id;
+    const looseId = loose.rows[0]!.id;
+    // EUR cutover demands an open billing start on every Google-bearing source.
+    const looseAccount = await accountOf(looseId);
+    await db.query(
+      `insert into public.ad_account_billing_starts(
+         ad_account_id, google_ads_customer_id, currency, google_local_date,
+         google_time_zone, baseline_cost_micros, start_basis
+       )
+       select account.id, account.google_ads_customer_id, 'EUR', current_date - 30,
+              'America/New_York', 0, 'observed_google_counter'
+       from public.ad_accounts account where account.id = $1`,
+      [looseAccount],
+    );
+    await db.query("update public.ad_accounts set status = 'active' where id = $1", [
+      looseAccount,
+    ]);
+    for (const bindingId of [anchorId, looseId]) await materializeBindingWindow(bindingId);
+    await db.query(
+      `select public.record_client_reporting_sync_success(
+         $1, 'shopify', current_date - 90, current_date - 1, 'EUR', 90
+       )`,
+      [anchorId],
+    );
+    await db.query(
+      `select public.record_client_reporting_sync_success(
+         $1, 'google_ads', current_date - 90, current_date - 1, 'EUR', 90
+       )`,
+      [looseId],
+    );
+    await db.query(
+      "select public.activate_client_reporting_cutover($1, $2, 'Unallocated fixture cutover')",
+      [CLIENT, ADMIN],
+    );
+    return { anchorId, unallocatedId: looseId };
+  }
+
+  async function bindingRow(id: string) {
+    const row = await db.query<{
+      status: string;
+      ad_account_id: string;
+      shopify_connection_id: string | null;
+      google_ads_connection_id: string | null;
+    }>(
+      `select status, ad_account_id, shopify_connection_id, google_ads_connection_id
+       from public.client_reporting_bindings where id = $1`,
+      [id],
+    );
+    return row.rows[0]!;
+  }
+
+  async function googleStatus(id: string) {
+    const row = await db.query<{ status: string; revoked_at: string | null }>(
+      "select status, revoked_at from public.client_google_ads_connections where id = $1",
+      [id],
+    );
+    return row.rows[0]!;
+  }
+
+  it("refuses while the account's billing is still open", async () => {
+    const { pairId, targetId } = await pairAndTarget();
+    await openBilling(pairId);
+    await cutOverBoth(pairId, targetId);
+
+    await expectSqlState(retireSource(pairId), "23514");
+    expect((await bindingRow(pairId)).status).toBe("active");
+  });
+
+  it("retires a pair's Google side and keeps its store reporting", async () => {
+    const { pairId, targetId } = await pairAndTarget();
+    const opened = await openBilling(pairId);
+    await cutOverBoth(pairId, targetId);
+    await closeBilling(opened);
+    const accountId = await accountOf(pairId);
+
+    const retired = await retireSource(pairId);
+    expect(retired.rows[0]!.id).toBe(pairId);
+
+    // The pair is gone; the same account keeps reporting its own store.
+    expect((await bindingRow(pairId)).status).toBe("revoked");
+    const replacement = await db.query<{
+      id: string;
+      ad_account_id: string;
+      google_ads_connection_id: string | null;
+    }>(
+      `select id, ad_account_id, google_ads_connection_id
+       from public.client_reporting_bindings
+       where status = 'active' and shopify_connection_id = $1`,
+      [SHOPIFY_2],
+    );
+    expect(replacement.rows).toHaveLength(1);
+    expect(replacement.rows[0]).toMatchObject({
+      ad_account_id: accountId,
+      google_ads_connection_id: null,
+    });
+
+    // The connection leaves the way every other removed asset does. An
+    // earlier draft froze it as 'connected' so the commission ledger could
+    // still read the account; the ledger now reaches a revoked connection by
+    // itself, and freezing the row cost far more than it bought - a link that
+    // could never be cancelled, and an account that could never come back.
+    expect(await googleStatus(GOOGLE_2)).toMatchObject({ status: "revoked" });
+    // The mapping stays: it is unique per CONNECTION, so a re-delivered
+    // account brings its own, and this one matches nothing once the queue no
+    // longer sees a connected source behind it.
+    const mappings = await db.query<{ n: string }>(
+      "select count(*)::text as n from public.client_asset_mappings where google_ads_connection_id = $1",
+      [GOOGLE_2],
+    );
+    expect(mappings.rows[0]!.n).toBe("1");
+
+    const event = await db.query<{
+      ad_account_id: string;
+      details: { windsorAccountId: string; replacementBindingId: string | null };
+    }>(
+      `select ad_account_id, details from public.client_reporting_anchor_events
+       where binding_id = $1 and event_type = 'source_retired'`,
+      [pairId],
+    );
+    expect(event.rows).toHaveLength(1);
+    expect(event.rows[0]!.ad_account_id).toBe(accountId);
+    expect(event.rows[0]!.details.replacementBindingId).toBe(replacement.rows[0]!.id);
+
+    // The replacement is an ACTIVE binding born after the cutover, so it must
+    // carry its own immutable evidence or the queue reads it as unexplained
+    // and fails the whole client closed - the very block this lifts. 0095
+    // shipped without it and 0096 had to repair production; not again.
+    const keeps = await db.query<{ prior_binding_id: string; details: { keepsShopifyConnectionId: string } }>(
+      `select prior_binding_id, details from public.client_reporting_anchor_events
+       where binding_id = $1 and event_type = 'source_retired'`,
+      [replacement.rows[0]!.id],
+    );
+    expect(keeps.rows).toHaveLength(1);
+    expect(keeps.rows[0]!.prior_binding_id).toBe(pairId);
+    expect(keeps.rows[0]!.details.keepsShopifyConnectionId).toBe(SHOPIFY_2);
+
+    // And the pair is NOT marked abandoned: its account goes on reporting the
+    // store, so offering it for restaging would offer what cannot commit.
+    const abandoned = await db.query<{ n: string }>(
+      "select count(*)::text as n from public.client_reporting_anchor_events where event_type = 'source_abandoned'",
+    );
+    expect(abandoned.rows[0]!.n).toBe("0");
+  });
+
+  it("refuses a shopify_anchor pair, whose store would sync broken for ever", async () => {
+    // The replacement binding would make its account a Shopify-only anchor
+    // still holding the Google history it recorded, which
+    // guard_normalized_daily_metric_family forbids: every later sync would
+    // fail. 0095 and 0096 refuse the same shape for the same reason, and the
+    // way out is the same - hand the store over.
+    const { pairId, targetId } = await anchorPairAndTarget();
+    const opened = await openBilling(pairId);
+    await cutOverBoth(pairId, targetId);
+    await closeBilling(opened);
+    expect((await db.query<{ role: string }>(
+      "select reporting_role as role from public.ad_accounts where id = $1",
+      [await accountOf(pairId)],
+    )).rows[0]!.role).toBe("shopify_anchor");
+
+    await expectSqlState(retireSource(pairId, "source-retire:test:anchor"), "23514");
+    expect((await bindingRow(pairId)).status).toBe("active");
+    const events = await db.query<{ n: string }>(
+      "select count(*)::text as n from public.client_reporting_anchor_events where event_type = 'source_retired'",
+    );
+    expect(events.rows[0]!.n).toBe("0");
+  });
+
+  it("retires a child, leaving its account unbound and its store untouched", async () => {
+    // Miguel Casal's shape: the Google account under a store is closed, and
+    // the store carries on without it.
+    const { pairId, targetId } = await pairAndTarget();
+    const opened = await openBilling(pairId);
+    await cutOverBoth(pairId, targetId);
+    await closeBilling(opened);
+    const childBinding = (await handover(pairId, targetId)).rows[0]!.id;
+    const childAccount = await accountOf(childBinding);
+    // Its own meter closes before it leaves.
+    const start = await db.query<{ id: string }>(
+      "select id from public.ad_account_billing_starts where ad_account_id = $1",
+      [childAccount],
+    );
+    await db.query(
+      `insert into public.ad_account_billing_ends(
+         ad_account_id, billing_start_id, google_ads_customer_id, currency,
+         google_local_date, google_time_zone, end_cost_micros
+       ) values ($1, $2, '7777777777', 'EUR', current_date - 30,
+         'America/New_York', 5550000)`,
+      [childAccount, start.rows[0]!.id],
+    );
+
+    const retired = await retireSource(childBinding, "source-retire:test:child");
+    expect(retired.rows[0]!.id).toBe(childBinding);
+
+    expect((await bindingRow(childBinding)).status).toBe("revoked");
+    // No replacement for a child: the account is simply left unbound.
+    const live = await db.query<{ n: string }>(
+      "select count(*)::text as n from public.client_reporting_bindings where ad_account_id = $1 and status = 'active'",
+      [childAccount],
+    );
+    expect(live.rows[0]!.n).toBe("0");
+    // The store it reported for keeps its own anchor.
+    expect((await bindingRow(targetId)).status).toBe("active");
+    const event = await db.query<{ details: { replacementBindingId: string | null } }>(
+      `select details from public.client_reporting_anchor_events
+       where binding_id = $1 and event_type = 'source_retired'`,
+      [childBinding],
+    );
+    expect(event.rows[0]!.details.replacementBindingId).toBeNull();
+
+    // The identity is deliberately NOT abandoned. Abandoning is what makes an
+    // identity restageable, and a google_spend account is pinned to nothing but
+    // its Google customer id - the restage path takes any healthy anchor of the
+    // client - so reuse would let the euros this source recorded for one store
+    // reappear under another. A store identity (0097) is pinned to its shop
+    // domain, which is why the store retirement may abandon and this may not.
+    const abandoned = await db.query<{ n: string }>(
+      `select count(*)::text as n from public.client_reporting_anchor_events
+       where binding_id = $1 and event_type = 'source_abandoned'`,
+      [childBinding],
+    );
+    expect(abandoned.rows[0]!.n).toBe("0");
+    // Nothing is written to the onboarding session trail, because nothing was
+    // revoked: the account simply stopped being a reporting source.
+    const trail = await db.query<{ n: string }>(
+      `select count(*)::text as n from public.client_onboarding_events
+       where event_type = 'connections_revoked'
+         and details->>'connection_id' = $1`,
+      [GOOGLE_2],
+    );
+    expect(trail.rows[0]!.n).toBe("0");
+  });
+
+  it("opens the door its refusal names, even for an account that is dead", async () => {
+    // The refusal above says to link the account to a store first. That door
+    // used to be shut: adoption refused any connection carrying an error
+    // latch, which is exactly what a closed account carries, so the refusal
+    // trapped the very accounts it named. Linking records history, not
+    // liveness, so it may now proceed - and the retirement then works.
+    const { anchorId, unallocatedId } = await unallocatedAndTarget();
+    await db.query(
+      "update public.client_google_ads_connections set last_error_code = 'not_connected' where id = $1",
+      [GOOGLE],
+    );
+
+    const adopted = await db.query<{ id: string }>(
+      `select public.adopt_client_reporting_google_child(
+         $1, $2, $3, 'anchor:retire:adopt-dead', 'Linked to the store it spent for'
+       ) as id`,
+      [unallocatedId, anchorId, ADMIN],
+    );
+    expect(adopted.rows[0]!.id).toBe(unallocatedId);
+    expect((await bindingRow(unallocatedId)).status).toBe("active");
+
+    // With a store to hold its history, the same source now retires - once
+    // its meter is closed, which the money gate still demands.
+    const account = await accountOf(unallocatedId);
+    const start = await db.query<{ id: string }>(
+      "select id from public.ad_account_billing_starts where ad_account_id = $1",
+      [account],
+    );
+    await db.query(
+      `insert into public.ad_account_billing_ends(
+         ad_account_id, billing_start_id, google_ads_customer_id, currency,
+         google_local_date, google_time_zone, end_cost_micros
+       )
+       select account.id, $2, account.google_ads_customer_id, 'EUR',
+              current_date - 30, 'America/New_York', 4200000
+       from public.ad_accounts account where account.id = $1`,
+      [account, start.rows[0]!.id],
+    );
+
+    const retired = await retireSource(unallocatedId, "source-retire:test:adopted");
+    expect(retired.rows[0]!.id).toBe(unallocatedId);
+    expect((await bindingRow(unallocatedId)).status).toBe("revoked");
+  });
+  it("refuses a Google source with no store: its spend would leave the totals", async () => {
+    // Nothing groups an unallocated account's history, so retiring it would
+    // drop every euro it recorded out of the client's reporting with no error
+    // anywhere. The way out is one dropdown in Clients, not a silent loss.
+    const { unallocatedId } = await unallocatedAndTarget();
+
+    // Pin the MESSAGE too: every gate in this RPC raises 23514, so the code
+    // alone would pass for a refusal that never reached this one.
+    await expect(
+      retireSource(unallocatedId, "source-retire:test:loose"),
+    ).rejects.toMatchObject({
+      code: "23514",
+      message: expect.stringMatching(/Link this Google account to a store/),
+    });
+    expect((await bindingRow(unallocatedId)).status).toBe("active");
+  });
+
+  it("leaves the retired connection revocable, so nothing downstream is trapped", async () => {
+    // An earlier draft kept the connection 'connected' and installed a trigger
+    // to keep it that way, so the commission ledger could still read the
+    // account. A row nothing may revoke traps every bulk statement that sweeps
+    // over it - cancelling the onboarding link that delivered it, above all,
+    // which is the dead end 0099 had just finished removing. The account's
+    // reachability belongs to the ledger's own read, not to this row, so the
+    // row stays ordinary: already revoked, and revocable again without error.
+    const { pairId, targetId } = await pairAndTarget();
+    const opened = await openBilling(pairId);
+    await cutOverBoth(pairId, targetId);
+    await closeBilling(opened);
+    await retireSource(pairId, "source-retire:test:revocable");
+
+    expect((await googleStatus(GOOGLE_2)).status).toBe("revoked");
+    await expect(
+      db.query(
+        `update public.client_google_ads_connections set status = 'revoked'
+         where id = $1 and status = 'connected'`,
+        [GOOGLE_2],
+      ),
+    ).resolves.toMatchObject({ affectedRows: 0 });
+  });
+
+  it("refuses before the cutover: an unbound source needs no retirement", async () => {
+    const { pairId } = await pairAndTarget();
+
+    await expectSqlState(retireSource(pairId, "source-retire:test:early"), "23514");
+    expect((await bindingRow(pairId)).status).toBe("active");
+  });
+
+  it("replays idempotently and refuses a reused key", async () => {
+    const { pairId, targetId } = await pairAndTarget();
+    const opened = await openBilling(pairId);
+    await cutOverBoth(pairId, targetId);
+    await closeBilling(opened);
+
+    await retireSource(pairId);
+    const again = await retireSource(pairId);
+    expect(again.rows[0]!.id).toBe(pairId);
+    // Two events, one replay: the retired pair and the replacement its store
+    // keeps reporting through. A second call adds neither.
+    const events = await db.query<{ n: string }>(
+      "select count(*)::text as n from public.client_reporting_anchor_events where event_type = 'source_retired'",
+    );
+    expect(Number(events.rows[0]!.n)).toBe(2);
+    await expectSqlState(retireSource(targetId, "source-retire:test:0001"), "23505");
   });
 });
 });

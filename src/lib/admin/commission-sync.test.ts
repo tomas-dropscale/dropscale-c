@@ -15,6 +15,7 @@ import {
   manualReferralRateForDate,
   microsToEuroNumber,
   needsGoogleLedgerRewrite,
+  storeBindingsForLedger,
 } from "./commission-sync-logic";
 
 describe("manual referral rates", () => {
@@ -541,5 +542,140 @@ describe("matchesAuthoritativeGoogleSpend", () => {
         "EUR",
       ),
     ).toBe(false);
+  });
+});
+
+describe("which binding says whose spend this is", () => {
+  let nextId = 0;
+  const row = (over = {}) => ({
+    id: `binding-${(nextId += 1)}`,
+    ad_account_id: "acct-1",
+    shopify_connection_id: null,
+    shopify_anchor_binding_id: null,
+    status: "active",
+    bound_at: "2026-08-01T00:00:00.000Z",
+    revoked_at: null,
+    ...over,
+  });
+  /** Every revoked row in the fixture carries retirement evidence. */
+  const evidenced = (rows: { id: string; status: string }[]) =>
+    new Set(rows.filter((r) => r.status === "revoked").map((r) => r.id));
+
+  it("keeps a retired child attributed to the store it spent for", () => {
+    // The account stays readable after retirement so its own weeks can still
+    // be certified. Reading it with no store would bill a shared Google
+    // account whole to the one store that remains.
+    const rows = [
+      row({ status: "revoked", shopify_anchor_binding_id: "anchor-1", revoked_at: "2026-09-01T00:00:00.000Z" }),
+    ];
+    const { bindings, retiredBoundAccountIds } = storeBindingsForLedger(rows, evidenced(rows));
+    expect(bindings[0]!.shopify_anchor_binding_id).toBe("anchor-1");
+    expect(retiredBoundAccountIds.has("acct-1")).toBe(true);
+  });
+
+  it("leaves a plainly UNBOUND account exactly as it was", () => {
+    // A pre-cutover unbind leaves the same revoked row on an account still
+    // under contract and still billing. Reading its dead store would rewrite
+    // live commissions down to campaigns that store no longer runs, so only a
+    // lifecycle RPC's own immutable evidence may speak for a revoked binding.
+    const rows = [
+      row({ status: "revoked", shopify_connection_id: "shop-gone", revoked_at: "2026-09-01T00:00:00.000Z" }),
+    ];
+    const { bindings, retiredBoundAccountIds } = storeBindingsForLedger(rows, new Set());
+    expect(bindings).toEqual([]);
+    expect(retiredBoundAccountIds.has("acct-1")).toBe(false);
+  });
+
+  it("treats a STAGED binding as live, so its account is not read as retired", () => {
+    const rows = [
+      row({ status: "revoked", shopify_anchor_binding_id: "anchor-old", revoked_at: "2026-08-10T00:00:00.000Z" }),
+      row({ status: "staged", shopify_anchor_binding_id: "anchor-new" }),
+    ];
+    const { bindings, retiredBoundAccountIds } = storeBindingsForLedger(rows, evidenced(rows));
+    expect(bindings[0]!.shopify_anchor_binding_id).toBe("anchor-new");
+    expect(retiredBoundAccountIds.has("acct-1")).toBe(false);
+  });
+
+  it("lets a LIVE binding with no store beat a dead one that names a store", () => {
+    // An account deliberately bound to no store reads whole. A binding it left
+    // behind must not filter live spend to a store it no longer reports for,
+    // whichever order the rows arrive in.
+    const dead = row({
+      status: "revoked",
+      shopify_anchor_binding_id: "old-anchor",
+      bound_at: "2026-07-01T00:00:00.000Z",
+      revoked_at: "2026-08-01T00:00:00.000Z",
+    });
+    const live = row({ status: "active", bound_at: "2026-08-01T00:00:00.000Z" });
+    for (const rows of [[dead, live], [live, dead]]) {
+      const { bindings, retiredBoundAccountIds } = storeBindingsForLedger(rows, evidenced(rows));
+      expect(bindings).toEqual([]);
+      expect(retiredBoundAccountIds.has("acct-1")).toBe(false);
+    }
+  });
+
+  it("picks the LAST store a retired account reported for, whatever the row order", () => {
+    // An account can be rebound from one store to another before it is
+    // retired. Row arrival order decides which store gets billed and it is not
+    // stable between runs, so it must decide nothing.
+    const older = row({
+      status: "revoked",
+      shopify_anchor_binding_id: "anchor-old",
+      bound_at: "2026-06-01T00:00:00.000Z",
+      revoked_at: "2026-07-01T00:00:00.000Z",
+    });
+    const newer = row({
+      status: "revoked",
+      shopify_anchor_binding_id: "anchor-new",
+      bound_at: "2026-07-01T00:00:00.000Z",
+      revoked_at: "2026-09-01T00:00:00.000Z",
+    });
+    for (const rows of [[older, newer], [newer, older]]) {
+      const { bindings } = storeBindingsForLedger(rows, evidenced(rows));
+      expect(bindings[0]!.shopify_anchor_binding_id).toBe("anchor-new");
+    }
+  });
+
+  it("orders by the instant, not by the text of the timestamp", () => {
+    // Postgres does not promise one spelling: fractional digits vary and an
+    // offset may be written "+00:00", "Z" or a real zone. Read as text the
+    // pair below inverts - "11:00" sorts before "12:00" - and the fee lands on
+    // the store the account had LEFT.
+    const older = row({
+      status: "revoked",
+      shopify_anchor_binding_id: "anchor-old",
+      bound_at: "2026-07-01T12:00:00+02:00",
+      revoked_at: null,
+    });
+    const newer = row({
+      status: "revoked",
+      shopify_anchor_binding_id: "anchor-new",
+      bound_at: "2026-07-01T11:00:00Z",
+      revoked_at: null,
+    });
+    for (const rows of [[older, newer], [newer, older]]) {
+      const { bindings } = storeBindingsForLedger(rows, evidenced(rows));
+      expect(bindings[0]!.shopify_anchor_binding_id).toBe("anchor-new");
+    }
+  });
+
+  it("leaves an account bound to no store alone, live or not", () => {
+    // An unallocated account has no store to filter to and never had one, so
+    // it still reads whole and is not treated as retired. A legacy account,
+    // with no binding row at all, lands the same way.
+    const rows = [row()];
+    const { bindings, retiredBoundAccountIds } = storeBindingsForLedger(rows, evidenced(rows));
+    expect(bindings).toEqual([]);
+    expect(retiredBoundAccountIds.has("acct-1")).toBe(false);
+    expect(storeBindingsForLedger([], new Set()).retiredBoundAccountIds.size).toBe(0);
+  });
+
+  it("keeps accounts apart", () => {
+    const rows = [
+      row({ shopify_connection_id: "shop-1" }),
+      row({ ad_account_id: "acct-2", status: "revoked", shopify_anchor_binding_id: "anchor-2" }),
+    ];
+    const { bindings } = storeBindingsForLedger(rows, evidenced(rows));
+    expect(bindings.map((b) => b.ad_account_id).sort()).toEqual(["acct-1", "acct-2"]);
   });
 });

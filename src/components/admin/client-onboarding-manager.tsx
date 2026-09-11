@@ -902,15 +902,21 @@ export function ClientOnboardingManager({
         );
       }
       if (bindingWasRetired(body)) {
-        // A live client's store leaves through its retirement RPC, which
-        // revoked the Shopify connection in the same transaction as the
-        // anchor: the asset endpoint has nothing left to remove, and calling
-        // it would only report the store as already gone.
+        // A live client's asset leaves through its retirement RPC, and the
+        // asset endpoint must not run afterwards. For a STORE the RPC revoked
+        // the Shopify connection in the same transaction, so there is nothing
+        // left to remove. For a GOOGLE account the connection is deliberately
+        // KEPT - the commission ledger still reads it to certify the weeks it
+        // billed - and calling the endpoint would revoke it, undoing that. The
+        // database refuses such a revoke, so the worst case is an error the
+        // admin should never have to see.
         setBusy(null);
         await settleRemoval(
           target,
           `${target.name} retired`,
-          "The store left the client's reporting with its history kept. Other stores, billing and the client's dashboard are unchanged.",
+          target.kind === "google_ads"
+            ? "The Google account left the client's reporting. Everything it already recorded stays with the store it spent for, that store goes on reporting, and the client is no longer held back by it. The connection itself stays listed on purpose, so the account's past weeks can still be billed; it reports nothing and costs nothing where it is."
+            : "The store left the client's reporting with its history kept. Other stores, billing and the client's dashboard are unchanged.",
         );
         return;
       }
@@ -1818,6 +1824,18 @@ export function ClientOnboardingManager({
                     This asset feeds the client&apos;s reporting
                   </p>
                   <p className="mt-1.5">
+                    {/*
+                      Deliberately the conservative sentence for every shape.
+                      After the cutover Remove may instead RETIRE the asset,
+                      which keeps the rest of the client reporting - but which
+                      of the two happens depends on gates only the database can
+                      settle (the rollout, the account's reporting role, an open
+                      billing meter, the client's remaining stores), and a
+                      preview that re-derives them here drifts from the
+                      transaction and promises what it then refuses. Warning
+                      more than happens is safe; promising more is not. The
+                      notice AFTER the click says what actually happened.
+                    */}
                     {bindingInfo.covers.length > 1
                       ? "Removing it unbinds a reporting pair, so BOTH of these stop feeding the dashboard:"
                       : "Removing it unbinds this reporting source:"}

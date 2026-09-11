@@ -45,6 +45,11 @@ const REVOKE_REASON =
   "Admin unbound this reporting source to remove the asset from Dropscale.";
 const RETIRE_REASON =
   "Admin retired this store from the client's reporting; its history is kept.";
+// The reason is written into an append-only event, so it states what the
+// admin did, never why. "Closed" was an assumption: Remove is also the way out
+// when an account is merely unreachable, or was swapped for another.
+const RETIRE_SOURCE_REASON =
+  "Admin removed this Google account from the client's reporting; its history is kept.";
 
 function serviceOrThrow() {
   const service = createServiceClient();
@@ -233,6 +238,40 @@ export async function revokeReportingBindingForAsset(input: {
             ? "invalid_request"
             : "database_error",
         retireError?.message?.trim() || "The store could not be retired.",
+        retireError?.code?.startsWith("23") ? 409 : retireError?.code === "22023" ? 400 : 500,
+      );
+    }
+    return { ...coverage, retired: true };
+  }
+
+  // The same door on the Google side (0100). A client who closes a Google Ads
+  // account must not be stuck: the account stays a bound source, its health
+  // probe latches, and the whole client turns blocked with every action
+  // hidden. Removing it from a live client retires it - a paired store keeps
+  // reporting through a replacement binding, a child leaves its history under
+  // the store it spent for, and the closed account leaves.
+  if (
+    input.kind === "google_ads" &&
+    binding.google_ads_connection_id !== null &&
+    (await clientReportingAuthority(binding.client_id)) === "v2"
+  ) {
+    const { data: retiredId, error: retireError } = await service.rpc(
+      "retire_client_reporting_google_source",
+      {
+        p_binding_id: binding.id,
+        p_admin_id: input.adminId,
+        p_idempotency_key: `source-retire:${binding.id}`,
+        p_reason: RETIRE_SOURCE_REASON,
+      },
+    );
+    if (retireError || retiredId !== binding.id) {
+      throw new ClientOnboardingError(
+        retireError?.code === "23514" || retireError?.code === "23505"
+          ? "invalid_state"
+          : retireError?.code === "22023"
+            ? "invalid_request"
+            : "database_error",
+        retireError?.message?.trim() || "The Google account could not be retired.",
         retireError?.code?.startsWith("23") ? 409 : retireError?.code === "22023" ? 400 : 500,
       );
     }
