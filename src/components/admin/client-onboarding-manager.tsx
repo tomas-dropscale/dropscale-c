@@ -902,20 +902,17 @@ export function ClientOnboardingManager({
         );
       }
       if (bindingWasRetired(body)) {
-        // A live client's asset leaves through its retirement RPC, and the
-        // asset endpoint must not run afterwards. For a STORE the RPC revoked
-        // the Shopify connection in the same transaction, so there is nothing
-        // left to remove. For a GOOGLE account the connection is deliberately
-        // KEPT - the commission ledger still reads it to certify the weeks it
-        // billed - and calling the endpoint would revoke it, undoing that. The
-        // database refuses such a revoke, so the worst case is an error the
-        // admin should never have to see.
+        // A live client's asset leaves through its retirement RPC, which
+        // revokes the connection in the same transaction - the Shopify one for
+        // a store, the Google one for a source - so the asset endpoint must not
+        // run afterwards: there is nothing left for it to remove, and it would
+        // answer with an error the admin should never have to see.
         setBusy(null);
         await settleRemoval(
           target,
           `${target.name} retired`,
           target.kind === "google_ads"
-            ? "The Google account left the client's reporting. Everything it already recorded stays with the store it spent for, that store goes on reporting, and the client is no longer held back by it. The connection itself stays listed on purpose, so the account's past weeks can still be billed; it reports nothing and costs nothing where it is."
+            ? "The Google account left the client's reporting. Everything it already recorded stays with the store it spent for, that store goes on reporting, its past weeks can still be billed, and the client is no longer held back by it."
             : "The store left the client's reporting with its history kept. Other stores, billing and the client's dashboard are unchanged.",
         );
         return;
