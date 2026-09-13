@@ -27,6 +27,7 @@ import {
   billableGoogleSpendWindow,
   matchesAuthoritativeGoogleSpend,
   needsGoogleLedgerRewrite,
+  sourceWentSilent,
   type AccountCommissionRateTerm,
   type ManualReferralRateTerm,
 } from "@/lib/admin/commission-sync-logic";
@@ -526,6 +527,17 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
               billingEndId: string | null;
             }
           | undefined;
+        // The proof this run supersedes. When the source turns out to be
+        // silent nothing is written, so that proof is put back as it was.
+        let priorMarker = null as {
+          status: string;
+          run_id: string;
+          started_at: string;
+          synced_at: string;
+          ledger_snapshot: unknown;
+          billing_start_id: string;
+          billing_end_id: string | null;
+        } | null;
         try {
           const start = billingStartByAccount.get(account.id);
           if (!start) {
@@ -720,6 +732,18 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
           // A crash or partial failure can then leave only an explicit failed or
           // in-progress generation, never a stale green marker.
           const syncStartedAt = runStartedAt.toISOString();
+          const { data: priorRow, error: priorRowError } = await supabase
+            .from("google_ledger_sync_windows")
+            .select(
+              "status, run_id, started_at, synced_at, ledger_snapshot, billing_start_id, billing_end_id",
+            )
+            .eq("ad_account_id", account.id)
+            .eq("period_start", from)
+            .eq("period_end", to)
+            .maybeSingle();
+          // Nothing is claimed yet, so a failed read simply fails this account.
+          if (priorRowError) throw priorRowError;
+          priorMarker = (priorRow as typeof priorMarker) ?? null;
           const { error: beginWindowError } = await supabase
             .from("google_ledger_sync_windows")
             .upsert(
@@ -813,6 +837,13 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
               );
             if (existingRowsError) throw existingRowsError;
             existingRows = (data ?? []) as unknown as typeof existingRows;
+          }
+          // Money first: a source that stopped reporting the account must not
+          // read as a week of zeros. The window fails and the rows stay.
+          if (sourceWentSilent(reportedDays, existingRows)) {
+            throw new SilentGoogleSource(
+              `The Google source reported nothing for ${queryFrom}..${queryTo} on an account the ledger already books; refusing to rewrite booked spend to zero.`,
+            );
           }
           const existing = new Map(
             existingRows.map((row) => [row.occurred_on, row]),
@@ -984,7 +1015,36 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
             );
           }
         } catch (error) {
-          if (marker) {
+          if (
+            marker &&
+            error instanceof SilentGoogleSource &&
+            priorMarker?.status === "complete" &&
+            priorMarker.billing_start_id === marker.billingStartId &&
+            priorMarker.billing_end_id === marker.billingEndId
+          ) {
+            // Nothing was written, so the proof this run superseded is exactly
+            // as valid as it was. Put it back rather than downgrade it.
+            const { error: restoreError } = await supabase
+              .from("google_ledger_sync_windows")
+              .update({
+                status: "complete",
+                run_id: priorMarker.run_id,
+                started_at: priorMarker.started_at,
+                synced_at: priorMarker.synced_at,
+                ledger_snapshot: priorMarker.ledger_snapshot as never,
+              })
+              .eq("ad_account_id", account.id)
+              .eq("period_start", marker.from)
+              .eq("period_end", marker.to)
+              .eq("run_id", marker.runId)
+              .eq("status", "in_progress");
+            if (restoreError) {
+              console.error(
+                `Could not restore the superseded ledger proof for ${account.id}:`,
+                restoreError,
+              );
+            }
+          } else if (marker) {
             let failWindow = supabase
               .from("google_ledger_sync_windows")
               .update({ status: "failed" })
@@ -1011,6 +1071,16 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
           if (error instanceof ConcurrentLedgerRun) {
             console.warn(
               `Commission sync skipped ${account.id}: ${error.message}`,
+            );
+            return;
+          }
+          // A silent source is refused, marked, and logged - but a rolling
+          // hourly run must not 500 over one closed account and skip the
+          // revenue-share, HST and rollup steps behind it. An explicit week
+          // refresh is the operator asking about that week: it is told.
+          if (error instanceof SilentGoogleSource && !opts?.period) {
+            console.warn(
+              `Commission sync refused ${account.id}: ${error.message}`,
             );
             return;
           }
@@ -1057,6 +1127,21 @@ class ConcurrentLedgerRun extends Error {
   constructor(message: string) {
     super(message);
     this.name = "ConcurrentLedgerRun";
+  }
+}
+
+/**
+ * The source answered with nothing for a window the ledger already books.
+ *
+ * A closed Google account, one Windsor forgot, a lapsed grant: read as a
+ * week of zeros it erased confirmed money (23 rows on 2026-09-13). Refused
+ * instead: the rows stay, the superseded proof is put back if there was one,
+ * and only an explicit week refresh reports it as a failure.
+ */
+class SilentGoogleSource extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SilentGoogleSource";
   }
 }
 

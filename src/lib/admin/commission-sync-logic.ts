@@ -489,3 +489,25 @@ export function storeBindingsForLedger(
   }
   return { bindings, retiredBoundAccountIds };
 }
+
+/**
+ * Whether the source answered with NOTHING for a window the ledger already
+ * books money on.
+ *
+ * Windsor omits the days an account did not spend, so a single absent day is
+ * a real zero and may correct a row. A whole window with no rows at all, over
+ * days that hold booked spend, is something else: a source that no longer
+ * reports the account - closed in Google, forgotten by Windsor, a lapsed
+ * grant. Read as "seven days of nothing" it rewrote confirmed money to zero
+ * (Viktoria Bratislava, TRÅD & GLÖD, Miguel Casal's 163-954-1537, 2026-09-13).
+ * Such a window must fail and leave the rows as they are.
+ */
+export function sourceWentSilent(
+  reportedDays: readonly { date: string }[],
+  existingRows: readonly { gross_amount: number | string }[],
+): boolean {
+  return (
+    reportedDays.length === 0 &&
+    existingRows.some((row) => Number(row.gross_amount) > 0)
+  );
+}

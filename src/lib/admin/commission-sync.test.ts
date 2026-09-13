@@ -15,6 +15,7 @@ import {
   manualReferralRateForDate,
   microsToEuroNumber,
   needsGoogleLedgerRewrite,
+  sourceWentSilent,
   storeBindingsForLedger,
 } from "./commission-sync-logic";
 
@@ -677,5 +678,28 @@ describe("which binding says whose spend this is", () => {
     ];
     const { bindings } = storeBindingsForLedger(rows, evidenced(rows));
     expect(bindings.map((b) => b.ad_account_id).sort()).toEqual(["acct-1", "acct-2"]);
+  });
+});
+
+describe("sourceWentSilent", () => {
+  const booked = [{ gross_amount: 757.2873 }, { gross_amount: 0 }];
+
+  it("refuses a window with no reported rows over booked spend", () => {
+    // Windsor forgot a closed account; Google says CUSTOMER_NOT_ENABLED. A
+    // week re-sync used to book seven zeros over €1,056 of confirmed spend.
+    expect(sourceWentSilent([], booked)).toBe(true);
+  });
+
+  it("lets a single absent day correct a row when the source still answers", () => {
+    expect(sourceWentSilent([{ date: "2026-08-25" }], booked)).toBe(false);
+  });
+
+  it("is not silence when nothing was booked to begin with", () => {
+    expect(sourceWentSilent([], [])).toBe(false);
+    expect(sourceWentSilent([], [{ gross_amount: 0 }, { gross_amount: "0" }])).toBe(false);
+  });
+
+  it("reads numeric strings the way the ledger stores them", () => {
+    expect(sourceWentSilent([], [{ gross_amount: "13.6612" }])).toBe(true);
   });
 });
