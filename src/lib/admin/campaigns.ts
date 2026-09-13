@@ -9,7 +9,12 @@ import { fetchLiveCampaignsDetailed, type LiveCampaign } from "@/lib/google-ads/
 import { markIfAuthRevoked } from "@/lib/google-ads/revoked";
 import { fetchHstClientKeys } from "@/lib/admin/hst";
 import { googleProfit, googleRoas } from "@/lib/admin/google-attribution";
-import { fetchDailyMetrics, groupByAccount, sumMetrics } from "@/lib/metrics/queries";
+import {
+  fetchDailyMetrics,
+  groupByAccount,
+  sumMetrics,
+  type DailyMetricRow,
+} from "@/lib/metrics/queries";
 import {
   refreshAccountsNow,
   refreshReportingSourcesNow,
@@ -20,6 +25,7 @@ import { rangeDays, type RangeSelection } from "@/lib/portal/range";
 import { hasWindsorEnv } from "@/lib/windsor/client";
 import { fetchGoogleReportingCampaigns } from "@/lib/reporting/google";
 import { convertCampaigns, reportingMoneyRates } from "@/lib/reporting/google-currency";
+import { FxError, fxDailyRates, rateOn } from "@/lib/shopify/fx";
 import {
   resolveReportingSources,
   type CanonicalReportingSource,
@@ -93,6 +99,18 @@ export type AdminAccountCampaigns = {
   rollupRequired: boolean;
   /** Canonical currencies of the physical metric accounts behind this store row. */
   rollupCurrencies: string[];
+  /**
+   * The same rollup priced in PORTFOLIO_CURRENCY - what this store adds to
+   * its client's row and to the portfolio. The fields above stay in the
+   * store's own currency, beside its campaigns, so a store's total and its
+   * campaigns always agree.
+   */
+  portfolio: {
+    spend: number;
+    commission: number;
+    rollupRevenue: number | null;
+    rollupSpend: number;
+  };
 };
 
 export type AdminLiveCampaign = LiveCampaign & {
@@ -165,8 +183,14 @@ export type AdminCampaignsOverview = {
     roas: number | null;
     /** Rollup ad spend — the denominator above. See the note in fetchAdminCampaigns. */
     rollupSpend: number | null;
+    /** PORTFOLIO_CURRENCY once the totals are priced, null while they cannot be. */
     currency: string | null;
+    /** Every currency the stores in the window report in, as stored. */
     currencies: string[];
+    /** The currencies priced into euros at each day's ECB rate for these totals. */
+    convertedCurrencies: string[];
+    /** Currencies the FX service could not price today; the totals stay null. */
+    fxUnavailable: string[];
     rollupComplete: boolean;
   };
 };
@@ -184,6 +208,8 @@ type AdminAccountInventory = {
   metricCurrencies: string[];
   metricRefreshKind: "reporting" | "legacy" | null;
   commissionRateByMetricAccount: Map<string, number>;
+  /** The reporting currency each physical metric account keeps its rows in. */
+  currencyByMetricAccount: Map<string, string>;
   /** Campaign mutations remain marker-gated even when Windsor is used read-only before cutover. */
   campaignControlsEnabled: boolean;
   authority: AdminReportingAuthority;
@@ -425,6 +451,7 @@ async function adminAccountInventory(
         commissionRateByMetricAccount: new Map([
           [account.id, Number(account.commission_rate)],
         ]),
+        currencyByMetricAccount: new Map([[account.id, account.currency]]),
         campaignControlsEnabled: false,
         authority: await campaignReportingAuthority({
           account,
@@ -531,6 +558,12 @@ async function adminAccountInventory(
           Number(baseById.get(source.adAccountId)!.commission_rate),
         ]),
       ),
+      currencyByMetricAccount: new Map(
+        grouped.map((source) => [
+          source.adAccountId,
+          baseById.get(source.adAccountId)!.currency,
+        ]),
+      ),
       campaignControlsEnabled,
       authority: await campaignReportingAuthority({
         account: base,
@@ -573,6 +606,7 @@ async function adminAccountInventory(
       commissionRateByMetricAccount: new Map([
         [source.adAccountId, Number(base.commission_rate)],
       ]),
+      currencyByMetricAccount: new Map([[source.adAccountId, base.currency]]),
       campaignControlsEnabled,
       authority: await campaignReportingAuthority({
         account: base,
@@ -608,10 +642,78 @@ async function adminAccountInventory(
   );
 }
 
+/**
+ * The agency's own reporting currency. Each client store keeps its rows in
+ * its own currency; this page adds them up across clients, so anything else
+ * is priced into euros at each day's ECB rate before a single sum is taken.
+ */
+export const PORTFOLIO_CURRENCY = "EUR";
+
+const MONEY_COLUMNS = [
+  "ad_spend",
+  "conversion_value",
+  "revenue",
+  "attributed_revenue",
+  "refunds_amount",
+  "product_cost",
+  "payment_fees",
+  "shipping_cost",
+  "revenue_share_base",
+  "revenue_share_amount",
+] as const;
+
+/**
+ * Every row priced in the portfolio currency, each at the rate of its own
+ * day. A currency the FX service cannot price today is reported, never
+ * guessed: its rows are left out, and every total that would have included
+ * them stays unavailable until it can be priced.
+ */
+async function priceInPortfolioCurrency(
+  rows: DailyMetricRow[],
+  currencyByAccount: Map<string, string>,
+  range: Pick<RangeSelection, "from" | "to">,
+): Promise<{ rows: DailyMetricRow[]; converted: string[]; unavailable: string[] }> {
+  const currencyOf = (row: DailyMetricRow) =>
+    currencyByAccount.get(row.ad_account_id) ?? PORTFOLIO_CURRENCY;
+  const foreign = [...new Set(rows.map(currencyOf))]
+    .filter((currency) => currency !== PORTFOLIO_CURRENCY)
+    .sort();
+  const rates = new Map<string, [string, number][]>();
+  const unavailable: string[] = [];
+  for (const currency of foreign) {
+    try {
+      rates.set(currency, await fxDailyRates(currency, PORTFOLIO_CURRENCY, range.from, range.to));
+    } catch (error) {
+      if (!(error instanceof FxError)) throw error;
+      console.error(`Portfolio totals: no ${currency} rate today:`, error.message);
+      unavailable.push(currency);
+    }
+  }
+  const priced = rows.flatMap((row) => {
+    const currency = currencyOf(row);
+    if (currency === PORTFOLIO_CURRENCY) return [row];
+    const pairs = rates.get(currency);
+    if (!pairs) return [];
+    const rate = rateOn(pairs, row.day);
+    const copy: Record<string, unknown> = { ...row };
+    for (const column of MONEY_COLUMNS) {
+      const value = row[column];
+      if (value !== null && value !== undefined) copy[column] = Number(value) * rate;
+    }
+    return [copy as DailyMetricRow];
+  });
+  return {
+    rows: priced,
+    converted: foreign.filter((currency) => !unavailable.includes(currency)),
+    unavailable,
+  };
+}
+
 /** Group accounts under their owner, biggest spender first. */
 function groupByOwner(
   entries: AdminAccountCampaigns[],
   owners: Map<string, Owner>,
+  fxUnavailable: ReadonlySet<string> = new Set(),
 ): AdminClientCampaigns[] {
   type Group = {
     clientId: string;
@@ -657,12 +759,13 @@ function groupByOwner(
     }
     if (entry.rollupMaterialized ?? entry.rollupComplete) {
       group.materialized += 1;
-      group.spend += entry.spend;
-      group.commission += entry.commission;
-      if (entry.rollupRevenue !== null) {
-        group.revenue = (group.revenue ?? 0) + entry.rollupRevenue;
+      // Added across stores, so in euros.
+      group.spend += entry.portfolio.spend;
+      group.commission += entry.portfolio.commission;
+      if (entry.portfolio.rollupRevenue !== null) {
+        group.revenue = (group.revenue ?? 0) + entry.portfolio.rollupRevenue;
       }
-      group.rollupSpend += entry.rollupSpend;
+      group.rollupSpend += entry.portfolio.rollupSpend;
     }
     byClient.set(entry.account.client_id, group);
   }
@@ -671,7 +774,10 @@ function groupByOwner(
     .map((group): AdminClientCampaigns => {
       const currencies = [...group.currencies].sort();
       const rollupComplete = group.required > 0 && group.complete === group.required;
-      const financialReady = group.materialized > 0 && currencies.length === 1;
+      // Rows already priced in euros; only a currency with no rate today holds
+      // a client's numbers back.
+      const financialReady =
+        group.materialized > 0 && !currencies.some((currency) => fxUnavailable.has(currency));
       return {
         clientId: group.clientId,
         clientName: group.clientName,
@@ -686,7 +792,7 @@ function groupByOwner(
           financialReady && group.revenue !== null && group.rollupSpend > 0
             ? googleRoas(group.revenue, group.rollupSpend)
             : null,
-        currency: financialReady ? currencies[0] : null,
+        currency: financialReady ? PORTFOLIO_CURRENCY : null,
         currencies,
         rollupComplete,
       };
@@ -960,6 +1066,7 @@ export async function fetchAdminCampaigns(
         rollupComplete: false,
         rollupRequired: false,
         rollupCurrencies: [],
+        portfolio: { spend: 0, commission: 0, rollupRevenue: null, rollupSpend: 0 },
       };
     }),
   );
@@ -982,6 +1089,7 @@ export async function fetchAdminCampaigns(
     rollupMaterialized: false,
     rollupRequired: false,
     rollupCurrencies: [],
+    portfolio: { spend: 0, commission: 0, rollupRevenue: null, rollupSpend: 0 },
   }));
 
   // Campaigns is a read-only portfolio view: use only the rollup rows already
@@ -993,11 +1101,22 @@ export async function fetchAdminCampaigns(
   const metricRows = options.providerOnly
     ? []
     : await fetchDailyMetrics(metricAccountIds, range.from, range.to);
+  // Priced into euros before anything is added across stores.
+  const currencyByMetricAccount = new Map(
+    inventory.flatMap((entry) => [...entry.currencyByMetricAccount]),
+  );
+  const priced = await priceInPortfolioCurrency(metricRows, currencyByMetricAccount, range);
+  // Raw rows keep each store's figures in its own currency and decide
+  // coverage; the priced rows are what gets added across stores.
   const metricRowsByAccount = groupByAccount(metricRows);
+  const pricedRowsByAccount = groupByAccount(priced.rows);
   const accountsWithRollups = perAccount.map((entry, index) => {
     const inventoryEntry = inventory[index];
     const rows = inventoryEntry.metricAccountIds.flatMap(
       (accountId) => metricRowsByAccount.get(accountId) ?? [],
+    );
+    const pricedRows = inventoryEntry.metricAccountIds.flatMap(
+      (accountId) => pricedRowsByAccount.get(accountId) ?? [],
     );
     const requiredMetricAccountIds = inventoryEntry.metricRefreshKind === null
       ? inventoryEntry.metricAccountIds.filter(
@@ -1009,27 +1128,34 @@ export async function fetchAdminCampaigns(
     ).size;
     const expectedRows = requiredMetricAccountIds.length * rangeDays(range);
     const rollupMaterialized = coverageRows > 0;
-    const rollupComplete =
-      expectedRows > 0 &&
-      coverageRows === expectedRows &&
-      inventoryEntry.metricCurrencies.length === 1;
+    const rollupComplete = expectedRows > 0 && coverageRows === expectedRows;
     const totals = sumMetrics(rows);
-    const commission = rollupMaterialized && inventoryEntry.metricCurrencies.length === 1
-      ? inventoryEntry.metricAccountIds.reduce((total, accountId) => {
-          const accountRate = inventoryEntry.commissionRateByMetricAccount.get(accountId);
-          if (typeof accountRate !== "number" || !Number.isFinite(accountRate)) {
-            throw new Error("Admin reporting inventory is unavailable.");
-          }
-          const accountTotals = sumMetrics(metricRowsByAccount.get(accountId) ?? []);
-          return total + (accountTotals.adSpend * accountRate) / 100;
-        }, 0)
-      : 0;
+    const pricedTotals = sumMetrics(pricedRows);
+    // Each physical account at its own rate - a Google child can be on a
+    // different rate from its anchor.
+    const commissionOn = (byAccount: Map<string, DailyMetricRow[]>) =>
+      rollupMaterialized
+        ? inventoryEntry.metricAccountIds.reduce((total, accountId) => {
+            const accountRate = inventoryEntry.commissionRateByMetricAccount.get(accountId);
+            if (typeof accountRate !== "number" || !Number.isFinite(accountRate)) {
+              throw new Error("Admin reporting inventory is unavailable.");
+            }
+            const accountTotals = sumMetrics(byAccount.get(accountId) ?? []);
+            return total + (accountTotals.adSpend * accountRate) / 100;
+          }, 0)
+        : 0;
     return {
       ...entry,
       spend: totals.adSpend,
-      commission,
+      commission: commissionOn(metricRowsByAccount),
       rollupRevenue: totals.attributedRevenue,
       rollupSpend: totals.adSpend,
+      portfolio: {
+        spend: pricedTotals.adSpend,
+        commission: commissionOn(pricedRowsByAccount),
+        rollupRevenue: pricedTotals.attributedRevenue,
+        rollupSpend: pricedTotals.adSpend,
+      },
       rollupComplete,
       rollupMaterialized,
       rollupRequired: requiredMetricAccountIds.length > 0,
@@ -1037,11 +1163,14 @@ export async function fetchAdminCampaigns(
         requiredMetricAccountIds.length > 0 ? inventoryEntry.metricCurrencies : [],
     };
   });
-  const rollup = sumMetrics(metricRows);
+  const rollup = sumMetrics(priced.rows);
   const revenue = rollup.attributedRevenue;
 
-  const spend = accountsWithRollups.reduce((sum, entry) => sum + entry.spend, 0);
-  const commission = accountsWithRollups.reduce((sum, entry) => sum + entry.commission, 0);
+  const spend = accountsWithRollups.reduce((sum, entry) => sum + entry.portfolio.spend, 0);
+  const commission = accountsWithRollups.reduce(
+    (sum, entry) => sum + entry.portfolio.commission,
+    0,
+  );
   const requiredMetricAccountIds = [
     ...new Set(inventory.flatMap((entry) =>
       entry.metricRefreshKind === null
@@ -1060,7 +1189,7 @@ export async function fetchAdminCampaigns(
   const currencies = [
     ...new Set(requiredScopes.flatMap((entry) => entry.rollupCurrencies)),
   ].sort();
-  const financialReady = metricRows.length > 0 && currencies.length === 1;
+  const financialReady = metricRows.length > 0 && priced.unavailable.length === 0;
   const connectedCampaignAccounts = perAccount.filter((entry) => entry.connected);
   const materializedCampaignAccounts = connectedCampaignAccounts.filter(
     (entry) =>
@@ -1085,10 +1214,12 @@ export async function fetchAdminCampaigns(
     clients: groupByOwner(
       accountsWithRollups.map((entry) => withPublicStoreDomain(entry, publicStoreDomains)),
       owners,
+      new Set(priced.unavailable),
     ),
     internal: groupByOwner(
       internalEntries.map((entry) => withPublicStoreDomain(entry, publicStoreDomains)),
       owners,
+      new Set(priced.unavailable),
     ),
     configured,
     totals: {
@@ -1110,8 +1241,10 @@ export async function fetchAdminCampaigns(
           ? googleRoas(revenue, rollup.adSpend)
           : null,
       rollupSpend: financialReady ? rollup.adSpend : null,
-      currency: financialReady ? currencies[0] : null,
+      currency: financialReady ? PORTFOLIO_CURRENCY : null,
       currencies,
+      convertedCurrencies: priced.converted,
+      fxUnavailable: priced.unavailable,
       rollupComplete,
     },
   };

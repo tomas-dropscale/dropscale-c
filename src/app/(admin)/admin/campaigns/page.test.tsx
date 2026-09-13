@@ -109,6 +109,8 @@ describe("Campaigns page approved summary", () => {
         connectedAccounts: 2,
         currency: "EUR",
         currencies: ["EUR"],
+        convertedCurrencies: [],
+        fxUnavailable: [],
         rollupComplete: true,
       },
     });
@@ -165,7 +167,37 @@ describe("Campaigns page approved summary", () => {
     );
   });
 
-  it("does not present mixed currencies as a single portfolio total", async () => {
+  it("presents mixed currencies as one euro portfolio and says what was priced", async () => {
+    mocks.fetchAdminCampaigns.mockResolvedValueOnce({
+      configured: true,
+      clients: [],
+      internal: [],
+      totals: {
+        revenue: 280,
+        profit: 40,
+        roas: 2,
+        rollupSpend: 140,
+        spend: 140,
+        commission: 14,
+        activeCampaigns: 3,
+        connectedAccounts: 2,
+        currency: "EUR",
+        currencies: ["EUR", "USD"],
+        convertedCurrencies: ["USD"],
+        fxUnavailable: [],
+        rollupComplete: true,
+      },
+    });
+
+    const page = await AdminCampaignsPage({ searchParams: Promise.resolve({}) });
+    const html = renderToStaticMarkup(page);
+
+    expect(html).toContain("USD accounts priced at each day");
+    expect(html).toContain("€140.00");
+    expect(html).not.toContain("reporting currencies are mixed");
+  });
+
+  it("keeps the totals blank, and says why, when a currency has no rate", async () => {
     mocks.fetchAdminCampaigns.mockResolvedValueOnce({
       configured: true,
       clients: [],
@@ -181,6 +213,8 @@ describe("Campaigns page approved summary", () => {
         connectedAccounts: 2,
         currency: null,
         currencies: ["EUR", "USD"],
+        convertedCurrencies: [],
+        fxUnavailable: ["USD"],
         rollupComplete: true,
       },
     });
@@ -188,7 +222,7 @@ describe("Campaigns page approved summary", () => {
     const page = await AdminCampaignsPage({ searchParams: Promise.resolve({}) });
     const html = renderToStaticMarkup(page);
 
-    expect(html).toContain("reporting currencies are mixed (EUR, USD)");
+    expect(html).toContain("no exchange rate for USD");
     expect(html).not.toContain("€0.00");
   });
 
@@ -208,6 +242,8 @@ describe("Campaigns page approved summary", () => {
         connectedAccounts: 1,
         currency: null,
         currencies: ["EUR"],
+        convertedCurrencies: [],
+        fxUnavailable: [],
         rollupComplete: false,
       },
     });
@@ -235,6 +271,8 @@ describe("Campaigns page approved summary", () => {
         connectedAccounts: 1,
         currency: "EUR",
         currencies: ["EUR"],
+        convertedCurrencies: [],
+        fxUnavailable: [],
         rollupComplete: true,
       },
     });

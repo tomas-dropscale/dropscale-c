@@ -4,6 +4,8 @@ import type { CanonicalReportingSource } from "@/lib/reporting/sources";
 import type { AdAccount } from "@/lib/supabase/types";
 
 const mocks = vi.hoisted(() => ({
+  fxDailyRates: vi.fn(),
+  FxError: class FxError extends Error {},
   createClient: vi.fn(),
   createServiceClient: vi.fn(),
   requireAdmin: vi.fn(),
@@ -36,6 +38,11 @@ vi.mock("@/lib/client-onboarding/sessions", () => ({
   requireClientOnboardingAdmin: mocks.requireAdmin,
 }));
 vi.mock("@/lib/google-ads/env", () => ({ hasGoogleAdsEnv: mocks.hasGoogleAdsEnv }));
+vi.mock("@/lib/shopify/fx", () => ({
+  FxError: mocks.FxError,
+  fxDailyRates: mocks.fxDailyRates,
+  rateOn: (pairs: [string, number][]) => pairs[0][1],
+}));
 vi.mock("@/lib/windsor/client", () => ({ hasWindsorEnv: mocks.hasWindsorEnv }));
 vi.mock("@/lib/google-ads/crypto", () => ({ decryptToken: mocks.decryptToken }));
 vi.mock("@/lib/google-ads/portal", () => ({
@@ -828,7 +835,7 @@ describe("admin V2 campaign inventory", () => {
     expect(overview.totals.spend).toBe(72.56);
   });
 
-  it("never adds or formats mixed reporting currencies as one portfolio", async () => {
+  function mixedCurrencyPortfolio() {
     const eur = account("legacy-eur", "client-1", {
       status: "active",
       currency: "EUR",
@@ -846,15 +853,25 @@ describe("admin V2 campaign inventory", () => {
     mocks.decryptToken.mockResolvedValue("refresh-token");
     mocks.fetchLiveCampaignsDetailed.mockResolvedValue([]);
     mocks.fetchDailyMetrics.mockResolvedValue([
-      { ad_account_id: "legacy-eur" },
-      { ad_account_id: "legacy-usd" },
+      { ad_account_id: "legacy-eur", day: "2026-08-14", ad_spend: 50, revenue: 100, attributed_revenue: 100 },
+      { ad_account_id: "legacy-usd", day: "2026-08-14", ad_spend: 100, revenue: 200, attributed_revenue: 200 },
     ]);
-    mocks.sumMetrics.mockImplementation((rows: Array<{ ad_account_id?: string }>) => ({
+    type Row = { ad_spend?: number; revenue?: number; attributed_revenue?: number };
+    const sum = (rows: Row[], key: keyof Row) => rows.reduce((total, row) => total + Number(row[key] ?? 0), 0);
+    mocks.sumMetrics.mockImplementation((rows: Row[]) => ({
       ...emptyRollup,
-      attributedRevenue: rows.length > 0 ? 100 : null,
-      revenue: rows.length * 100,
-      adSpend: rows.length * 50,
+      attributedRevenue: rows.length > 0 ? sum(rows, "attributed_revenue") : null,
+      revenue: sum(rows, "revenue"),
+      adSpend: sum(rows, "ad_spend"),
     }));
+  }
+
+  it("prices mixed reporting currencies into euros at the day's ECB rate", async () => {
+    // Rosa D'ouro reports in dollars. The portfolio is the agency's, and the
+    // agency's books are in euros - so its rows are priced at the day's rate
+    // and added, instead of every total on the page going blank.
+    mixedCurrencyPortfolio();
+    mocks.fxDailyRates.mockResolvedValue([["2026-08-14", 0.9]]);
 
     const overview = await fetchAdminCampaigns({
       key: "today",
@@ -862,26 +879,69 @@ describe("admin V2 campaign inventory", () => {
       to: "2026-08-14",
     });
 
-    expect(overview.clients[0]).toEqual(
+    expect(mocks.fxDailyRates).toHaveBeenCalledWith("USD", "EUR", "2026-08-14", "2026-08-14");
+    // $100 spend and $200 revenue become €90 and €180 beside the euro store's.
+    expect(overview.totals).toEqual(
       expect.objectContaining({
-        currency: null,
+        currency: "EUR",
         currencies: ["EUR", "USD"],
-        revenue: null,
-        spend: null,
-        rollupSpend: null,
-        realRoas: null,
+        convertedCurrencies: ["USD"],
+        fxUnavailable: [],
+        spend: 140,
+        rollupSpend: 140,
+        revenue: 280,
       }),
     );
+    expect(overview.clients[0]).toEqual(
+      expect.objectContaining({
+        currency: "EUR",
+        currencies: ["EUR", "USD"],
+        spend: 140,
+        rollupSpend: 140,
+        revenue: 280,
+      }),
+    );
+    // The dollar store's own row stays in dollars, beside its campaigns.
+    const usdStore = overview.clients[0].accounts.find(
+      (entry) => entry.account.id === "legacy-usd",
+    )!;
+    expect(usdStore).toEqual(
+      expect.objectContaining({
+        spend: 100,
+        rollupSpend: 100,
+        rollupRevenue: 200,
+        portfolio: expect.objectContaining({ spend: 90, rollupSpend: 90, rollupRevenue: 180 }),
+      }),
+    );
+  });
+
+  it("keeps the totals unavailable, and says which currency, when it cannot be priced", async () => {
+    mixedCurrencyPortfolio();
+    mocks.fxDailyRates.mockRejectedValue(new mocks.FxError("FX service returned 503 for USD→EUR."));
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const overview = await fetchAdminCampaigns({
+      key: "today",
+      from: "2026-08-14",
+      to: "2026-08-14",
+    });
+
     expect(overview.totals).toEqual(
       expect.objectContaining({
         currency: null,
         currencies: ["EUR", "USD"],
-        revenue: null,
+        convertedCurrencies: [],
+        fxUnavailable: ["USD"],
         spend: null,
+        revenue: null,
         commission: null,
         roas: null,
       }),
     );
+    expect(overview.clients[0]).toEqual(
+      expect.objectContaining({ currency: null, spend: null, revenue: null }),
+    );
+    error.mockRestore();
   });
 
   it("uses already-materialised rows from the exact range without render-time coverage refresh", async () => {

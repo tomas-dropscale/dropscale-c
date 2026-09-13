@@ -168,12 +168,16 @@ export default async function AdminCampaignsPage({
         </div>
       )}
 
-      {overview.totals.currencies.length > 1 && (
+      {overview.totals.fxUnavailable.length > 0 ? (
         <div className="panel mb-4 flex items-center gap-2 border-[var(--warning-orange)]/25 px-5 py-3 text-[12.5px] text-[var(--warning-orange)]">
           <AlertTriangle className="size-4 shrink-0" aria-hidden />
-          {`Portfolio totals are unavailable because reporting currencies are mixed (${overview.totals.currencies.join(", ")}).`}
+          {`Portfolio totals are unavailable: no exchange rate for ${overview.totals.fxUnavailable.join(", ")} right now. Try again shortly.`}
         </div>
-      )}
+      ) : overview.totals.convertedCurrencies.length > 0 ? (
+        <p className="mb-4 text-[12px] text-[var(--text-muted)]">
+          {`Totals in EUR — ${overview.totals.convertedCurrencies.join(", ")} accounts priced at each day's ECB rate.`}
+        </p>
+      ) : null}
 
       <CampaignsView
         clients={campaignView.clients}
