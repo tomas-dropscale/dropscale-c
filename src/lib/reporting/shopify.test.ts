@@ -124,8 +124,8 @@ function orderResponse(currencyCode = "EUR") {
               utmParameters: { source: "google" },
             },
           },
-          totalPriceSet: { shopMoney: { amount: "120.50" } },
-          totalRefundedSet: { shopMoney: { amount: "5.00" } },
+          totalPriceSet: { shopMoney: { amount: "120.50", currencyCode } },
+          totalRefundedSet: { shopMoney: { amount: "5.00", currencyCode } },
           lineItems: {
             pageInfo: { hasNextPage: false },
             nodes: [
@@ -133,7 +133,7 @@ function orderResponse(currencyCode = "EUR") {
                 title: "Summer Dress",
                 sku: "SUMMER-1",
                 quantity: 2,
-                originalUnitPriceSet: { shopMoney: { amount: "60.25" } },
+                originalUnitPriceSet: { shopMoney: { amount: "60.25", currencyCode } },
               },
             ],
           },
@@ -423,6 +423,50 @@ describe("V2 Shopify reporting adapter", () => {
     await expect(
       adapter.fetchDailySales("2026-08-13", "2026-08-13"),
     ).rejects.toMatchObject({ code: "currency_mismatch" });
+  });
+
+  it("prices an order placed in the store's former currency at its day's ECB rate", async () => {
+    // Amelia Bristol switched from CZK to GBP; the orders from before keep
+    // their CZK. They are priced into GBP at the rate of their own day, so
+    // the store's history neither vanishes nor reads thirty times too large.
+    mocks.verifyReportingShop.mockResolvedValue(verifiedShop({ currencyCode: "GBP" }));
+    const response = orderResponse("GBP");
+    const node = response.orders.nodes[0];
+    node.totalPriceSet.shopMoney.currencyCode = "CZK";
+    node.totalRefundedSet.shopMoney.currencyCode = "CZK";
+    node.lineItems.nodes[0].originalUnitPriceSet.shopMoney.currencyCode = "CZK";
+    mocks.reportingShopifyGraphql.mockResolvedValue(response);
+    mocks.fxDailyRates.mockResolvedValue([["2026-08-13", 0.034]]);
+    mocks.rateOn.mockReturnValue(0.034);
+    const adapter = await createShopifyReportingAdapter(
+      source({ shopify: { ...source().shopify!, currency: "GBP" } }),
+    );
+
+    const result = await adapter.fetchDailySales("2026-08-13", "2026-08-13");
+
+    expect(mocks.fxDailyRates).toHaveBeenCalledWith("CZK", "GBP", "2026-08-13", "2026-08-13");
+    expect(result.currency).toBe("GBP");
+    expect(result.days[0].revenue).toBeCloseTo(120.5 * 0.034, 6);
+    expect(result.days[0].refunds).toBeCloseTo(5 * 0.034, 6);
+    expect(result.orders[0].lines[0].unitPrice).toBeCloseTo(60.25 * 0.034, 6);
+  });
+
+  it("refuses to price a former-currency order without a rate", async () => {
+    mocks.verifyReportingShop.mockResolvedValue(verifiedShop({ currencyCode: "GBP" }));
+    const response = orderResponse("GBP");
+    response.orders.nodes[0].totalPriceSet.shopMoney.currencyCode = "CZK";
+    response.orders.nodes[0].totalRefundedSet.shopMoney.currencyCode = "CZK";
+    response.orders.nodes[0].lineItems.nodes[0].originalUnitPriceSet.shopMoney.currencyCode = "CZK";
+    mocks.reportingShopifyGraphql.mockResolvedValue(response);
+    mocks.fxDailyRates.mockResolvedValue([["2026-08-13", 0.034]]);
+    mocks.rateOn.mockReturnValue(Number.NaN);
+    const adapter = await createShopifyReportingAdapter(
+      source({ shopify: { ...source().shopify!, currency: "GBP" } }),
+    );
+
+    await expect(adapter.fetchDailySales("2026-08-13", "2026-08-13")).rejects.toThrow(
+      "No exchange rate from CZK to GBP on 2026-08-13.",
+    );
   });
 
   it("redacts failures while decrypting the stored credential", async () => {
@@ -1720,6 +1764,27 @@ describe("keeping a store's labels in step with Shopify", () => {
     await createShopifyReportingAdapter(source());
 
     expect(writes).toHaveLength(0);
+  });
+
+  it("follows the store's new currency instead of silencing the store, without rewriting the record", async () => {
+    // Amelia Bristol moved to the UK and switched the shop from CZK to GBP.
+    // The identity guard still holds (same shop id and domain); refusing the
+    // store over its currency would only lose its revenue from that day on.
+    // The stored currency is part of a bound source's identity (0056 refuses
+    // the write) and the sync receipts compare against it, so it is left as
+    // it is: the adapter prices from the verified currency and says so.
+    const { client, writes } = serviceDouble();
+    mocks.createServiceClient.mockReturnValue(client);
+    mocks.verifyReportingShop.mockResolvedValue(verifiedShop({ currencyCode: "GBP" }));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await expect(createShopifyReportingAdapter(source())).resolves.toBeTruthy();
+
+    expect(writes).toHaveLength(0);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("currency changed for connection 70000000-0000-4000-8000-000000000004: EUR -> GBP; pricing from GBP"),
+    );
+    warn.mockRestore();
   });
 
   it("records a domain the merchant removed altogether", async () => {

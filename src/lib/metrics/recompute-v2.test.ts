@@ -1424,7 +1424,10 @@ describe("V2 daily-metrics recompute", () => {
         undefined,
         "2026-08-09",
         "2026-08-15",
-      );
+        undefined,
+        // The legacy path prices former-currency orders too.
+        expect.objectContaining({ normalize: expect.any(Function) }),
+        );
       expect(db.upserts.flat().at(-1)).toMatchObject({ day: "2026-08-15" });
     } finally {
       vi.useRealTimers();

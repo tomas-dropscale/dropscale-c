@@ -921,7 +921,14 @@ async function syncAccountWindow(
       credential,
       account.shopify_client_id,
     );
-    const result = await fetchDailySales(account.shopify_url, token, from, to);
+    // An order placed before the merchant changed the store's currency is
+    // priced into today's at its own day's ECB rate, like the V2 adapter does.
+    const result = await fetchDailySales(account.shopify_url, token, from, to, undefined, {
+      normalize: async (foreign, shop, rangeFrom, rangeTo) => {
+        const pairs = await fxDailyRates(foreign, shop, rangeFrom, rangeTo);
+        return (day, amount) => amount * rateOn(pairs, day);
+      },
+    });
     sales = result.days;
     shopifySynced = true;
     // Capture the raw store-currency figures before the FX pass below rewrites

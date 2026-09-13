@@ -14,6 +14,7 @@ import {
   fetchCollectionProductKeys,
   fetchDailySales,
   resolveAdminToken,
+  type DailySalesNormalizer,
   type ShopifyGraphqlExecutor,
 } from "../shopify/client";
 
@@ -820,6 +821,23 @@ LIMIT ${SHOPIFYQL_ROW_LIMIT}`,
     .sort((left, right) => right.revenue - left.revenue || left.title.localeCompare(right.title));
 }
 
+/**
+ * Prices an order placed in a currency the shop no longer uses into the
+ * shop's current currency at its own day's ECB rate - the same table every
+ * other conversion here reads. A missing rate throws: booking an unconverted
+ * number as if converted is the one unacceptable outcome.
+ */
+const ecbNormalizer: DailySalesNormalizer = async (foreign, shop, from, to) => {
+  const pairs = await fxDailyRates(foreign, shop, from, to);
+  return (day, amount) => {
+    const rate = rateOn(pairs, day);
+    if (!Number.isFinite(rate) || rate <= 0) {
+      throw new Error(`No exchange rate from ${foreign} to ${shop} on ${day}.`);
+    }
+    return amount * rate;
+  };
+};
+
 function boundAdapter({
   shopDomain,
   accessToken,
@@ -855,6 +873,7 @@ function boundAdapter({
         from,
         to,
         graphql,
+        { normalize: ecbNormalizer },
       );
       if (currency(result.currency) !== verifiedCurrency) {
         throw new ShopifyReportingAdapterError(
@@ -1442,9 +1461,17 @@ export async function createShopifyReportingAdapter(
   }
   const verifiedCurrency = currency(verified.currencyCode);
   if (verifiedCurrency !== sourceCurrency) {
-    throw new ShopifyReportingAdapterError(
-      "currency_mismatch",
-      "The Shopify credential no longer matches the store currency.",
+    // A merchant can change the store's currency - Amelia Bristol went from
+    // CZK to GBP when it moved to the UK. Identity is proven above, so this
+    // is the same store, and refusing it would only silence its revenue for
+    // good. The adapter follows the store: every conversion below prices
+    // from the verified currency, and every order from the currency it was
+    // actually placed in (see fetchDailySales). The stored shopify_currency
+    // stays what it was at connection time - 0056 guards it as part of a
+    // bound source's identity, and the sync receipts are compared against
+    // it - so it is deliberately NOT rewritten here.
+    console.warn(
+      `Shopify store currency changed for connection ${shopify.connectionId}: ${sourceCurrency} -> ${verifiedCurrency}; pricing from ${verifiedCurrency}`,
     );
   }
 

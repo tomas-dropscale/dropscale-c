@@ -161,6 +161,23 @@ export type ShopifyGraphqlExecutor = <T>(
   variables?: Record<string, unknown>,
 ) => Promise<T>;
 
+/**
+ * Prices an order placed in a currency other than the shop's CURRENT one
+ * into the shop's currency, at the rate of the order's own day.
+ *
+ * A merchant can change the store currency, and Shopify keeps every earlier
+ * order in the currency it was placed in. Summing those as if they were in
+ * the new currency would be wrong by the whole exchange rate, so without a
+ * normalizer such an order is refused; the reporting adapter supplies one
+ * backed by the day's ECB rate.
+ */
+export type DailySalesNormalizer = (
+  foreignCurrency: string,
+  shopCurrency: string,
+  from: string,
+  to: string,
+) => Promise<(day: string, amount: number) => number>;
+
 export type ShopInfo = {
   name: string;
   currencyCode: string;
@@ -369,6 +386,14 @@ function finiteNonNegative(value: unknown, label: string): number {
   return parsed === 0 ? 0 : parsed;
 }
 
+function moneyCurrency(value: unknown, label: string): string {
+  const code = typeof value === "string" ? value.trim().toUpperCase() : "";
+  if (!/^[A-Z]{3}$/.test(code)) {
+    throw new ShopifyError(`Shopify returned a missing ${label} currency.`);
+  }
+  return code;
+}
+
 /**
  * Per-day sales for [from, to] (ISO dates, inclusive), plus the currency the
  * amounts are denominated in — the store's BASE currency, which is what
@@ -380,6 +405,10 @@ function finiteNonNegative(value: unknown, label: string): number {
  * Revenue is the TOTAL of every real order (test/cancelled aside), so it lines
  * up with Shopify's own sales. Payment status doesn't gate it — it's only
  * carried per order (`paid`) so the agency revenue share bills paid revenue.
+ *
+ * Every amount comes back in `currency`, the shop's current currency. An
+ * order placed before the merchant changed that currency is priced into it
+ * through `options.normalize`; with no normalizer such an order is refused.
  */
 export async function fetchDailySales(
   shopDomain: string,
@@ -387,6 +416,7 @@ export async function fetchDailySales(
   from: string,
   to: string,
   graphql: ShopifyGraphqlExecutor = shopifyGraphql,
+  options: { normalize?: DailySalesNormalizer } = {},
 ): Promise<{
   currency: string | null;
   timeZone: string;
@@ -407,15 +437,15 @@ export async function fetchDailySales(
         utmParameters: { source: string | null } | null;
       } | null;
     } | null;
-    totalPriceSet: { shopMoney: { amount: string } } | null;
-    totalRefundedSet: { shopMoney: { amount: string } } | null;
+    totalPriceSet: { shopMoney: { amount: string; currencyCode: string } } | null;
+    totalRefundedSet: { shopMoney: { amount: string; currencyCode: string } } | null;
     lineItems: {
       pageInfo: { hasNextPage: boolean };
       nodes: Array<{
         title: string;
         sku: string | null;
         quantity: number;
-        originalUnitPriceSet: { shopMoney: { amount: string } } | null;
+        originalUnitPriceSet: { shopMoney: { amount: string; currencyCode: string } } | null;
       }>;
     };
   };
@@ -474,15 +504,15 @@ export async function fetchDailySales(
                   utmParameters { source }
                 }
               }
-              totalPriceSet { shopMoney { amount } }
-              totalRefundedSet { shopMoney { amount } }
+              totalPriceSet { shopMoney { amount currencyCode } }
+              totalRefundedSet { shopMoney { amount currencyCode } }
               lineItems(first: 100) {
                 pageInfo { hasNextPage }
                 nodes {
                   title
                   sku
                   quantity
-                  originalUnitPriceSet { shopMoney { amount } }
+                  originalUnitPriceSet { shopMoney { amount currencyCode } }
                 }
               }
             }
@@ -538,6 +568,22 @@ export async function fetchDailySales(
   const syncedOrders: SyncedOrder[] = [];
   const seenOrders = new Set<string>();
 
+  // One converter per currency seen, resolved once; the shop's own needs none.
+  const converters = new Map<string, (day: string, amount: number) => number>();
+  const converterFor = async (orderCurrency: string) => {
+    if (orderCurrency === currency) return (_day: string, amount: number) => amount;
+    let convert = converters.get(orderCurrency);
+    if (!convert) {
+      if (!options.normalize) {
+        throw new ShopifyError(
+          `Shopify returned an order in ${orderCurrency}, but the store now reports in ${currency}.`,
+        );
+      }
+      convert = await options.normalize(orderCurrency, currency, from, to);
+      converters.set(orderCurrency, convert);
+    }
+    return convert;
+  };
   for (const order of orderNodes) {
     if (!/^gid:\/\/shopify\/Order\/\d+$/.test(order.id) || seenOrders.has(order.id)) {
       throw new ShopifyError("Shopify returned invalid order identity.");
@@ -563,13 +609,25 @@ export async function fetchDailySales(
     // GROSS order total (before refunds). Refunds are subtracted ONCE via
     // totalRefundedSet below — using currentTotalPriceSet here (already net of
     // refunds) would double-count them and understate net revenue.
-    const total = finiteNonNegative(
+    const rawTotal = finiteNonNegative(
       order.totalPriceSet?.shopMoney.amount,
       "order total",
     );
-    const refunded = order.totalRefundedSet === null
+    const rawRefunded = order.totalRefundedSet === null
       ? 0
       : finiteNonNegative(order.totalRefundedSet?.shopMoney.amount, "order refund");
+    // The currency the order was placed in - the shop's current one, or the
+    // one it had back then. Every money field of one order must agree.
+    const orderCurrency = moneyCurrency(order.totalPriceSet?.shopMoney.currencyCode, "order total");
+    if (
+      order.totalRefundedSet !== null &&
+      moneyCurrency(order.totalRefundedSet?.shopMoney.currencyCode, "order refund") !== orderCurrency
+    ) {
+      throw new ShopifyError("Shopify returned an order refund in another currency.");
+    }
+    const convert = await converterFor(orderCurrency);
+    const total = convert(day, rawTotal);
+    const refunded = convert(day, rawRefunded);
     if (order.lineItems.pageInfo.hasNextPage) {
       throw new ShopifyError("A Shopify order has too many lines for an exact report.");
     }
@@ -578,14 +636,21 @@ export async function fetchDailySales(
       if (!title || !Number.isSafeInteger(line.quantity) || line.quantity < 0) {
         throw new ShopifyError("Shopify returned an invalid order line.");
       }
+      const unitPrice = finiteNonNegative(
+        line.originalUnitPriceSet?.shopMoney.amount,
+        "order line price",
+      );
+      if (
+        moneyCurrency(line.originalUnitPriceSet?.shopMoney.currencyCode, "order line price") !==
+        orderCurrency
+      ) {
+        throw new ShopifyError("Shopify returned an order line in another currency.");
+      }
       return {
         productKey: line.sku?.trim() || title,
         title,
         quantity: line.quantity,
-        unitPrice: finiteNonNegative(
-          line.originalUnitPriceSet?.shopMoney.amount,
-          "order line price",
-        ),
+        unitPrice: convert(day, unitPrice),
       };
     });
 
