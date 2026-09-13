@@ -217,8 +217,9 @@ export type DailySales = {
   orders: number;
   refunds: number;
   /** Line-item quantities summed — how many things were sold, not how many
-   *  orders. Not netted against refunds: that needs per-line refund
-   *  quantities, which this query does not ask for. */
+   *  orders. Not netted against refunds: a refunded item was still sold. A
+   *  unit an edit took off the order before the customer paid for it (an
+   *  upsell whose charge failed) was not, and is not counted. */
   units: number;
   /**
    * Orders NOT referred by Instagram or Facebook — the store's conversions
@@ -232,8 +233,8 @@ export type DailySales = {
    * count above, so "N conversions worth €X" is one consistent statement.
    *
    * Gross order totals, like `revenue`: an order counted as a conversion has its
-   * value counted too, refunded or not. Netting per order would need per-line
-   * refund data this query does not ask for.
+   * value counted too, refunded or not - only what the customer never paid
+   * for is left out, as in `revenue`.
    */
   attributedRevenue: number;
 };
@@ -252,7 +253,8 @@ export type SyncedOrderLine = {
 export type SyncedOrder = {
   /** ISO day the order was created. */
   date: string;
-  /** Gross order total (after discounts, incl. shipping, BEFORE refunds), store base currency. */
+  /** Gross order total (after discounts, incl. shipping, BEFORE refunds, without
+   *  any line the customer never paid for), store base currency. */
   total: number;
   /** Whether the customer actually paid — the revenue-share base uses only these. */
   paid: boolean;
@@ -372,7 +374,7 @@ function reportingDay(timestamp: string, formatter: Intl.DateTimeFormat): string
   return `${parts.year}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`;
 }
 
-function finiteNonNegative(value: unknown, label: string): number {
+function finiteAmount(value: unknown, label: string): number {
   if (
     (typeof value !== "number" && typeof value !== "string") ||
     (typeof value === "string" && value.trim() === "")
@@ -380,10 +382,18 @@ function finiteNonNegative(value: unknown, label: string): number {
     throw new ShopifyError(`Shopify returned a missing ${label}.`);
   }
   const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed < 0) {
+  if (!Number.isFinite(parsed)) {
     throw new ShopifyError(`Shopify returned an invalid ${label}.`);
   }
   return parsed === 0 ? 0 : parsed;
+}
+
+function finiteNonNegative(value: unknown, label: string): number {
+  const parsed = finiteAmount(value, label);
+  if (parsed < 0) {
+    throw new ShopifyError(`Shopify returned an invalid ${label}.`);
+  }
+  return parsed;
 }
 
 function moneyCurrency(value: unknown, label: string): string {
@@ -405,6 +415,26 @@ function moneyCurrency(value: unknown, label: string): string {
  * Revenue is the TOTAL of every real order (test/cancelled aside), so it lines
  * up with Shopify's own sales. Payment status doesn't gate it — it's only
  * carried per order (`paid`) so the agency revenue share bills paid revenue.
+ *
+ * An order counts AS THE CUSTOMER PAID FOR IT. A post-purchase upsell
+ * (AfterSell) is added to the order after checkout and, when its charge
+ * fails, taken off again by an edit. Shopify writes that removal as a refund
+ * that moves no money and keeps the item's price in `totalPriceSet` - money
+ * the customer never paid and Shopify's own sales do not count. What was
+ * never paid is the gap `totalPriceSet - totalReceivedSet -
+ * totalOutstandingSet`: an unpaid order is all outstanding, a paid one all
+ * received, a refunded one still received (refunds are their own field), so
+ * the gap is what an edit took off the order before it was paid for. Gross
+ * revenue is the total without it; refunds come off once, from the money
+ * that moved, as before. An item taken off a PAID order and settled outside
+ * Shopify opens no gap and keeps counting, as it always did.
+ *
+ * Units follow the same money. A refund line item is an unpaid removal only
+ * while its value fits in that gap - the lines of refunds that moved no
+ * money first (how Shopify records the edit), then any other. Beyond the
+ * gap the item was paid for, and however it left the order - refunded for
+ * money, returned, taken off and refunded as a custom amount - it keeps its
+ * unit and its cost.
  *
  * Every amount comes back in `currency`, the shop's current currency. An
  * order placed before the merchant changed that currency is priced into it
@@ -437,15 +467,32 @@ export async function fetchDailySales(
         utmParameters: { source: string | null } | null;
       } | null;
     } | null;
+    taxesIncluded: boolean;
     totalPriceSet: { shopMoney: { amount: string; currencyCode: string } } | null;
+    totalReceivedSet: { shopMoney: { amount: string; currencyCode: string } } | null;
+    totalOutstandingSet: { shopMoney: { amount: string; currencyCode: string } } | null;
     totalRefundedSet: { shopMoney: { amount: string; currencyCode: string } } | null;
+    refunds: RefundNode[];
     lineItems: {
       pageInfo: { hasNextPage: boolean };
       nodes: Array<{
+        id: string;
         title: string;
         sku: string | null;
         quantity: number;
         originalUnitPriceSet: { shopMoney: { amount: string; currencyCode: string } } | null;
+      }>;
+    };
+  };
+  type RefundNode = {
+    totalRefundedSet: { shopMoney: { amount: string } } | null;
+    refundLineItems: {
+      pageInfo: { hasNextPage: boolean };
+      nodes: Array<{
+        quantity: number;
+        subtotalSet: { shopMoney: { amount: string } } | null;
+        totalTaxSet: { shopMoney: { amount: string } } | null;
+        lineItem: { id: string } | null;
       }>;
     };
   };
@@ -504,11 +551,27 @@ export async function fetchDailySales(
                   utmParameters { source }
                 }
               }
+              taxesIncluded
               totalPriceSet { shopMoney { amount currencyCode } }
+              totalReceivedSet { shopMoney { amount currencyCode } }
+              totalOutstandingSet { shopMoney { amount currencyCode } }
               totalRefundedSet { shopMoney { amount currencyCode } }
+              refunds {
+                totalRefundedSet { shopMoney { amount } }
+                refundLineItems(first: 100) {
+                  pageInfo { hasNextPage }
+                  nodes {
+                    quantity
+                    subtotalSet { shopMoney { amount } }
+                    totalTaxSet { shopMoney { amount } }
+                    lineItem { id }
+                  }
+                }
+              }
               lineItems(first: 100) {
                 pageInfo { hasNextPage }
                 nodes {
+                  id
                   title
                   sku
                   quantity
@@ -606,19 +669,32 @@ export async function fetchDailySales(
       !!order.displayFinancialStatus &&
       PAID_FINANCIAL_STATUSES.has(order.displayFinancialStatus);
 
-    // GROSS order total (before refunds). Refunds are subtracted ONCE via
-    // totalRefundedSet below — using currentTotalPriceSet here (already net of
-    // refunds) would double-count them and understate net revenue.
-    const rawTotal = finiteNonNegative(
-      order.totalPriceSet?.shopMoney.amount,
-      "order total",
-    );
+    // GROSS order total (before refunds): what the customer paid or still
+    // owes. totalPriceSet also carries an upsell an edit took off the order
+    // before its charge went through - that unpaid gap comes off (never
+    // below zero: an over-receipt is not a reason to count less). Refunds
+    // are subtracted ONCE via totalRefundedSet below — using
+    // currentTotalPriceSet here (already net of returns) would double-count
+    // them and understate net revenue.
+    const rawListed = finiteNonNegative(order.totalPriceSet?.shopMoney.amount, "order total");
+    const rawReceived = finiteNonNegative(order.totalReceivedSet?.shopMoney.amount, "order balance");
+    // A balance the merchant owes back shows as zero outstanding, not a
+    // negative one; should it ever go negative, that is not unpaid revenue.
+    const rawOutstanding = Math.max(0, finiteAmount(order.totalOutstandingSet?.shopMoney.amount, "order balance"));
+    const rawUnpaid = Math.max(0, Number((rawListed - rawReceived - rawOutstanding).toFixed(6)));
+    const rawTotal = Number((rawListed - rawUnpaid).toFixed(6));
     const rawRefunded = order.totalRefundedSet === null
       ? 0
       : finiteNonNegative(order.totalRefundedSet?.shopMoney.amount, "order refund");
     // The currency the order was placed in - the shop's current one, or the
     // one it had back then. Every money field of one order must agree.
     const orderCurrency = moneyCurrency(order.totalPriceSet?.shopMoney.currencyCode, "order total");
+    if (
+      moneyCurrency(order.totalReceivedSet?.shopMoney.currencyCode, "order balance") !== orderCurrency ||
+      moneyCurrency(order.totalOutstandingSet?.shopMoney.currencyCode, "order balance") !== orderCurrency
+    ) {
+      throw new ShopifyError("Shopify returned an order balance in another currency.");
+    }
     if (
       order.totalRefundedSet !== null &&
       moneyCurrency(order.totalRefundedSet?.shopMoney.currencyCode, "order refund") !== orderCurrency
@@ -631,11 +707,54 @@ export async function fetchDailySales(
     if (order.lineItems.pageInfo.hasNextPage) {
       throw new ShopifyError("A Shopify order has too many lines for an exact report.");
     }
-    const lines = order.lineItems.nodes.map((line) => {
+    // Units the customer never paid for, per line. A refund line item is an
+    // unpaid removal only while its value fits in the unpaid gap, first come
+    // first matched: the lines of refunds that moved no money first - that is
+    // how Shopify records the edit - then, only while a gap is left, lines of
+    // refunds that also moved money (shipping refunded along with the
+    // removal). One beyond the gap was paid for and settled some other way:
+    // it stays sold, like a refund for money.
+    const removed: Array<{ id: string; quantity: number; value: number; moved: boolean }> = [];
+    for (const refund of order.refunds) {
+      if (refund.refundLineItems.pageInfo.hasNextPage) {
+        throw new ShopifyError("A Shopify refund has too many lines for an exact report.");
+      }
+      const moved = finiteNonNegative(refund.totalRefundedSet?.shopMoney.amount, "refund total") > 0;
+      for (const item of refund.refundLineItems.nodes) {
+        if (!item.lineItem?.id || !Number.isSafeInteger(item.quantity) || item.quantity < 0) {
+          throw new ShopifyError("Shopify returned an invalid refund line.");
+        }
+        // A line's subtotal already holds the tax where the store's prices
+        // include it; elsewhere the tax sits on top.
+        const value =
+          finiteNonNegative(item.subtotalSet?.shopMoney.amount, "refund line subtotal") +
+          (order.taxesIncluded ? 0 : finiteNonNegative(item.totalTaxSet?.shopMoney.amount, "refund line tax"));
+        removed.push({ id: item.lineItem.id, quantity: item.quantity, value, moved });
+      }
+    }
+    const unpaidUnits = new Map<string, number>();
+    let unpaidLeft = rawUnpaid;
+    for (const pass of [false, true]) {
+      for (const item of removed) {
+        // A cent of tolerance: the gap comes from rounded money fields.
+        if (item.moved !== pass || unpaidLeft <= 0 || item.value <= 0 || item.value > unpaidLeft + 0.011) {
+          continue;
+        }
+        unpaidLeft = Math.max(0, Number((unpaidLeft - item.value).toFixed(6)));
+        unpaidUnits.set(item.id, (unpaidUnits.get(item.id) ?? 0) + item.quantity);
+      }
+    }
+    const lines = order.lineItems.nodes.flatMap((line) => {
       const title = typeof line.title === "string" ? line.title.trim() : "";
       if (!title || !Number.isSafeInteger(line.quantity) || line.quantity < 0) {
         throw new ShopifyError("Shopify returned an invalid order line.");
       }
+      const unpaid = unpaidUnits.get(line.id) ?? 0;
+      if (unpaid > line.quantity) {
+        throw new ShopifyError("Shopify returned an invalid refund line.");
+      }
+      const sold = line.quantity - unpaid;
+      if (sold === 0) return [];
       const unitPrice = finiteNonNegative(
         line.originalUnitPriceSet?.shopMoney.amount,
         "order line price",
@@ -646,12 +765,12 @@ export async function fetchDailySales(
       ) {
         throw new ShopifyError("Shopify returned an order line in another currency.");
       }
-      return {
+      return [{
         productKey: line.sku?.trim() || title,
         title,
-        quantity: line.quantity,
+        quantity: sold,
         unitPrice: convert(day, unitPrice),
-      };
+      }];
     });
 
     // The store's conversions: every real order except the ones Instagram or

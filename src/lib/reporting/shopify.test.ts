@@ -124,12 +124,17 @@ function orderResponse(currencyCode = "EUR") {
               utmParameters: { source: "google" },
             },
           },
+          taxesIncluded: false,
           totalPriceSet: { shopMoney: { amount: "120.50", currencyCode } },
+          totalReceivedSet: { shopMoney: { amount: "120.50", currencyCode } },
+          totalOutstandingSet: { shopMoney: { amount: "0.00", currencyCode } },
           totalRefundedSet: { shopMoney: { amount: "5.00", currencyCode } },
+          refunds: [],
           lineItems: {
             pageInfo: { hasNextPage: false },
             nodes: [
               {
+                id: "gid://shopify/LineItem/1",
                 title: "Summer Dress",
                 sku: "SUMMER-1",
                 quantity: 2,
@@ -433,6 +438,8 @@ describe("V2 Shopify reporting adapter", () => {
     const response = orderResponse("GBP");
     const node = response.orders.nodes[0];
     node.totalPriceSet.shopMoney.currencyCode = "CZK";
+    node.totalReceivedSet.shopMoney.currencyCode = "CZK";
+    node.totalOutstandingSet.shopMoney.currencyCode = "CZK";
     node.totalRefundedSet.shopMoney.currencyCode = "CZK";
     node.lineItems.nodes[0].originalUnitPriceSet.shopMoney.currencyCode = "CZK";
     mocks.reportingShopifyGraphql.mockResolvedValue(response);
@@ -455,6 +462,8 @@ describe("V2 Shopify reporting adapter", () => {
     mocks.verifyReportingShop.mockResolvedValue(verifiedShop({ currencyCode: "GBP" }));
     const response = orderResponse("GBP");
     response.orders.nodes[0].totalPriceSet.shopMoney.currencyCode = "CZK";
+    response.orders.nodes[0].totalReceivedSet.shopMoney.currencyCode = "CZK";
+    response.orders.nodes[0].totalOutstandingSet.shopMoney.currencyCode = "CZK";
     response.orders.nodes[0].totalRefundedSet.shopMoney.currencyCode = "CZK";
     response.orders.nodes[0].lineItems.nodes[0].originalUnitPriceSet.shopMoney.currencyCode = "CZK";
     mocks.reportingShopifyGraphql.mockResolvedValue(response);
