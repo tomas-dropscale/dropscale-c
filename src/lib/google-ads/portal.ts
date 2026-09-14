@@ -11,6 +11,7 @@ import type { RangeSelection } from "@/lib/portal/range";
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 const MAX_CAMPAIGN_ROWS = 1_001;
 const MAX_CAMPAIGN_URL_ROWS = 10_001;
+const MAX_LANDING_PAGE_ROWS = 10_001;
 const MAX_CAMPAIGN_TIMELINE_ROWS = 25_001;
 const MAX_CREATIVE_ROWS = 1_001;
 const MAX_PRODUCT_ROWS = 10_001;
@@ -166,6 +167,9 @@ export async function fetchCampaignNames(
  * like it might carry them. These exist only on the live path, which is where
  * the daily report reads from.
  */
+/** One page a campaign's clicks landed on, with every click that landed there in the range. */
+export type CampaignLandingPage = { url: string; clicks: number };
+
 export type LiveCampaign = Campaign & {
   /** Exact provider identity. Never derive this back out of the display id. */
   providerCampaignId: string;
@@ -183,6 +187,15 @@ export type LiveCampaign = Campaign & {
   googleRoas: number | null;
   /** Exact ad landing pages reported by Google; absent when the provider does not expose them. */
   finalUrls?: string[];
+  /**
+   * Where the campaign's clicks actually landed in the range, one entry per
+   * page with its clicks summed. Present only when the caller asked for the
+   * pages (see fetchLiveCampaignsDetailed), read best-effort next to the
+   * final URLs, and absent when that read failed or landed nothing.
+   * Performance Max and Shopping campaigns have no ad-level final URL, so
+   * this is the only URL evidence they carry.
+   */
+  landingPages?: CampaignLandingPage[];
   /**
    * The currency the daily budget is set in - the Google account's own. Set
    * only when the row's money columns were converted into another currency
@@ -632,13 +645,21 @@ export async function fetchLiveGoogleCampaignBreakdowns(
   return [...creatives, ...products];
 }
 
-/** Live campaigns for one customer, with everything Google will give us. */
+/**
+ * Live campaigns for one customer, with everything Google will give us.
+ *
+ * Where the clicks landed is read only on request: the store analytics sheet
+ * is its one reader, and read by default the pages would cost the portal, the
+ * daily report and the campaign snapshots a third Google query each and ride,
+ * unused, into the portal's client payload and the stored snapshots.
+ */
 export async function fetchLiveCampaignsDetailed(
   customerId: string,
   refreshToken: string,
   accountId: string,
   range: RangeSelection,
   expectedCurrency?: string,
+  options: { landingPages?: boolean } = {},
 ): Promise<LiveCampaign[]> {
   const query = `
     SELECT
@@ -663,7 +684,7 @@ export async function fetchLiveCampaignsDetailed(
     LIMIT ${MAX_CAMPAIGN_ROWS}
   `;
 
-  const [rows, finalUrlRows] = await Promise.all([
+  const [rows, finalUrlRows, landingRows] = await Promise.all([
     searchGoogleAds(customerId, refreshToken, query),
     searchGoogleAds(
       customerId,
@@ -681,6 +702,22 @@ export async function fetchLiveCampaignsDetailed(
       ORDER BY campaign.id, ad_group_ad.ad.id
       LIMIT ${MAX_CAMPAIGN_URL_ROWS}`,
     ).catch(() => []),
+    // Where the clicks landed, for every campaign type: Performance Max and
+    // Shopping have no ad-level final URL, so this is their only URL evidence.
+    // Best-effort like the final URLs: a failed read leaves the pages absent.
+    options.landingPages
+      ? searchGoogleAds(
+          customerId,
+          refreshToken,
+          `SELECT
+            campaign.id,
+            landing_page_view.unexpanded_final_url,
+            metrics.clicks
+          FROM landing_page_view
+          WHERE ${dateClause(range)}
+          LIMIT ${MAX_LANDING_PAGE_ROWS}`,
+        ).catch(() => null)
+      : null,
   ]);
   assertBounded(rows, "campaign", MAX_CAMPAIGN_ROWS);
   const seen = new Set<string>();
@@ -712,6 +749,37 @@ export async function fetchLiveCampaignsDetailed(
   } catch {
     // Landing-page metadata is supplemental: never hide valid campaign metrics.
     finalUrlsByCampaign.clear();
+  }
+
+  // The same URL reached from several ad groups is one page: clicks are
+  // summed per campaign and page. A row without a page or a click count is
+  // skipped on its own, and a malformed report drops every page, never the
+  // campaigns.
+  const landingPagesByCampaign = new Map<string, Map<string, number>>();
+  try {
+    if (landingRows) {
+      assertBounded(landingRows, "landing page", MAX_LANDING_PAGE_ROWS);
+      for (const row of landingRows) {
+        const campaignId = integerText(row.campaign?.id, "campaign identity");
+        const view = row.landingPageView;
+        const rawUrl = view && typeof view === "object" && !Array.isArray(view)
+          ? (view as Record<string, unknown>).unexpandedFinalUrl
+          : undefined;
+        const url = typeof rawUrl === "string" ? rawUrl.trim() : "";
+        if (!url || url.length > 4_096) continue;
+        const rawClicks = row.metrics?.clicks;
+        const clicks = typeof rawClicks === "number" ||
+            (typeof rawClicks === "string" && rawClicks.trim() !== "")
+          ? Number(rawClicks)
+          : Number.NaN;
+        if (!Number.isFinite(clicks) || clicks < 0) continue;
+        const pages = landingPagesByCampaign.get(campaignId) ?? new Map<string, number>();
+        pages.set(url, (pages.get(url) ?? 0) + clicks);
+        landingPagesByCampaign.set(campaignId, pages);
+      }
+    }
+  } catch {
+    landingPagesByCampaign.clear();
   }
 
   // The REST API serialises fields as camelCase (costMicros, startDateTime), even
@@ -758,6 +826,9 @@ export async function fetchLiveCampaignsDetailed(
       : nonNegative(budget.amountMicros, "daily budget") / 1_000_000;
 
     const finalUrls = [...(finalUrlsByCampaign.get(providerCampaignId) ?? [])].sort();
+    const landingPages = [...(landingPagesByCampaign.get(providerCampaignId) ?? [])]
+      .map(([url, clicks]) => ({ url, clicks }))
+      .sort((left, right) => right.clicks - left.clicks || left.url.localeCompare(right.url));
     return {
       // Not a DB uuid — the table is never written in the live path. Prefixed
       // so it can never collide with a real row id if the two ever mix.
@@ -783,6 +854,7 @@ export async function fetchLiveCampaignsDetailed(
       shoppingFeed: hasShoppingFeed(campaign),
       googleRoas: spend > 0 ? conversionValue / spend : null,
       ...(finalUrls.length > 0 ? { finalUrls } : {}),
+      ...(landingPages.length > 0 ? { landingPages } : {}),
     };
   });
 }

@@ -48,6 +48,35 @@ const row = {
   conversionValue: 40,
 };
 
+/** One exact Windsor campaign row for the verified source, without URL evidence. */
+function campaignRow(campaignId: string) {
+  return {
+    accountId: "111-222-3333",
+    customerId: "1112223333",
+    currency: "EUR",
+    timeZone: "Europe/Lisbon",
+    campaignId,
+    name: `Campaign ${campaignId}`,
+    status: "ENABLED" as const,
+    advertisingChannelType: "SEARCH",
+    shoppingFeed: false,
+    biddingStrategyType: null,
+    startDate: null,
+    dailyBudget: 10,
+    spend: 100,
+    impressions: 1_000,
+    clicks: 50,
+    conversions: 4,
+    conversionValue: 320,
+  };
+}
+
+/** A Google child source anchored to a store with two domain aliases, so the owner rule has hosts to check. */
+const anchoredSource: CanonicalReportingSource = {
+  ...source,
+  anchorShopifyDomains: { domain: "shop.myshopify.com", primaryDomain: "https://www.shop.example/" },
+};
+
 describe("Google V2 reporting adapter", () => {
   it("projects the exact Windsor account into the Google metric family", async () => {
     const fetcher = vi.fn(async () => [row]);
@@ -131,6 +160,7 @@ describe("Google V2 reporting adapter", () => {
         source,
         "2026-08-01",
         "2026-08-13",
+        null,
         fetcher,
       ),
     ).resolves.toEqual([
@@ -185,9 +215,155 @@ describe("Google V2 reporting adapter", () => {
         source,
         "2026-08-13",
         "2026-08-13",
+        null,
         fetcher,
       ),
     ).rejects.toThrow(/different Google Ads reporting identity/);
+  });
+
+  it("reads no landing pages unless asked, so the portal and the snapshots never carry them", async () => {
+    // The store analytics sheet is the one reader of where the clicks landed.
+    // Every other caller (the portal's campaign table, the admin campaign
+    // snapshot) gets the campaigns alone: no second provider request, and no
+    // list of thousands of URLs in a client payload or a stored row.
+    const fetcher = vi.fn(async () => [campaignRow("42")]);
+
+    const campaigns = await fetchGoogleReportingCampaigns(
+      source,
+      "2026-08-01",
+      "2026-08-13",
+      undefined,
+      fetcher,
+    );
+
+    expect(campaigns).toHaveLength(1);
+    expect(campaigns[0]).toMatchObject({ providerCampaignId: "42", spend: 100 });
+    expect(campaigns[0]).not.toHaveProperty("landingPages");
+  });
+
+  it("keeps only the landing pages on the store's own domain, as the final URLs are kept", async () => {
+    // A reused Google account: this store's PMax campaign and the previous
+    // store's, neither with a final URL, so both stay attributed by the owner
+    // rule. The previous store's clicks landed on its own domain, and its
+    // collection handle exists here too (cloned stores share handles), so
+    // that page must not name a collection in this store.
+    const fetcher = vi.fn(async () => [
+      { ...campaignRow("84"), name: "PMax - Bags", advertisingChannelType: "PERFORMANCE_MAX" },
+      { ...campaignRow("85"), name: "PMax - Old store", advertisingChannelType: "PERFORMANCE_MAX" },
+    ]);
+    const landingRows = [
+      { campaignId: "84", url: "https://shop.example/collections/bags", clicks: 30 },
+      // Both aliases of the store, and a subdomain of one, are the store.
+      { campaignId: "84", url: "https://www.shop.example/collections/bags?gad_source=1", clicks: 20 },
+      { campaignId: "84", url: "https://eu.shop.example/collections/bags", clicks: 10 },
+      { campaignId: "84", url: "https://shop.myshopify.com/", clicks: 5 },
+      // No host evidence: kept, as a final URL without a host would be.
+      { campaignId: "84", url: "/collections/bags", clicks: 1 },
+      { campaignId: "85", url: "https://old-store.example/collections/best-sellers", clicks: 900 },
+      { campaignId: "85", url: "https://old-store.example/", clicks: 100 },
+      // Even a page of this store's makes up no majority of that campaign.
+      { campaignId: "85", url: "https://shop.example/collections/best-sellers", clicks: 3 },
+    ];
+
+    const anchored = await fetchGoogleReportingCampaigns(
+      anchoredSource,
+      "2026-08-01",
+      "2026-08-13",
+      async () => landingRows,
+      fetcher,
+    );
+    expect(anchored.map((campaign) => [campaign.providerCampaignId, campaign.landingPages])).toEqual([
+      ["84", [
+        { url: "https://shop.example/collections/bags", clicks: 30 },
+        { url: "https://www.shop.example/collections/bags?gad_source=1", clicks: 20 },
+        { url: "https://eu.shop.example/collections/bags", clicks: 10 },
+        { url: "https://shop.myshopify.com/", clicks: 5 },
+        { url: "/collections/bags", clicks: 1 },
+      ]],
+      ["85", [{ url: "https://shop.example/collections/best-sellers", clicks: 3 }]],
+    ]);
+
+    // A source with no verifiable store domain cannot disprove any page, so
+    // every page stays, exactly as every campaign does.
+    const unanchored = await fetchGoogleReportingCampaigns(
+      source,
+      "2026-08-01",
+      "2026-08-13",
+      async () => landingRows,
+      fetcher,
+    );
+    expect(unanchored.map((campaign) => campaign.landingPages?.length)).toEqual([5, 3]);
+  });
+
+  it("attaches where each campaign's clicks landed, summed per page, next to its final URLs", async () => {
+    const fetcher = vi.fn(async () => [
+      { ...campaignRow("42"), finalUrls: ["https://shop.example/collections/summer"] },
+      // A Performance Max campaign: no ad-level final URL at all.
+      { ...campaignRow("84"), name: "PMax - Total Feed", advertisingChannelType: "PERFORMANCE_MAX" },
+      campaignRow("99"),
+    ]);
+    const landingFetcher = vi.fn(async () => [
+      { campaignId: "42", url: "https://shop.example/collections/summer?gad_source=1", clicks: 100 },
+      { campaignId: "84", url: "https://shop.example/collections/bags", clicks: 30 },
+      { campaignId: "84", url: "https://shop.example/", clicks: 5 },
+      // The same page twice over: one entry with the clicks summed.
+      { campaignId: "84", url: "https://shop.example/collections/bags", clicks: 20 },
+    ]);
+
+    const campaigns = await fetchGoogleReportingCampaigns(
+      source,
+      "2026-08-01",
+      "2026-08-13",
+      landingFetcher,
+      fetcher,
+    );
+
+    expect(landingFetcher).toHaveBeenCalledWith("111-222-3333", "2026-08-01", "2026-08-13");
+    expect(campaigns.map((campaign) => [campaign.providerCampaignId, campaign.finalUrls, campaign.landingPages])).toEqual([
+      ["42", ["https://shop.example/collections/summer"], [
+        { url: "https://shop.example/collections/summer?gad_source=1", clicks: 100 },
+      ]],
+      ["84", undefined, [
+        { url: "https://shop.example/collections/bags", clicks: 50 },
+        { url: "https://shop.example/", clicks: 5 },
+      ]],
+      // Landed nothing in the range: no field, rather than an empty list.
+      ["99", undefined, undefined],
+    ]);
+  });
+
+  it("keeps the campaigns when the landing-page read fails, and says so once", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const fetcher = vi.fn(async () => [campaignRow("42")]);
+    const landingFetcher = vi.fn(async () => {
+      throw new Error("Windsor is rate limiting requests.");
+    });
+
+    const campaigns = await fetchGoogleReportingCampaigns(
+      source,
+      "2026-08-01",
+      "2026-08-13",
+      landingFetcher,
+      fetcher,
+    );
+
+    expect(campaigns).toHaveLength(1);
+    expect(campaigns[0]).toMatchObject({ providerCampaignId: "42", spend: 100 });
+    expect(campaigns[0]).not.toHaveProperty("landingPages");
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]?.[0]).toContain("landing pages could not be read");
+    warn.mockRestore();
+  });
+
+  it("still fails the campaign read when the campaign fetch itself rejects", async () => {
+    // Best effort is for the landing pages only: the campaign rows stay exact.
+    const failure = new Error("campaign read failed");
+    const fetcher = vi.fn(async () => {
+      throw failure;
+    });
+    await expect(
+      fetchGoogleReportingCampaigns(source, "2026-08-01", "2026-08-13", null, fetcher),
+    ).rejects.toBe(failure);
   });
 
   it("projects exact Demand Gen ads into the unified campaign detail contract", async () => {

@@ -63,7 +63,7 @@ import {
 } from "@/lib/admin/reporting-snapshots";
 import { createServiceClient } from "@/lib/supabase/service";
 import type { ClientShopifyConnection, Json } from "@/lib/supabase/types";
-import { hasWindsorEnv } from "@/lib/windsor/client";
+import { fetchGoogleAdsLandingPages, hasWindsorEnv } from "@/lib/windsor/client";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
@@ -195,10 +195,13 @@ export type AdminAnalyticsCampaign = {
   shopifyUnits?: number | null;
   /**
    * The collection page the campaign sends people to: the one its final URLs
-   * name (or its name does, when the URLs name none), provided the store has
-   * that collection. Set whether or not the collection sold in the period.
+   * name (or its name does, when the URLs name none, or where its clicks
+   * landed when neither says), provided the store has that collection. Set
+   * whether or not the collection sold in the period.
    */
   collectionHandle?: string | null;
+  /** Which evidence named that collection, so the sheet can say so; absent when there is none. */
+  collectionSource?: CampaignCollectionSource;
   /** How many campaigns land on that same collection, this one included. */
   collectionSharedWith?: number | null;
   ctr: number | null;
@@ -917,7 +920,9 @@ async function loadGoogleCampaigns(
       const results = await Promise.allSettled(
         topology.googleSources.map(async (source) => {
           const [rows, timeline, rates] = await Promise.all([
-            fetchGoogleReportingCampaigns(source, range.from, range.to),
+            // The sheet is the one reader of where the clicks landed, so it
+            // is the one caller that asks for them.
+            fetchGoogleReportingCampaigns(source, range.from, range.to, fetchGoogleAdsLandingPages),
             fetchGoogleReportingCampaignTimeline(source, range.from, range.to),
             reportingMoneyRates(source, targetCurrency, range.from, range.to),
           ]);
@@ -1005,6 +1010,8 @@ async function loadGoogleCampaigns(
         account.id,
         range as RangeSelection,
         account.currency,
+        // The sheet is the one reader of where the clicks landed.
+        { landingPages: true },
       ),
       fetchLiveCampaignTimeline(
         account.google_ads_customer_id,
@@ -1623,6 +1630,7 @@ function campaignFamily(
       shopifyRevenue: matched?.revenue ?? null,
       shopifyUnits: unitRows ? unitRows.reduce((sum, row) => sum + row.units, 0) : null,
       collectionHandle: landed?.handle ?? null,
+      ...(landed ? { collectionSource: landed.source } : {}),
       collectionSharedWith: landed?.sharedWith ?? null,
       ctr: campaign.impressions > 0 ? campaign.clicks / campaign.impressions : null,
       cpc: campaign.clicks > 0 ? spend / campaign.clicks : null,
@@ -2003,6 +2011,8 @@ export type CampaignCollectionAttribution = Map<
   string,
   {
     handle: string;
+    /** Which evidence named the handle: final URLs, the campaign name, or where its clicks landed. */
+    source: CampaignCollectionSource;
     sharedWith: number;
     /** Whether the store's product costs were readable at all. */
     costsKnown: boolean;
@@ -2025,26 +2035,83 @@ function normalizedLandingPath(path: string): string {
   return decodePercentEscapes(bare).trim().toLowerCase().replace(/\/+$/, "");
 }
 
+/** Which evidence named a campaign's collection, in the order it is consulted. */
+export type CampaignCollectionSource = "final_url" | "name" | "landing";
+
 /**
- * The one collection a campaign lands on, or null.
+ * The collection a campaign's clicks predominantly landed on, or null.
+ *
+ * Performance Max and Shopping campaigns carry no ad-level final URL, so the
+ * only page evidence they have is where their clicks went. Clicks are grouped
+ * by the collection their landing page names (query strings, trailing slashes
+ * and percent-escapes fall away in the helper), and a collection counts as
+ * the campaign's when it took at least two thirds of EVERY landing click,
+ * homepage and product pages included. A feed campaign that scatters its
+ * clicks over product pages, or lands most of them on the homepage, names
+ * nothing: its sales cannot be read from one collection. The threshold also
+ * rules out a tie, since two collections cannot both hold two thirds.
+ *
+ * The host is not checked here: a page on another store's domain never
+ * arrives, because the reporting read drops it by the owner rule (see
+ * landingPagesByCampaign in reporting/google), and the live read serves an
+ * account that is the store's own.
+ */
+export function dominantLandedCollection(
+  landingPages: ReadonlyArray<{ url: string; clicks: number }> | null | undefined,
+): string | null {
+  if (!landingPages?.length) return null;
+  let total = 0;
+  const clicksByHandle = new Map<string, number>();
+  for (const page of landingPages) {
+    const clicks = Number.isFinite(page.clicks) && page.clicks > 0 ? page.clicks : 0;
+    total += clicks;
+    const handle = collectionHandleFromUrl(page.url);
+    if (handle) clicksByHandle.set(handle, (clicksByHandle.get(handle) ?? 0) + clicks);
+  }
+  if (total <= 0) return null;
+  let top: { handle: string; clicks: number } | null = null;
+  for (const [handle, clicks] of clicksByHandle) {
+    if (!top || clicks > top.clicks) top = { handle, clicks };
+  }
+  return top && top.clicks * 3 >= total * 2 ? top.handle : null;
+}
+
+/**
+ * The one collection a campaign lands on, with the evidence that named it,
+ * or null.
  *
  * The final URLs decide: exactly one collection among them names the page.
  * Only when the URLs name none does the campaign name stand in - a revenue
  * share names its deal there ("... /collections/b 5%"), and a name that
  * differs from the URLs must not cancel them, as it did when both were read
- * together. Two or more collections in the URLs land nowhere in particular.
+ * together. When neither says, the page most of the clicks landed on does
+ * (see dominantLandedCollection), which is how a Performance Max campaign
+ * with no final URL at all still gets a collection basis. Two or more
+ * collections in the URLs land nowhere in particular, whatever the name or
+ * the clicks say.
  */
-export function campaignCollectionHandle(
-  campaign: Pick<LiveCampaign, "name" | "finalUrls">,
-): string | null {
+export function campaignCollection(
+  campaign: Pick<LiveCampaign, "name" | "finalUrls" | "landingPages">,
+): { handle: string; source: CampaignCollectionSource } | null {
   const fromUrls = new Set(
     (campaign.finalUrls ?? [])
       .map(collectionHandleFromUrl)
       .filter((handle): handle is string => Boolean(handle)),
   );
   if (fromUrls.size > 1) return null;
-  if (fromUrls.size === 1) return fromUrls.values().next().value ?? null;
-  return collectionHandleFromUrl(campaign.name);
+  const fromUrl = fromUrls.values().next().value;
+  if (fromUrl) return { handle: fromUrl, source: "final_url" };
+  const fromName = collectionHandleFromUrl(campaign.name);
+  if (fromName) return { handle: fromName, source: "name" };
+  const landed = dominantLandedCollection(campaign.landingPages);
+  return landed ? { handle: landed, source: "landing" } : null;
+}
+
+/** The handle alone - see campaignCollection for the rule. Every reader of the collection basis goes through here. */
+export function campaignCollectionHandle(
+  campaign: Pick<LiveCampaign, "name" | "finalUrls" | "landingPages">,
+): string | null {
+  return campaignCollection(campaign)?.handle ?? null;
 }
 
 /** Runs one lookup per item with at most `limit` in flight at once, keeping the order. */
@@ -2071,7 +2138,8 @@ async function mapWithConcurrency<T, R>(
  * each day, shared out between the campaigns that land there.
  *
  * The campaign's final URLs name the collection page (one handle, else its
- * name, else the campaign is left out - see campaignCollectionHandle). The
+ * name, else the page most of its clicks landed on, else the campaign is
+ * left out - see campaignCollection). The
  * collection must exist: the sales report only lists collections whose
  * products sold in the window, so a page it left out is looked up in the
  * store, and a collection the store has keeps its sheet with real zeros
@@ -2122,12 +2190,15 @@ export async function attributeCampaignCollections(input: {
     input.collectionSales.value.flatMap((row) => (row.handle ? [[row.handle, row] as const] : [])),
   );
 
-  // Which collection each campaign names.
+  // Which collection each campaign names, and by what evidence.
   const namedByCampaign = new Map<string, string>();
+  const sourceByCampaign = new Map<string, CampaignCollectionSource>();
   for (const campaign of input.google.value.rows) {
-    const handle = campaignCollectionHandle(campaign);
-    if (!handle) continue;
-    namedByCampaign.set(`${campaign.ad_account_id}:${campaign.providerCampaignId}`, handle);
+    const named = campaignCollection(campaign);
+    if (!named) continue;
+    const key = `${campaign.ad_account_id}:${campaign.providerCampaignId}`;
+    namedByCampaign.set(key, named.handle);
+    sourceByCampaign.set(key, named.source);
   }
 
   // The products of each named collection. The sales report knows the ones
@@ -2250,6 +2321,7 @@ export async function attributeCampaignCollections(input: {
     for (const key of campaignKeys) {
       attribution.set(key, {
         handle,
+        source: sourceByCampaign.get(key) ?? "final_url",
         sharedWith: campaignKeys.length,
         costsKnown: input.costs !== null,
         salesKnown: input.orders.ok,

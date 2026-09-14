@@ -1127,6 +1127,87 @@ export async function fetchGoogleAdsCampaignFinalUrls(
   );
 }
 
+/** One page a campaign's clicks landed on, as Windsor reports it: not yet summed across repeats. */
+export type WindsorGoogleAdsLandingPageRow = {
+  campaignId: string;
+  url: string;
+  clicks: number;
+};
+
+/**
+ * Reads where a campaign's clicks actually landed, for one account and range,
+ * in one bounded request. `final_url` is an ad-level dimension, and Performance
+ * Max and Shopping campaigns have no ads in that sense (asset groups and a feed
+ * instead), so the final-URL read says nothing about them. `expanded_final_url`
+ * with `clicks` is the landing page Google recorded per click, and it exists
+ * for every campaign type. Rows are returned as Windsor gives them, one per
+ * (campaign, landing page) and possibly repeated across query-string variants
+ * of the same page; summing them is the caller's job. A row with no usable
+ * URL or click count is dropped, not fatal: it only loses that page's clicks.
+ */
+export async function fetchGoogleAdsLandingPages(
+  accountId: string,
+  from: string,
+  to: string,
+  options: WindsorRequestOptions = {},
+): Promise<WindsorGoogleAdsLandingPageRow[]> {
+  const ids = normalizeGoogleAdsCustomerId(accountId);
+  reportingRange(from, to);
+  // Wider than the final-URL read: every query-string variant of a landing
+  // page is its own row here, and an account can carry dozens of campaigns.
+  const maxRows = 5_001;
+  const landingRequest = new URL(`/${WINDSOR_DATASOURCE}`, CONNECTORS_ORIGIN);
+  landingRequest.searchParams.set(
+    "fields",
+    "account_id,campaign_id,expanded_final_url,clicks",
+  );
+  landingRequest.searchParams.set("date_from", from);
+  landingRequest.searchParams.set("date_to", to);
+  landingRequest.searchParams.set(
+    "filter",
+    JSON.stringify([["account_id", "eq", ids.accountId]]),
+  );
+  landingRequest.searchParams.set("_max_rows", String(maxRows));
+  landingRequest.searchParams.set("_renderer", "json");
+
+  const rawRows = arrayPayload(
+    await requestJson(landingRequest, options),
+    ["data", "results", "rows"],
+  );
+  // Asking for one sentinel row lets a silently truncated response fail closed.
+  if (rawRows.length >= maxRows) throw invalidCampaignResponse();
+
+  const rows: WindsorGoogleAdsLandingPageRow[] = [];
+  for (const value of rawRows) {
+    const raw = asRecord(value);
+    if (!raw || typeof raw.account_id !== "string") throw invalidCampaignResponse();
+    let reportedIds: { accountId: string; customerId: string };
+    try {
+      reportedIds = normalizeGoogleAdsCustomerId(raw.account_id);
+    } catch {
+      throw invalidCampaignResponse();
+    }
+    const campaignId = typeof raw.campaign_id === "string"
+      ? raw.campaign_id.trim()
+      : "";
+    if (reportedIds.customerId !== ids.customerId || !/^\d{1,30}$/.test(campaignId)) {
+      throw invalidCampaignResponse();
+    }
+    const url = typeof raw.expanded_final_url === "string"
+      ? raw.expanded_final_url.trim()
+      : "";
+    if (!url || url.length > 4_096) continue;
+    // Number("") is 0, which would count a blank cell as a measured zero.
+    const clicks = typeof raw.clicks === "number" ||
+        (typeof raw.clicks === "string" && raw.clicks.trim() !== "")
+      ? Number(raw.clicks)
+      : Number.NaN;
+    if (!Number.isFinite(clicks) || clicks < 0) continue;
+    rows.push({ campaignId, url, clicks });
+  }
+  return rows;
+}
+
 /**
  * Daily metrics for one exact account, restricted to campaigns that belong to
  * the given store domains (destination-URL attribution: a reused Google Ads

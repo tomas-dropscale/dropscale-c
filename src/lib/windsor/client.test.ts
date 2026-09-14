@@ -14,6 +14,7 @@ import {
   fetchGoogleAdsDailyBreakdown,
   fetchGoogleAdsDailyBreakdownForStore,
   fetchGoogleAdsDemandGenAdBreakdown,
+  fetchGoogleAdsLandingPages,
   fetchGoogleAdsPmaxProductBreakdown,
   listLinkedGoogleAdsAccounts,
   normalizeGoogleAdsCustomerId,
@@ -1537,6 +1538,205 @@ describe("Windsor store-scoped daily breakdown", () => {
     );
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(rows[0]).toMatchObject({ date: "2026-08-10", spend: 12.34 });
+  });
+});
+
+describe("Windsor landing pages", () => {
+  beforeEach(() => {
+    vi.stubEnv("WINDSOR_API_KEY", API_KEY);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it("reads where each campaign's clicks landed, one row per page as Windsor reports it", async () => {
+    // The probe's Tottebags shape: the same collection page four times over,
+    // with and without query strings. Nothing is summed here; the caller
+    // decides what counts as the same page.
+    const fetcher = mockFetch(
+      jsonResponse({
+        data: [
+          {
+            account_id: "123-456-7890",
+            campaign_id: "1",
+            expanded_final_url: "https://stockholm-slojd.com/collections/handgjorda-vaskor?gad_source=1&gclid=abc",
+            clicks: 11904,
+          },
+          {
+            account_id: "123-456-7890",
+            campaign_id: "1",
+            expanded_final_url: "https://stockholm-slojd.com/collections/handgjorda-vaskor",
+            clicks: "557",
+          },
+          {
+            account_id: "123-456-7890",
+            campaign_id: "1",
+            expanded_final_url: "https://stockholm-slojd.com/collections/handgjorda-vaskor?wbraid=x",
+            clicks: 228,
+          },
+          {
+            account_id: "123-456-7890",
+            campaign_id: "2",
+            expanded_final_url: "https://www.lararovinj.com",
+            clicks: 986,
+          },
+        ],
+      }),
+    );
+
+    const rows = await fetchGoogleAdsLandingPages(
+      "123-456-7890",
+      "2026-08-10",
+      "2026-08-16",
+      { fetcher: fetcher as typeof fetch },
+    );
+
+    expect(rows).toEqual([
+      { campaignId: "1", url: "https://stockholm-slojd.com/collections/handgjorda-vaskor?gad_source=1&gclid=abc", clicks: 11904 },
+      { campaignId: "1", url: "https://stockholm-slojd.com/collections/handgjorda-vaskor", clicks: 557 },
+      { campaignId: "1", url: "https://stockholm-slojd.com/collections/handgjorda-vaskor?wbraid=x", clicks: 228 },
+      { campaignId: "2", url: "https://www.lararovinj.com", clicks: 986 },
+    ]);
+    const upstream = requestedUrl(fetcher);
+    expect(upstream.origin).toBe("https://connectors.windsor.ai");
+    expect(upstream.pathname).toBe("/google_ads");
+    expect(upstream.searchParams.get("fields")).toBe(
+      "account_id,campaign_id,expanded_final_url,clicks",
+    );
+    expect(upstream.searchParams.get("date_from")).toBe("2026-08-10");
+    expect(upstream.searchParams.get("date_to")).toBe("2026-08-16");
+    expect(upstream.searchParams.get("filter")).toBe(
+      JSON.stringify([["account_id", "eq", "123-456-7890"]]),
+    );
+    expect(upstream.searchParams.get("_max_rows")).toBe("5001");
+    expect(upstream.searchParams.get("_renderer")).toBe("json");
+  });
+
+  it("skips a row without a page or a click count, and keeps a measured zero", async () => {
+    const fetcher = mockFetch(
+      jsonResponse({
+        data: [
+          { account_id: "123-456-7890", campaign_id: "1", expanded_final_url: null, clicks: 10 },
+          { account_id: "123-456-7890", campaign_id: "1", expanded_final_url: "   ", clicks: 10 },
+          { account_id: "123-456-7890", campaign_id: "1", expanded_final_url: "https://shop.example/a", clicks: "n/a" },
+          { account_id: "123-456-7890", campaign_id: "1", expanded_final_url: "https://shop.example/a", clicks: null },
+          { account_id: "123-456-7890", campaign_id: "1", expanded_final_url: "https://shop.example/a", clicks: "" },
+          { account_id: "123-456-7890", campaign_id: "1", expanded_final_url: "https://shop.example/a", clicks: -1 },
+          { account_id: "123-456-7890", campaign_id: "1", expanded_final_url: "https://shop.example/a", clicks: 0 },
+          { account_id: "123-456-7890", campaign_id: "1", expanded_final_url: "https://shop.example/b", clicks: 3 },
+        ],
+      }),
+    );
+
+    await expect(
+      fetchGoogleAdsLandingPages("123-456-7890", "2026-08-12", "2026-08-12", {
+        fetcher: fetcher as typeof fetch,
+      }),
+    ).resolves.toEqual([
+      { campaignId: "1", url: "https://shop.example/a", clicks: 0 },
+      { campaignId: "1", url: "https://shop.example/b", clicks: 3 },
+    ]);
+  });
+
+  it.each([
+    ["another account", { account_id: "987-654-3210" }],
+    ["a malformed account", { account_id: "not-an-account" }],
+    ["a non-numeric campaign id", { campaign_id: "campaign" }],
+    ["a missing campaign id", { campaign_id: null }],
+  ])("fails closed on a row with %s", async (_label, override) => {
+    const fetcher = mockFetch(
+      jsonResponse({
+        data: [
+          {
+            account_id: "123-456-7890",
+            campaign_id: "1",
+            expanded_final_url: "https://shop.example/collections/summer",
+            clicks: 5,
+            ...override,
+          },
+        ],
+      }),
+    );
+
+    await expect(
+      fetchGoogleAdsLandingPages("123-456-7890", "2026-08-12", "2026-08-12", {
+        fetcher: fetcher as typeof fetch,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_response", status: 502 });
+  });
+
+  it("fails closed at the sentinel row and on a shapeless payload", async () => {
+    const sentinel = mockFetch(
+      jsonResponse({
+        data: Array.from({ length: 5_001 }, (_, index) => ({
+          account_id: "123-456-7890",
+          campaign_id: "1",
+          expanded_final_url: `https://shop.example/p/${index}`,
+          clicks: 1,
+        })),
+      }),
+    );
+    await expect(
+      fetchGoogleAdsLandingPages("123-456-7890", "2026-08-12", "2026-08-12", {
+        fetcher: sentinel as typeof fetch,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_response", status: 502 });
+
+    const shapeless = mockFetch(jsonResponse({ nope: true }));
+    await expect(
+      fetchGoogleAdsLandingPages("123-456-7890", "2026-08-12", "2026-08-12", {
+        fetcher: shapeless as typeof fetch,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_response", status: 502 });
+  });
+
+  it("maps upstream failures the way every other read does", async () => {
+    const throttled = mockFetch(new Response("slow down", { status: 429 }));
+    await expect(
+      fetchGoogleAdsLandingPages("123-456-7890", "2026-08-12", "2026-08-12", {
+        fetcher: throttled as typeof fetch,
+      }),
+    ).rejects.toMatchObject({ code: "rate_limited", status: 429, upstreamStatus: 429 });
+
+    const denied = mockFetch(new Response("no", { status: 403 }));
+    await expect(
+      fetchGoogleAdsLandingPages("123-456-7890", "2026-08-12", "2026-08-12", {
+        fetcher: denied as typeof fetch,
+      }),
+    ).rejects.toMatchObject({ code: "forbidden", status: 502, upstreamStatus: 403 });
+
+    const network = mockFetch(new TypeError("fetch failed"));
+    await expect(
+      fetchGoogleAdsLandingPages("123-456-7890", "2026-08-12", "2026-08-12", {
+        fetcher: network as typeof fetch,
+      }),
+    ).rejects.toBeInstanceOf(WindsorError);
+
+    vi.stubEnv("WINDSOR_API_KEY", "");
+    const unconfigured = mockFetch(jsonResponse({ data: [] }));
+    await expect(
+      fetchGoogleAdsLandingPages("123-456-7890", "2026-08-12", "2026-08-12", {
+        fetcher: unconfigured as typeof fetch,
+      }),
+    ).rejects.toMatchObject({ code: "server_not_configured", status: 503 });
+    expect(unconfigured).not.toHaveBeenCalled();
+  });
+
+  it("rejects an invalid range or account before contacting Windsor", async () => {
+    const fetcher = mockFetch(jsonResponse({ data: [] }));
+    await expect(
+      fetchGoogleAdsLandingPages("123-456-7890", "2026-08-13", "2026-08-12", {
+        fetcher: fetcher as typeof fetch,
+      }),
+    ).rejects.toBeInstanceOf(WindsorError);
+    await expect(
+      fetchGoogleAdsLandingPages("nope", "2026-08-12", "2026-08-12", {
+        fetcher: fetcher as typeof fetch,
+      }),
+    ).rejects.toBeInstanceOf(WindsorError);
+    expect(fetcher).not.toHaveBeenCalled();
   });
 });
 

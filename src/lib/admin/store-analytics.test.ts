@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => ({
   decryptToken: vi.fn(),
   hasGoogleAdsEnv: vi.fn(),
   hasWindsorEnv: vi.fn(),
+  fetchGoogleAdsLandingPages: vi.fn(),
   fetchLiveCampaignsDetailed: vi.fn(),
   fetchLiveCampaignTimeline: vi.fn(),
   fetchLiveGoogleDemandGenBreakdowns: vi.fn(),
@@ -50,7 +51,10 @@ vi.mock("@/lib/supabase/service", () => ({
 }));
 vi.mock("@/lib/google-ads/crypto", () => ({ decryptToken: mocks.decryptToken }));
 vi.mock("@/lib/google-ads/env", () => ({ hasGoogleAdsEnv: mocks.hasGoogleAdsEnv }));
-vi.mock("@/lib/windsor/client", () => ({ hasWindsorEnv: mocks.hasWindsorEnv }));
+vi.mock("@/lib/windsor/client", () => ({
+  hasWindsorEnv: mocks.hasWindsorEnv,
+  fetchGoogleAdsLandingPages: mocks.fetchGoogleAdsLandingPages,
+}));
 vi.mock("@/lib/google-ads/portal", () => ({
   fetchLiveCampaignsDetailed: mocks.fetchLiveCampaignsDetailed,
   fetchLiveCampaignTimeline: mocks.fetchLiveCampaignTimeline,
@@ -120,8 +124,10 @@ vi.mock("@/lib/admin/reporting-snapshots", () => ({
 import {
   attributeCampaignCollections,
   attributeCollectionSpend,
+  campaignCollection,
   campaignCollectionHandle,
   concurrencyLimiter,
+  dominantLandedCollection,
   ensureAdminAnalyticsRollupCoverage,
   fetchAdminStoreAnalytics,
   fetchCachedAdminStoreAnalytics,
@@ -1022,6 +1028,93 @@ describe("admin store analytics DAL", () => {
     });
   });
 
+  it("gives a PMax campaign the collection its clicks landed on, with the same figures", async () => {
+    // The probe's Tottebags shape on a Performance Max campaign: no ad-level
+    // final URL, a plain name, and nearly every click on one collection page
+    // in four spellings. The sheet must read that page's sales exactly as it
+    // would for a campaign whose ads named it, and say how it knew.
+    mocks.createServiceClient.mockReturnValue(service([account()], null));
+    const adapter = shopifyAdapter();
+    adapter.fetchCampaignAttributionSeries.mockResolvedValue([]);
+    adapter.fetchCampaignProductSeries.mockResolvedValue([]);
+    adapter.fetchDailySales.mockResolvedValue(collectionOrders());
+    adapter.fetchLandingSessionsSeries.mockResolvedValue([
+      { bucket: "2026-08-14", landingPath: "/collections/best-sellers", platform: "alphabet", sessions: 100, addedToCart: 9, completedCheckout: 2 },
+      { bucket: "2026-08-14", landingPath: "/collections/best-sellers/products/lamp", platform: "google", sessions: 10, addedToCart: 1, completedCheckout: 1 },
+    ]);
+    mocks.createLegacyShopifyReportingAdapter.mockResolvedValue(adapter);
+    mocks.fetchLiveCampaignsDetailed.mockResolvedValue([
+      {
+        ...googleCampaign(),
+        name: "Tottebags - SWE",
+        landingPages: [
+          { url: "https://northwind.example/collections/best-sellers?gad_source=1&gclid=abc", clicks: 11904 },
+          { url: "https://northwind.example/collections/best-sellers", clicks: 557 },
+          { url: "https://northwind.example/collections/best-sellers?wbraid=x", clicks: 228 },
+          { url: "https://northwind.example/collections/best-sellers?wbraid=y", clicks: 218 },
+          { url: "https://northwind.example/", clicks: 40 },
+        ],
+      },
+    ]);
+    mocks.fetchLiveCampaignTimeline.mockResolvedValue([deliveredDay()]);
+
+    const result = await fetchAdminStoreAnalytics({
+      clientId: CLIENT_ID,
+      store: { accountId: STORE_ID, activityAccountIds: [STORE_ID], currency: "EUR", days: [] },
+      range: RANGE,
+    });
+
+    expect(result.campaigns).toMatchObject({
+      state: "ready",
+      data: {
+        rows: [
+          {
+            campaignId: "987654321",
+            attributionState: "unmatched",
+            shopifyRevenue: null,
+            collectionHandle: "best-sellers",
+            collectionSource: "landing",
+            collectionSharedWith: 1,
+            timeline: [
+              expect.objectContaining({
+                bucket: "2026-08-14",
+                collectionRevenue: 140,
+                collectionUnits: 4,
+                collectionOrders: 2,
+                collectionAddedToCart: 10,
+                cogs: null,
+              }),
+            ],
+          },
+        ],
+      },
+    });
+
+    // And the same PMax campaign with its clicks scattered over product
+    // pages - the probe's "All Products" - names no collection, so the sheet
+    // falls to Google's basis as before, and says nothing about a source.
+    mocks.fetchLiveCampaignsDetailed.mockResolvedValue([
+      {
+        ...googleCampaign(),
+        name: "All Products",
+        landingPages: [
+          { url: "https://northwind.example/products/lamp", clicks: 300 },
+          { url: "https://northwind.example/products/vase", clicks: 200 },
+          { url: "https://northwind.example/collections/best-sellers", clicks: 50 },
+        ],
+      },
+    ]);
+    const scattered = await fetchAdminStoreAnalytics({
+      clientId: CLIENT_ID,
+      store: { accountId: STORE_ID, activityAccountIds: [STORE_ID], currency: "EUR", days: [] },
+      range: RANGE,
+    });
+    const [row] = (scattered.campaigns as { data: { rows: Array<Record<string, unknown>> } }).data.rows;
+    expect(row).toMatchObject({ collectionHandle: null, collectionSharedWith: null });
+    expect(row).not.toHaveProperty("collectionSource");
+    expect(row?.timeline).toEqual([expect.objectContaining({ collectionRevenue: null, collectionOrders: null })]);
+  });
+
   it("keeps an hourly timeline hourly, and an unknown cost unknown on every hour", async () => {
     // A single-day range reports by hour. The day's collection figures ride on
     // the first hour once; no day-shaped bucket is invented among the hours;
@@ -1758,6 +1851,109 @@ describe("admin store analytics DAL", () => {
     });
   });
 
+  it("finds the collection most of a campaign's clicks landed on, or none", () => {
+    // The four shapes the Windsor probe returned, verbatim in spirit.
+    const tottebags = [
+      { url: "https://stockholm-slojd.com/collections/handgjorda-vaskor?gad_source=1&gclid=abc", clicks: 11904 },
+      { url: "https://stockholm-slojd.com/collections/handgjorda-vaskor", clicks: 557 },
+      { url: "https://stockholm-slojd.com/collections/handgjorda-vaskor?wbraid=x", clicks: 228 },
+      { url: "https://stockholm-slojd.com/collections/handgjorda-vaskor?wbraid=y", clicks: 218 },
+    ];
+    expect(dominantLandedCollection(tottebags)).toBe("handgjorda-vaskor");
+    const joias = [
+      { url: "https://orivelleparis.com/collections/liquidation?gad_source=1&gclid=def", clicks: 963 },
+      { url: "https://orivelleparis.com/collections/liquidation", clicks: 41 },
+      { url: "https://orivelleparis.com/collections/liquidation/", clicks: 7 },
+      { url: "https://orivelleparis.com/", clicks: 12 },
+    ];
+    expect(dominantLandedCollection(joias)).toBe("liquidation");
+    // A feed campaign landing on the homepage: the collections it also touched
+    // are a sliver of the total, so no single collection can stand for it.
+    const totalFeed = [
+      { url: "https://www.lararovinj.com", clicks: 986 },
+      { url: "https://www.lararovinj.com/collections/haljine", clicks: 18 },
+      { url: "https://www.lararovinj.com/collections/obuca", clicks: 10 },
+    ];
+    expect(dominantLandedCollection(totalFeed)).toBeNull();
+    // Product pages count in the total too: an all-products feed stays null.
+    const allProducts = [
+      { url: "https://www.lararovinj.com/products/haljina-a", clicks: 120 },
+      { url: "https://www.lararovinj.com/products/haljina-b", clicks: 90 },
+      { url: "https://www.lararovinj.com/products/cipele-c", clicks: 60 },
+      { url: "https://www.lararovinj.com/collections/haljine", clicks: 30 },
+    ];
+    expect(dominantLandedCollection(allProducts)).toBeNull();
+
+    // Exactly two thirds is enough; one click short is not.
+    expect(dominantLandedCollection([
+      { url: "https://shop.example/collections/a", clicks: 20 },
+      { url: "https://shop.example/", clicks: 10 },
+    ])).toBe("a");
+    expect(dominantLandedCollection([
+      { url: "https://shop.example/collections/a", clicks: 19 },
+      { url: "https://shop.example/", clicks: 11 },
+    ])).toBeNull();
+    // Two collections split evenly land nowhere in particular.
+    expect(dominantLandedCollection([
+      { url: "https://shop.example/collections/a", clicks: 50 },
+      { url: "https://shop.example/collections/b", clicks: 50 },
+    ])).toBeNull();
+    // Spellings of one page fold together: case, trailing slash, a page
+    // under it, percent-escapes.
+    expect(dominantLandedCollection([
+      { url: "https://shop.example/Collections/K%C3%A9nyelmes-ruh%C3%A1k/", clicks: 5 },
+      { url: "https://shop.example/collections/kényelmes-ruhák/products/x", clicks: 5 },
+      { url: "https://shop.example/", clicks: 4 },
+    ])).toBe("kényelmes-ruhák");
+    // Nothing, or nothing measured, names nothing.
+    expect(dominantLandedCollection([])).toBeNull();
+    expect(dominantLandedCollection(undefined)).toBeNull();
+    expect(dominantLandedCollection(null)).toBeNull();
+    expect(dominantLandedCollection([{ url: "https://shop.example/collections/a", clicks: 0 }])).toBeNull();
+    expect(dominantLandedCollection([{ url: "https://shop.example/collections/a", clicks: Number.NaN }])).toBeNull();
+  });
+
+  it("consults the final URLs, then the name, then where the clicks landed, and says which decided", () => {
+    const landed = [
+      { url: "https://northwind.example/collections/landed?gad_source=1", clicks: 90 },
+      { url: "https://northwind.example/", clicks: 10 },
+    ];
+    // (a) One collection in the final URLs wins over everything else.
+    expect(campaignCollection({
+      name: "Deal https://northwind.example/collections/deal 5%",
+      finalUrls: ["https://northwind.example/collections/best-sellers"],
+      landingPages: landed,
+    })).toEqual({ handle: "best-sellers", source: "final_url" });
+    // (b) URLs naming no collection: the name, if it names one.
+    expect(campaignCollection({
+      name: "Deal https://northwind.example/collections/deal 5%",
+      finalUrls: ["https://northwind.example/"],
+      landingPages: landed,
+    })).toEqual({ handle: "deal", source: "name" });
+    // (c) Neither says: where the clicks landed.
+    expect(campaignCollection({ name: "Tottebags - SWE", finalUrls: ["https://northwind.example/"], landingPages: landed }))
+      .toEqual({ handle: "landed", source: "landing" });
+    expect(campaignCollection({ name: "Tottebags - SWE", landingPages: landed }))
+      .toEqual({ handle: "landed", source: "landing" });
+    expect(campaignCollectionHandle({ name: "Tottebags - SWE", landingPages: landed })).toBe("landed");
+    // Clicks that name no one collection leave the campaign without one.
+    expect(campaignCollection({
+      name: "All Products",
+      landingPages: [
+        { url: "https://northwind.example/products/a", clicks: 60 },
+        { url: "https://northwind.example/collections/landed", clicks: 40 },
+      ],
+    })).toBeNull();
+    expect(campaignCollection({ name: "Plain" })).toBeNull();
+    // Two collections in the URLs still skip the campaign, whatever the
+    // name or the clicks say.
+    expect(campaignCollection({
+      name: "Deal https://northwind.example/collections/deal 5%",
+      finalUrls: ["https://northwind.example/collections/a", "https://northwind.example/collections/b"],
+      landingPages: landed,
+    })).toBeNull();
+  });
+
   it("reads the landing collection from the final URLs first, and from the name only when the URLs name none", async () => {
     const deal = "Deal https://northwind.example/collections/deal 5%";
     expect(campaignCollectionHandle({ name: deal, finalUrls: ["https://northwind.example/collections/best-sellers"] })).toBe("best-sellers");
@@ -2035,12 +2231,14 @@ describe("admin store analytics DAL", () => {
     });
 
     expect(mocks.requireAdmin).toHaveBeenCalledBefore(mocks.createServiceClient);
+    // The sheet asks for where the clicks landed; no other caller does.
     expect(mocks.fetchLiveCampaignsDetailed).toHaveBeenCalledWith(
       "1234567890",
       "google-refresh-token",
       STORE_ID,
       RANGE,
       "EUR",
+      { landingPages: true },
     );
     expect(mocks.fetchLiveGooglePmaxProductBreakdowns).toHaveBeenCalledWith(
       "1234567890",
@@ -2473,10 +2671,12 @@ describe("admin store analytics DAL", () => {
     });
     expect(mocks.createShopifyReportingAdapter).toHaveBeenCalledWith(anchor);
     expect(mocks.createLegacyShopifyReportingAdapter).not.toHaveBeenCalled();
+    // The sheet asks for where the clicks landed; no other caller does.
     expect(mocks.fetchGoogleReportingCampaigns).toHaveBeenCalledWith(
       child,
       RANGE.from,
       RANGE.to,
+      mocks.fetchGoogleAdsLandingPages,
     );
     expect(result.campaigns).toMatchObject({
       state: "partial",
@@ -2871,5 +3071,90 @@ describe("collection spend allocation", () => {
     expect(result.data.rows[0].timeline).toEqual([
       { bucket: "2026-08-14", revenue: 100, units: 4, spend: 40, roas: 2.5 },
     ]);
+  });
+
+  it("attributes a PMax campaign's spend to the collection its clicks landed on, by the same rule as the sheet", () => {
+    // No final URL and a plain name: the campaign is found by where its
+    // clicks landed, through the same helper the sheet uses, so the
+    // collection's ROAS and the campaign's collection basis agree.
+    const family = {
+      state: "ready" as const,
+      data: {
+        granularity: "day" as const,
+        rows: [{
+          collectionId: "gid://shopify/Collection/20",
+          handle: "best-sellers",
+          title: "Best sellers",
+          revenue: 100,
+          units: 4,
+          spend: null,
+          roas: null,
+          timeline: [{ bucket: "2026-08-14", revenue: 100, units: 4, spend: 0, roas: null }],
+          products: [
+            {
+              productId: "gid://shopify/Product/10",
+              title: "Lamp",
+              revenue: 100,
+              units: 4,
+              spend: null,
+              roas: null,
+              timeline: [{ bucket: "2026-08-14", revenue: 100, units: 4, spend: 0, roas: null }],
+            },
+          ],
+        }],
+      },
+    };
+    const campaign = {
+      ...googleCampaign(),
+      name: "Tottebags - SWE",
+      status: "active" as const,
+      landingPages: [
+        { url: "https://northwind.example/collections/best-sellers?gad_source=1", clicks: 900 },
+        { url: "https://northwind.example/", clicks: 100 },
+      ],
+    };
+    const google = {
+      ok: true as const,
+      value: {
+        rows: [campaign],
+        granularity: "day" as const,
+        timeline: [{
+          accountId: STORE_ID,
+          campaignId: campaign.providerCampaignId,
+          bucket: "2026-08-14",
+          granularity: "day" as const,
+          spend: 40,
+          impressions: 100,
+          clicks: 10,
+          conversions: 2,
+          googleRevenue: 120,
+        }],
+      },
+    };
+    const result = attributeCollectionSpend(family, google, { ok: true, value: [] });
+    if (!("data" in result)) throw new Error("Expected allocated collection data");
+    expect(result.data.rows[0]).toMatchObject({ spend: 40, roas: 2.5 });
+    expect(campaignCollectionHandle(campaign)).toBe("best-sellers");
+
+    // Scattered clicks: the same helper says no collection, so no spend lands.
+    const scattered = attributeCollectionSpend(
+      family,
+      {
+        ...google,
+        value: {
+          ...google.value,
+          rows: [{
+            ...campaign,
+            landingPages: [
+              { url: "https://northwind.example/products/lamp", clicks: 600 },
+              { url: "https://northwind.example/collections/best-sellers", clicks: 400 },
+            ],
+          }],
+        },
+      },
+      { ok: true, value: [] },
+    );
+    if (!("data" in scattered)) throw new Error("Expected collection data");
+    expect(scattered.data.rows[0]).toMatchObject({ spend: null, roas: null });
   });
 });

@@ -308,7 +308,7 @@ export function CampaignProfitLossSheet({
 }: {
   campaign: Pick<
     AdminAnalyticsCampaign,
-    "timeline" | "attributionState" | "collectionHandle" | "collectionSharedWith"
+    "timeline" | "attributionState" | "collectionHandle" | "collectionSource" | "collectionSharedWith"
   >;
   currency: string;
   today: string;
@@ -345,6 +345,16 @@ export function CampaignProfitLossSheet({
                   sheet.total.addedToCart !== null
                     ? " · cart additions are Google visits that landed there"
                     : " · landing sessions could not be read, so cart additions read “—”"
+                }${
+                  // The clicks named the collection because nothing else did.
+                  // That is the whole of what is known: a Performance Max or
+                  // Shopping campaign has no final URL at all, but a Search or
+                  // Demand Gen ad may point at a page that is not a collection,
+                  // or at a product Shopify redirects to one, and the caption
+                  // must not claim its ads name no URL when they do.
+                  campaign.collectionSource === "landing"
+                    ? " · the collection was read from where its clicks landed, as neither the campaign's final URLs nor its name names one"
+                    : ""
                 }`
               : campaign.attributionState === "unmatched"
                 ? `Profit on Google's reported conversion value · Shopify sees no utm_campaign on this campaign's traffic${

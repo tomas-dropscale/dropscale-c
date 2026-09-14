@@ -244,6 +244,56 @@ describe("a campaign's profit and loss by day", () => {
     expect(quiet).toContain("every order that landed on /collections/kenyelmes-ruhak");
     expect(quiet).not.toContain("utm_campaign");
     expect(quiet).toContain("in progress");
+    // Named by its final URLs: nothing to add about where the clicks went.
+    expect(quiet).not.toContain("from where its clicks landed");
+  });
+
+  it("says when the collection was read from where the clicks landed", () => {
+    // A Performance Max campaign names no final URL; its collection is the
+    // page most of its clicks landed on, and the caption must say so rather
+    // than let the reader assume the ads point there. The same source also
+    // covers a Search campaign whose final URLs name a product page that
+    // redirects to a collection, so the caption may only claim what holds
+    // for both: nothing but the clicks named a collection.
+    const campaign = {
+      attributionState: "unmatched" as const,
+      collectionHandle: "handgjorda-vaskor",
+      collectionSharedWith: 1,
+      timeline: [
+        point({
+          bucket: "2026-09-05",
+          spend: 104.2,
+          googleRevenue: 300,
+          shopifyRevenue: null, shopifyOrders: null, addedToCart: null, units: null,
+          collectionRevenue: 450, collectionUnits: 3, collectionOrders: 2, collectionAddedToCart: 40, cogs: 90,
+        }),
+      ],
+    };
+    const landed = renderToStaticMarkup(
+      <CampaignProfitLossSheet
+        title="Tottebags - SWE"
+        currency="EUR"
+        today="2026-09-11"
+        campaign={{ ...campaign, collectionSource: "landing" }}
+      />,
+    );
+    expect(landed).toContain("every order that landed on /collections/handgjorda-vaskor");
+    expect(landed).toContain("from where its clicks landed");
+    expect(landed).toContain("final URLs nor its name names one");
+    expect(landed).not.toContain("name no final URL");
+
+    for (const collectionSource of ["final_url", "name"] as const) {
+      const named = renderToStaticMarkup(
+        <CampaignProfitLossSheet
+          title="Tottebags - SWE"
+          currency="EUR"
+          today="2026-09-11"
+          campaign={{ ...campaign, collectionSource }}
+        />,
+      );
+      expect(named).toContain("every order that landed on /collections/handgjorda-vaskor");
+      expect(named).not.toContain("from where its clicks landed");
+    }
   });
 
   it("does not trust a revenue of 0 from a point written before the sheet existed", () => {

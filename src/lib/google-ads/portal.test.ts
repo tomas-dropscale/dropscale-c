@@ -18,7 +18,12 @@ import {
 } from "./portal";
 
 describe("fetchLiveCampaignsDetailed", () => {
-  beforeEach(() => mocks.searchGoogleAds.mockReset());
+  // A block body: mockReset returns the mock, and vitest calls whatever a hook
+  // returns as a cleanup function, which here would call the mock with no
+  // arguments after every test.
+  beforeEach(() => {
+    mocks.searchGoogleAds.mockReset();
+  });
 
   it("uses the current Google Ads campaign start field and keeps its local day", async () => {
     mocks.searchGoogleAds.mockResolvedValue([
@@ -185,6 +190,129 @@ describe("fetchLiveCampaignsDetailed", () => {
     ).rejects.toThrow(/different customer identity|different campaign currency/);
   });
 
+  it("attaches where the clicks landed, summed per page, so a PMax campaign has URL evidence too", async () => {
+    // The campaign read and the ad final-URL read answer as before; the
+    // landing_page_view read answers per (ad group, page), so the same page
+    // arrives twice and is summed once.
+    mocks.searchGoogleAds.mockImplementation(async (_customer: string, _token: string, query: string) => {
+      if (query.includes("FROM landing_page_view")) {
+        return [
+          { campaign: { id: "42" }, landingPageView: { unexpandedFinalUrl: "https://shop.example/collections/bags" }, metrics: { clicks: "30" } },
+          { campaign: { id: "42" }, landingPageView: { unexpandedFinalUrl: "https://shop.example/collections/bags" }, metrics: { clicks: 20 } },
+          { campaign: { id: "42" }, landingPageView: { unexpandedFinalUrl: "https://shop.example/" }, metrics: { clicks: 5 } },
+          // No page, or no count: skipped on their own.
+          { campaign: { id: "42" }, landingPageView: {}, metrics: { clicks: 9 } },
+          { campaign: { id: "42" }, landingPageView: { unexpandedFinalUrl: "https://shop.example/x" }, metrics: {} },
+          { campaign: { id: "7" }, landingPageView: { unexpandedFinalUrl: "https://shop.example/collections/lamps" }, metrics: { clicks: 1 } },
+        ];
+      }
+      if (query.includes("FROM ad_group_ad")) return [];
+      return [
+        {
+          ...providerIdentity(),
+          campaign: { id: "42", name: "PMax - Total Feed", status: "ENABLED", advertisingChannelType: "PERFORMANCE_MAX" },
+          campaignBudget: { amountMicros: "35000000" },
+          metrics: { ...campaignMetrics(), clicks: "55" },
+        },
+      ];
+    });
+
+    const [campaign] = await fetchLiveCampaignsDetailed("1234567890", "refresh", "account", {
+      key: "d7",
+      from: "2026-08-08",
+      to: "2026-08-14",
+    }, "EUR", { landingPages: true });
+
+    expect(campaign).toMatchObject({ providerCampaignId: "42" });
+    expect(campaign).not.toHaveProperty("finalUrls");
+    expect(campaign?.landingPages).toEqual([
+      { url: "https://shop.example/collections/bags", clicks: 50 },
+      { url: "https://shop.example/", clicks: 5 },
+    ]);
+    const landingQuery = mocks.searchGoogleAds.mock.calls
+      .map((call) => call[2] as string)
+      .find((query) => query.includes("FROM landing_page_view"));
+    expect(landingQuery).toContain("landing_page_view.unexpanded_final_url");
+    expect(landingQuery).toContain("metrics.clicks");
+    expect(landingQuery).toContain("segments.date BETWEEN '2026-08-08' AND '2026-08-14'");
+    expect(landingQuery).toContain("LIMIT 10001");
+  });
+
+  it("keeps the campaigns when the landing-page read fails or comes back malformed", async () => {
+    const campaignRows = [
+      {
+        ...providerIdentity(),
+        campaign: { id: "42", name: "Summer", status: "ENABLED", advertisingChannelType: "SEARCH" },
+        campaignBudget: {},
+        metrics: campaignMetrics(),
+      },
+    ];
+    mocks.searchGoogleAds.mockImplementation(async (_customer: string, _token: string, query: string) => {
+      if (query.includes("FROM landing_page_view")) throw new Error("landing_page_view is not available");
+      if (query.includes("FROM ad_group_ad")) return [];
+      return campaignRows;
+    });
+    const rejected = await fetchLiveCampaignsDetailed("1234567890", "refresh", "account", {
+      key: "d7",
+      from: "2026-08-08",
+      to: "2026-08-14",
+    }, "EUR", { landingPages: true });
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]).not.toHaveProperty("landingPages");
+
+    // A malformed report drops every page rather than half of them, and
+    // never the campaigns.
+    mocks.searchGoogleAds.mockImplementation(async (_customer: string, _token: string, query: string) => {
+      if (query.includes("FROM landing_page_view")) {
+        return [
+          { campaign: { id: "42" }, landingPageView: { unexpandedFinalUrl: "https://shop.example/collections/bags" }, metrics: { clicks: 30 } },
+          { campaign: { id: "not-a-campaign" }, landingPageView: { unexpandedFinalUrl: "https://shop.example/" }, metrics: { clicks: 5 } },
+        ];
+      }
+      if (query.includes("FROM ad_group_ad")) return [];
+      return campaignRows;
+    });
+    const malformed = await fetchLiveCampaignsDetailed("1234567890", "refresh", "account", {
+      key: "d7",
+      from: "2026-08-08",
+      to: "2026-08-14",
+    }, "EUR", { landingPages: true });
+    expect(malformed).toHaveLength(1);
+    expect(malformed[0]).not.toHaveProperty("landingPages");
+  });
+
+  it("issues no landing-page read unless asked, so the portal and the snapshots never carry the pages", async () => {
+    // The store analytics sheet is the one reader of where the clicks landed.
+    // The portal's campaign table, the daily report and the admin campaign
+    // snapshot get the campaigns alone: two Google queries, not three, and
+    // no list of thousands of URLs in a client payload or a stored row.
+    mocks.searchGoogleAds.mockImplementation(async (_customer: string, _token: string, query: string) => {
+      if (query.includes("FROM landing_page_view")) throw new Error("must not be queried");
+      if (query.includes("FROM ad_group_ad")) return [];
+      return [
+        {
+          ...providerIdentity(),
+          campaign: { id: "42", name: "PMax - Total Feed", status: "ENABLED", advertisingChannelType: "PERFORMANCE_MAX" },
+          campaignBudget: { amountMicros: "35000000" },
+          metrics: campaignMetrics(),
+        },
+      ];
+    });
+
+    const campaigns = await fetchLiveCampaignsDetailed("1234567890", "refresh", "account", {
+      key: "d7",
+      from: "2026-08-08",
+      to: "2026-08-14",
+    }, "EUR");
+
+    expect(campaigns).toHaveLength(1);
+    expect(campaigns[0]).not.toHaveProperty("landingPages");
+    expect(mocks.searchGoogleAds).toHaveBeenCalledTimes(2);
+    expect(
+      mocks.searchGoogleAds.mock.calls.some((call) => (call[2] as string).includes("FROM landing_page_view")),
+    ).toBe(false);
+  });
+
   it("fails closed at the campaign row sentinel", async () => {
     mocks.searchGoogleAds.mockResolvedValue(
       Array.from({ length: 1001 }, () => ({})),
@@ -203,7 +331,12 @@ describe("fetchLiveCampaignsDetailed", () => {
 });
 
 describe("fetchLiveDailyBreakdown", () => {
-  beforeEach(() => mocks.searchGoogleAds.mockReset());
+  // A block body: mockReset returns the mock, and vitest calls whatever a hook
+  // returns as a cleanup function, which here would call the mock with no
+  // arguments after every test.
+  beforeEach(() => {
+    mocks.searchGoogleAds.mockReset();
+  });
 
   it("loads a strict bounded day in the exact Google identity and currency", async () => {
     mocks.searchGoogleAds.mockResolvedValue([
@@ -336,7 +469,12 @@ function dailyMetricRow(overrides: Record<string, unknown> = {}) {
 }
 
 describe("exact Google campaign breakdowns", () => {
-  beforeEach(() => mocks.searchGoogleAds.mockReset());
+  // A block body: mockReset returns the mock, and vitest calls whatever a hook
+  // returns as a cleanup function, which here would call the mock with no
+  // arguments after every test.
+  beforeEach(() => {
+    mocks.searchGoogleAds.mockReset();
+  });
 
   it("maps every Demand Gen image asset to its own provider metrics", async () => {
     mocks.searchGoogleAds

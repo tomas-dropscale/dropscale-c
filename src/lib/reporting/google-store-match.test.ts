@@ -75,6 +75,7 @@ describe("Destination-URL attribution in the V2 Google adapter", () => {
       pairedSource,
       "2026-08-10",
       "2026-08-16",
+      null,
       async () => [
         campaignRow("1", "JP - TOTTEBAGS", [
           "https://akinikko.com/collections/bags",
@@ -97,6 +98,7 @@ describe("Destination-URL attribution in the V2 Google adapter", () => {
       googleOnly,
       "2026-08-10",
       "2026-08-16",
+      null,
       async () => [
         campaignRow("2", "25-07 - Lamparas Artesanales", [
           "https://casa-luna-artesanias.com/x",

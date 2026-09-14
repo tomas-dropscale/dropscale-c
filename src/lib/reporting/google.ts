@@ -1,6 +1,7 @@
 import "server-only";
 
 import type {
+  CampaignLandingPage,
   GoogleCampaignBreakdownRow,
   LiveCampaign,
 } from "@/lib/google-ads/portal";
@@ -17,6 +18,7 @@ import {
   type WindsorGoogleAdsCampaignTimelineRow,
   type WindsorGoogleAdsDailyRow,
   type WindsorGoogleAdsDemandGenAdRow,
+  type WindsorGoogleAdsLandingPageRow,
   type WindsorGoogleAdsPmaxProductRow,
 } from "../windsor/client";
 import {
@@ -67,11 +69,52 @@ type CampaignFinalUrlsFetcher = (
   to: string,
 ) => Promise<Map<string, string[]>>;
 
+type LandingPagesFetcher = (
+  accountId: string,
+  from: string,
+  to: string,
+) => Promise<WindsorGoogleAdsLandingPageRow[]>;
+
 const NO_FINAL_URLS: Map<string, string[]> = new Map();
 
 export type ReportingCampaign = LiveCampaign & {
   biddingStrategyType: string | null;
 };
+
+/**
+ * Windsor reports one row per landing page as recorded, so the same page
+ * comes back once per query-string variant and once per repeat; here they are
+ * summed per campaign and page, most clicked first.
+ *
+ * The owner rule applies to the pages as it does to the final URLs. A shared
+ * Google account keeps its previous store's campaigns, and the ones without a
+ * final URL (Performance Max, Shopping) stay attributed to this store because
+ * their spend cannot be disproved; but their clicks landed on the other
+ * store, and a page there must never name a collection here, where a cloned
+ * store has the same handle and would take that campaign's spend and sales.
+ * So a page whose host is provably another domain is dropped, while a page
+ * with no host evidence is kept, exactly as campaignBelongsToStore decides.
+ */
+function landingPagesByCampaign(
+  rows: readonly WindsorGoogleAdsLandingPageRow[],
+  storeDomains: readonly string[],
+): Map<string, CampaignLandingPage[]> {
+  const clicksByPage = new Map<string, Map<string, number>>();
+  for (const row of rows) {
+    if (!campaignBelongsToStore([row.url], storeDomains)) continue;
+    const pages = clicksByPage.get(row.campaignId) ?? new Map<string, number>();
+    pages.set(row.url, (pages.get(row.url) ?? 0) + row.clicks);
+    clicksByPage.set(row.campaignId, pages);
+  }
+  return new Map(
+    [...clicksByPage].map(([campaignId, pages]) => [
+      campaignId,
+      [...pages]
+        .map(([url, clicks]) => ({ url, clicks }))
+        .sort((left, right) => right.clicks - left.clicks || left.url.localeCompare(right.url)),
+    ]),
+  );
+}
 
 export type ReportingCampaignTimelinePoint = {
   accountId: string;
@@ -177,11 +220,24 @@ export async function fetchGoogleReportingDailyMetrics(
   }));
 }
 
-/** Campaign read path for V2 reporting. It never participates in billing. */
+/**
+ * Campaign read path for V2 reporting. It never participates in billing.
+ *
+ * Where each campaign's clicks landed is attached only when a landing-page
+ * reader is passed (`fetchGoogleAdsLandingPages` in production). The store
+ * analytics sheet is the one reader of those pages; read by default they
+ * would cost every other caller a second provider request per account and
+ * ride, unused, into the portal's client payload and the campaign snapshots,
+ * thousands of URLs at a time. They ride along best-effort: they only refine
+ * which collection a campaign is measured against, so a failed read is logged
+ * and the campaigns keep their final URLs, where a failed final-URL read still
+ * fails the whole campaign read, as it always did.
+ */
 export async function fetchGoogleReportingCampaigns(
   source: CanonicalReportingSource,
   from: string,
   to: string,
+  landingFetcher: LandingPagesFetcher | null = null,
   fetcher: CampaignFetcher = fetchGoogleAdsCampaignBreakdown,
 ): Promise<ReportingCampaign[]> {
   const google = source.googleAds;
@@ -196,7 +252,23 @@ export async function fetchGoogleReportingCampaigns(
     PAUSED: "paused",
     REMOVED: "ended",
   } as const;
-  const rows = await fetcher(google.accountId, from, to);
+  const [rows, landingRows] = await Promise.all([
+    fetcher(google.accountId, from, to),
+    landingFetcher
+      ? landingFetcher(google.accountId, from, to).catch((error: unknown) => {
+          console.warn(
+            `Google Ads landing pages could not be read for ${google.accountId}; campaigns keep their final URLs only:`,
+            error,
+          );
+          return null;
+        })
+      : null,
+  ]);
+  // Owner rule: a campaign whose final URLs point at another store's domain is
+  // not this store's campaign, no matter which Google account hosts it, and a
+  // landing page on another store's domain names nothing here.
+  const storeDomains = storeDomainsForSource(source);
+  const landingPages = landingRows ? landingPagesByCampaign(landingRows, storeDomains) : null;
   for (const row of rows) {
     if (
       row.accountId !== google.accountId ||
@@ -210,12 +282,10 @@ export async function fetchGoogleReportingCampaigns(
     }
   }
 
-  // Owner rule: a campaign whose final URLs point at another store's domain is
-  // not this store's campaign, no matter which Google account hosts it.
-  const storeDomains = storeDomainsForSource(source);
   return rows
     .filter((row) => campaignBelongsToStore(row.finalUrls, storeDomains))
     .map((row) => {
+      const landed = landingPages?.get(row.campaignId);
       return {
       id: `windsor-${source.adAccountId}-${row.campaignId}`,
       providerCampaignId: row.campaignId,
@@ -237,6 +307,7 @@ export async function fetchGoogleReportingCampaigns(
       conversionValue: row.conversionValue,
       googleRoas: row.spend > 0 ? row.conversionValue / row.spend : null,
       ...(row.finalUrls?.length ? { finalUrls: row.finalUrls } : {}),
+      ...(landed?.length ? { landingPages: landed } : {}),
       };
     });
 }
