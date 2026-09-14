@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   collectionHandleFromUrl,
   dealsFromCampaigns,
-  normalizeDecodedPath,
   normalizePath,
   orderRevShare,
   parseRevShareCampaign,
@@ -97,26 +96,9 @@ describe("normalizePath", () => {
     ["/collections/Velas/", "/collections/velas"],
     ["shop.com/collections/velas#top", "/collections/velas"],
     ["HTTPS://Shop.com/collections/Velas", "/collections/velas"],
-    // The billing rule keeps percent-escapes as they came: a percent-encoded
-    // landing page never equals the plain handle a deal's path holds, so the
-    // whole-order rule does not fire on it. Decoding here would be a change
-    // to what those clients are billed; see the function's own comment.
-    ["/collections/%E3%83%8F%E3%83%B3%E3%83%89?utm_source=google", "/collections/%e3%83%8f%e3%83%b3%e3%83%89"],
-    ["/collections/100%25-cotton", "/collections/100%25-cotton"],
-    ["", null],
-    [null, null],
-  ])("%s → %s", (input, expected) => {
-    expect(normalizePath(input)).toBe(expected);
-  });
-});
-
-describe("normalizeDecodedPath", () => {
-  it.each([
-    ["https://shop.com/collections/velas?utm=x", "/collections/velas"],
-    ["/collections/Velas/", "/collections/velas"],
-    ["shop.com/collections/velas#top", "/collections/velas"],
     // A landing path arrives percent-encoded; the handle it names does not,
-    // and a capital hidden in an escape lower-cases once decoded.
+    // and a capital hidden in an escape lower-cases once decoded. The billing
+    // rule and the campaign sheet read the same page either way.
     ["/collections/%E3%83%8F%E3%83%B3%E3%83%89?utm_source=google", "/collections/ハンド"],
     ["https://shop.com/collections/%CE%A3%CE%B1/", "/collections/σα"],
     ["https://shop.com/collections/ハンド", "/collections/ハンド"],
@@ -126,13 +108,7 @@ describe("normalizeDecodedPath", () => {
     ["", null],
     [null, null],
   ])("%s → %s", (input, expected) => {
-    expect(normalizeDecodedPath(input)).toBe(expected);
-  });
-
-  it("agrees with normalizePath wherever nothing is percent-encoded", () => {
-    for (const input of ["/collections/Velas/?page=2", "https://shop.com/Collections/x#top", "/", "shop.com"]) {
-      expect(normalizeDecodedPath(input)).toBe(normalizePath(input));
-    }
+    expect(normalizePath(input)).toBe(expected);
   });
 });
 
@@ -187,12 +163,12 @@ describe("orderRevShare — the agreed attribution rule", () => {
     expect(orderRevShare(order, [velas])).toEqual({ base: 0, amount: 0 });
   });
 
-  it("a percent-encoded landing path does not fire the landing rule; the lines still count", () => {
+  it("a percent-encoded landing path fires the landing rule like the plain one", () => {
     // A Japanese store: the deal's handle is plain, the order's landing page
-    // arrives percent-encoded. The billing rule compares them as they came,
-    // so this order bills by its lines, not whole. This pins the rule as it
-    // is billed today; making the landing rule decode is the owner's call
-    // (normalizePath explains), and this test is where it would show.
+    // arrives percent-encoded. Both spell the same page, so the order counts
+    // whole. Until 2026-09-14 the escapes were compared as they came and such
+    // an order billed by its lines alone; the owner asked for the rule to
+    // read the page, not its spelling.
     const hand: AttributionDeal = {
       handle: "ハンド",
       path: "/collections/ハンド",
@@ -207,8 +183,8 @@ describe("orderRevShare — the agreed attribution rule", () => {
         { productKey: "OTHER-1", revenue: 60 },
       ],
     };
-    expect(orderRevShare(order, [hand])).toEqual({ base: 40, amount: 2 });
-    // The same page spelled plain is the landing rule as always.
+    expect(orderRevShare(order, [hand])).toEqual({ base: 100, amount: 5 });
+    // The same page spelled plain reads the same.
     expect(orderRevShare({ ...order, landingPath: "/collections/ハンド" }, [hand])).toEqual({ base: 100, amount: 5 });
   });
 });

@@ -138,32 +138,19 @@ function landingPathOf(raw: string): string {
 }
 
 /**
- * Path only, lower-cased, no query/hash, no trailing slash, for the revenue
- * share's landing match. Percent-escapes are left exactly as they came, on
- * purpose: Shopify percent-encodes a non-ASCII handle in an order's landing
- * page while the deal's path holds it plain, so decoding here would make the
- * whole-order landing rule fire, for the first time, on every store with
- * such a handle. That changes what those clients are billed, and it is the
- * owner's decision to make rather than a side effect of an analytics change.
- * The admin sheet's collection basis, which bills nothing, matches the
- * decoded page instead: normalizeDecodedPath.
+ * Path only, percent-escapes decoded, lower-cased, no query/hash, no trailing
+ * slash: the landing match of the revenue share and of the campaign sheet.
+ * Shopify percent-encodes a non-ASCII handle in an order's landing page
+ * while the deal's path holds it plain, so without the decode the whole-order
+ * landing rule never fired on a Japanese, Hebrew or Greek collection and
+ * those orders billed by their lines alone. Decoded on the owner's word
+ * (2026-09-14, no revenue-share account was live at the time), so the rule
+ * reads the same page whichever way it was spelled. The WHATWG parser
+ * re-encodes a non-ASCII pathname, so the decode comes after it, and before
+ * lower-casing, so a capital hidden in an escape lower-cases once it is a
+ * letter again.
  */
 export function normalizePath(input: string | null | undefined): string | null {
-  const raw = (input ?? "").trim().toLowerCase();
-  if (!raw) return null;
-  const path = landingPathOf(raw).replace(/\/+$/, "");
-  return path || "/";
-}
-
-/**
- * normalizePath with the percent-escapes decoded, so
- * "/collections/%E3%83%8F%E3%83%B3%E3%83%89" is the same page as the Japanese
- * handle it encodes. The WHATWG parser re-encodes a non-ASCII pathname, so
- * the decode comes after it, and before lower-casing, so a capital hidden in
- * an escape lower-cases once it is a letter again. For the admin sheet only;
- * see normalizePath for why the billing rule does not read this.
- */
-export function normalizeDecodedPath(input: string | null | undefined): string | null {
   const raw = (input ?? "").trim();
   if (!raw) return null;
   const path = decodePercentEscapes(landingPathOf(raw)).trim().toLowerCase().replace(/\/+$/, "");

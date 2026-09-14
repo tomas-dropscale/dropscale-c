@@ -43,7 +43,7 @@ import {
   type ShopifyLandingSessionsRow,
   type ShopifyReportingAdapter,
 } from "@/lib/reporting/shopify";
-import { collectionHandleFromUrl, decodePercentEscapes, normalizeDecodedPath } from "@/lib/finance/rev-share";
+import { collectionHandleFromUrl, decodePercentEscapes, normalizePath } from "@/lib/finance/rev-share";
 import { loadCostContext } from "@/lib/cogs/context";
 import { orderCogs, type CostContext } from "@/lib/cogs/engine";
 import { fxDailyRates, rateOn } from "@/lib/shopify/fx";
@@ -2208,7 +2208,7 @@ export async function attributeCampaignCollections(input: {
     for (const order of input.orders.value.orders) {
       // Decoded, unlike the revenue share's own landing match: the sheet
       // bills nothing, so it may match the page a percent-encoded path names.
-      const landing = normalizeDecodedPath(order.landingPath);
+      const landing = normalizePath(order.landingPath);
       for (const deal of deals) {
         const landedHere = landing !== null && (landing === deal.path || landing.startsWith(`${deal.path}/`));
         const lines = landedHere
