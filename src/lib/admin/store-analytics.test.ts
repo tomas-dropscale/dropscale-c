@@ -101,9 +101,10 @@ vi.mock("@/lib/shopify/client", () => ({
     }
   },
 }));
-// The landing rule is the real one: the sheet matches orders by the revenue
-// share's own path rule (decoded, since the sheet bills nothing), so the
-// module is not mocked.
+// The page helpers are the real ones: the sheet reads a campaign's collection
+// from its URLs and its landing clicks with the revenue share's own parsers,
+// so the module is not mocked. What the collection earned is read by the
+// client's rule, not the revenue share's; see attributeCampaignCollections.
 vi.mock("@/lib/finance/rev-share", () => import("../finance/rev-share"));
 vi.mock("@/lib/reporting/sources", () => ({
   resolveReportingSources: mocks.resolveReportingSources,
@@ -180,10 +181,21 @@ function service(
     credential?: unknown;
     credentialError?: unknown;
   },
+  /** Makes the store's own row (its cost and fee settings) unreadable. */
+  settingsError?: unknown,
 ) {
   const accountQuery: Record<string, ReturnType<typeof vi.fn>> = {};
   accountQuery.select = vi.fn(() => accountQuery);
   accountQuery.in = vi.fn().mockResolvedValue({ data: accounts, error: null });
+  // The store's own row, read for its cost and fee settings. The cost tables
+  // behind it are mocked away above, so costs still read as unknown.
+  let settingsRow: unknown = null;
+  accountQuery.eq = vi.fn((_column: string, id: string) => {
+    settingsRow = (accounts as Array<{ id: string }>).find((row) => row.id === id) ?? null;
+    return accountQuery;
+  });
+  accountQuery.maybeSingle = vi.fn(async () =>
+    settingsError ? { data: null, error: settingsError } : { data: settingsRow, error: null });
   const rolloutQuery: Record<string, ReturnType<typeof vi.fn>> = {};
   rolloutQuery.select = vi.fn(() => rolloutQuery);
   rolloutQuery.eq = vi.fn(() => rolloutQuery);
@@ -333,7 +345,31 @@ function shopifyAdapter() {
   };
 }
 
-/** Two orders for the fixture collection: one landed on it, one bought one of its items elsewhere. */
+/** An order line as the sync reports it: undiscounted and unrefunded unless said. */
+function line(
+  productKey: string,
+  title: string,
+  quantity: number,
+  unitPrice: number,
+  overrides: { lineTotal?: number; refundedAmount?: number; refundedQuantity?: number } = {},
+) {
+  return {
+    productKey,
+    title,
+    quantity,
+    unitPrice,
+    lineTotal: unitPrice * quantity,
+    refundedAmount: 0,
+    refundedQuantity: 0,
+    ...overrides,
+  };
+}
+
+/**
+ * Two orders holding the fixture collection's Lamp next to a Vase it does not
+ * hold: one landed on the collection page, one on the homepage. Where they
+ * landed changes nothing for the sheet - both count their Lamp lines only.
+ */
 function collectionOrders() {
   return {
     currency: "EUR",
@@ -346,10 +382,7 @@ function collectionOrders() {
         paid: true,
         landingPath: "/collections/best-sellers?utm_source=google",
         refunded: 0,
-        lines: [
-          { productKey: "LAMP-1", title: "Lamp", quantity: 2, unitPrice: 40 },
-          { productKey: "VASE-1", title: "Vase", quantity: 1, unitPrice: 20 },
-        ],
+        lines: [line("LAMP-1", "Lamp", 2, 40), line("VASE-1", "Vase", 1, 20)],
       },
       {
         date: "2026-08-14",
@@ -357,10 +390,7 @@ function collectionOrders() {
         paid: true,
         landingPath: "/",
         refunded: 0,
-        lines: [
-          { productKey: "LAMP-1", title: "Lamp", quantity: 1, unitPrice: 40 },
-          { productKey: "VASE-1", title: "Vase", quantity: 1, unitPrice: 20 },
-        ],
+        lines: [line("LAMP-1", "Lamp", 1, 40), line("VASE-1", "Vase", 1, 20)],
       },
     ],
   };
@@ -1011,10 +1041,10 @@ describe("admin store analytics DAL", () => {
                 bucket: "2026-08-14",
                 shopifyRevenue: null,
                 addedToCart: null,
-                // The order that landed on the page counts whole (100, 3 units);
-                // the one that landed elsewhere counts its Lamp line only (40, 1).
-                collectionRevenue: 140,
-                collectionUnits: 4,
+                // Both orders count their Lamp lines (80 and 40) and nothing
+                // else: not the Vase, not the page either one landed on.
+                collectionRevenue: 120,
+                collectionUnits: 3,
                 collectionOrders: 2,
                 // Google visits that landed on the page, product pages within it included.
                 collectionAddedToCart: 10,
@@ -1078,8 +1108,8 @@ describe("admin store analytics DAL", () => {
             timeline: [
               expect.objectContaining({
                 bucket: "2026-08-14",
-                collectionRevenue: 140,
-                collectionUnits: 4,
+                collectionRevenue: 120,
+                collectionUnits: 3,
                 collectionOrders: 2,
                 collectionAddedToCart: 10,
                 cogs: null,
@@ -1144,7 +1174,7 @@ describe("admin store analytics DAL", () => {
 
     const timeline = (result.campaigns as { data: { rows: Array<{ timeline: Array<Record<string, unknown>> }> } }).data.rows[0]!.timeline;
     expect(timeline.map((point) => point.bucket)).toEqual(["2026-08-14T00:00:00", "2026-08-14T13:00:00"]);
-    expect(timeline[0]).toMatchObject({ collectionRevenue: 140, collectionOrders: 2, collectionAddedToCart: 4, cogs: null });
+    expect(timeline[0]).toMatchObject({ collectionRevenue: 120, collectionOrders: 2, collectionAddedToCart: 4, cogs: null });
     expect(timeline[1]).toMatchObject({ collectionRevenue: 0, collectionOrders: 0, collectionAddedToCart: 0, cogs: null });
   });
 
@@ -1211,23 +1241,23 @@ describe("admin store analytics DAL", () => {
     const second = attribution.get(`${STORE_ID}:111`)!;
     expect(first.sharedWith).toBe(2);
     expect(first.costsKnown).toBe(true);
-    // The collection earned 140 on 4 units over 2 orders. COGS per order: the
-    // landed order prices Lamp x2 at the manual 20 and Vase x1 at 30% of 20
-    // (46); the other order's Lamp line alone is 20. 150 of 200 spent gives
-    // the first campaign three quarters of everything.
+    // The collection earned 120 on 3 Lamp units over 2 orders. COGS per
+    // order: Lamp x2 at the manual 20 (40), then Lamp x1 (20); the Vase is
+    // not the collection's and costs it nothing. 150 of 200 spent gives the
+    // first campaign three quarters of everything.
     expect(first.byDay.get("2026-08-14")).toEqual({
-      revenue: 105,
-      units: 3,
+      revenue: 90,
+      units: 2.25,
       orders: 1.5,
       addedToCart: 6,
-      cogs: 49.5,
+      cogs: 45,
     });
     expect(second.byDay.get("2026-08-14")).toEqual({
-      revenue: 35,
-      units: 1,
+      revenue: 30,
+      units: 0.75,
       orders: 0.5,
       addedToCart: 2,
-      cogs: 16.5,
+      cogs: 15,
     });
   });
 
@@ -1273,8 +1303,8 @@ describe("admin store analytics DAL", () => {
     });
 
     expect(attribution.get(`${STORE_ID}:987654321`)!.byDay.get("2026-08-14")).toEqual({
-      revenue: 140,
-      units: 4,
+      revenue: 120,
+      units: 3,
       orders: 2,
       addedToCart: null,
       cogs: null,
@@ -1283,7 +1313,7 @@ describe("admin store analytics DAL", () => {
 
   it("prices a forint store's costs in euros exactly once", async () => {
     // A HUF store reporting in EUR: the manual cost is stored in euros already
-    // (11 EUR a lamp), so a landed order of two lamps at 20,000 HUF must read
+    // (11 EUR a lamp), so an order of two lamps at 20,000 HUF must read
     // revenue 100 EUR and COGS 22 EUR - not 22 rated down to 0.055.
     const attribution = await attributeCampaignCollections({
       orders: {
@@ -1297,7 +1327,7 @@ describe("admin store analytics DAL", () => {
               paid: true,
               landingPath: "/collections/best-sellers",
               refunded: 0,
-              lines: [{ productKey: "LAMP-1", title: "Lamp", quantity: 2, unitPrice: 20_000 }],
+              lines: [line("LAMP-1", "Lamp", 2, 20_000)],
             },
           ],
         },
@@ -1350,9 +1380,13 @@ describe("admin store analytics DAL", () => {
     expect(day.cogs).toBeCloseTo(22, 6);
   });
 
-  it("counts a landed order net of its refunds", async () => {
+  it("earns a discounted, partly refunded line what it was charged less what came back", async () => {
+    // Two lamps listed at 40, charged 70 with a code, one of them refunded
+    // for its 35: the line earns 35 and one unit, as the client's sheet has
+    // it. The 30 refunded on the order as a custom amount reaches no line.
     const orders = collectionOrders();
-    orders.orders[0]!.refunded = 30;
+    orders.orders[0]!.refunded = 65;
+    orders.orders[0]!.lines[0] = line("LAMP-1", "Lamp", 2, 40, { lineTotal: 70, refundedAmount: 35, refundedQuantity: 1 });
     const attribution = await attributeCampaignCollections({
       orders: { ok: true, value: orders },
       collectionProductKeys: async () => null,
@@ -1393,12 +1427,149 @@ describe("admin store analytics DAL", () => {
       costs: null,
     });
 
-    // 100 landed minus 30 refunded, plus the other order's Lamp line at 40.
+    // 70 charged minus 35 refunded, plus the other order's Lamp line at 40.
     expect(attribution.get(`${STORE_ID}:987654321`)!.byDay.get("2026-08-14")).toMatchObject({
-      revenue: 110,
-      units: 4,
+      revenue: 75,
+      units: 2,
       orders: 2,
     });
+  });
+
+  it("gives a collection nothing from an order that landed on its page but bought something else", async () => {
+    // The revenue share bills such an order whole, by contract; the client's
+    // own sheet does not count it at all, and the sheet follows the client.
+    const attribution = await attributeCampaignCollections({
+      orders: {
+        ok: true,
+        value: {
+          currency: "EUR",
+          orders: [
+            {
+              date: "2026-08-14",
+              total: 100,
+              paid: true,
+              landingPath: "/collections/best-sellers?utm_source=google",
+              refunded: 0,
+              lines: [line("VASE-1", "Vase", 5, 20)],
+            },
+            {
+              date: "2026-08-14",
+              total: 45,
+              paid: true,
+              landingPath: "/collections/best-sellers",
+              refunded: 0,
+              lines: [line("LAMP-1", "Lamp", 1, 40)],
+            },
+          ],
+        },
+      },
+      collectionProductKeys: async () => new Set(["LAMP-1"]),
+      targetCurrency: "EUR",
+      range: RANGE,
+      google: {
+        ok: true,
+        value: {
+          rows: [{ ...googleCampaign(), finalUrls: ["https://northwind.example/collections/best-sellers"] }] as never,
+          granularity: "day",
+          timeline: [deliveredDay()],
+        },
+      },
+      collectionSales: { ok: true, value: [] },
+      landing: { ok: true, value: [] },
+      costs: null,
+    });
+
+    // The Lamp order alone, and its Lamp line alone: no shipping, no Vase.
+    expect(attribution.get(`${STORE_ID}:987654321`)!.byDay.get("2026-08-14")).toEqual({
+      revenue: 40,
+      units: 1,
+      orders: 1,
+      addedToCart: 0,
+      cogs: null,
+    });
+  });
+
+  it("credits each collection of a two-collection order with its own lines", async () => {
+    // One order with a Lamp from best-sellers and a Vase from decor, shipping
+    // on top: each sheet reads its own line, and neither reads the shipping.
+    const attribution = await attributeCampaignCollections({
+      orders: {
+        ok: true,
+        value: {
+          currency: "EUR",
+          orders: [{
+            date: "2026-08-14",
+            total: 65,
+            paid: true,
+            landingPath: "/collections/best-sellers",
+            refunded: 0,
+            lines: [line("LAMP-1", "Lamp", 1, 40), line("VASE-1", "Vase", 1, 20)],
+          }],
+        },
+      },
+      collectionProductKeys: async (handle) => new Set(handle === "best-sellers" ? ["LAMP-1"] : ["VASE-1"]),
+      targetCurrency: "EUR",
+      range: RANGE,
+      google: {
+        ok: true,
+        value: {
+          rows: [
+            { ...googleCampaign(), finalUrls: ["https://northwind.example/collections/best-sellers"] },
+            { ...googleCampaign(), providerCampaignId: "111", finalUrls: ["https://northwind.example/collections/decor"] },
+          ] as never,
+          granularity: "day",
+          timeline: [deliveredDay(), deliveredDay(STORE_ID, "111")],
+        },
+      },
+      collectionSales: { ok: true, value: [] },
+      landing: { ok: true, value: [] },
+      costs: null,
+    });
+
+    expect(attribution.get(`${STORE_ID}:987654321`)!.byDay.get("2026-08-14")).toMatchObject({ revenue: 40, units: 1, orders: 1 });
+    expect(attribution.get(`${STORE_ID}:111`)!.byDay.get("2026-08-14")).toMatchObject({ revenue: 20, units: 1, orders: 1 });
+  });
+
+  it("carries the store's per-order fee settings on the live campaign sheet", async () => {
+    // The same settings the store rollup applies to every order, with the
+    // account's commission rate as the agency fee; a blank setting is a zero
+    // fee, not an unknown one.
+    mocks.createServiceClient.mockReturnValue(service([account({
+      payment_fee_pct: "1.7",
+      payment_fee_fixed: 0.25,
+      shipping_cost_per_order: null,
+      commission_rate: 10,
+    })], null));
+    const adapter = shopifyAdapter();
+    mocks.createLegacyShopifyReportingAdapter.mockResolvedValue(adapter);
+    mocks.fetchLiveCampaignsDetailed.mockResolvedValue([googleCampaign()]);
+
+    const result = await fetchAdminStoreAnalytics({
+      clientId: CLIENT_ID,
+      store: { accountId: STORE_ID, activityAccountIds: [STORE_ID], currency: "EUR", days: [] },
+      range: RANGE,
+    });
+
+    expect(result.campaigns).toMatchObject({
+      data: { fees: { paymentFeePct: 1.7, paymentFeeFixed: 0.25, shippingCostPerOrder: 0, agencyFeeRate: 10 } },
+    });
+  });
+
+  it("leaves the fee settings unknown, not zero, when the store's row cannot be read", async () => {
+    mocks.createServiceClient.mockReturnValue(
+      service([account()], null, undefined, undefined, new Error("ad_accounts is unavailable")),
+    );
+    const adapter = shopifyAdapter();
+    mocks.createLegacyShopifyReportingAdapter.mockResolvedValue(adapter);
+    mocks.fetchLiveCampaignsDetailed.mockResolvedValue([googleCampaign()]);
+
+    const result = await fetchAdminStoreAnalytics({
+      clientId: CLIENT_ID,
+      store: { accountId: STORE_ID, activityAccountIds: [STORE_ID], currency: "EUR", days: [] },
+      range: RANGE,
+    });
+
+    expect(result.campaigns).toMatchObject({ data: { fees: null } });
   });
 
   it("marks the collection's sales unknown, not zero, when the orders could not be read", async () => {
@@ -1502,11 +1673,11 @@ describe("admin store analytics DAL", () => {
       costs: null,
     });
 
-    // The landed order counts whole (100, 3 units); the other counts its
-    // Lamp line only (40, 1), known from the lookup, not the sales report.
+    // Both orders count their Lamp lines (80 and 40), the Lamp known from the
+    // lookup, not the sales report.
     expect(attribution.get(`${STORE_ID}:987654321`)!.byDay.get("2026-08-14")).toEqual({
-      revenue: 140,
-      units: 4,
+      revenue: 120,
+      units: 3,
       orders: 2,
       addedToCart: 0,
       cogs: null,
@@ -2014,13 +2185,14 @@ describe("admin store analytics DAL", () => {
       costs: null,
     });
     expect(attribution.get(`${STORE_ID}:987654321`)).toMatchObject({ handle: "best-sellers" });
-    expect(attribution.get(`${STORE_ID}:987654321`)!.byDay.get("2026-08-14")).toMatchObject({ revenue: 140, units: 4, orders: 2 });
+    expect(attribution.get(`${STORE_ID}:987654321`)!.byDay.get("2026-08-14")).toMatchObject({ revenue: 120, units: 3, orders: 2 });
   });
 
-  it("matches a percent-encoded landing path to a non-ASCII collection handle", async () => {
+  it("reads the cart additions of a percent-encoded landing path, and no revenue from where an order landed", async () => {
     // A Japanese store: Shopify's handle is plain, its ShopifyQL landing path
     // and the order's landing page arrive percent-encoded, and the campaign
-    // URL can be either. All four must be the same page.
+    // URL can be either. The campaign URL and the session paths must be the
+    // same page; the order's landing page no longer matters, encoded or not.
     const handle = "ハンド";
     const encoded = "%E3%83%8F%E3%83%B3%E3%83%89";
     const attribution = await attributeCampaignCollections({
@@ -2036,7 +2208,7 @@ describe("admin store analytics DAL", () => {
               paid: true,
               landingPath: `/collections/${encoded}?utm_source=google`,
               refunded: 0,
-              lines: [{ productKey: "OTHER-1", title: "Other", quantity: 1, unitPrice: 100 }],
+              lines: [line("OTHER-1", "Other", 1, 100)],
             },
             {
               date: "2026-08-14",
@@ -2044,7 +2216,7 @@ describe("admin store analytics DAL", () => {
               paid: true,
               landingPath: "/",
               refunded: 0,
-              lines: [{ productKey: "BAG-1", title: "Bag", quantity: 1, unitPrice: 30 }],
+              lines: [line("BAG-1", "Bag", 1, 30)],
             },
           ],
         },
@@ -2095,9 +2267,10 @@ describe("admin store analytics DAL", () => {
 
     const entry = attribution.get(`${STORE_ID}:987654321`)!;
     expect(entry.handle).toBe(handle);
-    // The landed order counts whole (100, 1 unit); the other counts its Bag
-    // line (30, 1); the cart additions are the two Google rows on the page.
-    expect(entry.byDay.get("2026-08-14")).toEqual({ revenue: 130, units: 2, orders: 2, addedToCart: 5, cogs: null });
+    // The order that landed on the encoded page holds none of the
+    // collection and earns nothing; the other counts its Bag line (30, 1);
+    // the cart additions are the two Google rows on the page.
+    expect(entry.byDay.get("2026-08-14")).toEqual({ revenue: 30, units: 1, orders: 1, addedToCart: 5, cogs: null });
   });
 
   it("keeps an unmatched campaign unmatched when a wider snapshot is sliced to the period", async () => {
@@ -2156,10 +2329,12 @@ describe("admin store analytics DAL", () => {
       timeline: [point("2026-08-01", shopifyRevenue), point("2026-08-14", shopifyRevenue)],
       breakdown: { state: "empty", rows: [], sources: [], reason: null },
     });
+    const fees = { paymentFeePct: 1.7, paymentFeeFixed: 0.25, shippingCostPerOrder: 0, agencyFeeRate: 10 };
     const sliced = {
       snapshot: snapshot([{
         granularity: "day",
         rows: [row("1", "unmatched", null), row("2", "matched", null), row("3", "unavailable", null), row("4", "matched", 50)],
+        fees,
       }]),
       sourceFrom: "2026-08-01",
       sourceTo: "2026-08-14",
@@ -2192,6 +2367,8 @@ describe("admin store analytics DAL", () => {
     ]);
     // Only the days inside the period survive the slice.
     expect(rows[0]!.timeline).toHaveLength(1);
+    // The store's fee settings ride the family data through the slice.
+    expect((result.campaigns as { data: { fees: unknown } }).data.fees).toEqual(fees);
   });
 
   it("uses the exact inclusive range for every legacy source and only exact campaign IDs", async () => {

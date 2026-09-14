@@ -139,6 +139,7 @@ function orderResponse(currencyCode = "EUR") {
                 sku: "SUMMER-1",
                 quantity: 2,
                 originalUnitPriceSet: { shopMoney: { amount: "60.25", currencyCode } },
+                discountedTotalSet: { shopMoney: { amount: "120.50", currencyCode } },
               },
             ],
           },
@@ -229,6 +230,9 @@ describe("V2 Shopify reporting adapter", () => {
               title: "Summer Dress",
               quantity: 2,
               unitPrice: 60.25,
+              lineTotal: 120.5,
+              refundedAmount: 0,
+              refundedQuantity: 0,
             },
           ],
         },
@@ -464,6 +468,7 @@ describe("V2 Shopify reporting adapter", () => {
     node.totalOutstandingSet.shopMoney.currencyCode = "CZK";
     node.totalRefundedSet.shopMoney.currencyCode = "CZK";
     node.lineItems.nodes[0].originalUnitPriceSet.shopMoney.currencyCode = "CZK";
+    node.lineItems.nodes[0].discountedTotalSet.shopMoney.currencyCode = "CZK";
     mocks.reportingShopifyGraphql.mockResolvedValue(response);
     mocks.fxDailyRates.mockResolvedValue([["2026-08-13", 0.034]]);
     mocks.rateOn.mockReturnValue(0.034);
@@ -488,6 +493,7 @@ describe("V2 Shopify reporting adapter", () => {
     response.orders.nodes[0].totalOutstandingSet.shopMoney.currencyCode = "CZK";
     response.orders.nodes[0].totalRefundedSet.shopMoney.currencyCode = "CZK";
     response.orders.nodes[0].lineItems.nodes[0].originalUnitPriceSet.shopMoney.currencyCode = "CZK";
+    response.orders.nodes[0].lineItems.nodes[0].discountedTotalSet.shopMoney.currencyCode = "CZK";
     mocks.reportingShopifyGraphql.mockResolvedValue(response);
     mocks.fxDailyRates.mockResolvedValue([["2026-08-13", 0.034]]);
     mocks.rateOn.mockReturnValue(Number.NaN);

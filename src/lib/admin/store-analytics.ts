@@ -43,7 +43,7 @@ import {
   type ShopifyLandingSessionsRow,
   type ShopifyReportingAdapter,
 } from "@/lib/reporting/shopify";
-import { collectionHandleFromUrl, decodePercentEscapes, normalizePath } from "@/lib/finance/rev-share";
+import { collectionHandleFromUrl, decodePercentEscapes } from "@/lib/finance/rev-share";
 import { loadCostContext } from "@/lib/cogs/context";
 import { orderCogs, type CostContext } from "@/lib/cogs/engine";
 import { fxDailyRates, rateOn } from "@/lib/shopify/fx";
@@ -105,10 +105,11 @@ export type AdminAnalyticsCampaignTimelinePoint = {
   /** Net units after returns across the campaign's products; null when the product series is unavailable. */
   units?: number | null;
   /**
-   * Sales of the collection this campaign lands on, split between the
-   * campaigns that land there by their share of the day's spend; ATC and
-   * orders are the Google sessions that landed on that collection page. null
-   * when the campaign lands on no single collection the store reports.
+   * Sales of the collection this campaign lands on, read from the orders the
+   * way the client's own sheet reads them (see attributeCampaignCollections)
+   * and split between the campaigns that land there by their share of the
+   * day's spend; ATC is the Google sessions that landed on that collection
+   * page. null when the campaign lands on no single collection the store has.
    */
   collectionRevenue?: number | null;
   collectionUnits?: number | null;
@@ -260,6 +261,12 @@ export type AdminStoreAnalytics = {
     rows: AdminAnalyticsCampaign[];
     /** The store's current local day; null when its zone could not be read. */
     storeToday?: string | null;
+    /**
+     * The store's per-order fee settings, for the sheet's fee and profit
+     * columns; null when they could not be read, absent on a snapshot taken
+     * before they were carried.
+     */
+    fees?: CampaignSheetFees | null;
   }>;
   collections: AdminAnalyticsFamily<{
     granularity: AdminAnalyticsGranularity;
@@ -287,6 +294,28 @@ export type AdminStoreAnalytics = {
    */
   campaignsFreshness?: AdminProviderFreshness;
   shopifyProvenance?: "legacy" | "v2_cutover" | "supplemental_v2_shopify";
+};
+
+/**
+ * The per-order settings the campaign sheet estimates its fees with: the
+ * same ones the store's own rollup applies to every order (see
+ * metrics/recompute and cogs/engine's paymentFee), plus the agency fee.
+ *
+ * The agency fee is the account's `commission_rate`, in percent of ad spend
+ * as the account stores it (10 for 10%). The portal P&L prices a referred
+ * account on the 10% list rate through its referral schedule instead, so
+ * the figure the sheet derives from this is an estimate of the fee, not
+ * the invoice.
+ */
+export type CampaignSheetFees = {
+  /** Payment fee, percent of the order's net (Shopify Payments' 1.7%). */
+  paymentFeePct: number;
+  /** Payment fee, fixed amount per order in the store's reporting currency. */
+  paymentFeeFixed: number;
+  /** Shipping cost per order, reporting currency. */
+  shippingCostPerOrder: number;
+  /** Agency fee, percent of ad spend. */
+  agencyFeeRate: number;
 };
 
 export type AdminProviderFreshness = {
@@ -1542,6 +1571,7 @@ function campaignFamily(
   storeToday: string | null = null,
   collectionAttribution: CampaignCollectionAttribution | null = null,
   basis: CollectionBasisSources | null = null,
+  fees: CampaignSheetFees | null = null,
 ): AdminStoreAnalytics["campaigns"] {
   if (!google.ok) {
     return google.state === "unavailable"
@@ -1762,13 +1792,13 @@ function campaignFamily(
   if (partial) {
     return {
       state: "partial",
-      data: { rows, granularity: google.value.granularity, storeToday },
+      data: { rows, granularity: google.value.granularity, storeToday, fees },
       message: message || "Some campaign detail sources are partial.",
     };
   }
   return {
     state: rows.length === 0 ? "empty" : "ready",
-    data: { rows, granularity: google.value.granularity, storeToday },
+    data: { rows, granularity: google.value.granularity, storeToday, fees },
     message: messages.length > 0 ? message : null,
   };
 }
@@ -1996,10 +2026,16 @@ async function shopifyFamilies(
 const GOOGLE_LANDING_PLATFORMS = new Set(["google", "alphabet"]);
 
 export type CampaignCollectionDay = {
-  /** null when the range's orders could not be read: unknown, not none. */
+  /**
+   * What the collection's items earned, the way the client's own sheet reads
+   * it: every order's collection lines at what they were charged, net of
+   * what was refunded on them (see attributeCampaignCollections). null when
+   * the range's orders could not be read: unknown, not none.
+   */
   revenue: number | null;
+  /** The collection's units sold, less the ones refunded; null with revenue. */
   units: number | null;
-  /** Orders the collection earned, by the landing-or-lines rule; null with revenue. */
+  /** Orders holding at least one collection item; null with revenue. */
   orders: number | null;
   /** null when the landing sessions could not be read. */
   addedToCart: number | null;
@@ -2143,16 +2179,30 @@ async function mapWithConcurrency<T, R>(
  * collection must exist: the sales report only lists collections whose
  * products sold in the window, so a page it left out is looked up in the
  * store, and a collection the store has keeps its sheet with real zeros
- * where nothing sold, whatever the window. What the collection earned is
- * read from the orders themselves, by the rule the revenue share already
- * applies:
- *  - an order that LANDED on the collection page counts whole - every line,
- *    the whole total;
- *  - any other order counts only the lines whose product is in the collection.
- * Cart additions and orders-from-landing are the Google sessions that landed
- * on the collection page. COGS is what those same lines cost, priced by the
- * store's own product costs order by order - manual cost, tiers and cost
- * collections included, exactly as the store's P&L prices them.
+ * where nothing sold, whatever the window.
+ *
+ * What the collection earned is read from the orders themselves, the way
+ * the client reads it in the P&L sheet they keep per collection, which this
+ * sheet exists to match: every order of the range, whatever page it landed
+ * on and whatever channel it came through, counts the lines whose product
+ * is in the collection, and nothing else.
+ *  - revenue is what those lines were charged after discounts, less what
+ *    was refunded on them (never below zero for a line);
+ *  - units are the lines' quantities, less the units refunded;
+ *  - an order counts once when it holds at least one such line.
+ * An order that landed on the collection page but bought something else
+ * earns the collection nothing; shipping and the other collections' items
+ * of an order never count. The revenue-share ledger reads a landed order
+ * whole, shipping and all, because that is the contractual rule the agency
+ * bills by - a different rule, kept in finance/rev-share.ts, that this
+ * sheet does not follow: read that way, the sheet over-read the client's
+ * figures by 40% and more.
+ *
+ * Cart additions are the Google sessions that landed on the collection
+ * page. COGS is what the collection lines cost, priced by the store's own
+ * product costs order by order - manual cost, tiers and cost collections
+ * included, exactly as the store's P&L prices them; a refunded unit was
+ * still bought and keeps its cost, as it does in that P&L.
  *
  * Amounts arrive in the store's base currency and are converted to the
  * reporting currency with the day's ECB rate, like every other Shopify
@@ -2160,14 +2210,9 @@ async function mapWithConcurrency<T, R>(
  * from lines converted first. Campaigns sharing a page split each day by
  * their share of that day's Google spend, equally when none of them spent.
  *
- * The landing match is a little wider than the revenue share's: a page under
- * the collection (a product opened from it) counts as landing on it, where
- * the revenue share wants the collection page itself. And a landed order is
- * counted net of its refunds, where the revenue share bills it gross.
- *
- * Within one collection the shares sum to one. Across collections nothing is
- * additive: an order that landed on one page and bought another collection's
- * items counts for both, exactly as the collections family itself warns.
+ * Within one collection the shares sum to one. Across collections the lines
+ * are additive: an order holding two collections' items credits each with
+ * its own lines.
  */
 export async function attributeCampaignCollections(input: {
   google: Attempt<GoogleCampaignLoad>;
@@ -2263,7 +2308,7 @@ export async function attributeCampaignCollections(input: {
     }
   }
 
-  // What each collection earned per day, from the orders, by the agreed rule.
+  // What each collection earned per day, from the orders, by the client's rule.
   type EarnedDay = { revenue: number; units: number; orders: number; cogs: number | null };
   const earnedByHandleDay = new Map<string, EarnedDay>();
   if (input.orders.ok) {
@@ -2271,31 +2316,30 @@ export async function attributeCampaignCollections(input: {
       ? null
       : await fxDailyRates(input.orders.value.currency, input.targetCurrency, input.range.from, input.range.to);
     const convert = (amount: number, day: string) => amount * (rates ? rateOn(rates, day) : 1);
-    const deals = [...campaignsByHandle.keys()].map((handle) => ({
+    const collections = [...campaignsByHandle.keys()].map((handle) => ({
       handle,
-      path: `/collections/${handle}`,
       productKeys: productKeysByHandle.get(handle) ?? new Set<string>(),
     }));
     for (const order of input.orders.value.orders) {
-      // Decoded, unlike the revenue share's own landing match: the sheet
-      // bills nothing, so it may match the page a percent-encoded path names.
-      const landing = normalizePath(order.landingPath);
-      for (const deal of deals) {
-        const landedHere = landing !== null && (landing === deal.path || landing.startsWith(`${deal.path}/`));
-        const lines = landedHere
-          ? order.lines
-          : order.lines.filter((line) => deal.productKeys.has(line.productKey));
+      for (const collection of collections) {
+        const lines = order.lines.filter((line) => collection.productKeys.has(line.productKey));
         if (lines.length === 0) continue;
-        // A landed order counts whole, net of what was refunded on it; a
-        // line-matched order counts its lines at their price - a refund is
-        // not allocated to lines, so it stays with the whole-order rule.
-        const revenue = landedHere
-          ? Math.max(0, order.total - order.refunded)
-          : lines.reduce((sum, line) => sum + line.unitPrice * line.quantity, 0);
-        const key = `${deal.handle}|${order.date}`;
+        // Each line at what it was charged, less what came back on it. A
+        // refund booked on no line (a custom amount) stays with the order
+        // and does not reach the collection, as it does not in the client's
+        // sheet either.
+        const revenue = lines.reduce(
+          (sum, line) => sum + Math.max(0, line.lineTotal - line.refundedAmount),
+          0,
+        );
+        const units = lines.reduce(
+          (sum, line) => sum + Math.max(0, line.quantity - line.refundedQuantity),
+          0,
+        );
+        const key = `${collection.handle}|${order.date}`;
         const current = earnedByHandleDay.get(key) ?? { revenue: 0, units: 0, orders: 0, cogs: input.costs ? 0 : null };
         current.revenue += convert(revenue, order.date);
-        current.units += lines.reduce((sum, line) => sum + line.quantity, 0);
+        current.units += units;
         current.orders += 1;
         if (current.cogs !== null && input.costs) {
           // The cost context is already in the reporting currency - a manual
@@ -2529,33 +2573,51 @@ function failedShopifyFamilies(): ShopifyFamilies {
   };
 }
 
+/** A stored setting as a number; anything unreadable is a zero fee, not a NaN one. */
+function feeSetting(value: unknown): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 /**
- * The store's product costs, for the campaign sheet's COGS column. Read on a
- * best-effort basis: a store whose costs cannot be read still gets its sheet,
- * with the column reading "—".
+ * The store's product costs, for the campaign sheet's COGS column, and its
+ * per-order fee settings, for the sheet's fee columns. Both read on a
+ * best-effort basis: a store whose settings cannot be read still gets its
+ * sheet, with those columns reading as unknown. The fee settings are one row read;
+ * the costs need the cost tables on top, so they can be missing on their
+ * own while the fees are known.
  */
 async function loadStoreCostContext(
   service: NonNullable<ReturnType<typeof createServiceClient>>,
   accountId: string,
   currency: string,
-): Promise<CostContext | null> {
+): Promise<{ costs: CostContext | null; fees: CampaignSheetFees | null }> {
+  let fees: CampaignSheetFees;
+  let defaultPct: number;
   try {
     const { data, error } = await service
       .from("ad_accounts")
-      .select("default_product_cost_pct")
+      .select("default_product_cost_pct, payment_fee_pct, payment_fee_fixed, shipping_cost_per_order, commission_rate")
       .eq("id", accountId)
       .maybeSingle();
     if (error) throw error;
-    const defaultPct = Number(data?.default_product_cost_pct ?? 30);
-    return await loadCostContext(
-      service,
-      accountId,
-      Number.isFinite(defaultPct) ? defaultPct : 30,
-      currency,
-    );
+    const storedPct = Number(data?.default_product_cost_pct ?? 30);
+    defaultPct = Number.isFinite(storedPct) ? storedPct : 30;
+    fees = {
+      paymentFeePct: feeSetting(data?.payment_fee_pct),
+      paymentFeeFixed: feeSetting(data?.payment_fee_fixed),
+      shippingCostPerOrder: feeSetting(data?.shipping_cost_per_order),
+      agencyFeeRate: feeSetting(data?.commission_rate),
+    };
+  } catch (error) {
+    console.error("Admin store analytics could not read the store's cost settings:", error);
+    return { costs: null, fees: null };
+  }
+  try {
+    return { costs: await loadCostContext(service, accountId, defaultPct, currency), fees };
   } catch (error) {
     console.error("Admin store analytics could not read product costs:", error);
-    return null;
+    return { costs: null, fees };
   }
 }
 
@@ -2629,7 +2691,7 @@ async function buildLiveAdminStoreAnalytics(
     }),
   );
 
-  const [google, breakdowns, shopify, activityResult, rollup, costs] = await Promise.all([
+  const [google, breakdowns, shopify, activityResult, rollup, { costs, fees }] = await Promise.all([
     googlePromise,
     breakdownPromise,
     shopifyPromise,
@@ -2664,6 +2726,7 @@ async function buildLiveAdminStoreAnalytics(
         // Filled while the attribution above ran its lookups.
         failedLookups: shopify.failedCollectionLookups,
       },
+      fees,
     );
   } catch (error) {
     console.error("Admin store campaign analytics composition failed:", error);
@@ -2798,6 +2861,7 @@ type CampaignSnapshotData = {
   granularity: AdminAnalyticsGranularity;
   rows: AdminAnalyticsCampaign[];
   storeToday?: string | null;
+  fees?: CampaignSheetFees | null;
 };
 
 type CollectionSnapshotData = {

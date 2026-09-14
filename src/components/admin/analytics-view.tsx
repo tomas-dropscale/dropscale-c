@@ -557,6 +557,7 @@ export function AnalyticsView({
             />
             <CampaignPerformanceSection
               campaigns={storeAnalytics.campaigns}
+              collections={storeAnalytics.collections}
               currency={scope.selectedStore.currency}
               rangeEnd={storeAnalytics.range.to}
               freshness={storeAnalytics.campaignsFreshness ?? null}

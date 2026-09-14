@@ -248,6 +248,23 @@ export type SyncedOrderLine = {
   quantity: number;
   /** Unit selling price in the store's base currency. */
   unitPrice: number;
+  /**
+   * What the customer was charged for the line after discounts and before
+   * refunds (Shopify's discountedTotalSet), store base currency. A discount
+   * code or an automatic discount makes this less than unitPrice x quantity,
+   * which is why a sheet that reads a collection's sales the way the client
+   * does needs it. For a line partly taken off the order unpaid, it is the
+   * share of the units that were actually sold.
+   */
+  lineTotal: number;
+  /**
+   * Money refunded on this line so far - the subtotals of the refund line
+   * items booked against it, store base currency. A removal the customer
+   * never paid for (see fetchDailySales) is not a refund and is left out.
+   */
+  refundedAmount: number;
+  /** Units refunded on this line so far, the same unpaid removals left out. */
+  refundedQuantity: number;
 };
 
 export type SyncedOrder = {
@@ -481,6 +498,7 @@ export async function fetchDailySales(
         sku: string | null;
         quantity: number;
         originalUnitPriceSet: { shopMoney: { amount: string; currencyCode: string } } | null;
+        discountedTotalSet: { shopMoney: { amount: string; currencyCode: string } } | null;
       }>;
     };
   };
@@ -576,6 +594,7 @@ export async function fetchDailySales(
                   sku
                   quantity
                   originalUnitPriceSet { shopMoney { amount currencyCode } }
+                  discountedTotalSet { shopMoney { amount currencyCode } }
                 }
               }
             }
@@ -714,7 +733,14 @@ export async function fetchDailySales(
     // refunds that also moved money (shipping refunded along with the
     // removal). One beyond the gap was paid for and settled some other way:
     // it stays sold, like a refund for money.
-    const removed: Array<{ id: string; quantity: number; value: number; moved: boolean }> = [];
+    const removed: Array<{
+      id: string;
+      quantity: number;
+      subtotal: number;
+      value: number;
+      moved: boolean;
+      unpaid: boolean;
+    }> = [];
     for (const refund of order.refunds) {
       if (refund.refundLineItems.pageInfo.hasNextPage) {
         throw new ShopifyError("A Shopify refund has too many lines for an exact report.");
@@ -726,10 +752,11 @@ export async function fetchDailySales(
         }
         // A line's subtotal already holds the tax where the store's prices
         // include it; elsewhere the tax sits on top.
+        const subtotal = finiteNonNegative(item.subtotalSet?.shopMoney.amount, "refund line subtotal");
         const value =
-          finiteNonNegative(item.subtotalSet?.shopMoney.amount, "refund line subtotal") +
+          subtotal +
           (order.taxesIncluded ? 0 : finiteNonNegative(item.totalTaxSet?.shopMoney.amount, "refund line tax"));
-        removed.push({ id: item.lineItem.id, quantity: item.quantity, value, moved });
+        removed.push({ id: item.lineItem.id, quantity: item.quantity, subtotal, value, moved, unpaid: false });
       }
     }
     const unpaidUnits = new Map<string, number>();
@@ -742,7 +769,20 @@ export async function fetchDailySales(
         }
         unpaidLeft = Math.max(0, Number((unpaidLeft - item.value).toFixed(6)));
         unpaidUnits.set(item.id, (unpaidUnits.get(item.id) ?? 0) + item.quantity);
+        item.unpaid = true;
       }
+    }
+    // What was refunded on each line, the unpaid removals aside: those were
+    // never sold, so they are not refunds either. The subtotal is booked as
+    // the line's own total is (tax inside where prices include it), so the
+    // two subtract cleanly.
+    const refundedByLine = new Map<string, { quantity: number; subtotal: number }>();
+    for (const item of removed) {
+      if (item.unpaid) continue;
+      const current = refundedByLine.get(item.id) ?? { quantity: 0, subtotal: 0 };
+      current.quantity += item.quantity;
+      current.subtotal += item.subtotal;
+      refundedByLine.set(item.id, current);
     }
     const lines = order.lineItems.nodes.flatMap((line) => {
       const title = typeof line.title === "string" ? line.title.trim() : "";
@@ -759,17 +799,30 @@ export async function fetchDailySales(
         line.originalUnitPriceSet?.shopMoney.amount,
         "order line price",
       );
+      const discountedTotal = finiteNonNegative(
+        line.discountedTotalSet?.shopMoney.amount,
+        "order line total",
+      );
       if (
         moneyCurrency(line.originalUnitPriceSet?.shopMoney.currencyCode, "order line price") !==
-        orderCurrency
+          orderCurrency ||
+        moneyCurrency(line.discountedTotalSet?.shopMoney.currencyCode, "order line total") !==
+          orderCurrency
       ) {
         throw new ShopifyError("Shopify returned an order line in another currency.");
       }
+      // The discounted total covers the whole line as Shopify lists it,
+      // unpaid units included; only the sold share was charged.
+      const soldTotal = sold === line.quantity ? discountedTotal : (discountedTotal * sold) / line.quantity;
+      const refunded = refundedByLine.get(line.id) ?? { quantity: 0, subtotal: 0 };
       return [{
         productKey: line.sku?.trim() || title,
         title,
         quantity: sold,
         unitPrice: convert(day, unitPrice),
+        lineTotal: convert(day, soldTotal),
+        refundedAmount: convert(day, refunded.subtotal),
+        refundedQuantity: refunded.quantity,
       }];
     });
 

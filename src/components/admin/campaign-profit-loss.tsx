@@ -2,42 +2,64 @@
 
 import * as React from "react";
 
-import type { AdminAnalyticsCampaign } from "@/lib/admin/store-analytics";
+import type {
+  AdminAnalyticsCampaign,
+  AdminAnalyticsCampaignTimelinePoint,
+  CampaignSheetFees,
+} from "@/lib/admin/store-analytics";
 import { integer, money, multiplier } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 /**
  * A campaign's day-by-day profit and loss: what Google delivered next to what
- * Shopify really sold, one row per day, totals at the foot.
+ * the store really sold, one row per day, totals at the foot, laid out as the
+ * sheet the client keeps by hand: ad spend, clicks, impressions, CTR, ATC,
+ * revenue, orders, units, CVR, ROAS, CPA, COGS, Shopify fees, shipping, the
+ * agency fee, profit and its running total.
  *
  * Every figure is one the store already reports. Spend, clicks and
- * impressions are Google's; sessions that added to cart, orders and revenue
- * are Shopify's own last-non-direct-click attribution for this campaign's UTM;
- * units are the net items sold across the campaign's products. The ratios are
- * derived here and nowhere else, so the sheet and its totals can never
- * disagree: CTR is clicks over impressions, CVR is orders over cart additions,
- * ROAS is Shopify revenue over spend, CPA is spend over orders.
+ * impressions are Google's; the sales columns are Shopify's, on the basis
+ * below; the fees are estimated from the store's own per-order settings, the
+ * ones its rollup applies to every order (see cogs/engine's paymentFee):
+ * Shopify fees are orders × fixed fee + revenue × percent, shipping is orders
+ * × cost per order, the agency fee is spend × rate. The ratios are derived
+ * here and nowhere else, so the sheet and its totals can never disagree: CTR
+ * is clicks over impressions, CVR is orders over cart additions, ROAS is
+ * revenue over spend, CPA is spend over orders.
  *
  * A day Shopify has not answered for reads "—", never 0: a zero is a fact, a
  * dash is the absence of one, and a P&L that prints the two alike is wrong.
+ * A fee the day cannot price (no settings, or no orders to count) reads "—"
+ * too, and counts 0 in profit, which the caption says; a day whose revenue is
+ * unknown has no profit at all.
  *
  * Profit and its running total are the point of the sheet, and they need a
- * revenue to subtract the spend from. Three bases, tried in order and stated
+ * revenue to subtract the costs from. Three bases, tried in order and stated
  * once in the caption, never mixed day by day:
  *  - "shopify": Shopify matched the campaign's own utm_campaign - the real
  *    sales of this campaign, last non-direct click.
  *  - "collection": the ads carry no utm_campaign (every visit lands as plain
  *    Google traffic, which Shopify labels "google" or "alphabet"), but the
  *    campaign sends people to one collection page. Its sales are read from
- *    the orders by the rule the revenue share already applies - an order that
- *    landed on the page counts whole, any other order counts the lines whose
- *    product is in the collection - from any channel, not only this
- *    campaign's ads, split between the campaigns landing there by spend; cart
- *    additions are the Google visits that landed on the page; and the store's
- *    product costs price those same lines order by order, so profit is
- *    revenue minus spend minus COGS. A collection that sold nothing in the
- *    period is still this basis, with zeros, as long as the store has it.
+ *    the orders the way the client's own per-collection sheet reads them:
+ *    revenue is the collection's items in every order, after discounts and
+ *    refunds, from any channel, not only this campaign's ads; orders are the
+ *    orders holding at least one of them; units are those items less the
+ *    ones refunded; all split between the campaigns landing there by spend.
+ *    Cart additions are the Google visits that landed on the page, and the
+ *    store's product costs price those same items order by order. A
+ *    collection that sold nothing in the period is still this basis, with
+ *    zeros, as long as the store has it.
  *  - "google": neither is known, so Google's own conversion value stands in.
+ *    Orders are unknown here, so only the agency fee can be priced.
+ *
+ * One sheet per collection is the same sheet fed with the campaigns landing
+ * there summed day by day (buildCollectionCampaign): the shares add back up
+ * to the collection's whole figures, which is what the client's sheet holds.
+ * That sheet never takes the "shopify" basis: a member campaign Shopify
+ * matched by its utm_campaign has sales of its own, but they are that
+ * campaign's, not the collection's items, and the collection's sheet stays
+ * the one the client keeps whatever its members' tagging.
  */
 
 export type CampaignProfitLossRow = {
@@ -57,7 +79,13 @@ export type CampaignProfitLossRow = {
   googleRevenue: number;
   /** Cost of the units sold, from the store's product costs; only on the collection basis. */
   cogs: number | null;
-  /** Revenue on the sheet's basis minus ad spend and COGS; null when the basis has no answer. */
+  /** Shopify's payment fees on the day's orders, orders × fixed + revenue × percent; null without the settings or the orders. */
+  paymentFees: number | null;
+  /** Shipping cost of the day's orders, orders × the store's cost per order; null without the settings or the orders. */
+  shipping: number | null;
+  /** The agency's fee on the day's spend, spend × rate; null without the settings. */
+  agencyFee: number | null;
+  /** Revenue on the sheet's basis minus ad spend, COGS and the fees the day could price; null when the basis has no answer. */
   profit: number | null;
   /** Running sum of profit up to and including this day. */
   cumulative: number | null;
@@ -106,9 +134,40 @@ type DayFacts = {
   };
 };
 
+/**
+ * The fees a day can price from the store's settings. Payment fees and
+ * shipping are per order, so they need the day's orders (and the revenue the
+ * percent applies to); the agency fee is on spend, which is always known.
+ * Without settings nothing can be priced, and the columns read "—".
+ *
+ * Only what the settings hold is priced. A cost the client keeps on their
+ * own sheet but the store's settings do not carry (a currency conversion
+ * fee on net sales, say) is not here, and profit reads higher by it; the
+ * caption lists the rates applied, so the reader can tell what was taken
+ * off. Carrying such a fee is a settings change, not a sheet one.
+ */
+function dayFees(
+  fees: CampaignSheetFees | null,
+  spend: number,
+  revenue: number | null,
+  orders: number | null,
+): Pick<CampaignProfitLossRow, "paymentFees" | "shipping" | "agencyFee"> {
+  if (!fees) return { paymentFees: null, shipping: null, agencyFee: null };
+  return {
+    paymentFees:
+      orders === null || revenue === null
+        ? null
+        : orders * fees.paymentFeeFixed + (revenue * fees.paymentFeePct) / 100,
+    shipping: orders === null ? null : orders * fees.shippingCostPerOrder,
+    agencyFee: (spend * fees.agencyFeeRate) / 100,
+  };
+}
+
 export function buildCampaignProfitLoss(
-  campaign: Pick<AdminAnalyticsCampaign, "timeline">,
+  /** `members` is set on a collection's sheet (see CollectionCampaign), and rules the "shopify" basis out. */
+  campaign: Pick<AdminAnalyticsCampaign, "timeline"> & { members?: number },
   today: string,
+  fees: CampaignSheetFees | null = null,
 ): CampaignProfitLoss {
   const byDay = new Map<string, CampaignProfitLossRow>();
   const facts = new Map<string, DayFacts>();
@@ -142,6 +201,9 @@ export function buildCampaignProfitLoss(
       cpa: null,
       googleRevenue: 0,
       cogs: null,
+      paymentFees: null,
+      shipping: null,
+      agencyFee: null,
       profit: null,
       cumulative: null,
       inProgress: day >= today,
@@ -165,15 +227,20 @@ export function buildCampaignProfitLoss(
   }
 
   // One basis for the whole sheet, chosen by what any day could answer:
-  // Shopify's own match first, the landing collection next, Google last. A day
-  // left unanswered on a Shopify or collection basis keeps its dash rather
-  // than borrowing the next basis's number.
+  // Shopify's own match first, the landing collection next, Google last. A
+  // collection's sheet (members set) skips the first: the sum carries a
+  // matched member's UTM sales, and read as a fact they would make the sheet
+  // that member's, printing its sales and orders for a page that sold more
+  // than that to everyone. A day left unanswered on a Shopify or collection
+  // basis keeps its dash rather than borrowing the next basis's number.
   const allFacts = [...facts.values()];
-  const revenueBasis: CampaignRevenueBasis = allFacts.some((fact) => fact.utm.revenue !== null)
-    ? "shopify"
-    : allFacts.some((fact) => fact.collection.revenue !== null)
-      ? "collection"
-      : "google";
+  const collectionSheet = campaign.members !== undefined;
+  const revenueBasis: CampaignRevenueBasis =
+    !collectionSheet && allFacts.some((fact) => fact.utm.revenue !== null)
+      ? "shopify"
+      : allFacts.some((fact) => fact.collection.revenue !== null)
+        ? "collection"
+        : "google";
 
   let running: number | null = null;
   const rows = [...byDay.values()]
@@ -190,10 +257,22 @@ export function buildCampaignProfitLoss(
         cogs: revenueBasis === "collection" ? fact?.collection.cogs ?? null : null,
       };
       const revenue = revenueBasis === "google" ? row.googleRevenue : row.revenue;
-      const profit = revenue === null ? null : revenue - row.spend - (row.cogs ?? 0);
+      // The per-order fees are priced on the sheet's own orders and revenue,
+      // so on the Google basis (no orders known) only the agency fee is.
+      const costs = dayFees(fees, row.spend, row.revenue, row.orders);
+      const profit =
+        revenue === null
+          ? null
+          : revenue -
+            row.spend -
+            (row.cogs ?? 0) -
+            (costs.paymentFees ?? 0) -
+            (costs.shipping ?? 0) -
+            (costs.agencyFee ?? 0);
       if (profit !== null) running = (running ?? 0) + profit;
       return {
         ...row,
+        ...costs,
         ctr: ratio(row.clicks, row.impressions),
         cvr: ratio(row.orders, row.addedToCart),
         roas: ratio(row.revenue, row.spend > 0 ? row.spend : null),
@@ -221,6 +300,8 @@ export function buildCampaignProfitLoss(
   // The total is the sum of the rows it stands under - not basis revenue
   // minus every day's spend, which would charge the spend of a day whose
   // revenue is unknown and end the column on a number the rows never reach.
+  // The fee columns sum the same way, so a day that could not price a fee
+  // adds nothing to the foot, exactly as it added nothing to its own profit.
   const rowProfits = rows.map((row) => row.profit);
   const totalProfit = sumNullable(rowProfits);
   return {
@@ -241,8 +322,143 @@ export function buildCampaignProfitLoss(
       cpa: orders !== null && orders > 0 ? spend / orders : null,
       googleRevenue,
       cogs,
+      paymentFees: sumNullable(rows.map((row) => row.paymentFees)),
+      shipping: sumNullable(rows.map((row) => row.shipping)),
+      agencyFee: sumNullable(rows.map((row) => row.agencyFee)),
       profit: totalProfit,
     },
+  };
+}
+
+/**
+ * The campaigns that land on one collection, summed into one campaign, so the
+ * collection gets the same sheet the client keeps for it: one row per day
+ * with every campaign's spend, clicks and impressions added, and the
+ * collection's own sales, which the producer split between those campaigns
+ * by spend, added back to the whole.
+ */
+export type CollectionCampaign = Pick<
+  AdminAnalyticsCampaign,
+  "timeline" | "attributionState" | "collectionSource" | "collectionSharedWith"
+> & {
+  collectionHandle: string;
+  /**
+   * How many campaigns were summed, so the sheet says so rather than calling
+   * the figures shares, and reads the collection's items rather than any
+   * member's own UTM sales.
+   */
+  members: number;
+};
+
+/**
+ * A sum that keeps the difference between "nobody knows" and "not yet
+ * computed": null when every member said null, undefined when no member
+ * carried the field at all (a point written before the sheet existed, whose
+ * absent orders field is what tells the sheet not to trust its revenue), and
+ * the sum of the members that answered otherwise. A member that did not
+ * answer adds nothing; a day one member has and another lacks keeps the one
+ * value.
+ */
+function sumOptional(values: Array<number | null | undefined>): number | null | undefined {
+  let sum: number | null | undefined = undefined;
+  for (const value of values) {
+    if (value === undefined) continue;
+    if (value === null) {
+      sum ??= null;
+      continue;
+    }
+    sum = (sum ?? 0) + value;
+  }
+  return sum;
+}
+
+/**
+ * The per-bucket sum of the members' timelines. Google's delivery figures add
+ * plainly; the Shopify and collection figures add null-aware, so a day is
+ * unknown only when every member left it unknown. The ratios are recomputed
+ * from the sums, never averaged.
+ */
+function sumTimelines(
+  members: ReadonlyArray<Pick<AdminAnalyticsCampaign, "timeline">>,
+): AdminAnalyticsCampaignTimelinePoint[] {
+  const byBucket = new Map<string, AdminAnalyticsCampaignTimelinePoint[]>();
+  for (const member of members) {
+    for (const point of member.timeline) {
+      const bucket = byBucket.get(point.bucket) ?? [];
+      bucket.push(point);
+      byBucket.set(point.bucket, bucket);
+    }
+  }
+  return [...byBucket.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([bucket, points]) => {
+      const spend = points.reduce((sum, point) => sum + point.spend, 0);
+      const googleRevenue = points.reduce((sum, point) => sum + point.googleRevenue, 0);
+      const shopifyRevenue = sumNullable(points.map((point) => point.shopifyRevenue));
+      const summed: AdminAnalyticsCampaignTimelinePoint = {
+        bucket,
+        spend,
+        impressions: points.reduce((sum, point) => sum + (point.impressions ?? 0), 0),
+        clicks: points.reduce((sum, point) => sum + (point.clicks ?? 0), 0),
+        conversions: points.reduce((sum, point) => sum + (point.conversions ?? 0), 0),
+        shopifyRevenue,
+        googleRevenue,
+        realRoas: spend > 0 && shopifyRevenue !== null ? shopifyRevenue / spend : null,
+        googleRoas: spend > 0 ? googleRevenue / spend : null,
+      };
+      // Assigned only when some member carried the field, so a sum of points
+      // written before the sheet existed still reads as one to the sheet.
+      const optional = [
+        "shopifySessions",
+        "addedToCart",
+        "shopifyOrders",
+        "units",
+        "collectionRevenue",
+        "collectionUnits",
+        "collectionOrders",
+        "collectionAddedToCart",
+        "cogs",
+      ] as const;
+      for (const field of optional) {
+        const value = sumOptional(points.map((point) => point[field]));
+        if (value !== undefined) summed[field] = value;
+      }
+      return summed;
+    });
+}
+
+/**
+ * One synthetic campaign for the collection the given campaigns land on, or
+ * null when there are none or the first names no collection. The members
+ * are taken as given: the caller groups them by handle.
+ *
+ * The attribution of the sum is matched when any member matched (Shopify
+ * knows that member's traffic by name, though the collection's sheet reads
+ * the collection's items, not that member's sales), unavailable when no
+ * member's could be read, and unmatched otherwise. The collection reads as found
+ * from where the clicks landed only when that is true of every member: if
+ * any member's final URLs or name named the page, the page was named.
+ */
+export function buildCollectionCampaign(
+  rows: ReadonlyArray<
+    Pick<AdminAnalyticsCampaign, "timeline" | "attributionState" | "collectionHandle" | "collectionSource">
+  >,
+): CollectionCampaign | null {
+  const handle = rows[0]?.collectionHandle;
+  if (!handle) return null;
+  return {
+    collectionHandle: handle,
+    members: rows.length,
+    collectionSharedWith: rows.length,
+    attributionState: rows.some((row) => row.attributionState === "matched")
+      ? "matched"
+      : rows.every((row) => row.attributionState === "unavailable")
+        ? "unavailable"
+        : "unmatched",
+    ...(rows.every((row) => row.collectionSource === "landing")
+      ? { collectionSource: "landing" as const }
+      : {}),
+    timeline: sumTimelines(rows),
   };
 }
 
@@ -253,6 +469,11 @@ function percent(value: number | null, digits = 1): string {
     minimumFractionDigits: digits,
     maximumFractionDigits: digits,
   }).format(value);
+}
+
+/** A stored fee rate as the settings show it: 1.7 reads "1.7%", 10 reads "10%". */
+function rate(value: number): string {
+  return new Intl.NumberFormat("en-GB", { style: "percent", maximumFractionDigits: 2 }).format(value / 100);
 }
 
 function count(value: number | null): string {
@@ -267,24 +488,46 @@ function times(value: number | null): string {
   return value === null ? "—" : multiplier(value);
 }
 
-const HEADERS: Array<{ label: string; align: "left" | "right" }> = [
-  { label: "Day", align: "left" },
-  { label: "Ad spend", align: "right" },
-  { label: "Clicks", align: "right" },
-  { label: "Impressions", align: "right" },
-  { label: "CTR", align: "right" },
-  { label: "Add to cart", align: "right" },
-  { label: "Revenue (Shopify)", align: "right" },
-  { label: "Revenue (Google)", align: "right" },
-  { label: "Orders", align: "right" },
-  { label: "Units", align: "right" },
-  { label: "CVR (cart → order)", align: "right" },
-  { label: "ROAS", align: "right" },
-  { label: "CPA", align: "right" },
-  { label: "COGS", align: "right" },
-  { label: "Profit", align: "right" },
-  { label: "Cumulative", align: "right" },
-];
+type SheetHeader = { label: string; align: "left" | "right" };
+
+/** On the Google basis the revenue column is Google's conversion value, and its head says so. */
+function sheetHeaders(revenueBasis: CampaignRevenueBasis): SheetHeader[] {
+  return [
+    { label: "Day", align: "left" },
+    { label: "Ad spend", align: "right" },
+    { label: "Clicks", align: "right" },
+    { label: "Impressions", align: "right" },
+    { label: "CTR", align: "right" },
+    { label: "ATC", align: "right" },
+    { label: revenueBasis === "google" ? "Revenue (Google)" : "Revenue", align: "right" },
+    { label: "Orders", align: "right" },
+    { label: "Units", align: "right" },
+    { label: "CVR (orders / ATC)", align: "right" },
+    { label: "ROAS", align: "right" },
+    { label: "CPA", align: "right" },
+    { label: "COGS", align: "right" },
+    { label: "Shopify fees", align: "right" },
+    { label: "Shipping", align: "right" },
+    { label: "Agency fee", align: "right" },
+    { label: "Profit", align: "right" },
+    { label: "Cumulative", align: "right" },
+  ];
+}
+
+/**
+ * What the fee columns hold, said from the settings themselves so the
+ * caption can never promise a rate the cells do not apply.
+ */
+function feesCaption(fees: CampaignSheetFees | null | undefined, currency: string): string {
+  if (!fees) {
+    return "the store's fee settings could not be read, so Shopify fees, shipping and the agency fee read “—” and count 0 in profit";
+  }
+  return (
+    `Shopify fees are ${money(fees.paymentFeeFixed, currency)} per order plus ${rate(fees.paymentFeePct)} of revenue, ` +
+    `shipping ${money(fees.shippingCostPerOrder, currency)} per order and the agency fee ${rate(fees.agencyFeeRate)} of ad spend, ` +
+    "from the store's settings; a fee a day cannot price reads “—” and counts 0 in profit"
+  );
+}
 
 /** Profit and its running total read green or red, as the store's own P&L does. */
 function ProfitCell({ value, currency }: { value: number | null; currency: string }) {
@@ -300,22 +543,77 @@ function ProfitCell({ value, currency }: { value: number | null; currency: strin
   );
 }
 
+export type CampaignProfitLossSheetCampaign = Pick<
+  AdminAnalyticsCampaign,
+  "timeline" | "attributionState" | "collectionHandle" | "collectionSource" | "collectionSharedWith"
+> & {
+  /**
+   * Set on a collection's sheet: how many campaigns were summed into it. The
+   * sheet then reads the collection's items and never a member's own UTM
+   * sales, whichever of its members Shopify matched.
+   */
+  members?: number;
+};
+
 export function CampaignProfitLossSheet({
   campaign,
   currency,
   today,
   title,
+  fees = null,
 }: {
-  campaign: Pick<
-    AdminAnalyticsCampaign,
-    "timeline" | "attributionState" | "collectionHandle" | "collectionSource" | "collectionSharedWith"
-  >;
+  campaign: CampaignProfitLossSheetCampaign;
   currency: string;
   today: string;
   title: string;
+  /** The store's per-order fee settings; null when unknown, and the fee columns read "—". */
+  fees?: CampaignSheetFees | null;
 }) {
-  const sheet = React.useMemo(() => buildCampaignProfitLoss(campaign, today), [campaign, today]);
+  const sheet = React.useMemo(() => buildCampaignProfitLoss(campaign, today, fees), [campaign, today, fees]);
   const cell = "px-2.5 py-2 text-right tabular-nums";
+  const muted = cn(cell, "text-[var(--text-secondary)]");
+  const headers = sheetHeaders(sheet.revenueBasis);
+  const members = campaign.members ?? 1;
+
+  // Said from the sheet itself, so the caption can never promise a basis the
+  // cells do not use.
+  const basisCaption = sheet.predatesSheet
+    ? "This period's snapshot was taken before the sheet existed, so the Shopify columns and COGS are not computed yet. Snapshots refresh every hour; profit reads Google's conversion value until then."
+    : sheet.revenueBasis === "shopify"
+      ? "Profit on Shopify's real sales for this campaign (last non-direct click), minus ad spend and fees · Google delivery"
+      : sheet.revenueBasis === "collection"
+        ? `Profit on /collections/${campaign.collectionHandle ?? ""}${
+            members > 1
+              ? `, the ${members} campaigns that land there summed`
+              : (campaign.collectionSharedWith ?? 1) > 1
+                ? `, split between the ${campaign.collectionSharedWith} campaigns that land there in proportion to spend, so orders and units are shares and need not be whole`
+                : ""
+          }. Revenue is the collection items in every order, after discounts and refunds, from any channel; Orders are the orders holding at least one of them; ATC is Google sessions that landed on the collection page and added to cart. Profit is revenue minus ad spend${
+            sheet.total.cogs !== null ? ", the product costs of those items" : ""
+          }, Shopify fees, shipping and the agency fee${
+            sheet.total.cogs !== null
+              ? ""
+              : " · product costs could not be read, so COGS reads “—” and is not subtracted"
+          }${
+            sheet.total.addedToCart !== null
+              ? ""
+              : " · landing sessions could not be read, so ATC reads “—”"
+          }${
+            // The clicks named the collection because nothing else did.
+            // That is the whole of what is known: a Performance Max or
+            // Shopping campaign has no final URL at all, but a Search or
+            // Demand Gen ad may point at a page that is not a collection,
+            // or at a product Shopify redirects to one, and the caption
+            // must not claim its ads name no URL when they do.
+            campaign.collectionSource === "landing"
+              ? " · the collection was read from where its clicks landed, as neither the campaign's final URLs nor its name names one"
+              : ""
+          }`
+        : campaign.attributionState === "unmatched"
+          ? `Profit on Google's reported conversion value, minus ad spend and the agency fee · Shopify sees no utm_campaign on this campaign's traffic${
+              campaign.collectionHandle ? "" : " and it lands on no single collection the store has"
+            }, so its sales read “—”. Tag the ads with utm_campaign={campaignid} to measure real sales.`
+          : "Profit on Google's reported conversion value, minus ad spend and the agency fee · Shopify attribution unavailable, so its sales read “—”";
 
   return (
     <div
@@ -326,51 +624,17 @@ export function CampaignProfitLossSheet({
       <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-[var(--border-subtle)] px-4 py-2.5">
         <p className="text-[12px] font-semibold text-[var(--text-primary)]">Profit &amp; loss by day</p>
         <p className="text-[10.5px] text-[var(--text-muted)]">
-          {/* Said from the sheet itself, so the caption can never promise a
-              basis the cells do not use. */}
-          {sheet.predatesSheet
-            ? "This period's snapshot was taken before the sheet existed, so the Shopify columns and COGS are not computed yet. Snapshots refresh every hour; profit reads Google's conversion value until then."
-            : sheet.revenueBasis === "shopify"
-            ? "Profit on Shopify's real sales for this campaign (last non-direct click) · Google delivery"
-            : sheet.revenueBasis === "collection"
-              ? `Profit on every order that landed on /collections/${campaign.collectionHandle ?? ""} or a page under it (the whole order, net of refunds) or bought its items elsewhere (those lines), from any channel, not only this campaign's ads${
-                  (campaign.collectionSharedWith ?? 1) > 1
-                    ? `, split between the ${campaign.collectionSharedWith} campaigns that land there in proportion to spend, so orders and units are shares and need not be whole`
-                    : ""
-                } - minus ad spend${
-                  sheet.total.cogs !== null
-                    ? " and the product costs of those lines"
-                    : " · product costs could not be read, so COGS reads “—” and is not subtracted"
-                }${
-                  sheet.total.addedToCart !== null
-                    ? " · cart additions are Google visits that landed there"
-                    : " · landing sessions could not be read, so cart additions read “—”"
-                }${
-                  // The clicks named the collection because nothing else did.
-                  // That is the whole of what is known: a Performance Max or
-                  // Shopping campaign has no final URL at all, but a Search or
-                  // Demand Gen ad may point at a page that is not a collection,
-                  // or at a product Shopify redirects to one, and the caption
-                  // must not claim its ads name no URL when they do.
-                  campaign.collectionSource === "landing"
-                    ? " · the collection was read from where its clicks landed, as neither the campaign's final URLs nor its name names one"
-                    : ""
-                }`
-              : campaign.attributionState === "unmatched"
-                ? `Profit on Google's reported conversion value · Shopify sees no utm_campaign on this campaign's traffic${
-                    campaign.collectionHandle ? "" : " and it lands on no single collection the store has"
-                  }, so its sales read “—”. Tag the ads with utm_campaign={campaignid} to measure real sales.`
-                : "Profit on Google's reported conversion value · Shopify attribution unavailable, so its sales read “—”"}
+          {basisCaption} · {feesCaption(fees, currency)}
         </p>
       </div>
       {sheet.rows.length === 0 ? (
         <p className="px-4 py-3 text-[11px] text-[var(--text-muted)]">No days were returned for this period.</p>
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[1400px] text-[11.5px]">
+          <table className="w-full min-w-[1560px] text-[11.5px]">
             <thead>
               <tr className="label-caps border-b border-[var(--border-subtle)]">
-                {HEADERS.map((header) => (
+                {headers.map((header) => (
                   <th
                     key={header.label}
                     className={cn("px-2.5 py-2 font-medium", header.align === "left" ? "text-left pl-4" : "text-right")}
@@ -399,14 +663,20 @@ export function CampaignProfitLossSheet({
                   <td className={cell}>{integer(row.impressions)}</td>
                   <td className={cell}>{percent(row.ctr)}</td>
                   <td className={cell}>{count(row.addedToCart)}</td>
-                  <td className={cell}>{amount(row.revenue, currency)}</td>
-                  <td className={cn(cell, "text-[var(--text-secondary)]")}>{money(row.googleRevenue, currency)}</td>
+                  {sheet.revenueBasis === "google" ? (
+                    <td className={muted}>{money(row.googleRevenue, currency)}</td>
+                  ) : (
+                    <td className={cell}>{amount(row.revenue, currency)}</td>
+                  )}
                   <td className={cell}>{count(row.orders)}</td>
                   <td className={cell}>{count(row.units)}</td>
                   <td className={cell}>{percent(row.cvr)}</td>
                   <td className={cell}>{times(row.roas)}</td>
                   <td className={cell}>{amount(row.cpa, currency)}</td>
-                  <td className={cn(cell, "text-[var(--text-secondary)]")}>{amount(row.cogs, currency)}</td>
+                  <td className={muted}>{amount(row.cogs, currency)}</td>
+                  <td className={muted}>{amount(row.paymentFees, currency)}</td>
+                  <td className={muted}>{amount(row.shipping, currency)}</td>
+                  <td className={muted}>{amount(row.agencyFee, currency)}</td>
                   <ProfitCell value={row.profit} currency={currency} />
                   <ProfitCell value={row.cumulative} currency={currency} />
                 </tr>
@@ -420,14 +690,20 @@ export function CampaignProfitLossSheet({
                 <td className={cell}>{integer(sheet.total.impressions)}</td>
                 <td className={cell}>{percent(sheet.total.ctr)}</td>
                 <td className={cell}>{count(sheet.total.addedToCart)}</td>
-                <td className={cell}>{amount(sheet.total.revenue, currency)}</td>
-                <td className={cn(cell, "text-[var(--text-secondary)]")}>{money(sheet.total.googleRevenue, currency)}</td>
+                {sheet.revenueBasis === "google" ? (
+                  <td className={muted}>{money(sheet.total.googleRevenue, currency)}</td>
+                ) : (
+                  <td className={cell}>{amount(sheet.total.revenue, currency)}</td>
+                )}
                 <td className={cell}>{count(sheet.total.orders)}</td>
                 <td className={cell}>{count(sheet.total.units)}</td>
                 <td className={cell}>{percent(sheet.total.cvr)}</td>
                 <td className={cell}>{times(sheet.total.roas)}</td>
                 <td className={cell}>{amount(sheet.total.cpa, currency)}</td>
-                <td className={cn(cell, "text-[var(--text-secondary)]")}>{amount(sheet.total.cogs, currency)}</td>
+                <td className={muted}>{amount(sheet.total.cogs, currency)}</td>
+                <td className={muted}>{amount(sheet.total.paymentFees, currency)}</td>
+                <td className={muted}>{amount(sheet.total.shipping, currency)}</td>
+                <td className={muted}>{amount(sheet.total.agencyFee, currency)}</td>
                 <ProfitCell value={sheet.total.profit} currency={currency} />
                 <ProfitCell value={sheet.total.profit} currency={currency} />
               </tr>

@@ -18,14 +18,21 @@ const TOKEN = "shpat_test";
 
 type Money = { amount: string; currencyCode?: string };
 
-type Line = { id: string; title: string; sku: string | null; quantity: number; originalUnitPriceSet: { shopMoney: Money } };
+type Line = {
+  id: string;
+  title: string;
+  sku: string | null;
+  quantity: number;
+  originalUnitPriceSet: { shopMoney: Money };
+  discountedTotalSet: { shopMoney: Money };
+};
 type RefundLine = { quantity: number; subtotalSet: { shopMoney: { amount: string } }; totalTaxSet: { shopMoney: { amount: string } }; lineItem: { id: string } | null };
 type Refund = { totalRefundedSet: { shopMoney: { amount: string } }; refundLineItems: { pageInfo: { hasNextPage: boolean }; nodes: RefundLine[] } };
 
 /**
  * An order as Shopify lists it: `total` is totalPriceSet, and unless
  * `balance` says otherwise the customer paid all of it (received = total,
- * nothing outstanding).
+ * nothing outstanding). The default line is two units at `line`, undiscounted.
  */
 function order(
   id: number,
@@ -61,6 +68,9 @@ function order(
           sku: "DRESS-1",
           quantity: 2,
           originalUnitPriceSet: { shopMoney: line },
+          discountedTotalSet: {
+            shopMoney: { amount: (Number(line.amount) * 2).toFixed(2), currencyCode: line.currencyCode },
+          },
         },
       ],
     },
@@ -113,9 +123,52 @@ describe("daily sales across a store currency change", () => {
     const czk = result.orders.find((row) => row.date === "2026-09-03")!;
     expect(czk.total).toBe(85);
     expect(czk.lines[0].unitPrice).toBeCloseTo(42.5, 6);
+    expect(czk.lines[0].lineTotal).toBeCloseTo(85, 6);
     const gbp = result.orders.find((row) => row.date === "2026-09-08")!;
     expect(gbp).toMatchObject({ total: 100, refunded: 10 });
-    expect(gbp.lines[0].unitPrice).toBe(50);
+    expect(gbp.lines[0]).toMatchObject({ unitPrice: 50, lineTotal: 100, refundedAmount: 0, refundedQuantity: 0 });
+  });
+
+  it("prices a former-currency line's total and refund at the same rate as its unit price", async () => {
+    // A CZK line of two at 1250, discounted to 2000 in all, one unit refunded
+    // for 1000: every money field of the line reads in GBP at the day's rate.
+    const node = order(
+      7,
+      "2026-09-03T10:00:00Z",
+      { amount: "2000.00", currencyCode: "CZK" },
+      { amount: "1000.00", currencyCode: "CZK" },
+      { amount: "1250.00", currencyCode: "CZK" },
+      [{
+        id: "gid://shopify/LineItem/1",
+        title: "Linen dress",
+        sku: "DRESS-1",
+        quantity: 2,
+        originalUnitPriceSet: { shopMoney: { amount: "1250.00", currencyCode: "CZK" } },
+        discountedTotalSet: { shopMoney: { amount: "2000.00", currencyCode: "CZK" } },
+      }],
+      [{
+        totalRefundedSet: { shopMoney: { amount: "1000.00" } },
+        refundLineItems: {
+          pageInfo: { hasNextPage: false },
+          nodes: [{
+            quantity: 1,
+            subtotalSet: { shopMoney: { amount: "1000.00" } },
+            totalTaxSet: { shopMoney: { amount: "0.00" } },
+            lineItem: { id: "gid://shopify/LineItem/1" },
+          }],
+        },
+      }],
+    );
+
+    const result = await fetchDailySales(SHOP, TOKEN, "2026-09-01", "2026-09-10", executor([node]), {
+      normalize: async () => (_day, amount) => amount * 0.034,
+    });
+
+    const [line] = result.orders[0].lines;
+    expect(line.unitPrice).toBeCloseTo(42.5, 6);
+    expect(line.lineTotal).toBeCloseTo(68, 6);
+    expect(line.refundedAmount).toBeCloseTo(34, 6);
+    expect(line).toMatchObject({ quantity: 2, refundedQuantity: 1 });
   });
 
   it("refuses a former-currency order when nothing can price it", async () => {
@@ -147,6 +200,15 @@ describe("daily sales across a store currency change", () => {
       "Shopify returned an order line in another currency.",
     ],
     [
+      "an order whose line total is in another currency",
+      (() => {
+        const node = order(8, "2026-09-08T10:00:00Z", { amount: "100.00", currencyCode: "GBP" }, null, { amount: "50.00", currencyCode: "GBP" });
+        node.lineItems.nodes[0].discountedTotalSet = { shopMoney: { amount: "100.00", currencyCode: "CZK" } };
+        return node;
+      })(),
+      "Shopify returned an order line in another currency.",
+    ],
+    [
       "an order whose balance is in another currency",
       {
         ...order(6, "2026-09-08T10:00:00Z", { amount: "100.00", currencyCode: "GBP" }, null, { amount: "50.00", currencyCode: "GBP" }),
@@ -174,9 +236,17 @@ describe("daily sales across a store currency change", () => {
  */
 describe("daily sales as the customer paid for the order", () => {
   const gbp = (amount: string): Money => ({ amount, currencyCode: "GBP" });
-  const L = (id: string, title: string, quantity: number, unit: string): Line => ({
-    id: `gid://shopify/LineItem/${id}`, title, sku: id, quantity, originalUnitPriceSet: { shopMoney: gbp(unit) },
+  /** A line of `quantity` at `unit`, charged `total` in all (undiscounted unless said). */
+  const L = (id: string, title: string, quantity: number, unit: string, total = (Number(unit) * quantity).toFixed(2)): Line => ({
+    id: `gid://shopify/LineItem/${id}`,
+    title,
+    sku: id,
+    quantity,
+    originalUnitPriceSet: { shopMoney: gbp(unit) },
+    discountedTotalSet: { shopMoney: gbp(total) },
   });
+  /** The line fields a plain sale carries: nothing refunded, the total as charged. */
+  const sold = (lineTotal: number) => ({ lineTotal, refundedAmount: 0, refundedQuantity: 0 });
   /** A refund of `total` money over the given lines (id, quantity, subtotal, tax). */
   const refund = (total: string, items: [string, number, string, string?][] = [], hasNextPage = false): Refund => ({
     totalRefundedSet: { shopMoney: { amount: total } },
@@ -207,8 +277,42 @@ describe("daily sales as the customer paid for the order", () => {
 
     expect(result.days[0]).toMatchObject({ revenue: 622.4, refunds: 0, orders: 1, units: 2 });
     expect(result.orders[0]).toMatchObject({ total: 622.4, refunded: 0, paid: true });
+    // The removal's refund line is not a refund of anything: the bag was
+    // never sold, so nothing on the order reads as refunded.
     expect(result.orders[0].lines).toEqual([
-      { productKey: "BAG-1", title: "Handgjord väska", quantity: 2, unitPrice: 311.2 },
+      { productKey: "BAG-1", title: "Handgjord väska", quantity: 2, unitPrice: 311.2, ...sold(622.4) },
+    ]);
+  });
+
+  it("charges a partly unpaid line for the units that were sold", async () => {
+    // Two bags listed at 100 each, one of them the upsell whose charge
+    // failed: the customer paid 100, one unit sold, and the line's total is
+    // the sold half of what Shopify lists for the line.
+    const node = order(23, "2026-09-08T10:00:00Z", gbp("200.00"), gbp("0.0"), gbp("0"), [
+      L("BAG", "Bag", 2, "100.00"),
+    ], [refund("0.0", [["BAG", 1, "100.00"]])], { received: "100.00", outstanding: "0.00" });
+
+    const result = await sales(node);
+
+    expect(result.days[0]).toMatchObject({ revenue: 100, refunds: 0, units: 1 });
+    expect(result.orders[0].lines).toEqual([
+      { productKey: "BAG", title: "Bag", quantity: 1, unitPrice: 100, ...sold(100) },
+    ]);
+  });
+
+  it("carries a discounted line at what the customer was charged for it", async () => {
+    // A 20% code on two dresses at 50: Shopify lists the unit at 50 and the
+    // line at 80. Revenue and units read as before; the line's own total
+    // is the discounted one, which is what a collection sheet sums.
+    const node = order(24, "2026-09-08T10:00:00Z", gbp("80.00"), null, gbp("0"), [
+      L("DRESS", "Dress", 2, "50.00", "80.00"),
+    ]);
+
+    const result = await sales(node);
+
+    expect(result.days[0]).toMatchObject({ revenue: 80, refunds: 0, units: 2 });
+    expect(result.orders[0].lines).toEqual([
+      { productKey: "DRESS", title: "Dress", quantity: 2, unitPrice: 50, ...sold(80) },
     ]);
   });
 
@@ -224,9 +328,25 @@ describe("daily sales as the customer paid for the order", () => {
     const result = await sales(node);
 
     expect(result.days[0]).toMatchObject({ revenue: 101.91, refunds: 42.49, units: 3 });
+    // The refund is booked on the Honora line, and only there.
     expect(result.orders[0].lines).toEqual([
-      { productKey: "HON", title: "Honora", quantity: 1, unitPrice: 42.49 },
-      { productKey: "KAT", title: "Katherine", quantity: 2, unitPrice: 29.71 },
+      { productKey: "HON", title: "Honora", quantity: 1, unitPrice: 42.49, lineTotal: 42.49, refundedAmount: 42.49, refundedQuantity: 1 },
+      { productKey: "KAT", title: "Katherine", quantity: 2, unitPrice: 29.71, ...sold(59.42) },
+    ]);
+  });
+
+  it("books a partial money refund on its line, quantity and subtotal alike", async () => {
+    // Three tops at 30, one sent back and refunded for its 30: the line
+    // keeps its three sold units and says one of them, worth 30, came back.
+    const node = order(25, "2026-09-08T10:00:00Z", gbp("90.00"), gbp("30.00"), gbp("0"), [
+      L("TOP", "Top", 3, "30.00"),
+    ], [refund("30.00", [["TOP", 1, "30.00"]])]);
+
+    const result = await sales(node);
+
+    expect(result.days[0]).toMatchObject({ revenue: 90, refunds: 30, units: 3 });
+    expect(result.orders[0].lines).toEqual([
+      { productKey: "TOP", title: "Top", quantity: 3, unitPrice: 30, lineTotal: 90, refundedAmount: 30, refundedQuantity: 1 },
     ]);
   });
 
@@ -270,8 +390,10 @@ describe("daily sales as the customer paid for the order", () => {
     const result = await sales(node);
 
     expect(result.days[0]).toMatchObject({ revenue: 59.95, refunds: 29.95, units: 1 });
+    // The 29.95 came back as a custom amount, on no line: the dress that
+    // stayed carries no refund of its own.
     expect(result.orders[0].lines).toEqual([
-      { productKey: "MID", title: "Midi", quantity: 1, unitPrice: 59.95 },
+      { productKey: "MID", title: "Midi", quantity: 1, unitPrice: 59.95, ...sold(59.95) },
     ]);
   });
 

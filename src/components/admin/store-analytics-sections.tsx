@@ -18,12 +18,18 @@ import {
   type FunnelChartPoint,
   type RoasEvolutionWindows,
 } from "@/components/admin/performance-charts";
-import { CampaignProfitLossSheet } from "./campaign-profit-loss";
+import {
+  buildCampaignProfitLoss,
+  buildCollectionCampaign,
+  CampaignProfitLossSheet,
+} from "./campaign-profit-loss";
 import { Badge } from "@/components/ui/badge";
 import type {
+  AdminAnalyticsCampaign,
   AdminAnalyticsFamily,
   AdminProviderFreshness,
   AdminStoreAnalytics,
+  CampaignSheetFees,
 } from "@/lib/admin/store-analytics";
 import { integer, money, multiplier } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -463,13 +469,177 @@ export function StoreSpendSection({
   );
 }
 
+/**
+ * The campaigns grouped by the collection they land on, in the order the
+ * collections first appear among the rows; a campaign landing on no
+ * collection belongs to no group.
+ */
+function campaignCollections(
+  rows: AdminAnalyticsCampaign[],
+): Array<{ handle: string; members: AdminAnalyticsCampaign[] }> {
+  const groups = new Map<string, AdminAnalyticsCampaign[]>();
+  for (const campaign of rows) {
+    if (!campaign.collectionHandle) continue;
+    const members = groups.get(campaign.collectionHandle) ?? [];
+    members.push(campaign);
+    groups.set(campaign.collectionHandle, members);
+  }
+  return [...groups.entries()].map(([handle, members]) => ({ handle, members }));
+}
+
+/**
+ * One row per collection the campaigns land on, with the campaigns that
+ * land there summed day by day and the ratios taken from the sums: the
+ * sheet the client keeps per collection, which the per-campaign sheets only
+ * hold shares of. The block is controlled by its parent, which keeps which
+ * collection sheets are open next to the campaign ones.
+ *
+ * The collections family names the collection when it has the handle (it
+ * only lists collections that sold in the period); otherwise the handle
+ * stands for the title.
+ */
+export function CampaignCollectionsBlock({
+  rows,
+  collections = null,
+  currency,
+  today,
+  fees,
+  openSheets,
+  onToggleSheet,
+}: {
+  rows: AdminAnalyticsCampaign[];
+  collections?: AdminStoreAnalytics["collections"] | null;
+  currency: string;
+  today: string;
+  fees: CampaignSheetFees | null;
+  openSheets: ReadonlySet<string>;
+  onToggleSheet: (handle: string) => void;
+}) {
+  // Built once per snapshot, so the sheet below sees the same campaign object
+  // across renders and keeps its own memo.
+  const groups = React.useMemo(
+    () =>
+      campaignCollections(rows).flatMap((group) => {
+        const campaign = buildCollectionCampaign(group.members);
+        return campaign
+          ? [{ ...group, campaign, total: buildCampaignProfitLoss(campaign, today, fees).total }]
+          : [];
+      }),
+    [rows, today, fees],
+  );
+  const titles = React.useMemo(
+    () =>
+      new Map(
+        collections && "data" in collections
+          ? collections.data.rows.flatMap((collection) =>
+              collection.handle ? [[collection.handle, collection.title] as const] : [],
+            )
+          : [],
+      ),
+    [collections],
+  );
+  if (groups.length === 0) return null;
+
+  const cell = "px-2.5 py-2.5 text-center tabular-nums";
+  return (
+    <div className="border-b border-[var(--border-subtle)]" role="region" aria-label="Collections landed on by campaigns">
+      <div className="flex flex-wrap items-baseline justify-between gap-2 px-5 pt-3 pb-1.5">
+        <p className="text-[12px] font-semibold text-[var(--text-primary)]">Collections</p>
+        <p className="text-[10.5px] text-[var(--text-muted)]">
+          One row per collection the campaigns land on, its campaigns summed day by day, the way the client keeps a sheet per collection. Open its P&amp;L for the collection&apos;s own day-by-day sheet.
+        </p>
+      </div>
+      <table className="w-full min-w-[1180px] text-[11.5px]">
+        <thead>
+          <tr className="label-caps border-b border-[var(--border-subtle)] text-left">
+            <th className="px-5 py-2 font-medium">Collection</th>
+            <th className="px-2.5 py-2 text-center font-medium">Spend</th>
+            <th className="px-2.5 py-2 text-center font-medium">Clicks</th>
+            <th className="px-2.5 py-2 text-center font-medium">Impressions</th>
+            <th className="px-2.5 py-2 text-center font-medium">CTR</th>
+            <th className="px-2.5 py-2 text-center font-medium">ATC</th>
+            <th className="px-2.5 py-2 text-center font-medium">Revenue</th>
+            <th className="px-2.5 py-2 text-center font-medium">Orders</th>
+            <th className="px-2.5 py-2 text-center font-medium">Units</th>
+            <th className="px-2.5 py-2 text-center font-medium">ROAS</th>
+            <th className="px-2.5 py-2 text-center font-medium">CPA</th>
+            <th className="px-5 py-2 text-center font-medium">Sheet</th>
+          </tr>
+        </thead>
+        <tbody>
+          {groups.map((group) => {
+            const { campaign, total } = group;
+            const title = titles.get(group.handle) ?? group.handle;
+            const open = openSheets.has(group.handle);
+            const memberCount = `${group.members.length} ${group.members.length === 1 ? "campaign" : "campaigns"}`;
+            return (
+              <React.Fragment key={group.handle}>
+                <tr className="transition-smooth border-t border-[var(--border-subtle)] first:border-t-0 hover:bg-[var(--bg-panel-hover)]">
+                  <td className="max-w-[300px] px-5 py-2.5">
+                    <span className="block truncate font-medium text-[var(--text-primary)]">{title}</span>
+                    <span className="mt-0.5 block truncate text-[10px] text-[var(--text-muted)]">
+                      /collections/{group.handle} · {memberCount}
+                    </span>
+                  </td>
+                  <td className={cell}>{money(total.spend, currency)}</td>
+                  <td className={cell}>{integer(total.clicks)}</td>
+                  <td className={cell}>{integer(total.impressions)}</td>
+                  <td className={cell}>{percent(total.ctr)}</td>
+                  <td className={cell}>{total.addedToCart === null ? "—" : integer(total.addedToCart)}</td>
+                  <td className={cell}>{total.revenue === null ? "—" : money(total.revenue, currency)}</td>
+                  <td className={cell}>{total.orders === null ? "—" : integer(total.orders)}</td>
+                  <td className={cell}>{total.units === null ? "—" : integer(total.units)}</td>
+                  <td className={cell}>{total.roas === null ? "—" : multiplier(total.roas)}</td>
+                  <td className={cell}>{total.cpa === null ? "—" : money(total.cpa, currency)}</td>
+                  <td className="px-5 py-2 text-center">
+                    <button
+                      type="button"
+                      aria-expanded={open}
+                      aria-label={`P&L: ${open ? "hide" : "show"} ${title} collection profit and loss by day`}
+                      onClick={() => onToggleSheet(group.handle)}
+                      className={cn(
+                        "transition-smooth rounded-[8px] border px-2 py-1 text-[10.5px] font-medium outline-none focus-visible:border-[var(--accent-gold)]",
+                        open
+                          ? "border-[var(--accent-gold)]/40 bg-[var(--accent-gold-dim)] text-[var(--accent-gold-strong)]"
+                          : "border-[var(--border-subtle)] text-[var(--text-secondary)] hover:bg-[var(--bg-panel-hover)]",
+                      )}
+                    >
+                      P&amp;L
+                    </button>
+                  </td>
+                </tr>
+                {open ? (
+                  <tr className="border-t border-[var(--border-subtle)] bg-[var(--bg-base)]">
+                    <td colSpan={12} className="px-5 py-3">
+                      <CampaignProfitLossSheet
+                        campaign={campaign}
+                        currency={currency}
+                        today={today}
+                        title={`${title} (collection)`}
+                        fees={fees}
+                      />
+                    </td>
+                  </tr>
+                ) : null}
+              </React.Fragment>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 export function CampaignPerformanceSection({
   campaigns,
+  collections = null,
   currency,
   rangeEnd,
   freshness = null,
 }: {
   campaigns: AdminStoreAnalytics["campaigns"];
+  /** The collections family, for the collection rows' titles; absent, the handles stand in. */
+  collections?: AdminStoreAnalytics["collections"] | null;
   currency: string;
   rangeEnd: string;
   /** The campaigns family's own row freshness; null for a live build. */
@@ -477,8 +647,11 @@ export function CampaignPerformanceSection({
 }) {
   const [openCampaigns, setOpenCampaigns] = React.useState<Set<string>>(new Set());
   const [openSheets, setOpenSheets] = React.useState<Set<string>>(new Set());
+  const [openCollectionSheets, setOpenCollectionSheets] = React.useState<Set<string>>(new Set());
   const hasData = "data" in campaigns;
   const rows = hasData ? campaigns.data.rows : [];
+  const fees = hasData ? campaigns.data.fees ?? null : null;
+  const today = (hasData ? campaigns.data.storeToday : null) ?? lisbonToday();
 
   function toggleIn(setter: React.Dispatch<React.SetStateAction<Set<string>>>, key: string) {
     setter((current) => {
@@ -490,6 +663,7 @@ export function CampaignPerformanceSection({
   }
   const toggleCampaign = (key: string) => toggleIn(setOpenCampaigns, key);
   const toggleSheet = (key: string) => toggleIn(setOpenSheets, key);
+  const toggleCollectionSheet = (handle: string) => toggleIn(setOpenCollectionSheets, handle);
 
   return (
     <section className="panel overflow-hidden" aria-labelledby="campaign-performance-title">
@@ -498,7 +672,7 @@ export function CampaignPerformanceSection({
           Campaign Performance
         </h2>
         <p className="mt-0.5 text-[11px] text-[var(--text-muted)]">
-          Google delivery and Shopify last-non-direct-click UTM attribution for the selected period. Open a campaign for its assets, or its P&amp;L for the day-by-day sheet.
+          Google delivery and Shopify last-non-direct-click UTM attribution for the selected period. Open a campaign for its assets, or its P&amp;L for the day-by-day sheet; a collection&apos;s P&amp;L sums the campaigns that land there.
         </p>
       </header>
 
@@ -517,6 +691,15 @@ export function CampaignPerformanceSection({
       ) : (
         <div className="overflow-x-auto">
           <SnapshotFreshnessNotice message={familyMessage(campaigns)} freshness={freshness} />
+          <CampaignCollectionsBlock
+            rows={rows}
+            collections={collections}
+            currency={currency}
+            today={today}
+            fees={fees}
+            openSheets={openCollectionSheets}
+            onToggleSheet={toggleCollectionSheet}
+          />
           <table className="w-full min-w-[1180px] text-[11.5px]">
             <thead>
               <tr className="label-caps border-b border-[var(--border-subtle)] text-left">
@@ -619,8 +802,9 @@ export function CampaignPerformanceSection({
                           <CampaignProfitLossSheet
                             campaign={campaign}
                             currency={currency}
-                            today={(hasData ? campaigns.data.storeToday : null) ?? lisbonToday()}
+                            today={today}
                             title={campaign.name}
+                            fees={fees}
                           />
                         </td>
                       </tr>

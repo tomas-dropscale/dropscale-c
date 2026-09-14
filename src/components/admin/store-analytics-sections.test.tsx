@@ -4,8 +4,10 @@ import { describe, expect, it, vi } from "vitest";
 
 import type {
   AdminAnalyticsCampaign,
+  AdminAnalyticsCampaignTimelinePoint,
   AdminProviderFreshness,
   AdminStoreAnalytics,
+  CampaignSheetFees,
 } from "@/lib/admin/store-analytics";
 
 vi.mock("@/components/admin/performance-charts", () => ({
@@ -14,8 +16,24 @@ vi.mock("@/components/admin/performance-charts", () => ({
   RoasEvolutionHover: () => <span>ROAS hover</span>,
 }));
 
-vi.mock("./campaign-profit-loss", () => ({
-  CampaignProfitLossSheet: () => <div>P&amp;L sheet</div>,
+// The sheet itself is tested next door; here it only has to say what it was
+// fed. The fold that feeds a collection's sheet is the real one.
+vi.mock("./campaign-profit-loss", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./campaign-profit-loss")>()),
+  CampaignProfitLossSheet: ({
+    title,
+    campaign,
+    fees,
+  }: {
+    title: string;
+    campaign: { members?: number; timeline: unknown[] };
+    fees?: CampaignSheetFees | null;
+  }) => (
+    <div>
+      P&amp;L sheet: {title} · {campaign.members ?? 1} campaigns · {campaign.timeline.length} buckets ·{" "}
+      {fees ? "with fees" : "no fees"}
+    </div>
+  ),
 }));
 
 vi.mock("@/components/ui/badge", () => ({
@@ -34,9 +52,13 @@ vi.mock("@/lib/utils", () => ({
   cn: (...values: Array<string | false | null | undefined>) => values.filter(Boolean).join(" "),
 }));
 
-import { CampaignPerformanceSection, snapshotFreshnessLine } from "./store-analytics-sections";
+import {
+  CampaignCollectionsBlock,
+  CampaignPerformanceSection,
+  snapshotFreshnessLine,
+} from "./store-analytics-sections";
 
-function campaign(): AdminAnalyticsCampaign {
+function campaign(over: Partial<AdminAnalyticsCampaign> = {}): AdminAnalyticsCampaign {
   return {
     accountId: "google-child",
     campaignId: "123456789",
@@ -67,8 +89,87 @@ function campaign(): AdminAnalyticsCampaign {
       rows: [],
       sources: [],
     },
+    ...over,
   };
 }
+
+function point(over: Partial<AdminAnalyticsCampaignTimelinePoint> & { bucket: string }): AdminAnalyticsCampaignTimelinePoint {
+  return {
+    spend: 0,
+    impressions: 0,
+    clicks: 0,
+    conversions: 0,
+    shopifyRevenue: null,
+    shopifySessions: null,
+    addedToCart: null,
+    shopifyOrders: null,
+    units: null,
+    googleRevenue: 0,
+    realRoas: null,
+    googleRoas: null,
+    ...over,
+  };
+}
+
+/**
+ * A campaign with no UTM match that lands on a collection, holding its
+ * spend share of one day's collection sales: the Emma Gyor shape.
+ */
+function landing(
+  name: string,
+  handle: string,
+  shares: { spend: number; revenue: number; orders: number },
+): AdminAnalyticsCampaign {
+  return campaign({
+    campaignId: name,
+    name,
+    spend: shares.spend,
+    attributionState: "unmatched",
+    collectionHandle: handle,
+    collectionSource: "final_url",
+    timeline: [
+      point({
+        bucket: "2026-08-06",
+        spend: shares.spend,
+        clicks: 100,
+        impressions: 1_000,
+        collectionRevenue: shares.revenue,
+        collectionUnits: 1,
+        collectionOrders: shares.orders,
+        collectionAddedToCart: 10,
+        cogs: 5,
+      }),
+    ],
+  });
+}
+
+const BLUSAS = ["[HU] BLUSAS - 27/08", "[HU] BLUSAS #2", "[HU] BLUSAS #3", "[HU] BLUSAS #4"].map((name) =>
+  landing(name, "mintas-kardiganok", { spend: 25, revenue: 100, orders: 0.5 }),
+);
+const BOHO = landing("BOHO - HU - 30/07", "kenyelmes-ruhak", { spend: 40, revenue: 80, orders: 1 });
+
+/** The collections family knows the BLUSAS collection by title; the BOHO one did not sell, so it is absent. */
+const COLLECTIONS: AdminStoreAnalytics["collections"] = {
+  state: "ready",
+  data: {
+    granularity: "day",
+    rows: [
+      {
+        collectionId: "gid://shopify/Collection/1",
+        title: "Mintás kardigánok",
+        handle: "mintas-kardiganok",
+        products: [],
+        revenue: 400,
+        units: 4,
+        spend: null,
+        roas: null,
+        timeline: [],
+      },
+    ],
+  },
+};
+
+const FEES: CampaignSheetFees = { paymentFeePct: 1.7, paymentFeeFixed: 0.25, shippingCostPerOrder: 0, agencyFeeRate: 10 };
 
 function campaigns(
   overrides: Partial<Extract<AdminStoreAnalytics["campaigns"], { data: unknown }>> = {},
@@ -91,10 +192,15 @@ const KEPT: AdminProviderFreshness = {
 const KEPT_MESSAGE =
   "Last failure: Google metrics are ready; Shopify last-non-direct-click UTM attribution matched to Google campaign IDs is unavailable. The last refresh failed (provider_partial); showing the last successful snapshot.";
 
-function render(section: AdminStoreAnalytics["campaigns"], freshness?: AdminProviderFreshness | null) {
+function render(
+  section: AdminStoreAnalytics["campaigns"],
+  freshness?: AdminProviderFreshness | null,
+  collections?: AdminStoreAnalytics["collections"] | null,
+) {
   return renderToStaticMarkup(
     <CampaignPerformanceSection
       campaigns={section}
+      collections={collections}
       currency="GBP"
       rangeEnd="2026-08-07"
       freshness={freshness}
@@ -193,5 +299,101 @@ describe("CampaignPerformanceSection", () => {
     expect(html).toContain('role="alert"');
     expect(html).toContain("Campaign performance could not be loaded for this store.");
     expect(html).not.toContain("Snapshot from");
+  });
+
+  it("groups the campaigns by the collection they land on, above the table, summed", () => {
+    // Paulo & Joao keep one sheet per collection: HU BLUSAS is four
+    // campaigns, BOHO is one, and the PMax lands on no collection at all.
+    const html = render(
+      campaigns({ data: { granularity: "day", rows: [...BLUSAS, BOHO, campaign()], storeToday: "2026-08-07" } }),
+      null,
+      COLLECTIONS,
+    );
+
+    expect(html).toContain('aria-label="Collections landed on by campaigns"');
+    // Titled by the collections family where it has the handle; the handle
+    // itself stands in for a collection the family did not list.
+    expect(html).toContain("Mintás kardigánok");
+    expect(html).toContain("/collections/mintas-kardiganok · 4 campaigns");
+    expect(html).toContain("/collections/kenyelmes-ruhak · 1 campaign<");
+    // Four shares of GBP 25 spend, GBP 100 revenue and half an order add up
+    // to the collection's whole: 100, 400, 2 orders, 4.00x.
+    expect(html).toContain("GBP 100.00");
+    expect(html).toContain("GBP 400.00");
+    expect(html).toContain("4.00x");
+    expect(html).toContain("GBP 50.00");
+    expect(html).toContain('aria-label="P&amp;L: show Mintás kardigánok collection profit and loss by day"');
+    expect(html).toContain('aria-label="P&amp;L: show kenyelmes-ruhak collection profit and loss by day"');
+    // The block sits above the campaign table, whose rows stay as they were.
+    expect(html.indexOf("Mintás kardigánok")).toBeLessThan(html.indexOf("[HU] BLUSAS - 27/08"));
+    expect(html).toContain("[HU] BLUSAS #4");
+    expect(html).toContain("PMax · Best sellers");
+    expect(html).not.toContain("P&amp;L sheet:");
+  });
+
+  it("renders no Collections block when no campaign lands on a collection", () => {
+    const html = render(campaigns(), null, COLLECTIONS);
+
+    expect(html).not.toContain("Collections landed on by campaigns");
+    expect(html).toContain("PMax · Best sellers");
+  });
+
+  it("names the collection by its handle when the collections family is unknown", () => {
+    const html = render(campaigns({ data: { granularity: "day", rows: BLUSAS, storeToday: "2026-08-07" } }));
+
+    expect(html).toContain("Collections landed on by campaigns");
+    expect(html).toContain('aria-label="P&amp;L: show mintas-kardiganok collection profit and loss by day"');
+    expect(html).not.toContain("Mintás kardigánok");
+  });
+});
+
+describe("CampaignCollectionsBlock", () => {
+  const block = (openSheets: ReadonlySet<string>, fees: CampaignSheetFees | null = null) =>
+    renderToStaticMarkup(
+      <CampaignCollectionsBlock
+        rows={[...BLUSAS, BOHO]}
+        collections={COLLECTIONS}
+        currency="GBP"
+        today="2026-08-07"
+        fees={fees}
+        openSheets={openSheets}
+        onToggleSheet={() => undefined}
+      />,
+    );
+
+  it("keeps the collection sheets closed until their P&L is toggled", () => {
+    const html = block(new Set());
+
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).not.toContain('aria-expanded="true"');
+    expect(html).not.toContain("P&amp;L sheet:");
+  });
+
+  it("opens the collection sheet fed with the summed campaigns, and the store's fees", () => {
+    const html = block(new Set(["mintas-kardiganok"]), FEES);
+
+    expect(html).toContain('aria-expanded="true"');
+    expect(html).toContain('aria-label="P&amp;L: hide Mintás kardigánok collection profit and loss by day"');
+    // Four campaigns summed over their one shared day, the fees passed along.
+    expect(html).toContain("P&amp;L sheet: Mintás kardigánok (collection) · 4 campaigns · 1 buckets · with fees");
+    // The other collection's sheet stays closed.
+    expect(html).not.toContain("P&amp;L sheet: kenyelmes-ruhak");
+    expect(html).toContain('aria-expanded="false"');
+  });
+
+  it("renders nothing when no row lands on a collection", () => {
+    const html = renderToStaticMarkup(
+      <CampaignCollectionsBlock
+        rows={[campaign()]}
+        collections={COLLECTIONS}
+        currency="GBP"
+        today="2026-08-07"
+        fees={null}
+        openSheets={new Set()}
+        onToggleSheet={() => undefined}
+      />,
+    );
+
+    expect(html).toBe("");
   });
 });
