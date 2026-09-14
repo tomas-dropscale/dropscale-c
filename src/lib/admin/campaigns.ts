@@ -1276,18 +1276,31 @@ export type AdminReportingStoreScope = {
   };
 };
 
-/** DB-only inventory for hourly store snapshot refreshes. */
+/**
+ * DB-only inventory for hourly store snapshot refreshes. A store with nothing
+ * refreshable behind it (a pending legacy account, say) is left out rather
+ * than returned with no activity accounts: the refresh rejects such a scope
+ * every hour, which read as one failed store and a red global Sync.
+ */
 export async function listAdminReportingStoreScopes(
   service: Supabase,
 ): Promise<AdminReportingStoreScope[]> {
-  return (await campaignSnapshotInventory(service))
-    .filter((entry) => entry.isStoreScope)
+  const stores = (await campaignSnapshotInventory(service))
+    .filter((entry) => entry.isStoreScope);
+  const skipped = stores.filter((entry) => entry.metricRefreshKind === null);
+  if (skipped.length > 0) {
+    console.warn(
+      `Hourly reporting skips ${skipped.length} store(s) with no refreshable accounts: ` +
+        skipped.map((entry) => entry.account.id).join(", "),
+    );
+  }
+  return stores
+    .filter((entry) => entry.metricRefreshKind !== null)
     .map((entry) => ({
       clientId: entry.account.client_id,
       store: {
         accountId: entry.account.id,
-        activityAccountIds:
-          entry.metricRefreshKind === null ? [] : [...entry.metricAccountIds],
+        activityAccountIds: [...entry.metricAccountIds],
         currency: entry.account.currency,
       },
     }));

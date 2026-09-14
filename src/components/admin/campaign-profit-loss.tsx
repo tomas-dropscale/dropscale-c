@@ -31,10 +31,12 @@ import { cn } from "@/lib/utils";
  *    campaign sends people to one collection page. Its sales are read from
  *    the orders by the rule the revenue share already applies - an order that
  *    landed on the page counts whole, any other order counts the lines whose
- *    product is in the collection - shared out between the campaigns landing
- *    there by spend; cart additions are the Google visits that landed on the
- *    page; and the store's product costs price those same lines order by
- *    order, so profit is revenue minus spend minus COGS.
+ *    product is in the collection - from any channel, not only this
+ *    campaign's ads, split between the campaigns landing there by spend; cart
+ *    additions are the Google visits that landed on the page; and the store's
+ *    product costs price those same lines order by order, so profit is
+ *    revenue minus spend minus COGS. A collection that sold nothing in the
+ *    period is still this basis, with zeros, as long as the store has it.
  *  - "google": neither is known, so Google's own conversion value stands in.
  */
 
@@ -331,9 +333,9 @@ export function CampaignProfitLossSheet({
             : sheet.revenueBasis === "shopify"
             ? "Profit on Shopify's real sales for this campaign (last non-direct click) · Google delivery"
             : sheet.revenueBasis === "collection"
-              ? `Profit on orders that landed on /collections/${campaign.collectionHandle ?? ""} or a page under it (whole order, net of refunds) or bought its items elsewhere (those lines)${
+              ? `Profit on every order that landed on /collections/${campaign.collectionHandle ?? ""} or a page under it (the whole order, net of refunds) or bought its items elsewhere (those lines), from any channel, not only this campaign's ads${
                   (campaign.collectionSharedWith ?? 1) > 1
-                    ? `, shared by ${campaign.collectionSharedWith} campaigns in proportion to spend, so orders and units are shares and need not be whole`
+                    ? `, split between the ${campaign.collectionSharedWith} campaigns that land there in proportion to spend, so orders and units are shares and need not be whole`
                     : ""
                 } - minus ad spend${
                   sheet.total.cogs !== null
@@ -346,7 +348,7 @@ export function CampaignProfitLossSheet({
                 }`
               : campaign.attributionState === "unmatched"
                 ? `Profit on Google's reported conversion value · Shopify sees no utm_campaign on this campaign's traffic${
-                    campaign.collectionHandle ? "" : " and it lands on no single collection the store reports"
+                    campaign.collectionHandle ? "" : " and it lands on no single collection the store has"
                   }, so its sales read “—”. Tag the ads with utm_campaign={campaignid} to measure real sales.`
                 : "Profit on Google's reported conversion value · Shopify attribution unavailable, so its sales read “—”"}
         </p>

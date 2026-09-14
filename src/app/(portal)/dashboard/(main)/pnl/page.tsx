@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Info } from "lucide-react";
 
 import { fetchAccounts, reportingMetricScope } from "@/lib/portal/data";
+import { clampPnlPeriod, currentPnlPeriod, PNL_YEARS_BACK } from "@/lib/admin/client-pnl";
 import { PnlSheetView } from "@/components/portal/pnl-sheet";
 import { StoreSelector } from "@/components/portal/store-selector";
 import { PageContainer } from "@/components/ui/page-container";
@@ -20,12 +21,6 @@ export async function generateMetadata(): Promise<Metadata> {
   return { title: d.pnl.title };
 }
 
-/** How many years back the picker offers. Beyond this there is no data anyway. */
-const YEARS_BACK = 2;
-
-const clamp = (value: number, min: number, max: number) =>
-  Number.isFinite(value) ? Math.min(Math.max(value, min), max) : min;
-
 /**
  * The client's P&L, one month per view.
  *
@@ -41,9 +36,15 @@ export default async function PnlPage({
   const [accounts, { d, locale }] = await Promise.all([fetchAccounts(), getServerDictionary()]);
   const intl = intlLocale(locale);
 
+  // The month opens on the Lisbon business day, the clock the rows are keyed
+  // to, and the period is clamped exactly as the admin's reading of it is.
   const now = new Date();
-  const year = clamp(Number(params.year ?? now.getFullYear()), now.getFullYear() - YEARS_BACK, now.getFullYear());
-  const month = clamp(Number(params.month ?? now.getMonth() + 1), 1, 12);
+  const today = currentPnlPeriod(now);
+  const { year, month } = clampPnlPeriod(
+    Number(params.year ?? today.year),
+    Number(params.month ?? today.month),
+    now,
+  );
 
   // A store filter, or every store combined — the same choice the rest of the
   // portal offers, and the P&L of one shop is a different question to the P&L
@@ -90,7 +91,7 @@ export default async function PnlPage({
     },
   );
 
-  const years = Array.from({ length: YEARS_BACK + 1 }, (_, index) => now.getFullYear() - index)
+  const years = Array.from({ length: PNL_YEARS_BACK + 1 }, (_, index) => today.year - index)
     .reverse();
 
   /** Keeps the other params while changing one — the store filter must survive. */

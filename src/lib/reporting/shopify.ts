@@ -13,6 +13,7 @@ import type { CanonicalReportingSource } from "./sources";
 import {
   fetchCollectionProductKeys,
   fetchDailySales,
+  readCollectionProductKeys,
   resolveAdminToken,
   type DailySalesNormalizer,
   type ShopifyGraphqlExecutor,
@@ -46,6 +47,13 @@ export type ShopifyReportingAdapter = {
   fetchCollectionProductKeys: (
     handle: string,
   ) => ReturnType<typeof fetchCollectionProductKeys>;
+  /**
+   * The same keys, or null when the store has no such collection. A failed
+   * read rejects instead of passing for a missing or an empty collection.
+   */
+  readCollectionProductKeys: (
+    handle: string,
+  ) => ReturnType<typeof readCollectionProductKeys>;
   fetchFunnel: (
     from: string,
     to: string,
@@ -885,6 +893,14 @@ function boundAdapter({
     },
     fetchCollectionProductKeys(handle) {
       return fetchCollectionProductKeys(
+        shopDomain,
+        accessToken,
+        handle,
+        graphql,
+      );
+    },
+    readCollectionProductKeys(handle) {
+      return readCollectionProductKeys(
         shopDomain,
         accessToken,
         handle,

@@ -79,8 +79,27 @@ vi.mock("@/lib/reporting/shopify", () => ({
   createLegacyShopifyReportingAdapter: mocks.createLegacyShopifyReportingAdapter,
   createShopifyReportingAdapter: mocks.createShopifyReportingAdapter,
 }));
-// The landing rule is the real one: the sheet must match orders the way the
-// revenue share does, so both read the same normalizePath.
+// Only the error classes are read from these two modules: they decide which
+// failures carry Shopify's own words into a family message.
+vi.mock("@/lib/client-onboarding/shopify", () => ({
+  ShopifyReportingError: class ShopifyReportingError extends Error {
+    constructor(readonly code: string, message: string) {
+      super(message);
+      this.name = "ShopifyReportingError";
+    }
+  },
+}));
+vi.mock("@/lib/shopify/client", () => ({
+  ShopifyError: class ShopifyError extends Error {
+    constructor(message: string, readonly status?: number) {
+      super(message);
+      this.name = "ShopifyError";
+    }
+  },
+}));
+// The landing rule is the real one: the sheet matches orders by the revenue
+// share's own path rule (decoded, since the sheet bills nothing), so the
+// module is not mocked.
 vi.mock("@/lib/finance/rev-share", () => import("../finance/rev-share"));
 vi.mock("@/lib/reporting/sources", () => ({
   resolveReportingSources: mocks.resolveReportingSources,
@@ -101,11 +120,16 @@ vi.mock("@/lib/admin/reporting-snapshots", () => ({
 import {
   attributeCampaignCollections,
   attributeCollectionSpend,
+  campaignCollectionHandle,
+  concurrencyLimiter,
   ensureAdminAnalyticsRollupCoverage,
   fetchAdminStoreAnalytics,
   fetchCachedAdminStoreAnalytics,
+  refreshAdminStoreAnalyticsSnapshots,
 } from "./store-analytics";
+import { ShopifyReportingError } from "@/lib/client-onboarding/shopify";
 import { ShopifyReportingAdapterError } from "@/lib/reporting/shopify";
+import { ShopifyError } from "@/lib/shopify/client";
 
 const CLIENT_ID = "10000000-0000-4000-8000-000000000001";
 const STORE_ID = "20000000-0000-4000-8000-000000000001";
@@ -242,6 +266,7 @@ function shopifyAdapter() {
     timeZone: "Europe/Lisbon",
     fetchDailySales: vi.fn().mockResolvedValue({ currency: "EUR", timeZone: "Europe/Lisbon", days: [], orders: [] }),
     fetchCollectionProductKeys: vi.fn(),
+    readCollectionProductKeys: vi.fn(),
     fetchFunnelSeries: vi.fn().mockResolvedValue({
       granularity: "day",
       points: [
@@ -615,8 +640,268 @@ describe("admin store analytics DAL", () => {
       lastErrorCode: "provider_failed",
       stale: true,
     });
+    // The campaigns family's own row carries no error: the funnel's failure
+    // must not read as a campaign one on the Campaign Performance section.
+    expect(result.campaignsFreshness).toEqual({
+      state: "partial",
+      refreshedAt: "2026-08-15T08:00:00.000Z",
+      lastAttemptAt: "2026-08-15T11:30:00.000Z",
+      lastErrorCode: null,
+      stale: true,
+    });
     expect(mocks.createShopifyReportingAdapter).not.toHaveBeenCalled();
     expect(mocks.fetchGoogleReportingCampaigns).not.toHaveBeenCalled();
+  });
+
+  it("reports the campaigns family's own kept-last-good failure as its freshness", async () => {
+    mocks.createServiceClient.mockReturnValue(service([account()], null));
+    const range = { from: "2026-08-08", to: "2026-08-14" };
+    const clean = (rows: unknown[]) => ({
+      state: "ready",
+      rows,
+      message: null,
+      refreshedAt: "2026-08-15T10:03:00.000Z",
+      lastAttemptAt: "2026-08-15T10:03:00.000Z",
+      lastErrorCode: null,
+      revision: 2,
+    });
+    mocks.readAdminReportingSnapshotFamilySelections.mockResolvedValue(new Map([
+      ["shopify_funnel", exactSelection(clean([{
+        daily: [],
+        totals: { sessions: 1, addedToCart: 0, reachedCheckout: 0, completedCheckout: 0 },
+      }]), range)],
+      ["store_campaign_performance", exactSelection({
+        ...clean([{ rows: [] }]),
+        message: "Last failure: Google metrics are ready; Shopify attribution is unavailable.",
+        lastAttemptAt: "2026-08-15T11:01:00.000Z",
+        lastErrorCode: "provider_partial",
+      }, range)],
+      ["shopify_collection_sales", exactSelection(clean([{ rows: [] }]), range)],
+    ]));
+
+    const result = await fetchCachedAdminStoreAnalytics({
+      clientId: CLIENT_ID,
+      store: {
+        accountId: STORE_ID,
+        activityAccountIds: [STORE_ID],
+        currency: "EUR",
+        days: [],
+      },
+      range,
+    });
+
+    expect(result.campaigns).toMatchObject({
+      state: "ready",
+      message: expect.stringContaining("Last failure: Google metrics are ready"),
+    });
+    expect(result.campaignsFreshness).toEqual({
+      state: "partial",
+      refreshedAt: "2026-08-15T10:03:00.000Z",
+      lastAttemptAt: "2026-08-15T11:01:00.000Z",
+      lastErrorCode: "provider_partial",
+      stale: false,
+    });
+  });
+
+  it("names what Shopify said when the reporting connection cannot be opened", async () => {
+    mocks.createServiceClient.mockReturnValue(service([account()], null));
+    mocks.createLegacyShopifyReportingAdapter.mockRejectedValue(
+      new ShopifyReportingError(
+        "invalid_credentials",
+        "Shopify rejected the Client ID or Client Secret. Confirm that the reporting app is installed on this store.",
+      ),
+    );
+    mocks.fetchLiveCampaignsDetailed.mockResolvedValue([googleCampaign()]);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const result = await fetchAdminStoreAnalytics({
+      clientId: CLIENT_ID,
+      store: {
+        accountId: STORE_ID,
+        activityAccountIds: [STORE_ID],
+        currency: "EUR",
+        days: [],
+      },
+      range: RANGE,
+    });
+
+    const cause =
+      "The selected Shopify reporting connection could not be verified (Shopify rejected the Client ID or Client Secret. Confirm that the reporting app is installed on this store.).";
+    expect(result.campaigns).toMatchObject({
+      state: "partial",
+      message: expect.stringContaining(
+        `UTM attribution matched to Google campaign IDs is unavailable. ${cause}`,
+      ),
+    });
+    expect(result.funnel).toMatchObject({
+      state: "failed",
+      message: expect.stringContaining(cause),
+    });
+    expect(error).toHaveBeenCalledWith(
+      "Shopify reporting connection could not be opened:",
+      expect.objectContaining({ code: "invalid_credentials" }),
+    );
+    error.mockRestore();
+  });
+
+  it("appends the cause to a failed Shopify read but never to a missing scope", async () => {
+    mocks.createServiceClient.mockReturnValue(service([account()], null));
+    const adapter = shopifyAdapter();
+    adapter.fetchCampaignAttributionSeries.mockRejectedValue(
+      new ShopifyError("Shopify is rate limiting this store. Wait a moment and try again.", 429),
+    );
+    adapter.fetchCampaignProductSeries.mockRejectedValue(
+      new ShopifyReportingAdapterError("missing_scope", "read_reports was not granted"),
+    );
+    adapter.fetchLandingSessionsSeries.mockRejectedValue(
+      new ShopifyReportingAdapterError("invalid_response", "x".repeat(300)),
+    );
+    mocks.createLegacyShopifyReportingAdapter.mockResolvedValue(adapter);
+    mocks.fetchLiveCampaignsDetailed.mockResolvedValue([googleCampaign()]);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const result = await fetchAdminStoreAnalytics({
+      clientId: CLIENT_ID,
+      store: {
+        accountId: STORE_ID,
+        activityAccountIds: [STORE_ID],
+        currency: "EUR",
+        days: [],
+      },
+      range: RANGE,
+    });
+
+    expect(result.campaigns).toMatchObject({
+      state: "partial",
+      message: expect.stringContaining(
+        "Shopify campaign attribution could not be loaded (Shopify is rate limiting this store. Wait a moment and try again.).",
+      ),
+      data: {
+        rows: [
+          expect.objectContaining({
+            breakdown: expect.objectContaining({
+              sources: expect.arrayContaining([
+                {
+                  provider: "shopify",
+                  source: "campaign_products",
+                  state: "unavailable",
+                  reason: "Shopify has not granted campaign product report access.",
+                },
+              ]),
+            }),
+          }),
+        ],
+      },
+    });
+    if (!("message" in result.campaigns) || !result.campaigns.message) {
+      throw new Error("Expected a campaign family message.");
+    }
+    // The appended cause is capped so the stored message stays well within
+    // the row's limit even when several reads fail with long errors.
+    expect(result.campaigns.message).not.toContain("x".repeat(201));
+    expect(result.campaigns.message.length).toBeLessThanOrEqual(1_000);
+    expect(error).toHaveBeenCalledWith(
+      "Shopify read failed (Shopify campaign attribution could not be loaded.)",
+      expect.objectContaining({ status: 429 }),
+    );
+    error.mockRestore();
+  });
+
+  it("runs at most two Shopify reads at a time for one store and still collects every outcome", async () => {
+    mocks.createServiceClient.mockReturnValue(service([account()], null));
+    const adapter = shopifyAdapter();
+    let active = 0;
+    let peak = 0;
+    const gate = async <T,>(value: T, fail = false): Promise<T> => {
+      active += 1;
+      peak = Math.max(peak, active);
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      active -= 1;
+      if (fail) throw new ShopifyError("Shopify is rate limiting this store.", 429);
+      return value;
+    };
+    adapter.fetchFunnelSeries.mockImplementation(() =>
+      gate({ granularity: "day", points: [] }));
+    adapter.fetchCampaignAttributionSeries.mockImplementation(() => gate([]));
+    adapter.fetchCampaignProductSeries.mockImplementation(() => gate([]));
+    adapter.fetchCollectionSalesSeries.mockImplementation(() => gate([]));
+    adapter.fetchLandingSessionsSeries.mockImplementation(() => gate([], true));
+    adapter.fetchDailySales.mockImplementation(() =>
+      gate({ currency: "EUR", timeZone: "Europe/Lisbon", days: [], orders: [] }));
+    mocks.createLegacyShopifyReportingAdapter.mockResolvedValue(adapter);
+    mocks.fetchLiveCampaignsDetailed.mockResolvedValue([googleCampaign()]);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const result = await fetchAdminStoreAnalytics({
+      clientId: CLIENT_ID,
+      store: {
+        accountId: STORE_ID,
+        activityAccountIds: [STORE_ID],
+        currency: "EUR",
+        days: [],
+      },
+      range: RANGE,
+    });
+
+    expect(peak).toBe(2);
+    for (const read of [
+      adapter.fetchFunnelSeries,
+      adapter.fetchCampaignAttributionSeries,
+      adapter.fetchCampaignProductSeries,
+      adapter.fetchCollectionSalesSeries,
+      adapter.fetchLandingSessionsSeries,
+      adapter.fetchDailySales,
+    ]) {
+      expect(read).toHaveBeenCalledTimes(1);
+    }
+    expect(result.funnel).toMatchObject({ state: "empty" });
+    expect(result.collections).toMatchObject({ state: "empty" });
+    // The one rejected read (landing sessions) feeds only the collection
+    // basis, and no campaign here lands on a collection, so the family is
+    // still ready: there was no collection column to lose.
+    expect(result.campaigns).toMatchObject({ state: "ready" });
+    vi.mocked(console.error).mockRestore();
+  });
+
+  it("flags a partial family as degraded when the snapshot refresh loads it", async () => {
+    mocks.createServiceClient.mockReturnValue(service([account()], null));
+    const adapter = shopifyAdapter();
+    adapter.fetchCampaignAttributionSeries.mockRejectedValue(
+      new ShopifyError("Shopify is rate limiting this store.", 429),
+    );
+    mocks.createLegacyShopifyReportingAdapter.mockResolvedValue(adapter);
+    mocks.fetchLiveCampaignsDetailed.mockResolvedValue([googleCampaign()]);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const loaded = new Map<string, unknown>();
+    mocks.refreshAdminReportingSnapshot.mockImplementation(
+      async (input: { family: string; load: () => Promise<{ state: string }> }) => {
+        const result = await input.load();
+        loaded.set(input.family, result);
+        return { state: "refreshed", snapshotState: result.state, refreshedAt: "now" };
+      },
+    );
+
+    const summary = await refreshAdminStoreAnalyticsSnapshots({
+      clientId: CLIENT_ID,
+      store: {
+        accountId: STORE_ID,
+        activityAccountIds: [STORE_ID],
+        currency: "EUR",
+        days: [],
+      },
+      range: RANGE,
+    });
+
+    expect(summary).toMatchObject({ refreshed: 3, partial: 1, failed: 0 });
+    expect(loaded.get("store_campaign_performance")).toMatchObject({
+      state: "partial",
+      degraded: { code: "provider_partial" },
+      message: expect.stringContaining("Shopify campaign attribution could not be loaded"),
+    });
+    expect(loaded.get("shopify_funnel")).toMatchObject({ state: "ready" });
+    expect(loaded.get("shopify_funnel")).not.toHaveProperty("degraded");
+    expect(loaded.get("shopify_collection_sales")).not.toHaveProperty("degraded");
+    vi.mocked(console.error).mockRestore();
   });
 
   it("does not let one malformed provider projection erase independent families", async () => {
@@ -785,6 +1070,7 @@ describe("admin store analytics DAL", () => {
     ];
     const attribution = await attributeCampaignCollections({
       orders: { ok: true, value: collectionOrders() },
+      collectionProductKeys: async () => null,
       targetCurrency: "EUR",
       range: RANGE,
       google: {
@@ -855,6 +1141,7 @@ describe("admin store analytics DAL", () => {
   it("marks orders and cart additions unknown, not zero, when the landing sessions could not be read", async () => {
     const attribution = await attributeCampaignCollections({
       orders: { ok: true, value: collectionOrders() },
+      collectionProductKeys: async () => null,
       targetCurrency: "EUR",
       range: RANGE,
       google: {
@@ -922,6 +1209,7 @@ describe("admin store analytics DAL", () => {
           ],
         },
       },
+      collectionProductKeys: async () => null,
       targetCurrency: "EUR",
       range: RANGE,
       google: {
@@ -974,6 +1262,7 @@ describe("admin store analytics DAL", () => {
     orders.orders[0]!.refunded = 30;
     const attribution = await attributeCampaignCollections({
       orders: { ok: true, value: orders },
+      collectionProductKeys: async () => null,
       targetCurrency: "EUR",
       range: RANGE,
       google: {
@@ -1022,6 +1311,7 @@ describe("admin store analytics DAL", () => {
   it("marks the collection's sales unknown, not zero, when the orders could not be read", async () => {
     const attribution = await attributeCampaignCollections({
       orders: { ok: false, state: "failed", message: "Shopify orders could not be loaded." },
+      collectionProductKeys: async () => null,
       targetCurrency: "EUR",
       range: RANGE,
       google: {
@@ -1062,6 +1352,650 @@ describe("admin store analytics DAL", () => {
       addedToCart: 8,
       cogs: null,
     });
+  });
+
+  it("gives a campaign on a collection that sold nothing in the window a sheet of real zeros", async () => {
+    // Early in the day, or on a quiet week, the sales report leaves the
+    // collection out: it only lists what sold. The store still has the page,
+    // so the campaign keeps its handle and its zeros are measured ones.
+    const collectionProductKeys = vi.fn(async (handle: string) =>
+      handle === "best-sellers" ? new Set(["LAMP-1", "Lamp"]) : null);
+    const attribution = await attributeCampaignCollections({
+      collectionProductKeys,
+      orders: { ok: true, value: { currency: "EUR", orders: [] } },
+      targetCurrency: "EUR",
+      range: { from: "2026-08-14", to: "2026-08-14" },
+      google: {
+        ok: true,
+        value: {
+          rows: [{ ...googleCampaign(), finalUrls: ["https://northwind.example/collections/best-sellers"] }] as never,
+          granularity: "hour",
+          timeline: [{ ...deliveredDay(), bucket: "2026-08-14T09:00:00", granularity: "hour" as const, spend: 4 }],
+        },
+      },
+      collectionSales: { ok: true, value: [] },
+      landing: { ok: true, value: [] },
+      costs: { manualCosts: new Map(), tiers: new Map(), collections: [], defaultCostPct: 30 },
+    });
+
+    expect(collectionProductKeys).toHaveBeenCalledTimes(1);
+    expect(collectionProductKeys).toHaveBeenCalledWith("best-sellers");
+    const entry = attribution.get(`${STORE_ID}:987654321`)!;
+    expect(entry).toMatchObject({ handle: "best-sellers", sharedWith: 1, costsKnown: true, salesKnown: true, landingKnown: true });
+    expect(entry.byDay.get("2026-08-14")).toEqual({ revenue: 0, units: 0, orders: 0, addedToCart: 0, cogs: 0 });
+  });
+
+  it("reads a looked-up collection's products for the lines rule, and keeps the handle with no days at all", async () => {
+    const attribution = await attributeCampaignCollections({
+      // The store has both pages; only one of them carries the Lamp.
+      collectionProductKeys: async (handle) => new Set(handle === "best-sellers" ? ["LAMP-1"] : []),
+      orders: { ok: true, value: collectionOrders() },
+      targetCurrency: "EUR",
+      range: RANGE,
+      google: {
+        ok: true,
+        value: {
+          rows: [
+            { ...googleCampaign(), finalUrls: ["https://northwind.example/collections/best-sellers"] },
+            // Landed nowhere, sold nothing, spent nothing: still names its page.
+            { ...googleCampaign(), providerCampaignId: "111", finalUrls: ["https://northwind.example/collections/quiet"] },
+          ] as never,
+          granularity: "day",
+          timeline: [deliveredDay()],
+        },
+      },
+      collectionSales: { ok: true, value: [] },
+      landing: { ok: true, value: [] },
+      costs: null,
+    });
+
+    // The landed order counts whole (100, 3 units); the other counts its
+    // Lamp line only (40, 1), known from the lookup, not the sales report.
+    expect(attribution.get(`${STORE_ID}:987654321`)!.byDay.get("2026-08-14")).toEqual({
+      revenue: 140,
+      units: 4,
+      orders: 2,
+      addedToCart: 0,
+      cogs: null,
+    });
+    const quiet = attribution.get(`${STORE_ID}:111`)!;
+    expect(quiet).toMatchObject({ handle: "quiet", sharedWith: 1, salesKnown: true, landingKnown: true, costsKnown: false });
+    expect(quiet.byDay.size).toBe(0);
+  });
+
+  it("keeps skipping a campaign whose collection the store does not have", async () => {
+    const attribution = await attributeCampaignCollections({
+      collectionProductKeys: async () => null,
+      orders: { ok: true, value: collectionOrders() },
+      targetCurrency: "EUR",
+      range: RANGE,
+      google: {
+        ok: true,
+        value: {
+          rows: [{ ...googleCampaign(), finalUrls: ["https://northwind.example/collections/renamed"] }] as never,
+          granularity: "day",
+          timeline: [deliveredDay()],
+        },
+      },
+      collectionSales: { ok: true, value: [] },
+      landing: { ok: true, value: [] },
+      costs: null,
+    });
+
+    expect(attribution.size).toBe(0);
+  });
+
+  it("asks the store once per collection the sales left out, two at a time, and survives a failed read", async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const collectionProductKeys = vi.fn(async (handle: string) => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      inFlight -= 1;
+      if (handle === "broken") throw new Error("Shopify timed out");
+      return handle === "gone" ? null : new Set([handle]);
+    });
+    const rows = ["a", "b", "best-sellers", "gone", "a", "broken"].map((handle, index) => ({
+      ...googleCampaign(),
+      providerCampaignId: String(index),
+      finalUrls: [`https://northwind.example/collections/${handle}`],
+    }));
+    const attribution = await attributeCampaignCollections({
+      collectionProductKeys,
+      orders: { ok: true, value: { currency: "EUR", orders: [] } },
+      targetCurrency: "EUR",
+      range: RANGE,
+      google: { ok: true, value: { rows: rows as never, granularity: "day", timeline: [] } },
+      collectionSales: {
+        ok: true,
+        value: [
+          {
+            collectionId: "gid://shopify/Collection/20",
+            handle: "best-sellers",
+            title: "Best sellers",
+            revenue: 300,
+            units: 3,
+            timeline: [{ bucket: "2026-08-14", revenue: 300, units: 3, orders: 3 }],
+            products: [],
+          },
+        ],
+      },
+      landing: { ok: true, value: [] },
+      costs: null,
+    });
+
+    // Sold collections are not asked about; the same handle is asked once.
+    expect(collectionProductKeys.mock.calls.map(([handle]) => handle).sort()).toEqual(["a", "b", "broken", "gone"]);
+    expect(peak).toBe(2);
+    expect(attribution.get(`${STORE_ID}:0`)).toMatchObject({ handle: "a", sharedWith: 2 });
+    expect(attribution.get(`${STORE_ID}:4`)).toMatchObject({ handle: "a", sharedWith: 2 });
+    expect(attribution.get(`${STORE_ID}:1`)).toMatchObject({ handle: "b", sharedWith: 1 });
+    expect(attribution.get(`${STORE_ID}:2`)).toMatchObject({ handle: "best-sellers", sharedWith: 1 });
+    expect(attribution.has(`${STORE_ID}:3`)).toBe(false);
+    expect(attribution.has(`${STORE_ID}:5`)).toBe(false);
+  });
+
+  it("marks a quiet collection's days unknown, not zero, when the orders or landing sessions could not be read", async () => {
+    const attribution = await attributeCampaignCollections({
+      collectionProductKeys: async () => new Set(["LAMP-1"]),
+      orders: { ok: false, state: "failed", message: "Shopify orders could not be loaded." },
+      targetCurrency: "EUR",
+      range: RANGE,
+      google: {
+        ok: true,
+        value: {
+          rows: [{ ...googleCampaign(), finalUrls: ["https://northwind.example/collections/best-sellers"] }] as never,
+          granularity: "day",
+          timeline: [deliveredDay()],
+        },
+      },
+      collectionSales: { ok: true, value: [] },
+      landing: { ok: false, state: "failed", message: "Shopify landing page sessions could not be loaded." },
+      costs: null,
+    });
+
+    const entry = attribution.get(`${STORE_ID}:987654321`)!;
+    expect(entry).toMatchObject({ handle: "best-sellers", salesKnown: false, landingKnown: false });
+    expect(entry.byDay.get("2026-08-14")).toEqual({ revenue: null, units: null, orders: null, addedToCart: null, cogs: null });
+  });
+
+  it("gives the live campaign row its handle and zeros when the store confirms a quiet collection", async () => {
+    mocks.createServiceClient.mockReturnValue(service([account()], null));
+    const adapter = shopifyAdapter();
+    adapter.fetchCampaignAttributionSeries.mockResolvedValue([]);
+    adapter.fetchCampaignProductSeries.mockResolvedValue([]);
+    // Nothing of the collection sold in the window, so the report has no row
+    // for it; the store answers the lookup with the collection's products.
+    adapter.fetchCollectionSalesSeries.mockResolvedValue([]);
+    adapter.readCollectionProductKeys.mockResolvedValue(new Set(["LAMP-1", "Lamp"]));
+    adapter.fetchDailySales.mockResolvedValue({ currency: "EUR", timeZone: "Europe/Lisbon", days: [], orders: [] });
+    mocks.createLegacyShopifyReportingAdapter.mockResolvedValue(adapter);
+    mocks.fetchLiveCampaignsDetailed.mockResolvedValue([
+      { ...googleCampaign(), finalUrls: ["https://northwind.example/collections/best-sellers"] },
+    ]);
+    mocks.fetchLiveCampaignTimeline.mockResolvedValue([deliveredDay()]);
+
+    const result = await fetchAdminStoreAnalytics({
+      clientId: CLIENT_ID,
+      store: { accountId: STORE_ID, activityAccountIds: [STORE_ID], currency: "EUR", days: [] },
+      range: RANGE,
+    });
+
+    expect(adapter.readCollectionProductKeys).toHaveBeenCalledWith("best-sellers");
+    expect(result.campaigns).toMatchObject({
+      data: {
+        rows: [
+          {
+            campaignId: "987654321",
+            attributionState: "unmatched",
+            collectionHandle: "best-sellers",
+            collectionSharedWith: 1,
+            timeline: [
+              expect.objectContaining({
+                bucket: "2026-08-14",
+                collectionRevenue: 0,
+                collectionUnits: 0,
+                collectionOrders: 0,
+                collectionAddedToCart: 0,
+                // Costs could not be read in this harness: unknown, not 0.
+                cogs: null,
+              }),
+            ],
+          },
+        ],
+      },
+    });
+  });
+
+  it("reads the store's null as a collection it does not have", async () => {
+    mocks.createServiceClient.mockReturnValue(service([account()], null));
+    const adapter = shopifyAdapter();
+    adapter.fetchCampaignAttributionSeries.mockResolvedValue([]);
+    adapter.fetchCampaignProductSeries.mockResolvedValue([]);
+    adapter.fetchCollectionSalesSeries.mockResolvedValue([]);
+    adapter.readCollectionProductKeys.mockResolvedValue(null);
+    mocks.createLegacyShopifyReportingAdapter.mockResolvedValue(adapter);
+    mocks.fetchLiveCampaignsDetailed.mockResolvedValue([
+      { ...googleCampaign(), finalUrls: ["https://northwind.example/collections/renamed"] },
+    ]);
+    mocks.fetchLiveCampaignTimeline.mockResolvedValue([deliveredDay()]);
+
+    const result = await fetchAdminStoreAnalytics({
+      clientId: CLIENT_ID,
+      store: { accountId: STORE_ID, activityAccountIds: [STORE_ID], currency: "EUR", days: [] },
+      range: RANGE,
+    });
+
+    // A renamed collection is the store's own answer, not a failure: the
+    // campaign keeps its skip and the family stays ready.
+    expect(result.campaigns).toMatchObject({
+      state: "ready",
+      data: {
+        rows: [
+          {
+            campaignId: "987654321",
+            collectionHandle: null,
+            collectionSharedWith: null,
+            timeline: [expect.objectContaining({ bucket: "2026-08-14", collectionRevenue: null, cogs: null })],
+          },
+        ],
+      },
+    });
+  });
+
+  it("reads an empty product list as a collection the store has, with nothing to sell", async () => {
+    mocks.createServiceClient.mockReturnValue(service([account()], null));
+    const adapter = shopifyAdapter();
+    adapter.fetchCampaignAttributionSeries.mockResolvedValue([]);
+    adapter.fetchCampaignProductSeries.mockResolvedValue([]);
+    adapter.fetchCollectionSalesSeries.mockResolvedValue([]);
+    adapter.readCollectionProductKeys.mockResolvedValue(new Set());
+    mocks.createLegacyShopifyReportingAdapter.mockResolvedValue(adapter);
+    mocks.fetchLiveCampaignsDetailed.mockResolvedValue([
+      { ...googleCampaign(), finalUrls: ["https://northwind.example/collections/empty"] },
+    ]);
+    mocks.fetchLiveCampaignTimeline.mockResolvedValue([deliveredDay()]);
+
+    const result = await fetchAdminStoreAnalytics({
+      clientId: CLIENT_ID,
+      store: { accountId: STORE_ID, activityAccountIds: [STORE_ID], currency: "EUR", days: [] },
+      range: RANGE,
+    });
+
+    expect(result.campaigns).toMatchObject({
+      state: "ready",
+      data: {
+        rows: [
+          {
+            campaignId: "987654321",
+            collectionHandle: "empty",
+            collectionSharedWith: 1,
+            timeline: [expect.objectContaining({ bucket: "2026-08-14", collectionRevenue: 0, collectionOrders: 0 })],
+          },
+        ],
+      },
+    });
+  });
+
+  it("keeps a campaign's skip when its collection lookup fails, and marks the family partial so the last good sheet is kept", async () => {
+    mocks.createServiceClient.mockReturnValue(service([account()], null));
+    const adapter = shopifyAdapter();
+    adapter.fetchCampaignAttributionSeries.mockResolvedValue([]);
+    adapter.fetchCampaignProductSeries.mockResolvedValue([]);
+    adapter.fetchCollectionSalesSeries.mockResolvedValue([]);
+    adapter.readCollectionProductKeys.mockRejectedValue(
+      new ShopifyError("Shopify is rate limiting this store.", 429),
+    );
+    mocks.createLegacyShopifyReportingAdapter.mockResolvedValue(adapter);
+    mocks.fetchLiveCampaignsDetailed.mockResolvedValue([
+      { ...googleCampaign(), finalUrls: ["https://northwind.example/collections/renamed"] },
+    ]);
+    mocks.fetchLiveCampaignTimeline.mockResolvedValue([deliveredDay()]);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const result = await fetchAdminStoreAnalytics({
+      clientId: CLIENT_ID,
+      store: { accountId: STORE_ID, activityAccountIds: [STORE_ID], currency: "EUR", days: [] },
+      range: RANGE,
+    });
+
+    // A failed read is not a collection the store lacks. It is logged, the
+    // campaign keeps its skip for this refresh, and the family is partial so
+    // the snapshot refresh keeps the last good sheet and records the failure
+    // instead of publishing one that says the store has no such collection.
+    expect(error).toHaveBeenCalledWith(
+      'Admin store analytics could not read the products of collection "renamed":',
+      expect.objectContaining({ status: 429 }),
+    );
+    expect(result.campaigns).toMatchObject({
+      state: "partial",
+      message: expect.stringContaining(
+        "The products of one collection could not be read from Shopify (renamed)",
+      ),
+      data: {
+        rows: [{ campaignId: "987654321", collectionHandle: null, collectionSharedWith: null }],
+      },
+    });
+    error.mockRestore();
+  });
+
+  it("marks the campaigns family partial when a read behind a campaign's collection basis fails", async () => {
+    mocks.createServiceClient.mockReturnValue(service([account()], null));
+    const adapter = shopifyAdapter();
+    adapter.fetchCampaignAttributionSeries.mockResolvedValue([]);
+    adapter.fetchCampaignProductSeries.mockResolvedValue([]);
+    adapter.fetchLandingSessionsSeries.mockRejectedValue(
+      new ShopifyError("Shopify is rate limiting this store.", 429),
+    );
+    mocks.createLegacyShopifyReportingAdapter.mockResolvedValue(adapter);
+    mocks.fetchLiveCampaignsDetailed.mockResolvedValue([
+      { ...googleCampaign(), finalUrls: ["https://northwind.example/collections/best-sellers"] },
+    ]);
+    mocks.fetchLiveCampaignTimeline.mockResolvedValue([deliveredDay()]);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const result = await fetchAdminStoreAnalytics({
+      clientId: CLIENT_ID,
+      store: { accountId: STORE_ID, activityAccountIds: [STORE_ID], currency: "EUR", days: [] },
+      range: RANGE,
+    });
+
+    // The sheet keeps its basis with the landing column unknown, and the
+    // family says why, so the snapshot refresh keeps the last good sheet.
+    expect(result.campaigns).toMatchObject({
+      state: "partial",
+      message: expect.stringContaining(
+        "Shopify landing page sessions could not be loaded (Shopify is rate limiting this store.).",
+      ),
+      data: {
+        rows: [
+          {
+            campaignId: "987654321",
+            collectionHandle: "best-sellers",
+            timeline: [
+              expect.objectContaining({ bucket: "2026-08-14", collectionRevenue: 0, collectionAddedToCart: null }),
+            ],
+          },
+        ],
+      },
+    });
+    vi.mocked(console.error).mockRestore();
+  });
+
+  it("stays ready when a missing scope, not a failure, withholds a basis read", async () => {
+    mocks.createServiceClient.mockReturnValue(service([account()], null));
+    const adapter = shopifyAdapter();
+    adapter.fetchCampaignAttributionSeries.mockResolvedValue([]);
+    adapter.fetchCampaignProductSeries.mockResolvedValue([]);
+    adapter.fetchLandingSessionsSeries.mockRejectedValue(
+      new ShopifyReportingAdapterError("missing_scope", "Shopify has not granted report access."),
+    );
+    mocks.createLegacyShopifyReportingAdapter.mockResolvedValue(adapter);
+    mocks.fetchLiveCampaignsDetailed.mockResolvedValue([
+      { ...googleCampaign(), finalUrls: ["https://northwind.example/collections/best-sellers"] },
+    ]);
+    mocks.fetchLiveCampaignTimeline.mockResolvedValue([deliveredDay()]);
+
+    const result = await fetchAdminStoreAnalytics({
+      clientId: CLIENT_ID,
+      store: { accountId: STORE_ID, activityAccountIds: [STORE_ID], currency: "EUR", days: [] },
+      range: RANGE,
+    });
+
+    // Withheld on every refresh alike: there is no better sheet to keep.
+    expect(result.campaigns).toMatchObject({
+      state: "ready",
+      message: null,
+      data: {
+        rows: [
+          {
+            collectionHandle: "best-sellers",
+            timeline: [expect.objectContaining({ bucket: "2026-08-14", collectionAddedToCart: null })],
+          },
+        ],
+      },
+    });
+  });
+
+  it("reads the landing collection from the final URLs first, and from the name only when the URLs name none", async () => {
+    const deal = "Deal https://northwind.example/collections/deal 5%";
+    expect(campaignCollectionHandle({ name: deal, finalUrls: ["https://northwind.example/collections/best-sellers"] })).toBe("best-sellers");
+    expect(campaignCollectionHandle({ name: deal, finalUrls: [] })).toBe("deal");
+    expect(campaignCollectionHandle({ name: deal })).toBe("deal");
+    expect(campaignCollectionHandle({ name: deal, finalUrls: ["https://northwind.example/"] })).toBe("deal");
+    expect(campaignCollectionHandle({ name: "Plain", finalUrls: ["https://northwind.example/"] })).toBeNull();
+    // Two collections in the URLs land nowhere in particular, whatever the name says.
+    expect(campaignCollectionHandle({
+      name: deal,
+      finalUrls: ["https://northwind.example/collections/a", "https://northwind.example/collections/b"],
+    })).toBeNull();
+    // The same page spelled twice is one collection.
+    expect(campaignCollectionHandle({
+      name: "x",
+      finalUrls: ["https://northwind.example/collections/a/", "https://northwind.example/Collections/A?page=2"],
+    })).toBe("a");
+
+    // Through the attribution: the rev-share name next to the ads' own URL
+    // used to make two handles and drop the campaign; now the URL wins.
+    const attribution = await attributeCampaignCollections({
+      collectionProductKeys: async () => null,
+      orders: { ok: true, value: collectionOrders() },
+      targetCurrency: "EUR",
+      range: RANGE,
+      google: {
+        ok: true,
+        value: {
+          rows: [{ ...googleCampaign(), name: deal, finalUrls: ["https://northwind.example/collections/best-sellers"] }] as never,
+          granularity: "day",
+          timeline: [deliveredDay()],
+        },
+      },
+      collectionSales: {
+        ok: true,
+        value: [
+          {
+            collectionId: "gid://shopify/Collection/20",
+            handle: "best-sellers",
+            title: "Best sellers",
+            revenue: 300,
+            units: 3,
+            timeline: [{ bucket: "2026-08-14", revenue: 300, units: 3, orders: 3 }],
+            products: [
+              {
+                productId: "gid://shopify/Product/10",
+                title: "Lamp",
+                revenue: 300,
+                units: 3,
+                costKeys: ["LAMP-1", "Lamp"],
+                timeline: [{ bucket: "2026-08-14", revenue: 300, units: 3, orders: 3 }],
+              },
+            ],
+          },
+        ],
+      },
+      landing: { ok: true, value: [] },
+      costs: null,
+    });
+    expect(attribution.get(`${STORE_ID}:987654321`)).toMatchObject({ handle: "best-sellers" });
+    expect(attribution.get(`${STORE_ID}:987654321`)!.byDay.get("2026-08-14")).toMatchObject({ revenue: 140, units: 4, orders: 2 });
+  });
+
+  it("matches a percent-encoded landing path to a non-ASCII collection handle", async () => {
+    // A Japanese store: Shopify's handle is plain, its ShopifyQL landing path
+    // and the order's landing page arrive percent-encoded, and the campaign
+    // URL can be either. All four must be the same page.
+    const handle = "ハンド";
+    const encoded = "%E3%83%8F%E3%83%B3%E3%83%89";
+    const attribution = await attributeCampaignCollections({
+      collectionProductKeys: async () => null,
+      orders: {
+        ok: true,
+        value: {
+          currency: "EUR",
+          orders: [
+            {
+              date: "2026-08-14",
+              total: 100,
+              paid: true,
+              landingPath: `/collections/${encoded}?utm_source=google`,
+              refunded: 0,
+              lines: [{ productKey: "OTHER-1", title: "Other", quantity: 1, unitPrice: 100 }],
+            },
+            {
+              date: "2026-08-14",
+              total: 30,
+              paid: true,
+              landingPath: "/",
+              refunded: 0,
+              lines: [{ productKey: "BAG-1", title: "Bag", quantity: 1, unitPrice: 30 }],
+            },
+          ],
+        },
+      },
+      targetCurrency: "EUR",
+      range: RANGE,
+      google: {
+        ok: true,
+        value: {
+          rows: [{ ...googleCampaign(), finalUrls: [`https://northwind.example/collections/${encoded}`] }] as never,
+          granularity: "day",
+          timeline: [deliveredDay()],
+        },
+      },
+      collectionSales: {
+        ok: true,
+        value: [
+          {
+            collectionId: "gid://shopify/Collection/21",
+            handle,
+            title: "Hand",
+            revenue: 30,
+            units: 1,
+            timeline: [{ bucket: "2026-08-14", revenue: 30, units: 1, orders: 1 }],
+            products: [
+              {
+                productId: "gid://shopify/Product/11",
+                title: "Bag",
+                revenue: 30,
+                units: 1,
+                costKeys: ["BAG-1", "Bag"],
+                timeline: [{ bucket: "2026-08-14", revenue: 30, units: 1, orders: 1 }],
+              },
+            ],
+          },
+        ],
+      },
+      landing: {
+        ok: true,
+        value: [
+          { bucket: "2026-08-14", landingPath: `/collections/${encoded}`, platform: "google", sessions: 10, addedToCart: 3, completedCheckout: 1 },
+          { bucket: "2026-08-14", landingPath: `/collections/${encoded}/products/bag`, platform: "alphabet", sessions: 4, addedToCart: 2, completedCheckout: 0 },
+          { bucket: "2026-08-14", landingPath: "/collections/other", platform: "google", sessions: 4, addedToCart: 2, completedCheckout: 0 },
+        ],
+      },
+      costs: null,
+    });
+
+    const entry = attribution.get(`${STORE_ID}:987654321`)!;
+    expect(entry.handle).toBe(handle);
+    // The landed order counts whole (100, 1 unit); the other counts its Bag
+    // line (30, 1); the cart additions are the two Google rows on the page.
+    expect(entry.byDay.get("2026-08-14")).toEqual({ revenue: 130, units: 2, orders: 2, addedToCart: 5, cogs: null });
+  });
+
+  it("keeps an unmatched campaign unmatched when a wider snapshot is sliced to the period", async () => {
+    // The fallback slice used to call every campaign without Shopify revenue
+    // "unavailable", as if the provider had failed. An unmatched campaign
+    // never had a revenue to lose; only a match that lost its sliced days is
+    // unavailable.
+    mocks.createServiceClient.mockReturnValue(service([account()], null));
+    const snapshot = (rows: unknown[]) => ({
+      state: "ready",
+      rows,
+      message: null,
+      refreshedAt: "2026-08-15T10:00:00.000Z",
+      lastAttemptAt: "2026-08-15T10:00:00.000Z",
+      lastErrorCode: null,
+      revision: 1,
+    });
+    const point = (bucket: string, shopifyRevenue: number | null) => ({
+      bucket,
+      spend: 10,
+      impressions: 100,
+      clicks: 10,
+      conversions: 0,
+      shopifyRevenue,
+      shopifySessions: null,
+      addedToCart: null,
+      shopifyOrders: shopifyRevenue === null ? null : 0,
+      units: null,
+      googleRevenue: 0,
+      realRoas: null,
+      googleRoas: null,
+    });
+    const row = (campaignId: string, attributionState: string, shopifyRevenue: number | null) => ({
+      accountId: STORE_ID,
+      campaignId,
+      name: `Campaign ${campaignId}`,
+      status: "active",
+      type: "PERFORMANCE_MAX",
+      shoppingFeed: false,
+      budget: 10,
+      spend: 20,
+      impressions: 200,
+      clicks: 20,
+      conversions: 0,
+      googleRevenue: 0,
+      shopifySessions: null,
+      shopifyOrders: null,
+      shopifyRevenue,
+      ctr: 0.1,
+      cpc: 1,
+      cpm: 100,
+      cpa: null,
+      googleRoas: null,
+      realRoas: null,
+      attributionState,
+      timeline: [point("2026-08-01", shopifyRevenue), point("2026-08-14", shopifyRevenue)],
+      breakdown: { state: "empty", rows: [], sources: [], reason: null },
+    });
+    const sliced = {
+      snapshot: snapshot([{
+        granularity: "day",
+        rows: [row("1", "unmatched", null), row("2", "matched", null), row("3", "unavailable", null), row("4", "matched", 50)],
+      }]),
+      sourceFrom: "2026-08-01",
+      sourceTo: "2026-08-14",
+      availableFrom: RANGE.from,
+      availableTo: RANGE.to,
+      exact: false,
+    };
+    mocks.readAdminReportingSnapshotFamilySelections.mockResolvedValue(new Map([
+      ["shopify_funnel", exactSelection(snapshot([{
+        daily: [],
+        totals: { sessions: 0, addedToCart: 0, reachedCheckout: 0, completedCheckout: 0 },
+      }]))],
+      ["store_campaign_performance", sliced],
+      ["shopify_collection_sales", exactSelection(snapshot([{ rows: [] }]))],
+    ]));
+
+    const result = await fetchCachedAdminStoreAnalytics({
+      clientId: CLIENT_ID,
+      store: { accountId: STORE_ID, activityAccountIds: [STORE_ID], currency: "EUR", days: [] },
+      range: RANGE,
+    });
+
+    expect(result.campaigns).toMatchObject({ state: "partial" });
+    const rows = (result.campaigns as { data: { rows: Array<{ campaignId: string; attributionState: string; timeline: unknown[] }> } }).data.rows;
+    expect(rows.map((campaign) => [campaign.campaignId, campaign.attributionState])).toEqual([
+      ["1", "unmatched"],
+      ["2", "unavailable"],
+      ["3", "unavailable"],
+      ["4", "matched"],
+    ]);
+    // Only the days inside the period survive the slice.
+    expect(rows[0]!.timeline).toHaveLength(1);
   });
 
   it("uses the exact inclusive range for every legacy source and only exact campaign IDs", async () => {
@@ -1801,6 +2735,63 @@ describe("admin store analytics DAL", () => {
       message: expect.stringContaining("could not be proved"),
     });
     expect(mocks.refreshAccountsNow).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("concurrencyLimiter", () => {
+  it("keeps at most the limit in flight, in call order, and reports every outcome", async () => {
+    const limit = concurrencyLimiter(2);
+    let active = 0;
+    let peak = 0;
+    const started: number[] = [];
+    const releases: Array<() => void> = [];
+    const task = (index: number, fail = false) => () => {
+      active += 1;
+      peak = Math.max(peak, active);
+      started.push(index);
+      return new Promise<number>((resolve, reject) => {
+        releases.push(() => {
+          active -= 1;
+          if (fail) reject(new Error(`task ${index} failed`));
+          else resolve(index);
+        });
+      });
+    };
+
+    const settled = Promise.allSettled([
+      limit(task(0)),
+      limit(task(1, true)),
+      limit(task(2)),
+      limit(task(3)),
+    ]);
+    await Promise.resolve();
+    expect(started).toEqual([0, 1]);
+    releases[0]();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(started).toEqual([0, 1, 2]);
+    releases[1]();
+    releases[2]();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(started).toEqual([0, 1, 2, 3]);
+    releases[3]();
+
+    expect(await settled).toEqual([
+      { status: "fulfilled", value: 0 },
+      { status: "rejected", reason: new Error("task 1 failed") },
+      { status: "fulfilled", value: 2 },
+      { status: "fulfilled", value: 3 },
+    ]);
+    expect(peak).toBe(2);
+    expect(active).toBe(0);
+  });
+
+  it("turns a synchronous throw into a rejection and frees the slot", async () => {
+    const limit = concurrencyLimiter(1);
+    await expect(limit(() => {
+      throw new Error("sync");
+    })).rejects.toThrow("sync");
+    await expect(limit(async () => "next")).resolves.toBe("next");
+    expect(() => concurrencyLimiter(0)).toThrow("positive integer");
   });
 });
 

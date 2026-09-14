@@ -58,6 +58,17 @@ const worker = {
      * d7 is the one rolling daily refresh and upserts every account/day. The
      * Today leg exists only for hourly chart buckets; it is not another daily
      * metrics pass. The ledger remains independent finance evidence.
+     *
+     * The order is load-bearing: every reporting leg upserts today's
+     * daily_metrics row, and the Today leg reads it from Windsor's
+     * campaign-hour feed where the rolling legs read the account daily table.
+     * The two disagree on the current day, so whichever leg runs last decides
+     * the ad spend every client sees today. Today runs last on purpose; moving
+     * it changes client-visible numbers. It is never starved by the rolling
+     * legs: each leg is its own request with its own route budget, and a leg
+     * that times out below is logged and the loop carries on. The route
+     * itself skips stores whose families are still fresh from the GitHub
+     * Actions fallback.
      */
     const job: { name: string; paths: string[] } =
       event.cron === "55 23 * * *"

@@ -10,8 +10,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import type { AdminAnalyticsClient } from "@/lib/admin/analytics";
-import type { AdminClientPnlStore } from "@/lib/admin/client-pnl";
+import type { AdminClientPnlStore, AdminPnlClient } from "@/lib/admin/client-pnl";
 import { pnlHref } from "@/lib/admin/pnl-href";
 
 const ALL_STORES = "__all__";
@@ -24,7 +23,7 @@ export function PnlScopeControls({
   year,
   month,
 }: {
-  clients: AdminAnalyticsClient[];
+  clients: AdminPnlClient[];
   clientId: string | null;
   stores: AdminClientPnlStore[];
   storeId: string | null;
@@ -51,7 +50,7 @@ export function PnlScopeControls({
           <SelectContent>
             {clients.map((client) => (
               <SelectItem key={client.id} value={client.id}>
-                {client.name}
+                {client.pending ? `${client.name} (pending)` : client.name}
               </SelectItem>
             ))}
           </SelectContent>

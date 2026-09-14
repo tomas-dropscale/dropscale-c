@@ -22,6 +22,7 @@ import { CampaignProfitLossSheet } from "./campaign-profit-loss";
 import { Badge } from "@/components/ui/badge";
 import type {
   AdminAnalyticsFamily,
+  AdminProviderFreshness,
   AdminStoreAnalytics,
 } from "@/lib/admin/store-analytics";
 import { integer, money, multiplier } from "@/lib/format";
@@ -196,6 +197,72 @@ function FamilyNotice({
     >
       {degraded && <AlertTriangle className="size-4 shrink-0" aria-hidden />}
       <span>{message || empty}</span>
+    </div>
+  );
+}
+
+const SNAPSHOT_TIME = new Intl.DateTimeFormat("en-GB", {
+  dateStyle: "medium",
+  timeStyle: "short",
+  timeZone: "Europe/Lisbon",
+});
+
+function snapshotTime(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? SNAPSHOT_TIME.format(timestamp) : null;
+}
+
+/**
+ * The one line the campaign table needs above it: when the shown snapshot
+ * was taken and what the last refresh said. With rows on screen the family's
+ * message and the row's error code were rendered nowhere, so a sheet kept
+ * from the last good refresh looked like this hour's.
+ */
+export function snapshotFreshnessLine(
+  message: string | null,
+  freshness: AdminProviderFreshness | null | undefined,
+): string | null {
+  const code = freshness?.lastErrorCode ?? null;
+  // The stored failure text starts with the RPC's own prefix (0073); the
+  // line says "failed" itself.
+  const detail = message?.replace(/^Last failure:\s*/i, "").trim() || null;
+  if (!detail && !code) return null;
+  const parts: string[] = [];
+  const taken = snapshotTime(freshness?.refreshedAt);
+  if (taken) parts.push(`Snapshot from ${taken}`);
+  if (code) {
+    const attempted = snapshotTime(freshness?.lastAttemptAt);
+    parts.push(
+      `last refresh${attempted ? ` ${attempted}` : ""} failed` +
+        (detail ? `: ${detail}` : ` (${code}); showing the last good data.`),
+    );
+  } else if (detail) {
+    parts.push(detail);
+  }
+  return parts.join(" · ");
+}
+
+function SnapshotFreshnessNotice({
+  message,
+  freshness,
+}: {
+  message: string | null;
+  freshness: AdminProviderFreshness | null | undefined;
+}) {
+  const line = snapshotFreshnessLine(message, freshness);
+  if (!line) return null;
+  const degraded = Boolean(freshness?.lastErrorCode);
+  return (
+    <div
+      role="status"
+      className={cn(
+        "flex items-center gap-2 border-b border-[var(--border-subtle)] px-5 py-2 text-[11px] text-[var(--text-muted)]",
+        degraded && "text-[var(--warning-orange)]",
+      )}
+    >
+      {degraded && <AlertTriangle className="size-3.5 shrink-0" aria-hidden />}
+      <p className="min-w-0 truncate" title={line}>{line}</p>
     </div>
   );
 }
@@ -400,10 +467,13 @@ export function CampaignPerformanceSection({
   campaigns,
   currency,
   rangeEnd,
+  freshness = null,
 }: {
   campaigns: AdminStoreAnalytics["campaigns"];
   currency: string;
   rangeEnd: string;
+  /** The campaigns family's own row freshness; null for a live build. */
+  freshness?: AdminProviderFreshness | null;
 }) {
   const [openCampaigns, setOpenCampaigns] = React.useState<Set<string>>(new Set());
   const [openSheets, setOpenSheets] = React.useState<Set<string>>(new Set());
@@ -446,6 +516,7 @@ export function CampaignPerformanceSection({
         />
       ) : (
         <div className="overflow-x-auto">
+          <SnapshotFreshnessNotice message={familyMessage(campaigns)} freshness={freshness} />
           <table className="w-full min-w-[1180px] text-[11.5px]">
             <thead>
               <tr className="label-caps border-b border-[var(--border-subtle)] text-left">

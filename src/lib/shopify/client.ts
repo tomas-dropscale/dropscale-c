@@ -825,11 +825,85 @@ export async function fetchDailySales(
   };
 }
 
+type CollectionProductsPage = {
+  pageInfo: { hasNextPage: boolean; endCursor: string | null };
+  nodes: { title: string; variants: { nodes: { sku: string | null }[] } }[];
+};
+
+/** One page of a collection's products, or null when the store has no collection by that handle. */
+async function fetchCollectionProductsPage(
+  shopDomain: string,
+  accessToken: string,
+  handle: string,
+  cursor: string | null,
+  graphql: ShopifyGraphqlExecutor,
+): Promise<CollectionProductsPage | null> {
+  const data = await graphql<{ collectionByHandle: { products: CollectionProductsPage } | null }>(
+    shopDomain,
+    accessToken,
+    `query ($handle: String!, $cursor: String) {
+      collectionByHandle(handle: $handle) {
+        products(first: ${PAGE_SIZE}, after: $cursor) {
+          pageInfo { hasNextPage endCursor }
+          nodes {
+            title
+            variants(first: 100) { nodes { sku } }
+          }
+        }
+      }
+    }`,
+    { handle, cursor },
+  );
+  return data.collectionByHandle?.products ?? null;
+}
+
+function addCollectionProductKeys(keys: Set<string>, page: CollectionProductsPage): void {
+  for (const product of page.nodes) {
+    // Add both: SKU-keyed lines and (for SKU-less products) title-keyed lines.
+    if (product.title) keys.add(product.title);
+    for (const variant of product.variants.nodes) {
+      const sku = variant.sku?.trim();
+      if (sku) keys.add(sku);
+    }
+  }
+}
+
 /**
- * Product keys (variant SKU, else product title — how order line items are
- * keyed) for every product in a collection, by handle. Returns an empty set
- * when the collection is missing or read_products isn't granted, so the
- * rev-share simply falls back to its landing-page rule.
+ * Product keys (variant SKU, else product title, how order line items are
+ * keyed) for every product in a collection, by handle, or null when the store
+ * has no collection by that handle. A page that cannot be read throws. The
+ * admin sheet reads this because it must tell a renamed collection (its
+ * campaign has no basis) from a throttle or a timeout (the last good sheet is
+ * kept), and because a set cut short by a failed later page would pass for
+ * the whole membership and silently drop the sales of every product it never
+ * reached.
+ */
+export async function readCollectionProductKeys(
+  shopDomain: string,
+  accessToken: string,
+  handle: string,
+  graphql: ShopifyGraphqlExecutor = shopifyGraphql,
+): Promise<Set<string> | null> {
+  const keys = new Set<string>();
+  let cursor: string | null = null;
+
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const products = await fetchCollectionProductsPage(shopDomain, accessToken, handle, cursor, graphql);
+    if (!products) return null;
+    addCollectionProductKeys(keys, products);
+    if (!products.pageInfo.hasNextPage) break;
+    cursor = products.pageInfo.endCursor;
+  }
+
+  return keys;
+}
+
+/**
+ * The same keys for the revenue-share ledger, which reads on a best-effort
+ * basis: an empty set when the collection is missing or read_products isn't
+ * granted, and the keys read so far when a later page fails, so the
+ * rev-share simply falls back to its landing-page rule. Kept exactly so
+ * because the ledger bills on it.
  */
 export async function fetchCollectionProductKeys(
   shopDomain: string,
@@ -841,50 +915,17 @@ export async function fetchCollectionProductKeys(
   let cursor: string | null = null;
 
   for (let page = 0; page < MAX_PAGES; page++) {
-    let data: {
-      collectionByHandle: {
-        products: {
-          pageInfo: { hasNextPage: boolean; endCursor: string | null };
-          nodes: { title: string; variants: { nodes: { sku: string | null }[] } }[];
-        };
-      } | null;
-    };
+    let products: CollectionProductsPage | null;
     try {
-      data = await graphql(
-        shopDomain,
-        accessToken,
-        `query ($handle: String!, $cursor: String) {
-          collectionByHandle(handle: $handle) {
-            products(first: ${PAGE_SIZE}, after: $cursor) {
-              pageInfo { hasNextPage endCursor }
-              nodes {
-                title
-                variants(first: 100) { nodes { sku } }
-              }
-            }
-          }
-        }`,
-        { handle, cursor },
-      );
+      products = await fetchCollectionProductsPage(shopDomain, accessToken, handle, cursor, graphql);
     } catch {
-      // Missing scope, removed field, or unknown handle — degrade to empty.
+      // Missing scope, removed field, or unknown handle: degrade to what was read.
       return keys;
     }
-
-    const collection = data.collectionByHandle;
-    if (!collection) return keys;
-
-    for (const product of collection.products.nodes) {
-      // Add both: SKU-keyed lines and (for SKU-less products) title-keyed lines.
-      if (product.title) keys.add(product.title);
-      for (const variant of product.variants.nodes) {
-        const sku = variant.sku?.trim();
-        if (sku) keys.add(sku);
-      }
-    }
-
-    if (!collection.products.pageInfo.hasNextPage) break;
-    cursor = collection.products.pageInfo.endCursor;
+    if (!products) return keys;
+    addCollectionProductKeys(keys, products);
+    if (!products.pageInfo.hasNextPage) break;
+    cursor = products.pageInfo.endCursor;
   }
 
   return keys;

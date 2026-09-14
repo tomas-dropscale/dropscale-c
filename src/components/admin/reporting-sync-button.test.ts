@@ -33,6 +33,45 @@ describe("requestReportingSync", () => {
     expect(refresh).toHaveBeenCalledOnce();
   });
 
+  it("treats a route-budget 502 with persisted store successes as a partial refresh", async () => {
+    const refresh = vi.fn();
+    const budget = {
+      error: "Reporting sync reached its route budget; remaining stores were not launched.",
+      campaigns: { refreshed: 0, failed: 1 },
+      stores: [{ refreshed: 3, partial: 0, failed: 0 }],
+    };
+    const fetcher = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(budget), {
+        status: 502,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    await expect(
+      requestReportingSync(
+        { scope: "all", range: { key: "d7", from: "2026-08-09", to: "2026-08-15" } },
+        refresh,
+        fetcher,
+      ),
+    ).resolves.toBeUndefined();
+    expect(refresh).toHaveBeenCalledOnce();
+
+    // The same 502 with nothing persisted is still the hard error it reads as.
+    fetcher.mockResolvedValueOnce(
+      new Response(JSON.stringify({ ...budget, stores: [] }), {
+        status: 502,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    await expect(
+      requestReportingSync(
+        { scope: "all", range: { key: "d7", from: "2026-08-09", to: "2026-08-15" } },
+        refresh,
+        fetcher,
+      ),
+    ).rejects.toThrow("route budget");
+  });
+
   it("does not refresh when no server response arrives", async () => {
     const refresh = vi.fn();
     const fetcher = vi.fn().mockRejectedValue(new Error("network down"));

@@ -31,6 +31,23 @@ const COLLECTION_RE = /\/collections\/([^/?#\s]+)/i;
 const TRAILING_RATE_RE = /(\d+(?:[.,]\d+)?)\s*%\s*$/;
 
 /**
+ * Percent-escapes decoded, or the string as it came when they are not valid
+ * escapes. A non-ASCII handle (Japanese, Hebrew, Greek stores) arrives
+ * percent-encoded in a ShopifyQL landing path and in a customer journey's
+ * landing page, and plain in a URL a person typed or Shopify's own handle
+ * field; the two must read the same. Decode BEFORE lower-casing: a capital
+ * letter hidden in an escape (%CE%A3 is a capital sigma) only lower-cases
+ * once it is a letter again.
+ */
+export function decodePercentEscapes(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+/**
  * Parse one campaign name into a rev-share deal, or null when it isn't one
  * (no /collections/ URL, or no trailing rate). Errs toward null — a campaign
  * that doesn't clearly encode a deal bills nothing.
@@ -47,14 +64,9 @@ export function parseRevShareCampaign(name: string | null | undefined): RevShare
   const rate = Number(rateMatch[1].replace(",", "."));
   if (!Number.isFinite(rate) || rate <= 0 || rate > 100) return null;
 
-  // Normalise the handle: strip a trailing slash and lower-case (Shopify
-  // handles are lower-case), and decode any %-escapes.
-  let handle = collection[1].replace(/\/+$/, "").toLowerCase();
-  try {
-    handle = decodeURIComponent(handle);
-  } catch {
-    // Leave the raw handle if it isn't valid percent-encoding.
-  }
+  // Normalise the handle: decode any %-escapes, then strip a trailing slash
+  // and lower-case (Shopify handles are lower-case).
+  const handle = decodePercentEscapes(collection[1]).replace(/\/+$/, "").toLowerCase();
   if (!handle) return null;
 
   return { handle, path: `/collections/${handle}`, rate };
@@ -75,12 +87,7 @@ export function collectionHandleFromUrl(url: string | null | undefined): string 
   const match = COLLECTION_RE.exec(url);
   if (!match) return null;
 
-  let handle = match[1].replace(/\/+$/, "").toLowerCase();
-  try {
-    handle = decodeURIComponent(handle);
-  } catch {
-    // Leave the raw handle if it isn't valid percent-encoding.
-  }
+  const handle = decodePercentEscapes(match[1]).replace(/\/+$/, "").toLowerCase();
   return handle || null;
 }
 
@@ -119,23 +126,47 @@ export type AttributableOrder = {
   lines: { productKey: string; revenue: number }[];
 };
 
-/** Path only, lower-cased, no query/hash, no trailing slash — for landing match. */
+/** The path of a landing page or URL, without its query or hash. */
+function landingPathOf(raw: string): string {
+  // Already a path (the common Shopify landing shape): drop query and hash.
+  if (raw.startsWith("/")) return raw.split(/[?#]/)[0];
+  try {
+    return new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`).pathname;
+  } catch {
+    return raw.split(/[?#]/)[0];
+  }
+}
+
+/**
+ * Path only, lower-cased, no query/hash, no trailing slash, for the revenue
+ * share's landing match. Percent-escapes are left exactly as they came, on
+ * purpose: Shopify percent-encodes a non-ASCII handle in an order's landing
+ * page while the deal's path holds it plain, so decoding here would make the
+ * whole-order landing rule fire, for the first time, on every store with
+ * such a handle. That changes what those clients are billed, and it is the
+ * owner's decision to make rather than a side effect of an analytics change.
+ * The admin sheet's collection basis, which bills nothing, matches the
+ * decoded page instead: normalizeDecodedPath.
+ */
 export function normalizePath(input: string | null | undefined): string | null {
   const raw = (input ?? "").trim().toLowerCase();
   if (!raw) return null;
+  const path = landingPathOf(raw).replace(/\/+$/, "");
+  return path || "/";
+}
 
-  let path: string;
-  if (raw.startsWith("/")) {
-    // Already a path (the common Shopify landing shape) — drop query/hash.
-    path = raw.split(/[?#]/)[0];
-  } else {
-    try {
-      path = new URL(raw.startsWith("http") ? raw : `https://${raw}`).pathname;
-    } catch {
-      path = raw.split(/[?#]/)[0];
-    }
-  }
-  path = path.replace(/\/+$/, "");
+/**
+ * normalizePath with the percent-escapes decoded, so
+ * "/collections/%E3%83%8F%E3%83%B3%E3%83%89" is the same page as the Japanese
+ * handle it encodes. The WHATWG parser re-encodes a non-ASCII pathname, so
+ * the decode comes after it, and before lower-casing, so a capital hidden in
+ * an escape lower-cases once it is a letter again. For the admin sheet only;
+ * see normalizePath for why the billing rule does not read this.
+ */
+export function normalizeDecodedPath(input: string | null | undefined): string | null {
+  const raw = (input ?? "").trim();
+  if (!raw) return null;
+  const path = decodePercentEscapes(landingPathOf(raw)).trim().toLowerCase().replace(/\/+$/, "");
   return path || "/";
 }
 

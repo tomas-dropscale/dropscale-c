@@ -31,10 +31,15 @@ type ReportingSyncResponse = {
   metricCoverage?: MetricCoverage;
 };
 
+// Each of these is the route saying "some of it worked": a 502 carrying one
+// of them with persisted successes is a partial refresh, not a hard error.
+// The route-budget one is the portfolio-wide Sync stopping at 120 s with the
+// launched stores already saved.
 const PARTIAL_REFRESH_ERRORS = new Set([
   "Store reporting could not be fully refreshed.",
   "Campaign reporting could not be fully refreshed.",
   "Some reporting families could not be fully refreshed.",
+  "Reporting sync reached its route budget; remaining stores were not launched.",
 ]);
 
 function hasPersistedSuccess(result: ReportingSyncResponse | null) {

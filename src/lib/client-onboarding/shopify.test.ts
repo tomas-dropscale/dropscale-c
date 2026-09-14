@@ -8,6 +8,7 @@ import {
   ShopifyReportingError,
   exchangeReportingClientCredentials,
   normalizeReportingShopDomain,
+  reportingShopifyGraphql,
   testReportingShopConnection,
   verifyReportingShop,
   type VerifiedReportingShop,
@@ -365,5 +366,321 @@ describe("read-only Shopify health check", () => {
       status: "failed",
       code: "invalid_shop_response",
     });
+  });
+});
+
+describe("reporting Shopify GraphQL throttle handling", () => {
+  function graphqlErrorsResponse(errors: unknown[]) {
+    return new Response(JSON.stringify({ errors }), {
+      status: 200,
+      headers: { "x-shopify-api-version": REPORTING_SHOPIFY_API_VERSION },
+    });
+  }
+
+  function throttledHttpResponse(retryAfter?: string) {
+    return new Response("", {
+      status: 429,
+      headers: retryAfter === undefined ? {} : { "retry-after": retryAfter },
+    });
+  }
+
+  function throttledEnvelope(message = "Throttled") {
+    return graphqlErrorsResponse([
+      {
+        message,
+        extensions: {
+          code: "THROTTLED",
+          documentation: "https://shopify.dev/api/usage/rate-limits",
+        },
+      },
+    ]);
+  }
+
+  const request = {
+    shopDomain: "northwind-demo.myshopify.com",
+    accessToken: "temporary-access-token-123",
+    query: "query DropscaleSheet($q: String!) { shopifyqlQuery(query: $q) { tableData { rows } } }",
+    variables: { q: "FROM sales SHOW total_sales SINCE -1d" },
+  };
+
+  function instantSleep() {
+    return vi.fn<(ms: number) => Promise<void>>().mockResolvedValue(undefined);
+  }
+
+  it("retries an HTTP 429 twice on the fixed ladder and then succeeds", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(throttledHttpResponse())
+      .mockResolvedValueOnce(throttledHttpResponse())
+      .mockResolvedValueOnce(graphqlResponse({ sheet: { rows: 3 } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const sleep = instantSleep();
+
+    await expect(
+      reportingShopifyGraphql<{ sheet: { rows: number } }>(request, { sleep }),
+    ).resolves.toEqual({ sheet: { rows: 3 } });
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(sleep.mock.calls).toEqual([[1000], [2500]]);
+    for (const [url, init] of fetchMock.mock.calls as Array<
+      [string, RequestInit]
+    >) {
+      expect(url).toBe(
+        `https://northwind-demo.myshopify.com/admin/api/${REPORTING_SHOPIFY_API_VERSION}/graphql.json`,
+      );
+      expect(JSON.parse(String(init.body))).toEqual({
+        query: request.query,
+        variables: request.variables,
+      });
+    }
+  });
+
+  it("honours a numeric Retry-After header, capped at five seconds", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(throttledHttpResponse("2.5"))
+      .mockResolvedValueOnce(throttledHttpResponse("30"))
+      .mockResolvedValueOnce(graphqlResponse({ ok: true }));
+    vi.stubGlobal("fetch", fetchMock);
+    const sleep = instantSleep();
+
+    await expect(
+      reportingShopifyGraphql<{ ok: boolean }>(request, { sleep }),
+    ).resolves.toEqual({ ok: true });
+    expect(sleep.mock.calls).toEqual([[2500], [5000]]);
+  });
+
+  it("falls back to the ladder when Retry-After is not a number", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        throttledHttpResponse("Wed, 21 Oct 2026 07:28:00 GMT"),
+      )
+      .mockResolvedValueOnce(graphqlResponse({ ok: true }));
+    vi.stubGlobal("fetch", fetchMock);
+    const sleep = instantSleep();
+
+    await expect(
+      reportingShopifyGraphql<{ ok: boolean }>(request, { sleep }),
+    ).resolves.toEqual({ ok: true });
+    expect(sleep.mock.calls).toEqual([[1000]]);
+  });
+
+  it("treats a THROTTLED envelope inside HTTP 200 as a throttle and retries", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(throttledEnvelope())
+      .mockResolvedValueOnce(graphqlResponse({ ok: true }));
+    vi.stubGlobal("fetch", fetchMock);
+    const sleep = instantSleep();
+
+    await expect(
+      reportingShopifyGraphql<{ ok: boolean }>(request, { sleep }),
+    ).resolves.toEqual({ ok: true });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(sleep.mock.calls).toEqual([[1000]]);
+  });
+
+  it.each([
+    ["MAX_COST_EXCEEDED code", { message: "Query cost is too high", extensions: { code: "MAX_COST_EXCEEDED" } }],
+    ["a throttled message without a code", { message: "Throttled" }],
+    ["a mixed-case throttle message", { message: "Request was throttled by Shopify", extensions: { code: "SOMETHING_ELSE" } }],
+  ])("recognises %s as a throttle", async (_label, error) => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(graphqlErrorsResponse([error]))
+      .mockResolvedValueOnce(graphqlResponse({ ok: true }));
+    vi.stubGlobal("fetch", fetchMock);
+    const sleep = instantSleep();
+
+    await expect(
+      reportingShopifyGraphql<{ ok: boolean }>(request, { sleep }),
+    ).resolves.toEqual({ ok: true });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledTimes(1);
+  });
+
+  it("gives up after two retries and surfaces the throttle as retryable", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(throttledHttpResponse())
+      .mockResolvedValueOnce(throttledEnvelope())
+      .mockResolvedValueOnce(throttledHttpResponse("1"));
+    vi.stubGlobal("fetch", fetchMock);
+    const sleep = instantSleep();
+
+    await expect(
+      reportingShopifyGraphql(request, { sleep }),
+    ).rejects.toMatchObject({
+      name: "ShopifyReportingError",
+      code: "shopify_rate_limited",
+      retryable: true,
+      message: "Shopify is rate limiting this store. Wait a moment and try again.",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(sleep.mock.calls).toEqual([[1000], [2500]]);
+  });
+
+  it("appends the first Shopify message to a non-throttle GraphQL error without retrying", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      graphqlErrorsResponse([
+        {
+          message: "  Access denied for orders field. Required access: `read_orders` access scope.  ",
+          extensions: { code: "ACCESS_DENIED" },
+        },
+        { message: "Second error that must not be used" },
+      ]),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const sleep = instantSleep();
+
+    await expect(
+      reportingShopifyGraphql(request, { sleep }),
+    ).rejects.toMatchObject({
+      code: "insufficient_scopes",
+      retryable: false,
+      message:
+        "Shopify did not allow this read-only reporting check. Shopify said: Access denied for orders field. Required access: `read_orders` access scope.",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("caps the appended Shopify message at 200 characters", async () => {
+    const longMessage = "x".repeat(450);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        graphqlErrorsResponse([{ message: longMessage }]),
+      ),
+    );
+
+    await expect(
+      reportingShopifyGraphql(request, { sleep: instantSleep() }),
+    ).rejects.toMatchObject({
+      code: "insufficient_scopes",
+      message: `Shopify did not allow this read-only reporting check. Shopify said: ${"x".repeat(200)}`,
+    });
+  });
+
+  it("keeps the plain message when the errors carry no usable text", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        graphqlErrorsResponse([{ extensions: { code: "INTERNAL" } }, { message: "   " }]),
+      ),
+    );
+
+    await expect(
+      reportingShopifyGraphql(request, { sleep: instantSleep() }),
+    ).rejects.toMatchObject({
+      code: "insufficient_scopes",
+      message: "Shopify did not allow this read-only reporting check.",
+    });
+  });
+
+  it("keeps today's behaviour for a missing data block with no errors", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { "x-shopify-api-version": REPORTING_SHOPIFY_API_VERSION },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const sleep = instantSleep();
+
+    await expect(
+      reportingShopifyGraphql(request, { sleep }),
+    ).rejects.toMatchObject({
+      code: "insufficient_scopes",
+      message: "Shopify did not allow this read-only reporting check.",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("does not retry a 401, which waiting cannot fix", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response("", { status: 401 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const sleep = instantSleep();
+
+    await expect(
+      reportingShopifyGraphql(request, { sleep }),
+    ).rejects.toMatchObject({ code: "invalid_credentials", retryable: false });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("does not retry a retryable outage either; only throttles wait", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response("", { status: 503 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const sleep = instantSleep();
+
+    await expect(
+      reportingShopifyGraphql(request, { sleep }),
+    ).rejects.toMatchObject({ code: "shopify_unavailable", retryable: true });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("waits on a real timer between attempts when no sleep is injected", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(throttledHttpResponse())
+        .mockResolvedValueOnce(graphqlResponse({ ok: true }));
+      vi.stubGlobal("fetch", fetchMock);
+
+      const pending = reportingShopifyGraphql<{ ok: boolean }>(request);
+      await vi.advanceTimersByTimeAsync(999);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(pending).resolves.toEqual({ ok: true });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports a throttled probe as rate limited in the health check", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const fetchMock = vi.fn().mockImplementation(
+        async (_url: string, init: RequestInit) => {
+          const { query } = JSON.parse(String(init.body)) as { query: string };
+          if (query.includes("shopifyqlQuery")) return throttledEnvelope();
+          if (query.includes("shopifyPaymentsAccount")) {
+            return graphqlResponse({ shopifyPaymentsAccount: null });
+          }
+          return graphqlResponse({ ok: true });
+        },
+      );
+      vi.stubGlobal("fetch", fetchMock);
+
+      const pending = testReportingShopConnection({
+        shop: verifiedShop(),
+        accessToken: "temporary-access-token-123",
+      });
+      await vi.advanceTimersByTimeAsync(1000 + 2500);
+      const result = await pending;
+
+      expect(result.ok).toBe(false);
+      expect(result.capabilities[1]).toEqual({
+        capability: "reports",
+        status: "failed",
+        code: "shopify_rate_limited",
+      });
+      const reportProbes = (fetchMock.mock.calls as Array<[string, RequestInit]>)
+        .filter(([, init]) => String(init.body).includes("shopifyqlQuery"));
+      expect(reportProbes).toHaveLength(3);
+      expect(fetchMock).toHaveBeenCalledTimes(8);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -19,6 +19,18 @@ const LISBON_DAY = new Intl.DateTimeFormat("en-GB", {
 });
 
 export const ADMIN_REPORTING_CURRENT_RANGE_TTL_MS = 90 * 60 * 1_000;
+/**
+ * How long a ready snapshot outranks a degraded reload. A partial family means
+ * a provider failed mid-way (a Shopify throttle, a timeout, an uninstalled
+ * app); the Google-only sheet it produces is worse than the complete one the
+ * row already holds, so for a day the row keeps the complete one and records
+ * the failure instead. Past a day the old sheet is stale enough that partial
+ * data is the better offer.
+ */
+export const ADMIN_REPORTING_KEEP_LAST_GOOD_MS = 24 * 60 * 60 * 1_000;
+/** The stored message column allows 1..1000 characters; longer text is fenced. */
+const SNAPSHOT_MESSAGE_LIMIT = 1_000;
+const ERROR_CODE = /^[a-z0-9_]{1,80}$/;
 
 type Supabase = SupabaseClient<Database>;
 
@@ -60,6 +72,12 @@ export type AdminReportingFamilyResult<T> = {
   state: "ready" | "partial" | "empty" | "unavailable";
   rows: T[];
   message?: string | null;
+  /**
+   * Set when a partial result is the product of a provider failure rather
+   * than of the data itself. The code is what the row records when a recent
+   * ready snapshot is kept in preference to this result.
+   */
+  degraded?: { code: string };
 };
 
 export type AdminReportingRefreshResult =
@@ -69,7 +87,15 @@ export type AdminReportingRefreshResult =
       refreshedAt: string;
     }
   | { state: "busy" }
-  | { state: "failed"; errorCode: "provider_failed" | "topology_changed" | "snapshot_failed" };
+  | {
+      state: "failed";
+      /**
+       * provider_failed, topology_changed or snapshot_failed from this module;
+       * otherwise the family's own degraded code (provider_partial) when a
+       * recent ready snapshot was kept instead of the degraded reload.
+       */
+      errorCode: string;
+    };
 
 function validDay(value: string): boolean {
   if (!ISO_DAY.test(value)) return false;
@@ -357,8 +383,45 @@ export async function readAdminReportingSnapshotFamilySelections(input: {
 }
 
 /**
+ * Whether the row still holds a ready snapshot recent enough to outrank a
+ * degraded reload. The claim above already blanked the row when the authority
+ * changed, so a ready state here belongs to the same topology. A read that
+ * fails is no evidence of a good snapshot: the caller then completes as it
+ * always did, because Google-only data still beats nothing.
+ */
+async function recentReadySnapshot(input: {
+  client: Supabase;
+  family: AdminReportingSnapshotFamily;
+  accountId: string;
+  from: string;
+  to: string;
+  authorityKey: string;
+  now: number;
+}): Promise<boolean> {
+  const { data, error } = await input.client
+    .from("admin_reporting_range_snapshots")
+    .select("state, last_success_at")
+    .eq("family", input.family)
+    .eq("scope_account_id", input.accountId)
+    .eq("from_day", input.from)
+    .eq("to_day", input.to)
+    .eq("authority_key", input.authorityKey)
+    .maybeSingle();
+  if (error || !data) return false;
+  const row = data as Pick<AdminReportingRangeSnapshot, "state" | "last_success_at">;
+  const succeededAt = row.last_success_at ? Date.parse(row.last_success_at) : Number.NaN;
+  return (
+    row.state === "ready" &&
+    Number.isFinite(succeededAt) &&
+    input.now - succeededAt <= ADMIN_REPORTING_KEEP_LAST_GOOD_MS
+  );
+}
+
+/**
  * Claims, loads and atomically replaces one exact provider family. A failed
  * provider attempt records its error code but leaves the prior success intact.
+ * So does a degraded partial reload while the row holds a ready snapshot from
+ * the last day: the failure is recorded, the good sheet stays.
  */
 export async function refreshAdminReportingSnapshot<T>(input: {
   client: Supabase;
@@ -397,7 +460,8 @@ export async function refreshAdminReportingSnapshot<T>(input: {
       !["ready", "partial", "empty", "unavailable"].includes(result.state) ||
       !Array.isArray(result.rows) ||
       (result.state === "ready" && result.rows.length === 0) ||
-      (["empty", "unavailable"].includes(result.state) && result.rows.length > 0)
+      (["empty", "unavailable"].includes(result.state) && result.rows.length > 0) ||
+      (result.degraded !== undefined && !ERROR_CODE.test(result.degraded.code))
     ) {
       throw new Error("The reporting provider returned an invalid snapshot family.");
     }
@@ -405,6 +469,39 @@ export async function refreshAdminReportingSnapshot<T>(input: {
     if (currentAuthority.key !== input.authority.key) {
       failure = { state: "failed", errorCode: "topology_changed" };
       throw new Error("Reporting authority changed during the refresh.");
+    }
+    const message = result.message?.trim().slice(0, SNAPSHOT_MESSAGE_LIMIT) || null;
+    if (
+      result.state === "partial" &&
+      result.degraded &&
+      (await recentReadySnapshot({
+        client: input.client,
+        family: input.family,
+        accountId: input.accountId,
+        from: input.from,
+        to: input.to,
+        authorityKey: input.authority.key,
+        now: Date.now(),
+      }))
+    ) {
+      // Completing here would replace a complete sheet with a dashed one
+      // until the next successful leg. Recording the failure instead keeps
+      // the ready payload and makes the row read "Last failure: ..." (0073).
+      console.warn(
+        `Reporting snapshot kept last good: ${input.family} ${input.accountId} ` +
+          `${input.from}..${input.to} (${result.degraded.code}): ${message ?? "no message"}`,
+      );
+      await input.client.rpc("fail_admin_reporting_snapshot_refresh", {
+        p_family: input.family,
+        p_scope_account_id: input.accountId,
+        p_from_day: input.from,
+        p_to_day: input.to,
+        p_authority_key: input.authority.key,
+        p_lease_token: leaseToken,
+        p_error_code: result.degraded.code,
+        p_error_message: message?.slice(0, 500) ?? null,
+      });
+      return { state: "failed", errorCode: result.degraded.code };
     }
     const payload = JSON.parse(JSON.stringify(result.rows)) as Json;
     const { data: completed, error: completionError } = await input.client.rpc(
@@ -418,7 +515,7 @@ export async function refreshAdminReportingSnapshot<T>(input: {
         p_lease_token: leaseToken,
         p_state: result.state,
         p_payload: payload,
-        p_message: result.message?.trim() || null,
+        p_message: message,
       },
     );
     if (completionError || completed !== true) {

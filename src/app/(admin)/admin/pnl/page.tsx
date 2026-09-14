@@ -5,10 +5,11 @@ import { PnlScopeControls } from "@/components/admin/pnl-scope-controls";
 import { MixedCurrencyNotice } from "@/components/portal/mixed-currency-notice";
 import { PnlSheetView } from "@/components/portal/pnl-sheet";
 import { PageContainer } from "@/components/ui/page-container";
-import { listAdminAnalyticsClients } from "@/lib/admin/analytics";
 import {
   clampPnlPeriod,
+  currentPnlPeriod,
   fetchAdminClientPnl,
+  listAdminPnlClients,
   PNL_YEARS_BACK,
 } from "@/lib/admin/client-pnl";
 import { pnlHref } from "@/lib/admin/pnl-href";
@@ -16,7 +17,6 @@ import { money } from "@/lib/format";
 import { intlLocale } from "@/lib/i18n";
 import { getServerDictionary } from "@/lib/i18n/server";
 import { displayCurrency } from "@/lib/portal/currency";
-import { presetSelection } from "@/lib/portal/range";
 
 export const dynamic = "force-dynamic";
 
@@ -50,15 +50,17 @@ export default async function AdminPnlPage({
   searchParams: Promise<PnlSearchParams>;
 }) {
   const params = await searchParams;
+  // The month opens on the Lisbon business day, the clock the rows are keyed to.
   const now = new Date();
+  const today = currentPnlPeriod(now);
   const { year, month } = clampPnlPeriod(
-    Number(singleParam(params.year) ?? now.getFullYear()),
-    Number(singleParam(params.month) ?? now.getMonth() + 1),
+    Number(singleParam(params.year) ?? today.year),
+    Number(singleParam(params.month) ?? today.month),
     now,
   );
   // Reauthenticates the admin before any cross-client read is constructed.
   const [clients, { d, locale }] = await Promise.all([
-    listAdminAnalyticsClients(presetSelection("d30", now)),
+    listAdminPnlClients(),
     getServerDictionary(),
   ]);
   const intl = intlLocale(locale);
@@ -75,7 +77,7 @@ export default async function AdminPnlPage({
       })
     : null;
 
-  const years = Array.from({ length: PNL_YEARS_BACK + 1 }, (_, index) => now.getFullYear() - index)
+  const years = Array.from({ length: PNL_YEARS_BACK + 1 }, (_, index) => today.year - index)
     .reverse();
   const hrefFor = (next: { year?: number; month?: number }) =>
     pnlHref({
@@ -103,7 +105,7 @@ export default async function AdminPnlPage({
       {!selectedClient ? (
         <p className="text-[12.5px] text-[var(--text-secondary)]">
           {requestedClientId
-            ? "That client is not approved or has no reporting evidence. Choose an available client."
+            ? "That client has no store to read a P&L for. Choose an available client."
             : "Choose a client to read their P&L."}
         </p>
       ) : !pnl ? (

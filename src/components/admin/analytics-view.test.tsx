@@ -16,7 +16,27 @@ vi.mock("@/components/portal/range-picker", () => ({
 }));
 
 vi.mock("./reporting-sync-button", () => ({
-  ReportingSyncButton: () => <span>Sync reporting</span>,
+  ReportingSyncButton: ({
+    request,
+  }: {
+    request: {
+      scope: string;
+      clientId?: string;
+      store?: { accountId: string; activityAccountIds: string[]; currency: string };
+      range: { from: string; to: string };
+    };
+  }) => (
+    <span
+      data-scope={request.scope}
+      data-client={request.clientId}
+      data-store={request.store?.accountId}
+      data-activity={request.store?.activityAccountIds.join(",")}
+      data-currency={request.store?.currency}
+      data-range={`${request.range.from}..${request.range.to}`}
+    >
+      Sync reporting
+    </span>
+  ),
 }));
 
 vi.mock("@/components/admin/performance-charts", () => ({
@@ -360,7 +380,10 @@ describe("AnalyticsView", () => {
     expect(html).not.toContain(">REV.</th>");
     expect(html).toContain(">Real ROAS</th>");
     expect(html).not.toContain("Provider + Shopify");
-    expect(html).not.toContain("Shopify attribution unavailable for one provider.");
+    // With rows on screen the family message used to be rendered nowhere; it
+    // now heads the campaign table as the snapshot notice.
+    expect(html).toContain("Shopify attribution unavailable for one provider.");
+    expect(html).toContain("Sync reporting");
     expect(html).toContain('text-center font-medium">Spend</th>');
     expect(html).toContain('text-center font-medium">Source</th>');
     expect(html).toContain("200");
@@ -501,6 +524,53 @@ describe("AnalyticsView", () => {
     expect(html).toContain("200");
   });
 
+  it("mounts the store Sync with the selected store's exact scope and range", () => {
+    const html = renderToStaticMarkup(
+      <AnalyticsView
+        clients={clients}
+        overview={overview()}
+        selectedStoreId="store-gbp"
+        range={{ key: "d7", from: "2026-08-01", to: "2026-08-07" }}
+        storeAnalytics={storeAnalytics()}
+      />,
+    );
+
+    expect(html).toContain(
+      '<span data-scope="store" data-client="client-1" data-store="store-gbp" data-activity="store-gbp,google-child" data-currency="GBP" data-range="2026-08-01..2026-08-07">Sync reporting</span>',
+    );
+    // Next to the selected store's header, before the KPI cards.
+    expect(html.indexOf("Sync reporting")).toBeLessThan(html.indexOf("key performance indicators"));
+  });
+
+  it("heads a populated campaign table with the kept snapshot's freshness", () => {
+    const analytics = storeAnalytics();
+    analytics.campaigns = {
+      ...analytics.campaigns,
+      message:
+        "Last failure: Google metrics are ready; Shopify attribution is unavailable. The last refresh failed (provider_partial); showing the last successful snapshot.",
+    };
+    analytics.campaignsFreshness = {
+      state: "partial",
+      refreshedAt: "2026-08-07T09:03:00.000Z",
+      lastAttemptAt: "2026-08-07T10:01:00.000Z",
+      lastErrorCode: "provider_partial",
+      stale: false,
+    };
+
+    const html = renderToStaticMarkup(
+      <AnalyticsView
+        clients={clients}
+        overview={overview()}
+        selectedStoreId="store-gbp"
+        range={{ key: "custom", from: "2026-08-01", to: "2026-08-07" }}
+        storeAnalytics={analytics}
+      />,
+    );
+
+    expect(html).toContain("Snapshot from 7 Aug 2026, 10:03 · last refresh 7 Aug 2026, 11:01 failed: Google metrics are ready");
+    expect(html).toContain("PMax · Best sellers");
+  });
+
   it("renders immediate scope controls and the approved all-stores table", () => {
     const running = overview();
     running.stores[0].reportingState = "running";
@@ -526,6 +596,8 @@ describe("AnalyticsView", () => {
     expect(html).toContain("Running");
     expect(html).toContain("complete selected-period grid");
     expect(html).toContain("Mixed currencies (EUR, GBP)");
+    // The per-store Sync belongs to a selected store, not to the client view.
+    expect(html).not.toContain("Sync reporting");
     // 609dda5 removed the KPI hint line. Withheld mixed-currency aggregates
     // must surface as em-dash values on all five KPI cards; the hint text
     // itself is covered by the scope-model test (lib/admin/analytics-view).

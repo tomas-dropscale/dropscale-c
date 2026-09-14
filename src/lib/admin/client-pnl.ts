@@ -7,6 +7,7 @@ import { fetchDailyMetrics, sumMetrics } from "@/lib/metrics/queries";
 import { currencyScope, type CurrencyScope } from "@/lib/portal/currency";
 import { workspaceAccounts, workspaceMetricScope } from "@/lib/portal/data";
 import { buildPnlSheet, monthDays, type PnlSheet } from "@/lib/portal/pnl";
+import { presetSelection } from "@/lib/portal/range";
 import { createClient } from "@/lib/supabase/server";
 
 /**
@@ -55,21 +56,100 @@ export type AdminClientPnl = {
   unallocatedSpend: number;
 };
 
+export type AdminPnlClient = {
+  id: string;
+  name: string;
+  email: string;
+  /**
+   * Every ad_accounts row the client owns, whatever its status or role -
+   * Google children and retired accounts included. A count of sources rather
+   * than of shops; what matters here is that it is not zero.
+   */
+  storeCount: number;
+  /** Not approved yet. Their portal opens all the same, so their P&L reads too. */
+  pending: boolean;
+};
+
 /** How many years back the picker offers. Beyond this there is no data anyway. */
 export const PNL_YEARS_BACK = 2;
 
 const clamp = (value: number, min: number, max: number) =>
   Number.isFinite(value) ? Math.min(Math.max(Math.trunc(value), min), max) : min;
 
+/**
+ * The year and month of the reporting day: the business day in Lisbon, which
+ * is the clock every daily row is keyed to. Not the runtime's clock - the
+ * Worker runs on UTC, an hour behind Lisbon in summer, so for the first hour
+ * of a month it would still open last month's sheet while the day's rows were
+ * already landing in the new one.
+ */
+export function currentPnlPeriod(now = new Date()): { year: number; month: number } {
+  const today = presetSelection("today", now).to;
+  return { year: Number(today.slice(0, 4)), month: Number(today.slice(5, 7)) };
+}
+
 export function clampPnlPeriod(
   year: number,
   month: number,
   now = new Date(),
 ): { year: number; month: number } {
+  const current = currentPnlPeriod(now).year;
   return {
-    year: clamp(year, now.getFullYear() - PNL_YEARS_BACK, now.getFullYear()),
+    year: clamp(year, current - PNL_YEARS_BACK, current),
     month: clamp(month, 1, 12),
   };
+}
+
+/**
+ * Every client whose P&L there is to read: any workspace that is not archived
+ * and owns at least one ad_accounts row, of any status and any reporting role.
+ *
+ * Deliberately wider than the Analytics catalogue, which wants an approved
+ * client with reporting evidence and skips workspaces owned by an admin
+ * profile. The portal itself admits any non-rejected workspace (0064), and a
+ * store an admin owns has a P&L like any other. So a pending client is listed
+ * and flagged; a workspace with no store is not, since its sheet could only be
+ * empty.
+ *
+ * Read through the admin's own session, like the sheet: RLS shows an admin
+ * every client and every account.
+ */
+export async function listAdminPnlClients(): Promise<AdminPnlClient[]> {
+  await requireClientOnboardingAdmin();
+
+  const supabase = await createClient();
+  const [clientsResult, accountsResult] = await Promise.all([
+    supabase
+      .from("portal_clients")
+      .select("id, full_name, email, approval_status")
+      .neq("approval_status", "rejected"),
+    supabase.from("ad_accounts").select("client_id"),
+  ]);
+  if (clientsResult.error || accountsResult.error) {
+    throw new Error("The client list is unavailable.");
+  }
+
+  const storeCounts = new Map<string, number>();
+  for (const account of accountsResult.data ?? []) {
+    storeCounts.set(account.client_id, (storeCounts.get(account.client_id) ?? 0) + 1);
+  }
+
+  // Locale-aware so an accented name sorts among its letter, not after Z.
+  const byName = new Intl.Collator("en");
+  return (clientsResult.data ?? [])
+    .filter((client) => storeCounts.has(client.id))
+    .map((client) => ({
+      id: client.id,
+      name: client.full_name,
+      email: client.email,
+      storeCount: storeCounts.get(client.id) ?? 0,
+      pending: client.approval_status !== "approved",
+    }))
+    .sort(
+      (left, right) =>
+        byName.compare(left.name, right.name) ||
+        (left.id < right.id ? -1 : left.id > right.id ? 1 : 0),
+    );
 }
 
 export async function fetchAdminClientPnl(input: {

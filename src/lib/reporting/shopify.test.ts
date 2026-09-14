@@ -248,6 +248,28 @@ describe("V2 Shopify reporting adapter", () => {
     expect(publicResult).not.toContain(ACCESS_TOKEN);
   });
 
+  it("tells a collection the store lacks from a read that failed, and keeps the ledger's read best-effort", async () => {
+    const adapter = await createShopifyReportingAdapter(source());
+
+    // The store's own answer for a renamed collection.
+    mocks.reportingShopifyGraphql.mockResolvedValueOnce({ collectionByHandle: null });
+    await expect(adapter.readCollectionProductKeys("renamed")).resolves.toBeNull();
+    mocks.reportingShopifyGraphql.mockResolvedValueOnce({ collectionByHandle: null });
+    await expect(adapter.fetchCollectionProductKeys("renamed")).resolves.toEqual(new Set());
+
+    // A read that failed: the sheet's reader rejects, the ledger's degrades.
+    const throttled = new Error("Throttled");
+    mocks.reportingShopifyGraphql.mockRejectedValueOnce(throttled);
+    await expect(adapter.readCollectionProductKeys("summer")).rejects.toBe(throttled);
+    mocks.reportingShopifyGraphql.mockRejectedValueOnce(throttled);
+    await expect(adapter.fetchCollectionProductKeys("summer")).resolves.toEqual(new Set());
+
+    // With every page answering, both read the same membership.
+    await expect(adapter.readCollectionProductKeys("summer")).resolves.toEqual(
+      new Set(["Summer Dress", "SUMMER-1"]),
+    );
+  });
+
   it("uses the shop IANA reporting day and DST-aware exclusive order bounds", async () => {
     mocks.reportingShopifyGraphql.mockImplementation(
       async ({ query }: { query: string; variables?: Record<string, unknown> }) => {

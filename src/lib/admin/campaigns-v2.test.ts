@@ -93,7 +93,7 @@ vi.mock("@/lib/admin/reporting-snapshots", () => ({
   readAdminReportingSnapshots: mocks.readAdminReportingSnapshots,
   refreshAdminReportingSnapshot: mocks.refreshAdminReportingSnapshot,
 }));
-import { fetchAdminCampaigns } from "./campaigns";
+import { fetchAdminCampaigns, listAdminReportingStoreScopes } from "./campaigns";
 
 function account(id: string, clientId: string, overrides: Partial<AdAccount> = {}): AdAccount {
   return {
@@ -594,6 +594,40 @@ describe("admin V2 campaign inventory", () => {
     );
     expect(mocks.resolveReportingSources).not.toHaveBeenCalled();
     expect(mocks.fetchGoogleReportingCampaigns).not.toHaveBeenCalled();
+  });
+
+  it("lists only store scopes the hourly refresh can actually run", async () => {
+    const live = account("live", "client-1", {
+      status: "active",
+      shopify_url: "live.myshopify.com",
+      shopify_connected: true,
+      currency: "GBP",
+    });
+    // A pending legacy store has nothing refreshable behind it. Returned with
+    // no activity accounts it failed the hourly refresh every hour.
+    const pending = account("pending", "client-1", {
+      shopify_url: "pending.myshopify.com",
+      shopify_connected: true,
+    });
+    const service = {
+      from: vi.fn((table: string) => {
+        if (table === "ad_accounts") return query([live, pending]);
+        return query([]);
+      }),
+    };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const scopes = await listAdminReportingStoreScopes(service as never);
+
+    expect(scopes).toEqual([
+      {
+        clientId: "client-1",
+        store: { accountId: "live", activityAccountIds: ["live"], currency: "GBP" },
+      },
+    ]);
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("pending"));
+    warn.mockRestore();
   });
 
   it("keeps materialized pre-cutover metrics visible for a pending account", async () => {

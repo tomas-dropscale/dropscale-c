@@ -183,8 +183,11 @@ describe("a campaign's profit and loss by day", () => {
         }}
       />,
     );
-    expect(html).toContain("/collections/kenyelmes-ruhak or a page under it");
-    expect(html).toContain("shared by 4 campaigns");
+    expect(html).toContain("every order that landed on /collections/kenyelmes-ruhak or a page under it");
+    // Said plainly: the page's orders come from any channel, and the page is
+    // shared between the campaigns that land on it.
+    expect(html).toContain("from any channel, not only this campaign");
+    expect(html).toContain("split between the 4 campaigns that land there");
     expect(html).toContain("COGS");
     expect(html).toContain("EUR 90.00");
     expect(html).toContain("the product costs of those lines");
@@ -213,6 +216,34 @@ describe("a campaign's profit and loss by day", () => {
     );
     expect(noCosts).toContain("product costs could not be read");
     expect(noCosts).not.toContain("the product costs of those lines");
+    expect(noCosts).not.toContain("split between");
+
+    // A collection that sold nothing in the period is still the basis, with
+    // real zeros, so the caption keeps naming the page rather than the UTMs.
+    const quiet = renderToStaticMarkup(
+      <CampaignProfitLossSheet
+        title="BOHO - HU - 30/07"
+        currency="EUR"
+        today="2026-09-11"
+        campaign={{
+          attributionState: "unmatched",
+          collectionHandle: "kenyelmes-ruhak",
+          collectionSharedWith: 1,
+          timeline: [
+            point({
+              bucket: "2026-09-11T09:00:00",
+              spend: 4.2,
+              googleRevenue: 0,
+              shopifyRevenue: null, shopifyOrders: null, addedToCart: null, units: null,
+              collectionRevenue: 0, collectionUnits: 0, collectionOrders: 0, collectionAddedToCart: 0, cogs: 0,
+            }),
+          ],
+        }}
+      />,
+    );
+    expect(quiet).toContain("every order that landed on /collections/kenyelmes-ruhak");
+    expect(quiet).not.toContain("utm_campaign");
+    expect(quiet).toContain("in progress");
   });
 
   it("does not trust a revenue of 0 from a point written before the sheet existed", () => {

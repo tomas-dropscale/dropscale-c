@@ -6,10 +6,18 @@ name: Hourly reporting sync
 # unreliable in practice — whole nights pass with no refresh, so ad spend and
 # COGS drift hours stale. This fires the SAME endpoints on a schedule that does.
 #
-# It is safe alongside the Worker cron: every endpoint is idempotent and
-# self-throttled by a 15-minute freshness gate, so if the Worker cron DID run at
-# :00 this :07 run finds the data fresh and does nothing; if it did NOT, this
-# fills the gap. Net effect: at most one real refresh an hour, guaranteed.
+# It is safe alongside the Worker cron: every endpoint is idempotent, and the
+# reporting route skips, for machine calls only, every store whose three
+# snapshot families (funnel, campaign performance, collection sales) for that
+# range succeeded within the last 20 minutes with no failure recorded since.
+# So if the Worker cron DID run at :00, this :07 run finds those stores fresh
+# and reads nothing from Shopify or Google for them; a store that failed or
+# was cut by the route budget at :00 is retried here. The portfolio Google
+# leg, the metrics rollup and the ledger have no such gate and run each time.
+# The legs run d7 -> d30 -> today, the same order as the Worker cron, and
+# the order matters: every leg upserts today's daily_metrics row, and the
+# today leg reads it from a different Windsor feed than the rolling legs, so
+# the last leg decides the ad spend clients see today. Do not reorder them.
 #
 # This is NOT the deploy path — deployment stays on Cloudflare Workers Builds.
 #

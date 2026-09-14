@@ -1,6 +1,7 @@
 import "server-only";
 
 import { requireClientOnboardingAdmin } from "@/lib/client-onboarding/sessions";
+import { ShopifyReportingError } from "@/lib/client-onboarding/shopify";
 import { decryptToken } from "@/lib/google-ads/crypto";
 import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
 import {
@@ -42,11 +43,11 @@ import {
   type ShopifyLandingSessionsRow,
   type ShopifyReportingAdapter,
 } from "@/lib/reporting/shopify";
-import { collectionHandleFromUrl, normalizePath } from "@/lib/finance/rev-share";
+import { collectionHandleFromUrl, decodePercentEscapes, normalizeDecodedPath } from "@/lib/finance/rev-share";
 import { loadCostContext } from "@/lib/cogs/context";
 import { orderCogs, type CostContext } from "@/lib/cogs/engine";
 import { fxDailyRates, rateOn } from "@/lib/shopify/fx";
-import type { SyncedOrder } from "@/lib/shopify/client";
+import { ShopifyError, type SyncedOrder } from "@/lib/shopify/client";
 import {
   resolveReportingSources,
   type CanonicalReportingSource,
@@ -192,7 +193,11 @@ export type AdminAnalyticsCampaign = {
   shopifyRevenue: number | null;
   /** Net units after returns across the campaign's products; null when unavailable. */
   shopifyUnits?: number | null;
-  /** The collection page the campaign sends people to, when its final URLs name exactly one. */
+  /**
+   * The collection page the campaign sends people to: the one its final URLs
+   * name (or its name does, when the URLs name none), provided the store has
+   * that collection. Set whether or not the collection sold in the period.
+   */
   collectionHandle?: string | null;
   /** How many campaigns land on that same collection, this one included. */
   collectionSharedWith?: number | null;
@@ -272,6 +277,12 @@ export type AdminStoreAnalytics = {
     truncated: boolean;
   }>;
   providerFreshness?: AdminProviderFreshness;
+  /**
+   * The campaigns family's own row: when its shown snapshot was taken and
+   * what the last refresh recorded. The aggregate above mixes three families,
+   * so a funnel failure would otherwise read as a campaign one.
+   */
+  campaignsFreshness?: AdminProviderFreshness;
   shopifyProvenance?: "legacy" | "v2_cutover" | "supplemental_v2_shopify";
 };
 
@@ -633,6 +644,63 @@ async function v2Authority(
   });
 }
 
+/** The stored snapshot message allows at most this many characters (0062). */
+const FAMILY_MESSAGE_LIMIT = 1_000;
+/** How much of a provider's own error text travels into a family message. */
+const PROVIDER_CAUSE_LIMIT = 200;
+/** How many Shopify reads one store has in flight at once. */
+const SHOPIFY_READ_CONCURRENCY = 2;
+
+/**
+ * The fixed sentence plus what Shopify itself said, when the failure is one
+ * of its own errors. Four stores with the reporting app uninstalled read
+ * exactly like a passing throttle without it: the same sentence on the row,
+ * nothing in the logs.
+ */
+function withProviderCause(sentence: string, error: unknown): string {
+  if (
+    !(error instanceof ShopifyReportingError) &&
+    !(error instanceof ShopifyReportingAdapterError) &&
+    !(error instanceof ShopifyError)
+  ) {
+    return sentence;
+  }
+  const cause = error.message.trim().slice(0, PROVIDER_CAUSE_LIMIT);
+  if (!cause) return sentence;
+  return `${sentence.replace(/\.$/, "")} (${cause}).`;
+}
+
+/**
+ * At most `limit` of the wrapped tasks run at once; the rest wait their turn
+ * in call order, and every outcome still reaches its caller. Shopify's cost
+ * throttle is per shop, so six reads fired together for one store spend each
+ * other's budget and the last ones fail as throttled; two at a time keeps
+ * every read inside it.
+ */
+export function concurrencyLimiter(
+  limit: number,
+): <T>(task: () => Promise<T>) => Promise<T> {
+  if (!Number.isInteger(limit) || limit < 1) {
+    throw new Error("The concurrency limit must be a positive integer.");
+  }
+  let active = 0;
+  const waiting: Array<() => void> = [];
+  return async <T>(task: () => Promise<T>): Promise<T> => {
+    if (active < limit) active += 1;
+    else await new Promise<void>((resolve) => waiting.push(resolve));
+    try {
+      return await task();
+    } finally {
+      // The slot is handed to the next waiter directly. Releasing it first
+      // would let a newcomer take it before the waiter wakes and exceed the
+      // limit by one.
+      const next = waiting.shift();
+      if (next) next();
+      else active -= 1;
+    }
+  };
+}
+
 function shopifyFailure<T>(error: unknown, operation: string): AdminAnalyticsFamily<T> {
   if (
     error instanceof ShopifyReportingAdapterError &&
@@ -810,11 +878,17 @@ async function openShopify(topology: StoreTopology): Promise<Attempt<ShopifyRepo
         credentialCiphertext: account.shopify_admin_token,
       }),
     };
-  } catch {
+  } catch (error) {
+    // Without this line the failure was unobservable: the fixed sentence
+    // below was all the row and the logs ever held.
+    console.error("Shopify reporting connection could not be opened:", error);
     return {
       ok: false,
       state: "failed",
-      message: "The selected Shopify reporting connection could not be verified.",
+      message: withProviderCause(
+        "The selected Shopify reporting connection could not be verified.",
+        error,
+      ),
     };
   }
 }
@@ -1437,6 +1511,22 @@ function campaignBreakdown(
   return { state: "empty", rows: [], sources, reason: null };
 }
 
+/**
+ * The reads behind the sheet's collection basis. A failed one leaves the
+ * basis incomplete: null figures, or a campaign without its handle, which the
+ * sheet captions as landing on no collection the store has. The family must
+ * then be partial, because the snapshot refresh keeps the last good sheet on
+ * a partial and records the failure, where a ready family would replace that
+ * sheet and leave nothing on the row to say why.
+ */
+type CollectionBasisSources = {
+  collectionSales: Attempt<unknown>;
+  landing: Attempt<unknown>;
+  orders: Attempt<unknown>;
+  /** Handles whose product lookup failed, as opposed to collections the store lacks. */
+  failedLookups: readonly string[];
+};
+
 function campaignFamily(
   google: Attempt<GoogleCampaignLoad>,
   breakdowns: GoogleBreakdownAttempts,
@@ -1444,6 +1534,7 @@ function campaignFamily(
   shopifyProducts: Attempt<ShopifyCampaignProductSeriesRow[]>,
   storeToday: string | null = null,
   collectionAttribution: CampaignCollectionAttribution | null = null,
+  basis: CollectionBasisSources | null = null,
 ): AdminStoreAnalytics["campaigns"] {
   if (!google.ok) {
     return google.state === "unavailable"
@@ -1576,10 +1667,14 @@ function campaignFamily(
                 const carries = firstBucketOfDay.get(day) === bucket;
                 const dayFigures = landed.byDay.get(day) ?? null;
                 const figures = carries ? dayFigures : null;
+                // A day the collection has no figures for is a real zero
+                // only when the source it would have read was readable.
                 const nothing = (known: boolean) => (known ? 0 : null);
-                const salesKnown = dayFigures ? dayFigures.revenue !== null : true;
-                const landingKnown = dayFigures ? dayFigures.addedToCart !== null : true;
-                const cogsKnown = dayFigures ? dayFigures.cogs !== null : landed.costsKnown;
+                const salesKnown = dayFigures ? dayFigures.revenue !== null : landed.salesKnown;
+                const landingKnown = dayFigures ? dayFigures.addedToCart !== null : landed.landingKnown;
+                const cogsKnown = dayFigures
+                  ? dayFigures.cogs !== null
+                  : landed.costsKnown && landed.salesKnown;
                 return {
                   collectionRevenue: figures ? figures.revenue : nothing(salesKnown),
                   collectionUnits: figures ? figures.units : nothing(salesKnown),
@@ -1610,14 +1705,38 @@ function campaignFamily(
       ),
     };
   });
+  // The basis is only in use where a campaign lands on a collection. A store
+  // whose campaigns name none has no collection column to lose, so a failed
+  // orders read there is the collections family's failure, not this one's,
+  // and this sheet stays fresh. A missing scope is not a failure: the
+  // columns it withholds stay withheld on every refresh, so there is no
+  // better sheet to keep.
+  const failedBasisReads: string[] = [];
+  let failedLookupsMessage: string | null = null;
+  if (basis && google.value.rows.some((campaign) => campaignCollectionHandle(campaign) !== null)) {
+    for (const attempt of [basis.collectionSales, basis.landing, basis.orders]) {
+      if (!attempt.ok && attempt.state === "failed") failedBasisReads.push(attempt.message);
+    }
+    if (basis.failedLookups.length > 0) {
+      const count = basis.failedLookups.length === 1
+        ? "one collection"
+        : `${basis.failedLookups.length} collections`;
+      failedLookupsMessage =
+        `The products of ${count} could not be read from Shopify (${basis.failedLookups.join(", ")}), ` +
+        "so the campaigns landing there have no collection basis in this refresh.";
+    }
+  }
   const messages = [
     google.message ?? null,
     attribution.ok
       ? null
-      : "Google metrics are ready; Shopify last-non-direct-click UTM attribution matched to Google campaign IDs is unavailable.",
+      : "Google metrics are ready; Shopify last-non-direct-click UTM attribution matched to Google campaign IDs is unavailable. " +
+        attribution.message,
     [...campaignIdCounts.values()].some((count) => count > 1)
       ? "Shopify attribution was withheld for campaign IDs repeated across Google accounts."
       : null,
+    ...failedBasisReads,
+    failedLookupsMessage,
     rows.some((row) =>
       row.breakdown.sources.some((source) => source.state === "failed"))
       ? "Some campaign breakdown sources failed for the selected period."
@@ -1625,19 +1744,24 @@ function campaignFamily(
   ].filter((message): message is string => Boolean(message));
   const partial = Boolean(google.message) ||
     !attribution.ok ||
+    failedBasisReads.length > 0 ||
+    failedLookupsMessage !== null ||
     rows.some((row) =>
       row.breakdown.sources.some((source) => source.state === "failed"));
+  // The provider causes appended above can push the join past what the
+  // snapshot row stores; a message over the limit fences the whole family.
+  const message = messages.join(" ").slice(0, FAMILY_MESSAGE_LIMIT);
   if (partial) {
     return {
       state: "partial",
       data: { rows, granularity: google.value.granularity, storeToday },
-      message: messages.join(" ") || "Some campaign detail sources are partial.",
+      message: message || "Some campaign detail sources are partial.",
     };
   }
   return {
     state: rows.length === 0 ? "empty" : "ready",
     data: { rows, granularity: google.value.granularity, storeToday },
-    message: messages.length > 0 ? messages.join(" ") : null,
+    message: messages.length > 0 ? message : null,
   };
 }
 
@@ -1656,6 +1780,18 @@ async function shopifyFamilies(
   landing: Attempt<ShopifyLandingSessionsRow[]>;
   /** The range's orders with the page each one landed on, in the store's base currency. */
   orders: Attempt<{ currency: string; orders: SyncedOrder[] }>;
+  /**
+   * The product keys of one collection the sales left out, by handle, or
+   * null when the store has no such collection or the read failed. Read on
+   * demand, only for the collections campaigns land on.
+   */
+  collectionProductKeys: (handle: string) => Promise<ReadonlySet<string> | null>;
+  /**
+   * The handles whose product lookup failed, filled in as the lookups run.
+   * A failed lookup is not a collection the store lacks: the campaigns family
+   * reads this list once the attribution has run and goes partial on it.
+   */
+  failedCollectionLookups: readonly string[];
   /** The store's verified IANA zone, or null when the store could not be opened. */
   timeZone: string | null;
 }> {
@@ -1672,11 +1808,13 @@ async function shopifyFamilies(
       collectionSales: adapterAttempt,
       landing: adapterAttempt,
       orders: adapterAttempt,
+      collectionProductKeys: async () => null,
+      failedCollectionLookups: [],
       timeZone: null,
     };
   }
-  const invoke = <T>(operation: () => Promise<T>) =>
-    Promise.resolve().then(operation);
+  // Two reads at a time per shop; every outcome is still collected below.
+  const invoke = concurrencyLimiter(SHOPIFY_READ_CONCURRENCY);
   const [funnelResult, attributionResult, productResult, collectionsResult, landingResult, ordersResult] =
     await Promise.allSettled([
       invoke(() => adapterAttempt.value.fetchFunnelSeries(range.from, range.to)),
@@ -1703,13 +1841,24 @@ async function shopifyFamilies(
     result: PromiseSettledResult<T>,
     failedMessage: string,
     unavailableMessage: string,
-  ): Attempt<T> =>
-    result.status === "fulfilled"
-      ? { ok: true, value: result.value }
-      : result.reason instanceof ShopifyReportingAdapterError &&
-          result.reason.code === "missing_scope"
-        ? { ok: false, state: "unavailable", message: unavailableMessage }
-        : { ok: false, state: "failed", message: failedMessage };
+  ): Attempt<T> => {
+    if (result.status === "fulfilled") return { ok: true, value: result.value };
+    if (
+      result.reason instanceof ShopifyReportingAdapterError &&
+      result.reason.code === "missing_scope"
+    ) {
+      return { ok: false, state: "unavailable", message: unavailableMessage };
+    }
+    // The cause travels in the message so the snapshot row keeps it (0073);
+    // the fixed sentence alone made a throttle and an uninstalled app
+    // indistinguishable.
+    console.error(`Shopify read failed (${failedMessage})`, result.reason);
+    return {
+      ok: false,
+      state: "failed",
+      message: withProviderCause(failedMessage, result.reason),
+    };
+  };
   const collectionSales = settledAttempt(
     collectionsResult,
     "Shopify collection sales could not be loaded.",
@@ -1749,37 +1898,17 @@ async function shopifyFamilies(
     );
   }
 
-  const attribution: Attempt<ShopifyCampaignAttributionSeriesRow[]> =
-    attributionResult.status === "fulfilled"
-      ? { ok: true, value: attributionResult.value }
-      : attributionResult.reason instanceof ShopifyReportingAdapterError &&
-          attributionResult.reason.code === "missing_scope"
-        ? {
-            ok: false,
-            state: "unavailable",
-            message: "Shopify has not granted campaign report access.",
-          }
-        : {
-            ok: false,
-            state: "failed",
-            message: "Shopify campaign attribution could not be loaded.",
-          };
+  const attribution = settledAttempt(
+    attributionResult,
+    "Shopify campaign attribution could not be loaded.",
+    "Shopify has not granted campaign report access.",
+  );
 
-  const products: Attempt<ShopifyCampaignProductSeriesRow[]> =
-    productResult.status === "fulfilled"
-      ? { ok: true, value: productResult.value }
-      : productResult.reason instanceof ShopifyReportingAdapterError &&
-          productResult.reason.code === "missing_scope"
-        ? {
-            ok: false,
-            state: "unavailable",
-            message: "Shopify has not granted campaign product report access.",
-          }
-        : {
-            ok: false,
-            state: "failed",
-            message: "Shopify campaign products could not be loaded.",
-          };
+  const products = settledAttempt(
+    productResult,
+    "Shopify campaign products could not be loaded.",
+    "Shopify has not granted campaign product report access.",
+  );
 
   let collections: AdminStoreAnalytics["collections"];
   if (collectionsResult.status === "rejected") {
@@ -1822,6 +1951,7 @@ async function shopifyFamilies(
         "Shopify net sales and net units use the selected reporting days and current official collection membership. A product can belong to more than one collection, so collection rows are not additive. Spend and ROAS require a verified Google offer-to-Shopify product mapping that is not configured.",
     };
   }
+  const failedCollectionLookups: string[] = [];
   return {
     funnel,
     attribution,
@@ -1830,6 +1960,27 @@ async function shopifyFamilies(
     collectionSales,
     landing,
     orders,
+    collectionProductKeys: async (handle) => {
+      try {
+        // Null is the store's own answer: it has no collection by that
+        // handle, so the campaign landing there has no basis. A set, even an
+        // empty one, is a collection the store has.
+        return await adapterAttempt.value.readCollectionProductKeys(handle);
+      } catch (error) {
+        // A read that failed (a throttle, a timeout) says nothing about the
+        // collection. The campaign keeps its skip for this refresh, and the
+        // handle goes on the list that marks the campaigns family partial,
+        // so the last good sheet is kept rather than replaced by one that
+        // claims the store has no such collection.
+        console.error(
+          `Admin store analytics could not read the products of collection "${handle}":`,
+          error,
+        );
+        failedCollectionLookups.push(handle);
+        return null;
+      }
+    },
+    failedCollectionLookups,
     timeZone: adapterAttempt.value.timeZone,
   };
 }
@@ -1855,23 +2006,78 @@ export type CampaignCollectionAttribution = Map<
     sharedWith: number;
     /** Whether the store's product costs were readable at all. */
     costsKnown: boolean;
+    /** Whether the range's orders were readable: a day without figures is a real zero only then. */
+    salesKnown: boolean;
+    /** Whether the landing sessions were readable, for the same reason. */
+    landingKnown: boolean;
     /** Keyed by reporting DAY, never by hour. */
     byDay: Map<string, CampaignCollectionDay>;
   }
 >;
 
+/**
+ * A ShopifyQL landing path, decoded and lower-cased, without query, hash or
+ * trailing slash. Decoded because the report percent-encodes a non-ASCII
+ * page, and the handle it is compared with is plain.
+ */
 function normalizedLandingPath(path: string): string {
   const bare = path.split(/[?#]/)[0] ?? "";
-  return bare.toLowerCase().replace(/\/+$/, "");
+  return decodePercentEscapes(bare).trim().toLowerCase().replace(/\/+$/, "");
+}
+
+/**
+ * The one collection a campaign lands on, or null.
+ *
+ * The final URLs decide: exactly one collection among them names the page.
+ * Only when the URLs name none does the campaign name stand in - a revenue
+ * share names its deal there ("... /collections/b 5%"), and a name that
+ * differs from the URLs must not cancel them, as it did when both were read
+ * together. Two or more collections in the URLs land nowhere in particular.
+ */
+export function campaignCollectionHandle(
+  campaign: Pick<LiveCampaign, "name" | "finalUrls">,
+): string | null {
+  const fromUrls = new Set(
+    (campaign.finalUrls ?? [])
+      .map(collectionHandleFromUrl)
+      .filter((handle): handle is string => Boolean(handle)),
+  );
+  if (fromUrls.size > 1) return null;
+  if (fromUrls.size === 1) return fromUrls.values().next().value ?? null;
+  return collectionHandleFromUrl(campaign.name);
+}
+
+/** Runs one lookup per item with at most `limit` in flight at once, keeping the order. */
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  run: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = [];
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      results[index] = await run(items[index] as T);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
 }
 
 /**
  * Which collection each campaign lands on, and what that collection earned
  * each day, shared out between the campaigns that land there.
  *
- * The campaign's final URLs name the collection page (one handle, or the
- * campaign is left out). What the collection earned is read from the orders
- * themselves, by the rule the revenue share already applies:
+ * The campaign's final URLs name the collection page (one handle, else its
+ * name, else the campaign is left out - see campaignCollectionHandle). The
+ * collection must exist: the sales report only lists collections whose
+ * products sold in the window, so a page it left out is looked up in the
+ * store, and a collection the store has keeps its sheet with real zeros
+ * where nothing sold, whatever the window. What the collection earned is
+ * read from the orders themselves, by the rule the revenue share already
+ * applies:
  *  - an order that LANDED on the collection page counts whole - every line,
  *    the whole total;
  *  - any other order counts only the lines whose product is in the collection.
@@ -1898,6 +2104,12 @@ function normalizedLandingPath(path: string): string {
 export async function attributeCampaignCollections(input: {
   google: Attempt<GoogleCampaignLoad>;
   collectionSales: Attempt<ShopifyCollectionSalesSeriesRow[]>;
+  /**
+   * The product keys of a collection the sales report left out, or null when
+   * the store has no such collection (or the read failed). A set, even an
+   * empty one, means the collection exists and its zeros are real.
+   */
+  collectionProductKeys: (handle: string) => Promise<ReadonlySet<string> | null>;
   landing: Attempt<ShopifyLandingSessionsRow[]>;
   orders: Attempt<{ currency: string; orders: SyncedOrder[] }>;
   costs: CostContext | null;
@@ -1910,19 +2122,44 @@ export async function attributeCampaignCollections(input: {
     input.collectionSales.value.flatMap((row) => (row.handle ? [[row.handle, row] as const] : [])),
   );
 
-  // Which campaigns land where.
+  // Which collection each campaign names.
+  const namedByCampaign = new Map<string, string>();
+  for (const campaign of input.google.value.rows) {
+    const handle = campaignCollectionHandle(campaign);
+    if (!handle) continue;
+    namedByCampaign.set(`${campaign.ad_account_id}:${campaign.providerCampaignId}`, handle);
+  }
+
+  // The products of each named collection. The sales report knows the ones
+  // that sold; the rest are asked of the store, once per handle and two at a
+  // time, and a handle the store does not know stays out.
+  const productKeysByHandle = new Map<string, ReadonlySet<string>>();
+  for (const [handle, collection] of collectionByHandle) {
+    productKeysByHandle.set(handle, new Set(collection.products.flatMap((product) => product.costKeys)));
+  }
+  const lookups = new Map<string, Promise<ReadonlySet<string> | null>>();
+  const lookup = (handle: string) => {
+    let pending = lookups.get(handle);
+    if (!pending) {
+      pending = Promise.resolve()
+        .then(() => input.collectionProductKeys(handle))
+        .catch(() => null);
+      lookups.set(handle, pending);
+    }
+    return pending;
+  };
+  const unlisted = [...new Set(namedByCampaign.values())].filter((handle) => !collectionByHandle.has(handle));
+  const found = await mapWithConcurrency(unlisted, 2, lookup);
+  unlisted.forEach((handle, index) => {
+    const keys = found[index];
+    if (keys) productKeysByHandle.set(handle, keys);
+  });
+
+  // Which campaigns land where, among the collections the store has.
   const handleByCampaign = new Map<string, string>();
   const campaignsByHandle = new Map<string, string[]>();
-  for (const campaign of input.google.value.rows) {
-    const handles = new Set(
-      [...(campaign.finalUrls ?? []), campaign.name]
-        .map(collectionHandleFromUrl)
-        .filter((handle): handle is string => Boolean(handle)),
-    );
-    if (handles.size !== 1) continue;
-    const handle = handles.values().next().value as string;
-    if (!collectionByHandle.has(handle)) continue;
-    const key = `${campaign.ad_account_id}:${campaign.providerCampaignId}`;
+  for (const [key, handle] of namedByCampaign) {
+    if (!productKeysByHandle.has(handle)) continue;
     handleByCampaign.set(key, handle);
     campaignsByHandle.set(handle, [...(campaignsByHandle.get(handle) ?? []), key]);
   }
@@ -1963,16 +2200,15 @@ export async function attributeCampaignCollections(input: {
       ? null
       : await fxDailyRates(input.orders.value.currency, input.targetCurrency, input.range.from, input.range.to);
     const convert = (amount: number, day: string) => amount * (rates ? rateOn(rates, day) : 1);
-    const deals = [...campaignsByHandle.keys()].map((handle) => {
-      const collection = collectionByHandle.get(handle);
-      return {
-        handle,
-        path: `/collections/${handle}`,
-        productKeys: new Set(collection ? collection.products.flatMap((product) => product.costKeys) : []),
-      };
-    });
+    const deals = [...campaignsByHandle.keys()].map((handle) => ({
+      handle,
+      path: `/collections/${handle}`,
+      productKeys: productKeysByHandle.get(handle) ?? new Set<string>(),
+    }));
     for (const order of input.orders.value.orders) {
-      const landing = normalizePath(order.landingPath);
+      // Decoded, unlike the revenue share's own landing match: the sheet
+      // bills nothing, so it may match the page a percent-encoded path names.
+      const landing = normalizeDecodedPath(order.landingPath);
       for (const deal of deals) {
         const landedHere = landing !== null && (landing === deal.path || landing.startsWith(`${deal.path}/`));
         const lines = landedHere
@@ -2008,6 +2244,19 @@ export async function attributeCampaignCollections(input: {
   }
 
   for (const [handle, campaignKeys] of campaignsByHandle) {
+    // Every campaign that lands on a collection the store has gets its entry,
+    // days or none: the handle names the sheet's basis even before the
+    // campaign has spent, landed or sold anything in the window.
+    for (const key of campaignKeys) {
+      attribution.set(key, {
+        handle,
+        sharedWith: campaignKeys.length,
+        costsKnown: input.costs !== null,
+        salesKnown: input.orders.ok,
+        landingKnown: input.landing.ok,
+        byDay: new Map<string, CampaignCollectionDay>(),
+      });
+    }
     const days = new Set<string>([
       ...[...spendByCampaignDay.keys()]
         .filter((dayKey) => campaignKeys.some((key) => dayKey.startsWith(`${key}|`)))
@@ -2035,12 +2284,8 @@ export async function attributeCampaignCollections(input: {
 
       campaignKeys.forEach((key, index) => {
         const share = shares[index] ?? 0;
-        const entry = attribution.get(key) ?? {
-          handle,
-          sharedWith: campaignKeys.length,
-          costsKnown: input.costs !== null,
-          byDay: new Map<string, CampaignCollectionDay>(),
-        };
+        const entry = attribution.get(key);
+        if (!entry) return;
         entry.byDay.set(day, {
           revenue: input.orders.ok ? earned.revenue * share : null,
           units: input.orders.ok ? earned.units * share : null,
@@ -2048,7 +2293,6 @@ export async function attributeCampaignCollections(input: {
           addedToCart: input.landing.ok ? landed.addedToCart * share : null,
           cogs: earned.cogs === null || !input.orders.ok ? null : earned.cogs * share,
         });
-        attribution.set(key, entry);
       });
     }
   }
@@ -2080,12 +2324,7 @@ export function attributeCollectionSpend(
   }
   const spendByProductBucket = new Map<string, number>();
   for (const campaign of google.value.rows) {
-    const handles = new Set(
-      [...(campaign.finalUrls ?? []), campaign.name]
-        .map(collectionHandleFromUrl)
-        .filter((handle): handle is string => Boolean(handle)),
-    );
-    const collectionHandle = handles.size === 1 ? handles.values().next().value : undefined;
+    const collectionHandle = campaignCollectionHandle(campaign);
     const target = collectionHandle ? collectionByHandle.get(collectionHandle) ?? null : null;
     const mapped = mappedByCampaign.get(campaign.providerCampaignId) ?? [];
     let candidates = mapped
@@ -2212,6 +2451,8 @@ function failedShopifyFamilies(): ShopifyFamilies {
       state: "failed",
       message: "Shopify orders could not be loaded.",
     },
+    collectionProductKeys: async () => null,
+    failedCollectionLookups: [],
     timeZone: null,
   };
 }
@@ -2327,21 +2568,30 @@ async function buildLiveAdminStoreAnalytics(
 
   let campaigns: AdminStoreAnalytics["campaigns"];
   try {
+    const collectionAttribution = await attributeCampaignCollections({
+      google,
+      collectionSales: shopify.collectionSales,
+      collectionProductKeys: shopify.collectionProductKeys,
+      landing: shopify.landing,
+      orders: shopify.orders,
+      costs,
+      targetCurrency: input.store.currency,
+      range: input.range,
+    });
     campaigns = campaignFamily(
       google,
       breakdowns,
       shopify.attribution,
       shopify.products,
       shopify.timeZone ? localDayIn(shopify.timeZone) : null,
-      await attributeCampaignCollections({
-        google,
+      collectionAttribution,
+      {
         collectionSales: shopify.collectionSales,
         landing: shopify.landing,
         orders: shopify.orders,
-        costs,
-        targetCurrency: input.store.currency,
-        range: input.range,
-      }),
+        // Filled while the attribution above ran its lookups.
+        failedLookups: shopify.failedCollectionLookups,
+      },
     );
   } catch (error) {
     console.error("Admin store campaign analytics composition failed:", error);
@@ -2587,7 +2837,13 @@ function slicedCampaignFamily(
       cpa: conversions && conversions > 0 ? spend / conversions : null,
       googleRoas: spend > 0 ? googleRevenue / spend : null,
       realRoas: spend > 0 && shopifyRevenue !== null ? shopifyRevenue / spend : null,
-      attributionState: shopifyRevenue === null ? "unavailable" as const : campaign.attributionState,
+      // A match whose sliced days lost their revenue is unavailable here. An
+      // unmatched campaign stays unmatched: its revenue was null to begin
+      // with, and a data gap is not a provider outage - the sheet's caption
+      // tells the two apart.
+      attributionState: shopifyRevenue === null && campaign.attributionState === "matched"
+        ? "unavailable" as const
+        : campaign.attributionState,
       timeline,
       breakdown,
     }];
@@ -2893,6 +3149,7 @@ export async function fetchCachedAdminStoreAnalytics(
     spend = readyOrEmpty({ granularity: "hour", daily }, daily.length === 0);
   }
   const freshness = providerFreshness(snapshots, input.range);
+  const campaignsFreshness = providerFreshness([campaignsSnapshot], input.range);
   return {
     clientId: input.clientId,
     storeAccountId: input.store.accountId,
@@ -2907,6 +3164,9 @@ export async function fetchCachedAdminStoreAnalytics(
     providerFreshness: selections.some((selection) => !selection.exact) && freshness.state === "ready"
       ? { ...freshness, state: "partial" }
       : freshness,
+    campaignsFreshness: !campaignsSelection.exact && campaignsFreshness.state === "ready"
+      ? { ...campaignsFreshness, state: "partial" }
+      : campaignsFreshness,
     shopifyProvenance: topology.shopifyProvenance,
   };
 }
@@ -2995,8 +3255,19 @@ function snapshotFamilyResult<T>(family: AdminAnalyticsFamily<T>) {
   if (!("data" in family)) {
     throw new Error("The provider family returned an invalid ready state.");
   }
+  if (family.state === "partial") {
+    // A live partial always means a provider failed part-way (a throttle, a
+    // timeout, an uninstalled app). The code lets the refresh keep a recent
+    // ready snapshot instead of replacing it with this dashed one.
+    return {
+      state: "partial" as const,
+      rows: [family.data],
+      message: family.message ?? null,
+      degraded: { code: "provider_partial" },
+    };
+  }
   return {
-    state: family.state === "partial" ? "partial" as const : "ready" as const,
+    state: "ready" as const,
     rows: [family.data],
     message: family.message ?? null,
   };

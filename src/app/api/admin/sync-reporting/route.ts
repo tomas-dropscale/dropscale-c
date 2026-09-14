@@ -34,6 +34,16 @@ const NO_STORE_HEADERS = { "Cache-Control": "private, no-store, max-age=0" };
 const STORE_REFRESH_BATCH_SIZE = 15;
 const REPORTING_ROUTE_BUDGET_MS = 120_000;
 const PROVIDER_REFRESH_TIMEOUT_MS = 45_000;
+// The Worker cron fires at :00 and the GitHub Actions fallback at :07, and the
+// claim lease is only 300 s, so on an hour where both run every provider read
+// happened twice. A store whose three families all succeeded this recently is
+// skipped by machine calls; a manual Sync still refreshes everything.
+const STORE_FRESHNESS_WINDOW_MS = 20 * 60 * 1_000;
+const STORE_SNAPSHOT_FAMILIES = [
+  "shopify_funnel",
+  "store_campaign_performance",
+  "shopify_collection_sales",
+] as const;
 
 type StoreRequest = {
   scope: "store";
@@ -231,10 +241,52 @@ async function refreshStore(request: StoreRequest) {
   };
 }
 
+/**
+ * The stores whose three snapshot families for this exact range all succeeded
+ * within the freshness window with no failure recorded since. One read covers
+ * every store; a read that fails skips nothing, so the refresh runs as before.
+ */
+async function freshStoreAccountIds(
+  service: NonNullable<ReturnType<typeof createServiceClient>>,
+  range: RangeSelection,
+  now: number,
+): Promise<Set<string>> {
+  let data: Array<{ scope_account_id: string; family: string }> | null = null;
+  try {
+    const result = await service
+      .from("admin_reporting_range_snapshots")
+      .select("scope_account_id, family")
+      .eq("from_day", range.from)
+      .eq("to_day", range.to)
+      .in("family", [...STORE_SNAPSHOT_FAMILIES])
+      .is("last_error_code", null)
+      .gte("last_success_at", new Date(now - STORE_FRESHNESS_WINDOW_MS).toISOString());
+    data = result.error ? null : result.data;
+  } catch {
+    data = null;
+  }
+  if (!Array.isArray(data)) {
+    console.warn("Reporting freshness could not be read; refreshing every store.");
+    return new Set();
+  }
+  const families = new Map<string, Set<string>>();
+  for (const row of data) {
+    const set = families.get(row.scope_account_id) ?? new Set<string>();
+    set.add(row.family);
+    families.set(row.scope_account_id, set);
+  }
+  return new Set(
+    [...families]
+      .filter(([, set]) => set.size === STORE_SNAPSHOT_FAMILIES.length)
+      .map(([accountId]) => accountId),
+  );
+}
+
 async function refreshAll(
   range: RangeSelection,
   refreshMetrics = false,
   responseScope: "all" | "hourly" = "hourly",
+  skipFreshStores = false,
 ) {
   const startedAt = Date.now();
   const deadline = startedAt + REPORTING_ROUTE_BUDGET_MS;
@@ -273,7 +325,12 @@ async function refreshAll(
       busy: 0,
       failed: 1,
     }));
-  const scopes = await listAdminReportingStoreScopes(service);
+  const allScopes = await listAdminReportingStoreScopes(service);
+  const fresh = skipFreshStores
+    ? await freshStoreAccountIds(service, range, startedAt)
+    : new Set<string>();
+  const scopes = allScopes.filter((scope) => !fresh.has(scope.store.accountId));
+  const freshStores = allScopes.length - scopes.length;
   // Rotate the first store every hour. If an outage exhausts the budget, the
   // same tail cannot be starved forever by always restarting at index zero.
   const startOffset = scopes.length > 0
@@ -326,6 +383,9 @@ async function refreshAll(
       campaigns,
       provisioning,
       stores,
+      // Stores skipped because every family was already fresh: neither
+      // failed nor budget-skipped, so they never degrade the response.
+      fresh: freshStores,
       budget: {
         limitMs: REPORTING_ROUTE_BUDGET_MS,
         exhausted: skippedStores > 0,
@@ -455,10 +515,15 @@ export async function POST(request: NextRequest) {
       }
       // d7 remains the rolling history refresh. Today also refreshes metrics:
       // its campaign-hour feed is fresher than Windsor's current-day aggregate
-      // and replaces only today's row after the rolling pass.
+      // and replaces only today's row after the rolling pass. Both schedulers
+      // therefore call today LAST; the leg that runs last decides today's ad
+      // spend for every client. Machine calls skip stores whose families are
+      // already fresh: two schedulers fire this within minutes of each other.
       return await refreshAll(
         presetSelection(key),
         key === "today" || key === "d7" || key === "d30",
+        "hourly",
+        true,
       );
     }
 

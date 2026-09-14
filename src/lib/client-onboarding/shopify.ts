@@ -10,6 +10,21 @@ export const REPORTING_SHOPIFY_API_VERSION = "2026-07" as const;
 const SHOP_DOMAIN = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/;
 const REQUEST_TIMEOUT_MS = 15_000;
 
+/**
+ * Shopify meters the Admin GraphQL API per store. At the top of every hour
+ * about fifteen stores refresh at once and each one issues several reads in
+ * parallel, so a throttle is routine rather than exceptional, and without a
+ * pause every throttle blanked a whole sheet. Two short waits clear almost
+ * all of them; anything slower is the caller's decision, not this module's.
+ */
+const THROTTLE_RETRY_DELAYS_MS = [1_000, 2_500] as const;
+/** A Retry-After hint above this would hold a request slot for too long. */
+const MAX_RETRY_AFTER_MS = 5_000;
+/** Enough of a GraphQL error to explain a blank sheet in a log or snapshot. */
+const GRAPHQL_ERROR_MESSAGE_MAX_CHARS = 200;
+const GRAPHQL_DENIED_MESSAGE =
+  "Shopify did not allow this read-only reporting check.";
+
 export type ShopifyReportingErrorCode =
   | "invalid_domain"
   | "invalid_credentials"
@@ -30,6 +45,27 @@ export class ShopifyReportingError extends Error {
     this.name = "ShopifyReportingError";
   }
 }
+
+/**
+ * A throttle is the one failure the read itself may retry, and the HTTP form
+ * of it can carry a Retry-After hint. Keeping the hint on a private subclass
+ * lets the retry loop honour it without widening the public error shape that
+ * callers already match on by code.
+ */
+class ShopifyThrottledError extends ShopifyReportingError {
+  constructor(public readonly retryAfterMs: number | null = null) {
+    super(
+      "shopify_rate_limited",
+      "Shopify is rate limiting this store. Wait a moment and try again.",
+      true,
+    );
+  }
+}
+
+/** Only the wait between throttled attempts; tests replace it to run instantly. */
+export type ReportingGraphqlRetryOptions = {
+  sleep?: (ms: number) => Promise<void>;
+};
 
 export type VerifiedReportingShop = {
   shopId: string;
@@ -67,12 +103,14 @@ type TokenResponse = {
   access_token?: unknown;
 };
 
+type GraphqlError = {
+  message?: unknown;
+  extensions?: { code?: unknown };
+};
+
 type GraphqlEnvelope<T> = {
   data?: T;
-  errors?: Array<{
-    message?: unknown;
-    extensions?: { code?: unknown };
-  }>;
+  errors?: GraphqlError[];
 };
 
 type VerifyResponse = {
@@ -252,6 +290,50 @@ function unavailable(error?: unknown): ShopifyReportingError {
   );
 }
 
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Shopify sends Retry-After in seconds, sometimes fractional. The HTTP-date
+ * form is ignored rather than parsed because the ladder is a good enough
+ * fallback and a clock skew could otherwise turn into a very long wait.
+ */
+function retryAfterMs(response: Response): number | null {
+  const header = response.headers.get("retry-after")?.trim();
+  if (!header || !/^\d+(\.\d+)?$/.test(header)) return null;
+  return Math.min(Math.round(Number(header) * 1_000), MAX_RETRY_AFTER_MS);
+}
+
+/**
+ * Shopify delivers its cost throttle inside an HTTP 200 envelope, so a
+ * throttled read looks exactly like a scope refusal unless the error code or
+ * message is inspected. The message match covers the rare envelope that
+ * carries "Throttled" without an extensions block.
+ */
+function isThrottleError(error: GraphqlError): boolean {
+  const code = error.extensions?.code;
+  if (code === "THROTTLED" || code === "MAX_COST_EXCEEDED") return true;
+  return typeof error.message === "string" && /throttl/i.test(error.message);
+}
+
+/**
+ * A blank sheet used to say only "did not allow"; the first Shopify message
+ * is what actually tells an operator whether it was a scope, a field, or a
+ * malformed ShopifyQL string. It is trimmed and capped so a snapshot row
+ * cannot grow without bound.
+ */
+function describeGraphqlErrors(errors: GraphqlError[]): string {
+  const first = errors.find(
+    (error) => typeof error.message === "string" && error.message.trim(),
+  );
+  if (!first) return GRAPHQL_DENIED_MESSAGE;
+  const message = String(first.message)
+    .trim()
+    .slice(0, GRAPHQL_ERROR_MESSAGE_MAX_CHARS);
+  return `${GRAPHQL_DENIED_MESSAGE} Shopify said: ${message}`;
+}
+
 function classifyResponseStatus(response: Response): void {
   if (response.status >= 300 && response.status < 400) {
     throw new ShopifyReportingError(
@@ -260,11 +342,7 @@ function classifyResponseStatus(response: Response): void {
     );
   }
   if (response.status === 429) {
-    throw new ShopifyReportingError(
-      "shopify_rate_limited",
-      "Shopify is rate limiting this store. Wait a moment and try again.",
-      true,
-    );
+    throw new ShopifyThrottledError(retryAfterMs(response));
   }
   if (response.status === 401 || response.status === 403) {
     throw new ShopifyReportingError(
@@ -378,18 +456,18 @@ export async function exchangeReportingClientCredentials({
   return payload.access_token;
 }
 
-export async function reportingShopifyGraphql<T>({
-  shopDomain,
+/** One attempt: its own timeout, its own classification, no waiting. */
+async function requestReportingGraphql<T>({
+  domain,
   accessToken,
   query,
   variables,
 }: {
-  shopDomain: string;
+  domain: string;
   accessToken: string;
   query: string;
   variables?: Record<string, unknown>;
 }): Promise<T> {
-  const domain = normalizeReportingShopDomain(shopDomain);
   let response: Response;
   try {
     response = await fetchWithTimeout(
@@ -422,13 +500,68 @@ export async function reportingShopifyGraphql<T>({
       true,
     );
   }
-  if (payload.errors?.length || !payload.data) {
+  if (payload.errors?.length) {
+    if (payload.errors.some(isThrottleError)) {
+      throw new ShopifyThrottledError();
+    }
     throw new ShopifyReportingError(
       "insufficient_scopes",
-      "Shopify did not allow this read-only reporting check.",
+      describeGraphqlErrors(payload.errors),
+    );
+  }
+  if (!payload.data) {
+    throw new ShopifyReportingError(
+      "insufficient_scopes",
+      GRAPHQL_DENIED_MESSAGE,
     );
   }
   return payload.data;
+}
+
+/**
+ * Every reporting read goes through here, so this is where a throttle is
+ * absorbed: an HTTP 429 or a THROTTLED envelope waits and tries again, at
+ * most twice, honouring a numeric Retry-After hint when Shopify sends one.
+ * Nothing else is retried, because a refused scope or a bad token will not
+ * change by waiting, and a retried timeout would only pile onto the queue.
+ */
+export async function reportingShopifyGraphql<T>(
+  {
+    shopDomain,
+    accessToken,
+    query,
+    variables,
+  }: {
+    shopDomain: string;
+    accessToken: string;
+    query: string;
+    variables?: Record<string, unknown>;
+  },
+  { sleep = defaultSleep }: ReportingGraphqlRetryOptions = {},
+): Promise<T> {
+  const domain = normalizeReportingShopDomain(shopDomain);
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await requestReportingGraphql<T>({
+        domain,
+        accessToken,
+        query,
+        variables,
+      });
+    } catch (error) {
+      if (
+        !(error instanceof ShopifyReportingError) ||
+        error.code !== "shopify_rate_limited" ||
+        !error.retryable ||
+        attempt >= THROTTLE_RETRY_DELAYS_MS.length
+      ) {
+        throw error;
+      }
+      const hinted =
+        error instanceof ShopifyThrottledError ? error.retryAfterMs : null;
+      await sleep(hinted ?? THROTTLE_RETRY_DELAYS_MS[attempt]);
+    }
+  }
 }
 
 export async function verifyReportingShop({

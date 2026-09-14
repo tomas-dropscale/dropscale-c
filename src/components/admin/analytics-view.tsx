@@ -16,6 +16,7 @@ import {
   StoreSpendSection,
 } from "@/components/admin/store-analytics-sections";
 import { AnalyticsScopeControls } from "./analytics-scope-controls";
+import { ReportingSyncButton } from "./reporting-sync-button";
 import { RangePicker } from "@/components/portal/range-picker";
 import { Badge } from "@/components/ui/badge";
 import { PageContainer } from "@/components/ui/page-container";
@@ -187,7 +188,7 @@ export function AnalyticsScopeSelector({
           range={range}
         />
 
-        <div className="flex min-w-0 items-start gap-2 text-[11.5px] text-[var(--text-muted)] lg:max-w-64 lg:justify-end lg:text-right">
+        <div className="flex min-w-0 items-start gap-2 text-[11.5px] text-[var(--text-muted)] lg:max-w-80 lg:justify-end lg:text-right">
           <ContextIcon className="mt-0.5 size-3.5 shrink-0 text-[var(--accent-gold)]" aria-hidden />
           <span className="min-w-0">
             <span className="flex min-w-0 items-center justify-end gap-2" id="analytics-scope-title">
@@ -196,6 +197,23 @@ export function AnalyticsScopeSelector({
             </span>
             {overview && <span className="mt-0.5 block text-[10.5px]">{freshnessLabel(updatedAt)}</span>}
           </span>
+          {/* One store's Sync: the selected range plus the fixed 30-day tracking
+              window, without waiting for the hourly cycle or syncing the whole
+              portfolio from the global button. */}
+          {overview && selectedStore && (
+            <ReportingSyncButton
+              request={{
+                scope: "store",
+                clientId: overview.clientId,
+                store: {
+                  accountId: selectedStore.accountId,
+                  activityAccountIds: selectedStore.activityAccountIds,
+                  currency: selectedStore.currency,
+                },
+                range,
+              }}
+            />
+          )}
         </div>
       </div>
     </section>
@@ -541,6 +559,7 @@ export function AnalyticsView({
               campaigns={storeAnalytics.campaigns}
               currency={scope.selectedStore.currency}
               rangeEnd={storeAnalytics.range.to}
+              freshness={storeAnalytics.campaignsFreshness ?? null}
             />
             <CollectionReturnSection
               collections={storeAnalytics.collections}

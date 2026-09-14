@@ -93,7 +93,31 @@ const RANGE = {
   from: "2026-08-03",
   to: "2026-08-12",
 };
-const serviceClient = { service: true };
+/**
+ * The one table the route reads itself: the freshness gate's snapshot rows.
+ * Every other query goes through the mocked libraries.
+ */
+const snapshotRows: Array<{ scope_account_id: string; family: string }> = [];
+const snapshotQuery = {
+  select: vi.fn(),
+  eq: vi.fn(),
+  in: vi.fn(),
+  is: vi.fn(),
+  gte: vi.fn(),
+};
+snapshotQuery.select.mockReturnValue(snapshotQuery);
+snapshotQuery.eq.mockReturnValue(snapshotQuery);
+snapshotQuery.in.mockReturnValue(snapshotQuery);
+snapshotQuery.is.mockReturnValue(snapshotQuery);
+snapshotQuery.gte.mockImplementation(async () => ({ data: [...snapshotRows], error: null }));
+const serviceClient = {
+  service: true,
+  from: vi.fn(() => snapshotQuery),
+};
+
+function freshFamilies(accountId: string, families: string[]) {
+  return families.map((family) => ({ scope_account_id: accountId, family }));
+}
 
 function adminRequest(body: unknown, origin = "http://localhost") {
   return new NextRequest(URL, {
@@ -174,6 +198,13 @@ describe("admin exact-range reporting sync route", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.callOrder.length = 0;
+    snapshotRows.length = 0;
+    snapshotQuery.select.mockReturnValue(snapshotQuery);
+    snapshotQuery.eq.mockReturnValue(snapshotQuery);
+    snapshotQuery.in.mockReturnValue(snapshotQuery);
+    snapshotQuery.is.mockReturnValue(snapshotQuery);
+    snapshotQuery.gte.mockImplementation(async () => ({ data: [...snapshotRows], error: null }));
+    serviceClient.from.mockReturnValue(snapshotQuery);
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-15T12:00:00.000Z"));
     vi.stubEnv("CRON_SECRET", CRON_SECRET);
@@ -593,6 +624,74 @@ describe("admin exact-range reporting sync route", () => {
         skippedStores: 2,
       },
     });
+  });
+
+  it("skips a store whose three families are already fresh on a machine call", async () => {
+    const scopes = [reportingScope(0), reportingScope(1)];
+    mocks.listAdminReportingStoreScopes.mockResolvedValueOnce(scopes);
+    snapshotRows.push(
+      ...freshFamilies(scopes[0].store.accountId, [
+        "shopify_funnel",
+        "store_campaign_performance",
+        "shopify_collection_sales",
+      ]),
+      // Two of three families fresh is not fresh: the third still needs its turn.
+      ...freshFamilies(scopes[1].store.accountId, [
+        "shopify_funnel",
+        "store_campaign_performance",
+      ]),
+    );
+
+    const response = await POST(cronRequest("today"));
+
+    expect(response.status).toBe(200);
+    expect(serviceClient.from).toHaveBeenCalledWith("admin_reporting_range_snapshots");
+    expect(snapshotQuery.eq).toHaveBeenCalledWith("from_day", "2026-08-15");
+    expect(snapshotQuery.eq).toHaveBeenCalledWith("to_day", "2026-08-15");
+    expect(snapshotQuery.is).toHaveBeenCalledWith("last_error_code", null);
+    expect(snapshotQuery.gte).toHaveBeenCalledWith(
+      "last_success_at",
+      new Date(Date.now() - 20 * 60_000).toISOString(),
+    );
+    expect(mocks.refreshAdminStoreAnalyticsSnapshots).toHaveBeenCalledTimes(1);
+    expect(mocks.refreshAdminStoreAnalyticsSnapshots).toHaveBeenCalledWith(
+      expect.objectContaining({
+        store: expect.objectContaining({ accountId: scopes[1].store.accountId }),
+      }),
+      { authenticate: false },
+    );
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      fresh: 1,
+      budget: { launchedStores: 1, skippedStores: 0 },
+    });
+  });
+
+  it("refreshes every store on a manual all request whatever their freshness", async () => {
+    snapshotRows.push(...freshFamilies(STORE_ID, [
+      "shopify_funnel",
+      "store_campaign_performance",
+      "shopify_collection_sales",
+    ]));
+
+    const response = await POST(adminRequest(allRequest()));
+
+    expect(response.status).toBe(200);
+    expect(serviceClient.from).not.toHaveBeenCalledWith("admin_reporting_range_snapshots");
+    expect(mocks.refreshAdminStoreAnalyticsSnapshots).toHaveBeenCalledOnce();
+    await expect(response.json()).resolves.toMatchObject({ ok: true, fresh: 0 });
+  });
+
+  it("refreshes every store when the freshness read fails", async () => {
+    snapshotQuery.gte.mockResolvedValueOnce({ data: null, error: { message: "down" } });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const response = await POST(cronRequest("d7"));
+
+    expect(response.status).toBe(200);
+    expect(mocks.refreshAdminStoreAnalyticsSnapshots).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("freshness"));
+    warn.mockRestore();
   });
 
   it("rejects unsupported machine ranges before creating a service client", async () => {

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   collectionHandleFromUrl,
   dealsFromCampaigns,
+  normalizeDecodedPath,
   normalizePath,
   orderRevShare,
   parseRevShareCampaign,
@@ -29,6 +30,8 @@ describe("collectionHandleFromUrl", () => {
 
   it("decodes percent-escapes, like the campaign-name parse", () => {
     expect(collectionHandleFromUrl("https://l.com/collections/v%C3%A9las")).toBe("vélas");
+    // Decoded before lower-casing: the escaped capital sigma reads as a small one.
+    expect(collectionHandleFromUrl("https://l.com/collections/%CE%A3%CE%B1")).toBe("σα");
   });
 
   it("agrees with the campaign-name parse on the same URL", () => {
@@ -93,10 +96,43 @@ describe("normalizePath", () => {
     ["https://shop.com/collections/velas?utm=x", "/collections/velas"],
     ["/collections/Velas/", "/collections/velas"],
     ["shop.com/collections/velas#top", "/collections/velas"],
+    ["HTTPS://Shop.com/collections/Velas", "/collections/velas"],
+    // The billing rule keeps percent-escapes as they came: a percent-encoded
+    // landing page never equals the plain handle a deal's path holds, so the
+    // whole-order rule does not fire on it. Decoding here would be a change
+    // to what those clients are billed; see the function's own comment.
+    ["/collections/%E3%83%8F%E3%83%B3%E3%83%89?utm_source=google", "/collections/%e3%83%8f%e3%83%b3%e3%83%89"],
+    ["/collections/100%25-cotton", "/collections/100%25-cotton"],
     ["", null],
     [null, null],
   ])("%s → %s", (input, expected) => {
     expect(normalizePath(input)).toBe(expected);
+  });
+});
+
+describe("normalizeDecodedPath", () => {
+  it.each([
+    ["https://shop.com/collections/velas?utm=x", "/collections/velas"],
+    ["/collections/Velas/", "/collections/velas"],
+    ["shop.com/collections/velas#top", "/collections/velas"],
+    // A landing path arrives percent-encoded; the handle it names does not,
+    // and a capital hidden in an escape lower-cases once decoded.
+    ["/collections/%E3%83%8F%E3%83%B3%E3%83%89?utm_source=google", "/collections/ハンド"],
+    ["https://shop.com/collections/%CE%A3%CE%B1/", "/collections/σα"],
+    ["https://shop.com/collections/ハンド", "/collections/ハンド"],
+    // Not valid escapes: kept as they came.
+    ["/collections/100%25-cotton", "/collections/100%-cotton"],
+    ["/collections/%E3", "/collections/%e3"],
+    ["", null],
+    [null, null],
+  ])("%s → %s", (input, expected) => {
+    expect(normalizeDecodedPath(input)).toBe(expected);
+  });
+
+  it("agrees with normalizePath wherever nothing is percent-encoded", () => {
+    for (const input of ["/collections/Velas/?page=2", "https://shop.com/Collections/x#top", "/", "shop.com"]) {
+      expect(normalizeDecodedPath(input)).toBe(normalizePath(input));
+    }
   });
 });
 
@@ -149,5 +185,30 @@ describe("orderRevShare — the agreed attribution rule", () => {
     const order = { total: 100, landingPath: "/collections/other", lines: [{ productKey: "X", revenue: 100 }] };
     expect(orderRevShare(order, [])).toEqual({ base: 0, amount: 0 });
     expect(orderRevShare(order, [velas])).toEqual({ base: 0, amount: 0 });
+  });
+
+  it("a percent-encoded landing path does not fire the landing rule; the lines still count", () => {
+    // A Japanese store: the deal's handle is plain, the order's landing page
+    // arrives percent-encoded. The billing rule compares them as they came,
+    // so this order bills by its lines, not whole. This pins the rule as it
+    // is billed today; making the landing rule decode is the owner's call
+    // (normalizePath explains), and this test is where it would show.
+    const hand: AttributionDeal = {
+      handle: "ハンド",
+      path: "/collections/ハンド",
+      rate: 5,
+      productKeys: new Set(["HAND-1"]),
+    };
+    const order = {
+      total: 100,
+      landingPath: "/collections/%E3%83%8F%E3%83%B3%E3%83%89?utm_source=google",
+      lines: [
+        { productKey: "HAND-1", revenue: 40 },
+        { productKey: "OTHER-1", revenue: 60 },
+      ],
+    };
+    expect(orderRevShare(order, [hand])).toEqual({ base: 40, amount: 2 });
+    // The same page spelled plain is the landing rule as always.
+    expect(orderRevShare({ ...order, landingPath: "/collections/ハンド" }, [hand])).toEqual({ base: 100, amount: 5 });
   });
 });

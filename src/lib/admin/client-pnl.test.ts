@@ -36,8 +36,14 @@ vi.mock("@/lib/billing/referrals", () => ({
 vi.mock("@/lib/supabase/server", () => ({ createClient: mocks.createClient }));
 vi.mock("@/lib/portal/currency", () => import("../portal/currency"));
 vi.mock("@/lib/portal/pnl", () => import("../portal/pnl"));
+vi.mock("@/lib/portal/range", () => import("../portal/range"));
 
-import { clampPnlPeriod, fetchAdminClientPnl } from "./client-pnl";
+import {
+  clampPnlPeriod,
+  currentPnlPeriod,
+  fetchAdminClientPnl,
+  listAdminPnlClients,
+} from "./client-pnl";
 
 const CLIENT = "70000000-0000-4000-8000-000000000001";
 const ANCHOR = "70000000-0000-4000-8000-000000000010";
@@ -105,6 +111,34 @@ function session(client: { data: unknown; error: unknown }) {
   chain.eq = vi.fn(() => chain);
   chain.maybeSingle = vi.fn(async () => client);
   return { from: vi.fn(() => chain) };
+}
+
+type CatalogueAnswer = { data: Array<Record<string, unknown>> | null; error: unknown };
+
+/**
+ * A Supabase double for the client list: each table is awaited straight off
+ * its builder, and `.neq` is modelled as the database would apply it, so a
+ * test can feed an archived row and watch it never arrive.
+ */
+function catalogueSession(tables: Partial<Record<"portal_clients" | "ad_accounts", CatalogueAnswer>>) {
+  const filters: Array<[string, string, unknown]> = [];
+  const client = {
+    from: vi.fn((table: keyof typeof tables) => {
+      const answer = tables[table] ?? { data: [], error: null };
+      let rows = answer.data;
+      const chain: Record<string, unknown> = {};
+      chain.select = vi.fn(() => chain);
+      chain.neq = vi.fn((column: string, value: unknown) => {
+        filters.push([table, column, value]);
+        rows = rows?.filter((row) => row[column] !== value) ?? null;
+        return chain;
+      });
+      chain.then = (resolve: (value: unknown) => unknown, reject?: (reason: unknown) => unknown) =>
+        Promise.resolve({ data: rows, error: answer.error }).then(resolve, reject);
+      return chain;
+    }),
+  };
+  return { client, filters };
 }
 
 beforeEach(() => {
@@ -290,5 +324,131 @@ describe("a client's P&L read by an admin", () => {
     expect(clampPnlPeriod(2000, 0, now)).toEqual({ year: 2024, month: 1 });
     expect(clampPnlPeriod(Number.NaN, Number.NaN, now)).toEqual({ year: 2024, month: 1 });
     expect(clampPnlPeriod(2026.7, 9.9, now)).toEqual({ year: 2026, month: 9 });
+  });
+
+  it("opens on the Lisbon business day, not on the runtime's clock", () => {
+    // 23:30 UTC on 31 August is already 00:30 on 1 September in Lisbon, an
+    // hour ahead of UTC in summer: the day's rows land in September.
+    expect(currentPnlPeriod(new Date("2026-08-31T23:30:00Z"))).toEqual({ year: 2026, month: 9 });
+    // In winter Lisbon runs on UTC, so the two clocks agree.
+    expect(currentPnlPeriod(new Date("2026-12-31T23:30:00Z"))).toEqual({ year: 2026, month: 12 });
+    expect(currentPnlPeriod(new Date("2027-01-01T00:30:00Z"))).toEqual({ year: 2027, month: 1 });
+    // The clamp counts its years from that same day.
+    expect(clampPnlPeriod(2027, 1, new Date("2026-12-31T23:30:00Z"))).toEqual({ year: 2026, month: 1 });
+    expect(clampPnlPeriod(2027, 1, new Date("2027-01-01T00:30:00Z"))).toEqual({ year: 2027, month: 1 });
+  });
+});
+
+describe("the clients whose P&L an admin can read", () => {
+  const PENDING = "70000000-0000-4000-8000-000000000002";
+  const ARCHIVED = "70000000-0000-4000-8000-000000000003";
+  const NO_STORE = "70000000-0000-4000-8000-000000000004";
+  const ADMIN_OWNED = "70000000-0000-4000-8000-000000000005";
+
+  function client(id: string, full_name: string, over: Record<string, unknown> = {}) {
+    return {
+      id,
+      full_name,
+      email: `${id.slice(-2)}@example.com`,
+      approval_status: "approved",
+      ...over,
+    };
+  }
+
+  function catalogue(over: Partial<Record<"portal_clients" | "ad_accounts", CatalogueAnswer>> = {}) {
+    const double = catalogueSession({
+      portal_clients: {
+        data: [
+          client(CLIENT, "Paulo & João"),
+          client(PENDING, "Anna Műhely", { approval_status: "pending" }),
+          client(ARCHIVED, "Archived client", { approval_status: "rejected" }),
+          client(NO_STORE, "Nothing connected yet"),
+          // A workspace whose id is an admin profile: Analytics skips it, the
+          // P&L must not, since its store has a sheet like any other.
+          client(ADMIN_OWNED, "Leandro Barbosa"),
+        ],
+        error: null,
+      },
+      ad_accounts: {
+        data: [
+          { client_id: CLIENT },
+          { client_id: CLIENT },
+          { client_id: PENDING },
+          { client_id: ARCHIVED },
+          { client_id: ADMIN_OWNED },
+        ],
+        error: null,
+      },
+      ...over,
+    });
+    mocks.createClient.mockResolvedValue(double.client);
+    return double;
+  }
+
+  it("authenticates first, then lists every workspace with a store - pending and admin-owned included, archived and storeless not", async () => {
+    const double = catalogue();
+
+    const clients = await listAdminPnlClients();
+
+    expect(mocks.requireAdmin.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.createClient.mock.invocationCallOrder[0]!,
+    );
+    // Archived workspaces are filtered at the database; nothing else is - not
+    // the account's status or role, and no profiles read to exclude admins.
+    expect(double.filters).toEqual([["portal_clients", "approval_status", "rejected"]]);
+    expect(double.client.from).not.toHaveBeenCalledWith("profiles");
+    expect(clients).toEqual([
+      { id: PENDING, name: "Anna Műhely", email: "02@example.com", storeCount: 1, pending: true },
+      { id: ADMIN_OWNED, name: "Leandro Barbosa", email: "05@example.com", storeCount: 1, pending: false },
+      { id: CLIENT, name: "Paulo & João", email: "01@example.com", storeCount: 2, pending: false },
+    ]);
+  });
+
+  it("sorts by name the way a person would, an accent among its letter, and by id when names tie", async () => {
+    const TWIN_A = "70000000-0000-4000-8000-0000000000a1";
+    const TWIN_B = "70000000-0000-4000-8000-0000000000a2";
+    catalogue({
+      portal_clients: {
+        data: [
+          client("70000000-0000-4000-8000-0000000000b1", "Zoë"),
+          client(TWIN_B, "Emma"),
+          client("70000000-0000-4000-8000-0000000000b2", "anna"),
+          client(TWIN_A, "Emma"),
+          client("70000000-0000-4000-8000-0000000000b3", "Álvaro"),
+        ],
+        error: null,
+      },
+      ad_accounts: {
+        data: [
+          "70000000-0000-4000-8000-0000000000b1",
+          TWIN_A,
+          TWIN_B,
+          "70000000-0000-4000-8000-0000000000b2",
+          "70000000-0000-4000-8000-0000000000b3",
+        ].map((client_id) => ({ client_id })),
+        error: null,
+      },
+    });
+
+    const clients = await listAdminPnlClients();
+
+    expect(clients.map((row) => [row.name, row.id])).toEqual([
+      ["Álvaro", "70000000-0000-4000-8000-0000000000b3"],
+      ["anna", "70000000-0000-4000-8000-0000000000b2"],
+      ["Emma", TWIN_A],
+      ["Emma", TWIN_B],
+      ["Zoë", "70000000-0000-4000-8000-0000000000b1"],
+    ]);
+  });
+
+  it("lists nobody when no workspace owns a store, and refuses a failed read of either table", async () => {
+    catalogue({ ad_accounts: { data: [], error: null } });
+    await expect(listAdminPnlClients()).resolves.toEqual([]);
+
+    catalogue({ portal_clients: { data: null, error: { message: "down" } } });
+    await expect(listAdminPnlClients()).rejects.toThrow("The client list is unavailable.");
+
+    catalogue({ ad_accounts: { data: null, error: { message: "down" } } });
+    await expect(listAdminPnlClients()).rejects.toThrow("The client list is unavailable.");
   });
 });
