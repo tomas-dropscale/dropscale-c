@@ -7,15 +7,9 @@ export default function AdminLoading() {
     >
       <span className="sr-only">Loading page</span>
       <div className="h-12 animate-pulse rounded-xl bg-[var(--bg-panel)]" />
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
-        {Array.from({ length: 5 }, (_, index) => (
-          <div
-            key={index}
-            className="h-28 animate-pulse rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-panel)]"
-          />
-        ))}
-      </div>
-      <div className="h-80 animate-pulse rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-panel)]" />
+      <div className="h-44 animate-pulse rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-panel)]" />
+      <div className="h-36 animate-pulse rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-panel)]" />
+      <div className="h-14 animate-pulse rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-panel)]" />
     </div>
   );
 }
