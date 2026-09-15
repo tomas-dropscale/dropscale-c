@@ -665,6 +665,7 @@ async function syncReportingSourceWindow(
     google,
     shopify,
     computedAt: new Date().toISOString(),
+    timeZone: source.googleAds?.timeZone,
   });
   if (lifecycle === "staged") {
     // The staged commit RPC (0056) validates its rows against a fixed key

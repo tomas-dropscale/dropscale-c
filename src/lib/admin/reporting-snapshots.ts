@@ -31,6 +31,14 @@ export const ADMIN_REPORTING_KEEP_LAST_GOOD_MS = 24 * 60 * 60 * 1_000;
 /** The stored message column allows 1..1000 characters; longer text is fenced. */
 const SNAPSHOT_MESSAGE_LIMIT = 1_000;
 const ERROR_CODE = /^[a-z0-9_]{1,80}$/;
+/**
+ * The families whose snapshot is a campaign sheet with a spend total, the
+ * only figure the today guard below can compare between two reads.
+ */
+const TODAY_GUARDED_FAMILIES = new Set<AdminReportingSnapshotFamily>([
+  "google_campaigns",
+  "store_campaign_performance",
+]);
 
 type Supabase = SupabaseClient<Database>;
 
@@ -85,6 +93,12 @@ export type AdminReportingRefreshResult =
       state: "refreshed";
       snapshotState: AdminReportingFamilyResult<unknown>["state"];
       refreshedAt: string;
+      /**
+       * True when today's ready sheet was kept over a reload that is behind
+       * it: the row was completed again with the sheet it already held, so
+       * it reads as refreshed and records nothing to alert on.
+       */
+      kept?: true;
     }
   | { state: "busy" }
   | {
@@ -382,46 +396,119 @@ export async function readAdminReportingSnapshotFamilySelections(input: {
   );
 }
 
+type StoredSnapshotRow = Pick<AdminReportingRangeSnapshot, "state" | "last_success_at"> &
+  Partial<Pick<AdminReportingRangeSnapshot, "payload" | "message" | "last_error_code">>;
+
 /**
- * Whether the row still holds a ready snapshot recent enough to outrank a
- * degraded reload. The claim above already blanked the row when the authority
- * changed, so a ready state here belongs to the same topology. A read that
- * fails is no evidence of a good snapshot: the caller then completes as it
- * always did, because Google-only data still beats nothing.
+ * The row this refresh would replace, under the same authority. The claim
+ * above already blanked the row when the authority changed, so a ready state
+ * here belongs to the same topology. A read that fails is no evidence of a
+ * good snapshot: the caller then completes as it always did, because
+ * Google-only data still beats nothing. The payload, message and failure
+ * code ride along only for the today guard, which compares the sheet and
+ * may complete it again; the keep-last-good rule reads two columns as it
+ * always did.
  */
-async function recentReadySnapshot(input: {
+async function storedSnapshot(input: {
   client: Supabase;
   family: AdminReportingSnapshotFamily;
   accountId: string;
   from: string;
   to: string;
   authorityKey: string;
-  now: number;
-}): Promise<boolean> {
+  withPayload: boolean;
+}): Promise<StoredSnapshotRow | null> {
   const { data, error } = await input.client
     .from("admin_reporting_range_snapshots")
-    .select("state, last_success_at")
+    .select(
+      input.withPayload
+        ? "state, last_success_at, payload, message, last_error_code"
+        : "state, last_success_at",
+    )
     .eq("family", input.family)
     .eq("scope_account_id", input.accountId)
     .eq("from_day", input.from)
     .eq("to_day", input.to)
     .eq("authority_key", input.authorityKey)
     .maybeSingle();
-  if (error || !data) return false;
-  const row = data as Pick<AdminReportingRangeSnapshot, "state" | "last_success_at">;
+  if (error || !data) return null;
+  // The column list is chosen at runtime, which the client's select parser
+  // cannot type; the row is exactly the columns asked for above.
+  return data as unknown as StoredSnapshotRow;
+}
+
+/**
+ * Whether the row still holds a ready snapshot recent enough to outrank a
+ * degraded reload.
+ */
+function recentReady(row: StoredSnapshotRow, now: number): boolean {
   const succeededAt = row.last_success_at ? Date.parse(row.last_success_at) : Number.NaN;
   return (
     row.state === "ready" &&
     Number.isFinite(succeededAt) &&
-    input.now - succeededAt <= ADMIN_REPORTING_KEEP_LAST_GOOD_MS
+    now - succeededAt <= ADMIN_REPORTING_KEEP_LAST_GOOD_MS
   );
+}
+
+type SheetTotals = { spend: number; clicks: number; conversions: number };
+
+const count = (value: unknown) =>
+  typeof value === "number" && Number.isFinite(value) ? value : 0;
+
+/**
+ * What a campaign sheet totals, in the shape each guarded family stores:
+ * google_campaigns is one campaign per payload entry, store_campaign_performance
+ * one sheet whose rows are the campaigns. An empty payload is a sheet with no
+ * campaigns, so it totals zero. Null when the payload is not that shape or a
+ * spend is not a number, so a malformed row never decides what is kept; a
+ * click or conversion count the sheet does not carry counts as zero, because
+ * the two counts only break a tie on spend. Spend is rounded to the
+ * six-decimal money contract: the same campaigns summed in another order must
+ * not read as a regression.
+ */
+function snapshotTotals(
+  family: AdminReportingSnapshotFamily,
+  payload: unknown,
+): SheetTotals | null {
+  if (!Array.isArray(payload)) return null;
+  if (payload.length === 0) return { spend: 0, clicks: 0, conversions: 0 };
+  const rows =
+    family === "google_campaigns"
+      ? payload
+      : (payload[0] as { rows?: unknown } | null)?.rows;
+  if (!Array.isArray(rows)) return null;
+  const totals: SheetTotals = { spend: 0, clicks: 0, conversions: 0 };
+  for (const row of rows) {
+    const fields = row as { spend?: unknown; clicks?: unknown; conversions?: unknown } | null;
+    if (typeof fields?.spend !== "number" || !Number.isFinite(fields.spend)) return null;
+    totals.spend += fields.spend;
+    totals.clicks += count(fields.clicks);
+    totals.conversions += count(fields.conversions);
+  }
+  totals.spend = Math.round(totals.spend * 1e6) / 1e6;
+  return totals;
+}
+
+/**
+ * Whether a reload is behind the sheet the row holds: less spend, or the same
+ * spend with fewer clicks or conversions. Spend plateaus once a day's budget
+ * is spent while Google keeps attributing conversions hours after their
+ * clicks, so two replicas answer the same spend from different ingestion
+ * points and only the counts tell the older one apart.
+ */
+function sheetRegressed(reload: SheetTotals, stored: SheetTotals): boolean {
+  if (reload.spend !== stored.spend) return reload.spend < stored.spend;
+  return reload.clicks < stored.clicks || reload.conversions < stored.conversions;
 }
 
 /**
  * Claims, loads and atomically replaces one exact provider family. A failed
  * provider attempt records its error code but leaves the prior success intact.
  * So does a degraded partial reload while the row holds a ready snapshot from
- * the last day: the failure is recorded, the good sheet stays.
+ * the last day: the failure is recorded, the good sheet stays. A reload of
+ * today's campaign sheet that is behind the ready one the row holds is not
+ * written either, but that is no failure: the row is completed again with the
+ * sheet it holds (the today guard, explained where it runs).
  */
 export async function refreshAdminReportingSnapshot<T>(input: {
   client: Supabase;
@@ -471,19 +558,37 @@ export async function refreshAdminReportingSnapshot<T>(input: {
       throw new Error("Reporting authority changed during the refresh.");
     }
     const message = result.message?.trim().slice(0, SNAPSHOT_MESSAGE_LIMIT) || null;
-    if (
-      result.state === "partial" &&
-      result.degraded &&
-      (await recentReadySnapshot({
-        client: input.client,
-        family: input.family,
-        accountId: input.accountId,
-        from: input.from,
-        to: input.to,
-        authorityKey: input.authority.key,
-        now: Date.now(),
-      }))
-    ) {
+    const now = Date.now();
+    // The today guard: a single-day range on the current Lisbon day is the
+    // day in progress, and Windsor answers that day from replicas at
+    // different ingestion points, so two reads seconds apart disagree
+    // (measured 2026-09-15: 118.99 at 10:04:30, nothing at 10:05:30, 118.99
+    // again from 10:06:43; the cron leg in between rewrote the sheet with a
+    // total of 0.00). Truth for that day only grows and neither Windsor
+    // table overshoots, so the larger total is at least as true, and on
+    // equal spend the sheet with more clicks or conversions is the later
+    // state (sheetRegressed). Only the two campaign families carry those
+    // totals to compare, and only an answer that measures spend enters: an
+    // unavailable reload says the connection is gone, which no kept sheet
+    // should hide.
+    const guardsToday =
+      input.from === input.to &&
+      input.to === lisbonDay(now) &&
+      TODAY_GUARDED_FAMILIES.has(input.family) &&
+      result.state !== "unavailable";
+    const stored =
+      (result.state === "partial" && result.degraded !== undefined) || guardsToday
+        ? await storedSnapshot({
+            client: input.client,
+            family: input.family,
+            accountId: input.accountId,
+            from: input.from,
+            to: input.to,
+            authorityKey: input.authority.key,
+            withPayload: guardsToday,
+          })
+        : null;
+    if (result.state === "partial" && result.degraded && stored && recentReady(stored, now)) {
       // Completing here would replace a complete sheet with a dashed one
       // until the next successful leg. Recording the failure instead keeps
       // the ready payload and makes the row read "Last failure: ..." (0073).
@@ -502,6 +607,54 @@ export async function refreshAdminReportingSnapshot<T>(input: {
         p_error_message: message?.slice(0, 500) ?? null,
       });
       return { state: "failed", errorCode: result.degraded.code };
+    }
+    if (guardsToday && stored?.state === "ready") {
+      const storedTotals = snapshotTotals(input.family, stored.payload);
+      const reloadTotals = snapshotTotals(input.family, result.rows);
+      if (storedTotals && reloadTotals && sheetRegressed(reloadTotals, storedTotals)) {
+        // Completing the reload would print a smaller day over a larger one
+        // until the next leg happened to hit a fresher replica. The stored
+        // sheet is completed again instead, under this lease: the row keeps
+        // its payload, reads as succeeded now and records no failure. Nothing
+        // failed here (the provider answered, from behind), and recording
+        // one, as the keep-last-good rule above does for a degraded reload,
+        // made a routine kept sheet read as a degraded account everywhere a
+        // failure is read: the campaigns page marked the account partial,
+        // the analytics page dropped it from the stores running activity,
+        // the hourly leg answered 502 and the freshness gate re-read the
+        // store on every run. The message travels with the sheet unless it
+        // is a recorded failure's text, which this completion supersedes the
+        // way any completion does.
+        console.warn(
+          `Reporting snapshot kept today: ${input.family} ${input.accountId} ` +
+            `${input.from}..${input.to}: the stored sheet totals ` +
+            `${storedTotals.spend.toFixed(2)} spend and the reload ${reloadTotals.spend.toFixed(2)}.`,
+        );
+        const { data: kept, error: keptError } = await input.client.rpc(
+          "complete_admin_reporting_snapshot_refresh",
+          {
+            p_family: input.family,
+            p_scope_account_id: input.accountId,
+            p_from_day: input.from,
+            p_to_day: input.to,
+            p_authority_key: input.authority.key,
+            p_lease_token: leaseToken,
+            p_state: "ready",
+            p_payload: stored.payload as Json,
+            p_message: stored.last_error_code ? null : (stored.message ?? null),
+          },
+        );
+        if (keptError || kept !== true) {
+          failure = { state: "failed", errorCode: "snapshot_failed" };
+          throw new Error("The reporting snapshot completion was fenced.");
+        }
+        return {
+          state: "refreshed",
+          snapshotState: "ready",
+          refreshedAt: new Date().toISOString(),
+          kept: true,
+        };
+      }
     }
     const payload = JSON.parse(JSON.stringify(result.rows)) as Json;
     const { data: completed, error: completionError } = await input.client.rpc(
