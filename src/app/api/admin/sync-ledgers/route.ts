@@ -3,6 +3,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getSessionProfile } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/service";
 import {
+  PartialLedgerSync,
   purgeAdminAccountRevenue,
   syncCommissionLedger,
   syncRevenueShareLedger,
@@ -117,6 +118,19 @@ export async function POST(request: NextRequest) {
   return run({ force: true, client: supabase });
 }
 
+/**
+ * Every step this route runs after the commission ledger, in order. The ledger
+ * throws from inside the one try below, so a partial commission sync skips all
+ * of them, and the 502 body says which.
+ */
+const SKIPPED_BEHIND_THE_LEDGER = [
+  "revenue_share_ledger",
+  "hst_commission",
+  "hst_costs",
+  "daily_metrics_rollup",
+  "referral_rate_caches",
+] as const;
+
 async function run(
   opts: Parameters<typeof syncCommissionLedger>[0],
   billingOnly = false,
@@ -207,6 +221,46 @@ async function run(
     });
   } catch (error) {
     console.error("Ledger sync failed:", error);
+    // A run where most accounts booked and a few did not is a partial refresh,
+    // not a dead one. The hourly workflow treats 502 the way it already treats
+    // a degraded reporting leg, "did work, but not all of it", so a single
+    // transient Windsor timeout on one account stops emailing the owner a red
+    // X for a sync that booked everybody else. The failed stores and their
+    // reasons travel in the body, because a status alone tells nobody which
+    // client to chase.
+    //
+    // `booked > 0` is what separates that from a total Windsor outage. The
+    // ledger raises this class after running every account, so the failure
+    // list alone cannot tell one flaky client from all of them, and a run
+    // where nothing booked must stay the loud 500 that emails somebody.
+    //
+    // Nothing here is a full refresh. The commission ledger threw, so the
+    // revenue share, both HST steps, the rollup that folds supplier COGS into
+    // daily_metrics and the referral cache never ran, and a permanently broken
+    // account would skip them every hour. `skipped` says so out loud, since a
+    // 502 alone reads as "nearly everything worked".
+    //
+    // An exact period is the operator asking about one billing week, and that
+    // question has no partial answer: the billing screen must never say
+    // "updated" over a week that stayed stale, so it still gets the 500 it
+    // always got. So does any other error.
+    if (error instanceof PartialLedgerSync && !opts?.period && error.booked > 0) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: error.message,
+          bookedAccounts: error.booked,
+          failedAccounts: error.accounts.map((account) => ({
+            adAccountId: account.adAccountId,
+            storeName: account.storeName,
+            reason: account.message,
+          })),
+          skipped: SKIPPED_BEHIND_THE_LEDGER,
+          syncedAt: new Date().toISOString(),
+        },
+        { status: 502 },
+      );
+    }
     return NextResponse.json(
       {
         error:

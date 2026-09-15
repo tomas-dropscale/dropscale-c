@@ -1,8 +1,38 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
 vi.mock("../google-ads/client", () => ({ searchGoogleAdsAsAgency: vi.fn() }));
 
+const stubs = vi.hoisted(() => ({
+  ledgerStoreDomainsByAccount: vi.fn(),
+  decryptToken: vi.fn(),
+}));
+
+// commission-sync.ts reaches Supabase, Google and Windsor through the "@/"
+// alias, which the test runner does not resolve. The pure arithmetic keeps its
+// real implementation (importActual on the same file by relative path), so the
+// sync under test does the sums production does; only the edges are stubbed.
+vi.mock("@/lib/supabase/server", () => ({ createClient: vi.fn() }));
+vi.mock("@/lib/google-ads/crypto", () => ({ decryptToken: stubs.decryptToken }));
+vi.mock("@/lib/google-ads/client", () => ({ searchGoogleAds: vi.fn() }));
+vi.mock("@/lib/windsor/client", () => ({
+  fetchGoogleAdsDailyBreakdownForStore: vi.fn(),
+  normalizeGoogleAdsCustomerId: (value: string) => ({
+    customerId: value.replace(/\D/g, ""),
+  }),
+}));
+vi.mock("@/lib/google-ads/billing-start", async () =>
+  vi.importActual("../google-ads/billing-start"),
+);
+vi.mock("@/lib/finance/config", async () => vi.importActual("../finance/config"));
+vi.mock("@/lib/admin/commission-sync-bindings", () => ({
+  ledgerStoreDomainsByAccount: stubs.ledgerStoreDomainsByAccount,
+}));
+vi.mock("@/lib/admin/commission-sync-logic", async () =>
+  vi.importActual("./commission-sync-logic"),
+);
+
+import { PartialLedgerSync, syncCommissionLedger } from "./commission-sync";
 import {
   accountCommissionTermsForDate,
   billableGoogleMicros,
@@ -701,5 +731,238 @@ describe("sourceWentSilent", () => {
 
   it("reads numeric strings the way the ledger stores them", () => {
     expect(sourceWentSilent([], [{ gross_amount: "13.6612" }])).toBe(true);
+  });
+});
+
+describe("a forced ledger run that only partly synced", () => {
+  type SyncOpts = NonNullable<Parameters<typeof syncCommissionLedger>[0]>;
+  type Supa = NonNullable<SyncOpts["client"]>;
+  type Answer = { data: unknown; error: unknown };
+
+  const CLIENT = "aa000000-0000-4000-8000-000000000001";
+  const LARA = "aa000000-0000-4000-8000-000000000011";
+  const ITO = "aa000000-0000-4000-8000-000000000012";
+  const CLOSED = "aa000000-0000-4000-8000-000000000013";
+  const NO_BASELINE =
+    "Billing has not started: no immutable Google spend baseline exists.";
+
+  function account(
+    id: string,
+    storeName: string,
+    overrides: Record<string, unknown> = {},
+  ) {
+    return {
+      id,
+      client_id: CLIENT,
+      store_name: storeName,
+      google_ads_customer_id: "1234567890",
+      google_ads_refresh_token: null,
+      currency: "EUR",
+      ...overrides,
+    };
+  }
+
+  /**
+   * Just enough of PostgREST's builder to drive the per-account loop: every
+   * filter method returns itself, and awaiting the chain (or maybeSingle)
+   * yields whatever was registered for that table.
+   *
+   * Mutating calls are recorded instead of answered, so a test can prove that
+   * a run which ended in a partial-sync error still wrote nothing at all.
+   */
+  function fakeSupabase(tables: Record<string, Answer>) {
+    const writes: { table: string; method: string }[] = [];
+    const client = {
+      from(table: string) {
+        const answer = tables[table] ?? { data: [], error: null };
+        const chain: Record<string, unknown> = {};
+        for (const method of [
+          "select",
+          "in",
+          "not",
+          "eq",
+          "is",
+          "gt",
+          "gte",
+          "lte",
+          "order",
+          "limit",
+        ]) {
+          chain[method] = () => chain;
+        }
+        for (const method of ["insert", "update", "upsert", "delete"]) {
+          chain[method] = () => {
+            writes.push({ table, method });
+            return chain;
+          };
+        }
+        chain.maybeSingle = () => Promise.resolve(answer);
+        chain.then = (resolve: (value: Answer) => unknown) => resolve(answer);
+        return chain;
+      },
+    };
+    return { client: client as unknown as Supa, writes };
+  }
+
+  function tables(
+    accounts: unknown[],
+    extra: Record<string, Answer> = {},
+  ): Record<string, Answer> {
+    return {
+      commissions: { data: null, error: null },
+      revenue_sources: { data: { id: "source-1" }, error: null },
+      ad_accounts: { data: accounts, error: null },
+      profiles: { data: [], error: null },
+      ...extra,
+    };
+  }
+
+  /** A start and an end that closed long before any rolling window. */
+  function closedAccountTables(accounts: unknown[]): Record<string, Answer> {
+    return tables(accounts, {
+      ad_account_billing_starts: {
+        data: [
+          {
+            id: "start-closed",
+            ad_account_id: CLOSED,
+            google_ads_customer_id: "1234567890",
+            google_local_date: "2019-01-07",
+            google_time_zone: "UTC",
+            currency: "EUR",
+            baseline_cost_micros: "0",
+            captured_at: null,
+          },
+        ],
+        error: null,
+      },
+      ad_account_billing_ends: {
+        data: [
+          {
+            id: "end-closed",
+            ad_account_id: CLOSED,
+            billing_start_id: "start-closed",
+            google_ads_customer_id: "1234567890",
+            google_local_date: "2019-02-01",
+            google_time_zone: "UTC",
+            currency: "EUR",
+            end_cost_micros: "0",
+            captured_at: "2019-02-01T00:00:00.000Z",
+          },
+        ],
+        error: null,
+      },
+    });
+  }
+
+  async function run(registry: Record<string, Answer>, opts: SyncOpts) {
+    const { client, writes } = fakeSupabase(registry);
+    let thrown: unknown;
+    try {
+      await syncCommissionLedger({ ...opts, client });
+    } catch (error) {
+      thrown = error;
+    }
+    return { thrown, writes };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    stubs.decryptToken.mockResolvedValue("refresh-token");
+    stubs.ledgerStoreDomainsByAccount.mockResolvedValue({
+      storeDomainsByAccount: new Map(),
+      retiredBoundAccountIds: new Set(),
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("names the accounts that failed and reads as the sentence it always did", async () => {
+    const { thrown, writes } = await run(
+      tables([
+        account(LARA, "Lara Rovinj"),
+        account(ITO, "Miguel Casal - Ito -Tsuzuri"),
+      ]),
+      { force: true },
+    );
+
+    // The message is the one the hourly job has always emailed, character for
+    // character, so log lines and screens that quote it do not move.
+    expect(thrown).toBeInstanceOf(PartialLedgerSync);
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).name).toBe("PartialLedgerSync");
+    expect((thrown as Error).message).toBe(
+      `Google Ads sync incomplete — Lara Rovinj: ${NO_BASELINE} | ` +
+        `Miguel Casal - Ito -Tsuzuri: ${NO_BASELINE}`,
+    );
+    // And the same failures again as data, so a caller can name the stores
+    // without taking that sentence apart.
+    expect((thrown as PartialLedgerSync).accounts).toEqual([
+      { adAccountId: LARA, storeName: "Lara Rovinj", message: NO_BASELINE },
+      {
+        adAccountId: ITO,
+        storeName: "Miguel Casal - Ito -Tsuzuri",
+        message: NO_BASELINE,
+      },
+    ]);
+    // A failing account books nothing. The error says the run was partial; it
+    // must never be the thing that moved money.
+    expect(writes).toEqual([]);
+    // And it counted no booking, because there was none. Every account failed,
+    // which is the shape of a Windsor outage rather than a partial refresh,
+    // and the route needs that told apart from one flaky client.
+    expect((thrown as PartialLedgerSync).booked).toBe(0);
+  });
+
+  it("counts only the accounts that failed, not the ones with nothing to do", async () => {
+    // A Google account closed long before the rolling window is skipped whole:
+    // it is not a failure, and it must not appear in the partial report.
+    const { thrown } = await run(
+      closedAccountTables([
+        account(LARA, "Lara Rovinj"),
+        account(CLOSED, "Amelia Bristol", {
+          google_ads_refresh_token: "encrypted",
+        }),
+      ]),
+      { force: true },
+    );
+
+    expect((thrown as PartialLedgerSync).accounts).toEqual([
+      { adAccountId: LARA, storeName: "Lara Rovinj", message: NO_BASELINE },
+    ]);
+    expect((thrown as Error).message).toBe(
+      `Google Ads sync incomplete — Lara Rovinj: ${NO_BASELINE}`,
+    );
+    // It is not a booking either: an account with nothing to do wrote no
+    // window, so this run still completed none.
+    expect((thrown as PartialLedgerSync).booked).toBe(0);
+  });
+
+  it("throws nothing at all when every account is fine", async () => {
+    const { thrown, writes } = await run(
+      closedAccountTables([
+        account(CLOSED, "Amelia Bristol", {
+          google_ads_refresh_token: "encrypted",
+        }),
+      ]),
+      { force: true },
+    );
+
+    expect(thrown).toBeUndefined();
+    expect(writes).toEqual([]);
+  });
+
+  it("still swallows the same failures for a caller that did not force", async () => {
+    // Unchanged condition: a page-load sync must never take a finance screen
+    // down, so an unforced run logs the failures and returns.
+    const { thrown } = await run(
+      tables([account(LARA, "Lara Rovinj")]),
+      {},
+    );
+
+    expect(thrown).toBeUndefined();
   });
 });

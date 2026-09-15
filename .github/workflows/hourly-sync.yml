@@ -81,7 +81,15 @@ jobs:
             head -c 400 /tmp/body 2>/dev/null || true
             echo
             case "$code" in
-              200 | 502) ;; # 200 ok; 502 = partial refresh (budget/provider) — still did work
+              200) ;;
+              # 502 = partial refresh (budget/provider): it did work, but not
+              # all of it, so the run stays green. It is annotated all the same,
+              # because a green run with no trace is how a permanently broken
+              # account goes unnoticed for weeks. From sync-ledgers a 502 also
+              # means every step behind the commission ledger — revenue share,
+              # HST commission, supplier COGS, the daily rollup and the referral
+              # cache — was skipped this hour.
+              502) echo "::warning::/$path returned 502 — partial refresh. The body above names what did not update; repeated hours mean something is broken, not slow." ;;
               401 | 403) echo "::error::/$path was rejected ($code) — CRON_SECRET does not match the Worker's."; fail=1 ;;
               *) echo "::warning::/$path returned $code"; fail=1 ;;
             esac

@@ -291,6 +291,45 @@ export async function purgeAdminAccountRevenue(opts?: SyncOpts): Promise<void> {
   }
 }
 
+/** One account a run could not finish, and the reason it gave. */
+export type LedgerSyncFailure = {
+  adAccountId: string;
+  storeName: string;
+  message: string;
+};
+
+/**
+ * Some accounts booked and some did not.
+ *
+ * A forced run has always thrown when any account failed, and every caller
+ * could only read that throw as "the ledger did not sync". It is a different
+ * event from a run that did nothing: the accounts that answered are written,
+ * their windows are complete, and one transient Windsor timeout on one account
+ * should not make the hourly job report a dead sync for everybody.
+ *
+ * The message is built exactly as before, so log lines and screens read the
+ * same. The per-account detail rides along in `accounts` so a caller can name
+ * the stores that stayed stale without re-parsing that sentence.
+ *
+ * `booked` is what makes the word "partial" true rather than merely likely.
+ * The class is raised after every account has run, so failures alone cannot
+ * tell a bad hour for one client from a total Windsor outage; a run where
+ * nothing at all booked is not a partial refresh and callers must be free to
+ * treat it as the dead sync it is.
+ */
+export class PartialLedgerSync extends Error {
+  readonly accounts: LedgerSyncFailure[];
+  /** How many accounts finished and wrote a complete window in this run. */
+  readonly booked: number;
+
+  constructor(message: string, accounts: LedgerSyncFailure[], booked: number) {
+    super(message);
+    this.name = "PartialLedgerSync";
+    this.accounts = accounts;
+    this.booked = booked;
+  }
+}
+
 // Per-isolate memo so a burst of admin navigation doesn't even hit the
 // database to discover it has nothing to do.
 let lastRunAt = 0;
@@ -515,7 +554,8 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
       ],
     );
 
-    const failures: string[] = [];
+    const failures: LedgerSyncFailure[] = [];
+    let booked = 0;
     await Promise.all(
       billable.map(async (account) => {
         let marker:
@@ -1014,6 +1054,9 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
               "This refresh was superseded by a newer account or sync change.",
             );
           }
+          // Counted only here, past the completion proof: this account's rows
+          // are written and its window says so.
+          booked += 1;
         } catch (error) {
           if (
             marker &&
@@ -1084,11 +1127,11 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
             );
             return;
           }
-          failures.push(
-            `${account.store_name}: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          );
+          failures.push({
+            adAccountId: account.id,
+            storeName: account.store_name,
+            message: error instanceof Error ? error.message : String(error),
+          });
           console.error(`Commission sync failed for ${account.id}:`, error);
         }
       }),
@@ -1098,7 +1141,13 @@ export async function syncCommissionLedger(opts?: SyncOpts): Promise<void> {
     // decoration. Surface partial failure so the billing screen cannot say
     // "updated" while one client's Google account stayed stale.
     if (opts?.force && failures.length > 0) {
-      throw new Error(`Google Ads sync incomplete — ${failures.join(" | ")}`);
+      throw new PartialLedgerSync(
+        `Google Ads sync incomplete — ${failures
+          .map((failure) => `${failure.storeName}: ${failure.message}`)
+          .join(" | ")}`,
+        failures,
+        booked,
+      );
     }
 
     lastRunAt = Date.now();

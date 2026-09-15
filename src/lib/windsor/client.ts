@@ -19,6 +19,20 @@ const ONBOARD_ORIGIN = "https://onboard.windsor.ai";
 const CONNECTORS_ORIGIN = "https://connectors.windsor.ai";
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 const AUTHORIZATION_REQUEST_TIMEOUT_MS = 25_000;
+/**
+ * The waits between repeated attempts, so at most two retries and three
+ * attempts in all. The whole ladder stays inside the hourly sync's budget:
+ * the same Windsor workspace now serves three reporting legs plus the ledger
+ * sync, and a single ten second timeout on one account used to fail the run
+ * for every account.
+ */
+const RETRY_DELAYS_MS = [400, 1_200] as const;
+/**
+ * The longest wait this process can sit out between two attempts. A
+ * Retry-After hint above it is not shortened to fit, it ends the retrying:
+ * see retryDelayMs.
+ */
+const MAX_RETRY_WAIT_MS = 3_000;
 const MAX_JSON_CHARS = 1_000_000;
 const MAX_PRODUCT_JSON_CHARS = 8_000_000;
 const MAX_SECRET_CHARS = 4_096;
@@ -195,10 +209,19 @@ export type WindsorRequestOptions = {
   fetcher?: typeof fetch;
   signal?: AbortSignal;
   timeoutMs?: number;
+  /** Only the wait between retried attempts; tests replace it to run instantly. */
+  sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
 };
 
 type WindsorInternalRequestOptions = WindsorRequestOptions & {
   maxJsonChars?: number;
+  /**
+   * How many times one failed request may be repeated. Two callers set it to
+   * 0: the authorization poll, whose own loop is already the ladder, and the
+   * co-user link generator, which is the one request here that changes state
+   * upstream and must never be sent twice.
+   */
+  maxRetries?: number;
 };
 
 export type WindsorPollOptions = WindsorRequestOptions & {
@@ -666,18 +689,16 @@ function timedSignal(external: AbortSignal | undefined, timeoutMs: number) {
   };
 }
 
-async function requestJson(
+/**
+ * Exactly one Windsor request: its own fresh timeout, its own classification,
+ * no waiting and no repetition. Every failure it can throw is a WindsorError.
+ */
+async function attemptJson(
   url: URL,
-  options: WindsorInternalRequestOptions = {},
+  options: WindsorInternalRequestOptions,
+  timeoutMs: number,
+  maxJsonChars: number,
 ): Promise<unknown> {
-  const apiKey = requireApiKey();
-  const timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
-  const maxJsonChars = options.maxJsonChars ?? MAX_JSON_CHARS;
-  if (!Number.isFinite(timeoutMs) || timeoutMs < 250 || timeoutMs > 30_000) {
-    throw new WindsorError("invalid_request", "Windsor request timeout is invalid.", 400);
-  }
-
-  url.searchParams.set("api_key", apiKey);
   const timeout = timedSignal(options.signal, timeoutMs);
   try {
     const response = await (options.fetcher ?? fetch)(url, {
@@ -745,9 +766,182 @@ async function requestJson(
 }
 
 /**
+ * True only for a failure that says nothing at all about the data: nothing
+ * answered before the timeout, the connection dropped, Windsor answered 5xx,
+ * or Windsor answered 429. Sending the same request again is the only way to
+ * learn what the answer was.
+ *
+ * "upstream_unavailable" also carries the refused redirect, which is a real
+ * answer from a reachable Windsor and would be refused identically a second
+ * later, so an upstream status below 500 stays a first-attempt failure.
+ */
+function isTransientWindsorFailure(error: unknown): error is WindsorError {
+  if (!(error instanceof WindsorError)) return false;
+  if (error.code === "rate_limited") return true;
+  if (error.code !== "upstream_unavailable") return false;
+  return error.upstreamStatus === null || error.upstreamStatus >= 500;
+}
+
+/**
+ * How long to wait before repeating a failed attempt, or null when Windsor
+ * asked for a wait this process cannot sit out, which ends the retrying.
+ *
+ * A 429 is not a transport accident, it is the provider naming a quota, so
+ * asking again inside the window it named puts three times the load on the
+ * one resource that is already saturated. The same workspace serves three
+ * reporting legs and the ledger sync, and the hourly schedule now fires twice
+ * an hour, so that burst is not theoretical. A hint longer than
+ * MAX_RETRY_WAIT_MS is therefore obeyed by not asking again at all: the
+ * caller gets the rate_limited failure it got before this read was ever
+ * retried.
+ *
+ * The ladder is the floor, never the ceiling. "Retry-After: 0", and an HTTP
+ * date already in the past, both arrive here as 0, and waiting zero would
+ * fire three requests back to back at a server that just said stop. Waiting
+ * longer than asked is always compliant; waiting less never is.
+ */
+function retryDelayMs(error: WindsorError, attempt: number): number | null {
+  const ladder = RETRY_DELAYS_MS[Math.min(attempt, RETRY_DELAYS_MS.length - 1)];
+  if (error.retryAfterMs === null) return ladder;
+  if (error.retryAfterMs > MAX_RETRY_WAIT_MS) return null;
+  return Math.max(error.retryAfterMs, ladder);
+}
+
+/** Every key a Windsor answer is known to carry its rows under. */
+const ROW_KEYS = ["data", "results", "rows", "accounts"] as const;
+
+/**
+ * True when a parsed answer carries rows and carries none: an empty array, or
+ * an object whose row-bearing keys are all empty arrays. An answer with no
+ * row-bearing key at all (the co-user link, for one) is not a row answer and
+ * is never described as empty.
+ */
+function answerHasNoRows(payload: unknown): boolean {
+  if (Array.isArray(payload)) return payload.length === 0;
+  const record = asRecord(payload);
+  if (!record) return false;
+  const carried = ROW_KEYS.map((key) => record[key]).filter((value) =>
+    Array.isArray(value),
+  ) as unknown[][];
+  return carried.length > 0 && carried.every((rows) => rows.length === 0);
+}
+
+/**
+ * The wait between two attempts. It resolves early when the caller cancels, so
+ * a cancelled request does not sit out the full delay, and it never rejects:
+ * the loop below is the single place that decides what a cancel throws.
+ */
+function defaultRetrySleep(
+  milliseconds: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    const finish = () => {
+      signal?.removeEventListener("abort", stopEarly);
+      resolve();
+    };
+    const timer = setTimeout(finish, milliseconds);
+    const stopEarly = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", stopEarly);
+      resolve();
+    };
+    signal?.addEventListener("abort", stopEarly, { once: true });
+  });
+}
+
+/**
+ * One Windsor read, repeated only when the attempt failed in a way that says
+ * nothing about the data. A timeout, a dropped connection, a 5xx and a 429 are
+ * transient by construction, so the identical request is sent again, at most
+ * twice (three attempts in all), waiting 400 ms and then 1200 ms, or longer
+ * when Windsor names a wait (retryDelayMs). Each attempt gets its own fresh
+ * timeout, exactly as the single attempt did. An externally aborted signal
+ * ends the loop at once, with no further attempt: the caller that wanted the
+ * answer is already gone.
+ *
+ * Nothing else is repeated. A cancelled request, a rejected key, a forbidden
+ * workspace, a missing resource, a rejected request and a malformed body are
+ * all answers of a kind, and asking again returns the same one.
+ *
+ * The retry is invisible to results. A successful attempt returns exactly what
+ * one attempt returned before, and after the last failed attempt the very same
+ * WindsorError is thrown, with the same code, message and status, so every
+ * caller that classifies Windsor errors keeps classifying them identically.
+ *
+ * An answer is never retried, however empty it looks. A closed Google account,
+ * or one that simply had no activity, legitimately reports no rows, and that
+ * emptiness is a measurement the ledger and the client portal depend on.
+ * Reading "no rows" as "ask again" is how a booked day would be asked about
+ * until some replica agreed to erase it. Only a failed attempt is repeated.
+ *
+ * And a repeated attempt may not answer with nothing. This is the other half
+ * of the same rule, and the one the retry itself creates. A retry is only ever
+ * sent while Windsor is demonstrably degraded, which is exactly the state in
+ * which a replica behind the others answers a healthy-looking 200 carrying no
+ * rows. Without this, a read that used to throw, and whose throw is what makes
+ * the reporting merge keep the stored Google family, would instead succeed
+ * empty and write zero over closed days of ad spend that daily_metrics, the
+ * client portal and the P&L all read. So an empty answer that arrives after a
+ * failed attempt is not treated as a measurement: the transient failure that
+ * prompted the retry is thrown instead, which is precisely what this read did
+ * before it was ever retried. An empty answer on the FIRST attempt is
+ * untouched, because nothing about it is in doubt.
+ */
+async function requestJson(
+  url: URL,
+  options: WindsorInternalRequestOptions = {},
+): Promise<unknown> {
+  const apiKey = requireApiKey();
+  const timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const maxJsonChars = options.maxJsonChars ?? MAX_JSON_CHARS;
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 250 || timeoutMs > 30_000) {
+    throw new WindsorError("invalid_request", "Windsor request timeout is invalid.", 400);
+  }
+
+  url.searchParams.set("api_key", apiKey);
+  const maxRetries = options.maxRetries ?? RETRY_DELAYS_MS.length;
+  const sleep = options.sleep ?? defaultRetrySleep;
+  /** The transient failure the attempt now running is trying to recover from. */
+  let recovering: WindsorError | null = null;
+  for (let attempt = 0; ; attempt += 1) {
+    let payload: unknown;
+    try {
+      payload = await attemptJson(url, options, timeoutMs, maxJsonChars);
+    } catch (error) {
+      if (
+        attempt >= maxRetries ||
+        !isTransientWindsorFailure(error) ||
+        options.signal?.aborted
+      ) {
+        throw error;
+      }
+      const delay = retryDelayMs(error, attempt);
+      if (delay === null) throw error;
+      recovering = error;
+      await sleep(delay, options.signal);
+      if (options.signal?.aborted) throw error;
+      continue;
+    }
+    if (recovering && answerHasNoRows(payload)) throw recovering;
+    return payload;
+  }
+}
+
+/**
  * Generates a Windsor co-user link restricted to Google Ads. The API key is
  * attached only to the server-to-server request; the returned URL contains a
  * separate, temporary co-user token.
+ *
+ * Never repeated. Every other read here asks Windsor what it already holds,
+ * so asking twice costs a request; this one is a GET that MINTS a token, and
+ * a timeout is no evidence that the mint did not happen upstream. Three
+ * attempts would leave two orphan authorizations for
+ * finishAbandonedWindsorAuthorizations to close, against whatever link quota
+ * Windsor applies. It is also the slowest request in the module, at 25 s, and
+ * the only one a person is sitting in front of on the onboarding screen: the
+ * ladder would make them wait up to 76 s to be told it failed.
  */
 export async function createGoogleAdsAuthorization(
   options: WindsorRequestOptions = {},
@@ -758,6 +952,7 @@ export async function createGoogleAdsAuthorization(
     await requestJson(url, {
       ...options,
       timeoutMs: options.timeoutMs ?? AUTHORIZATION_REQUEST_TIMEOUT_MS,
+      maxRetries: 0,
     }),
   );
   if (!payload || typeof payload.url !== "string") {
@@ -800,15 +995,22 @@ export async function createGoogleAdsAuthorization(
   };
 }
 
-/** List only the accounts completed through one V2 co-user link. */
-export async function listLinkedGoogleAdsAccounts(
+async function readLinkedGoogleAdsAccounts(
   accessToken: string,
-  options: WindsorRequestOptions = {},
+  options: WindsorInternalRequestOptions,
 ): Promise<WindsorGoogleAdsAccount[]> {
   const url = new URL("/api/team/co-user-linked-accounts/", ONBOARD_ORIGIN);
   url.searchParams.set("ds_id", WINDSOR_DATASOURCE);
   url.searchParams.set("access_token", requireSecret(accessToken, "Windsor access token"));
   return normalizeAccounts(await requestJson(url, options), ["data", "accounts", "results"]);
+}
+
+/** List only the accounts completed through one V2 co-user link. */
+export async function listLinkedGoogleAdsAccounts(
+  accessToken: string,
+  options: WindsorRequestOptions = {},
+): Promise<WindsorGoogleAdsAccount[]> {
+  return readLinkedGoogleAdsAccounts(accessToken, options);
 }
 
 /** Read-only workspace inventory used by health checks and admin diagnostics. */
@@ -887,7 +1089,15 @@ export async function pollLinkedGoogleAdsAccounts(
     }
 
     try {
-      const accounts = await listLinkedGoogleAdsAccounts(accessToken, options);
+      // This loop is the ladder for this read: it already waits between
+      // attempts, honours a Retry-After and stops at maxAttempts. Nesting the
+      // request-level ladder inside it would multiply the bounded wait a
+      // person is sitting through on the authorization page, so each poll
+      // attempt stays exactly one request, as it has always been.
+      const accounts = await readLinkedGoogleAdsAccounts(accessToken, {
+        ...options,
+        maxRetries: 0,
+      });
       if (accounts.length > 0) {
         return { status: "connected", accounts, attempts: attempt };
       }

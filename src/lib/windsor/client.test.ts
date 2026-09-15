@@ -42,6 +42,9 @@ function mockFetch(...responses: Array<Response | Error>) {
   return fetcher;
 }
 
+/** The injectable wait between retried attempts, so a retry costs no real time. */
+const instantly = async () => {};
+
 function requestedUrl(fetcher: ReturnType<typeof vi.fn>, call = 0) {
   const input = fetcher.mock.calls[call]?.[0];
   return input instanceof URL ? input : new URL(String(input));
@@ -303,15 +306,20 @@ describe("Windsor Google Ads server adapter", () => {
   });
 
   it("redacts even a network error that contains the authenticated URL", async () => {
-    const fetcher = mockFetch(
+    // A dropped connection is retried, so every attempt fails the same way and
+    // the last one is what the caller sees.
+    const dropped = () =>
       new Error(
         `fetch https://connectors.windsor.ai/google_ads?api_key=${API_KEY} failed`,
-      ),
-    );
+      );
+    const fetcher = mockFetch(dropped(), dropped(), dropped());
 
     let error: unknown;
     try {
-      await probeGoogleAdsCapabilities({ fetcher: fetcher as typeof fetch });
+      await probeGoogleAdsCapabilities({
+        fetcher: fetcher as typeof fetch,
+        sleep: instantly,
+      });
     } catch (caught) {
       error = caught;
     }
@@ -2150,10 +2158,17 @@ describe("Windsor landing pages", () => {
   });
 
   it("maps upstream failures the way every other read does", async () => {
-    const throttled = mockFetch(new Response("slow down", { status: 429 }));
+    // A throttle and a dropped connection are retried, so each attempt is
+    // given the same failure and the caller still sees that exact failure.
+    const throttled = mockFetch(
+      new Response("slow down", { status: 429 }),
+      new Response("slow down", { status: 429 }),
+      new Response("slow down", { status: 429 }),
+    );
     await expect(
       fetchGoogleAdsLandingPages("123-456-7890", "2026-08-12", "2026-08-12", {
         fetcher: throttled as typeof fetch,
+        sleep: instantly,
       }),
     ).rejects.toMatchObject({ code: "rate_limited", status: 429, upstreamStatus: 429 });
 
@@ -2164,10 +2179,15 @@ describe("Windsor landing pages", () => {
       }),
     ).rejects.toMatchObject({ code: "forbidden", status: 502, upstreamStatus: 403 });
 
-    const network = mockFetch(new TypeError("fetch failed"));
+    const network = mockFetch(
+      new TypeError("fetch failed"),
+      new TypeError("fetch failed"),
+      new TypeError("fetch failed"),
+    );
     await expect(
       fetchGoogleAdsLandingPages("123-456-7890", "2026-08-12", "2026-08-12", {
         fetcher: network as typeof fetch,
+        sleep: instantly,
       }),
     ).rejects.toBeInstanceOf(WindsorError);
 
@@ -2237,5 +2257,317 @@ describe("Single-day hourly aggregation money contract", () => {
     expect(rows[0].spend).toBe(13.333);
     expect(rows[0].conversionValue).toBe(13.333);
     expect(rows[0].conversions).toBe(0.2);
+  });
+});
+
+describe("Retrying a transient Windsor failure", () => {
+  beforeEach(() => {
+    vi.stubEnv("WINDSOR_API_KEY", API_KEY);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  /** What a fetch rejects with when the request timeout aborts it. */
+  const timedOut = () => new DOMException("The operation was aborted.", "AbortError");
+
+  const ONE_DAY = {
+    date: "2026-09-14",
+    account_id: "123-456-7890",
+    account_currency_code: "EUR",
+    account_time_zone: "Europe/Lisbon",
+    spend: 12.5,
+    impressions: 100,
+    clicks: 10,
+    conversions: 1,
+    conversion_value: 40,
+  };
+  const ONE_DAY_READ = {
+    date: "2026-09-14",
+    accountId: "123-456-7890",
+    customerId: "1234567890",
+    currency: "EUR",
+    timeZone: "Europe/Lisbon",
+    spend: 12.5,
+    impressions: 100,
+    clicks: 10,
+    conversions: 1,
+    conversionValue: 40,
+  };
+
+  /** A closed range, so exactly one request per read and no today window. */
+  function readTwoDays(options: {
+    fetcher: unknown;
+    sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
+    signal?: AbortSignal;
+  }) {
+    const { fetcher, ...rest } = options;
+    return fetchGoogleAdsDailyBreakdown("123-456-7890", "2026-09-14", "2026-09-15", {
+      fetcher: fetcher as typeof fetch,
+      ...rest,
+    });
+  }
+
+  it("retries a timed out request and returns exactly what one attempt returns", async () => {
+    const fetcher = mockFetch(timedOut(), jsonResponse({ data: [ONE_DAY] }));
+    const sleep = vi.fn().mockResolvedValue(undefined);
+
+    await expect(readTwoDays({ fetcher, sleep })).resolves.toEqual([ONE_DAY_READ]);
+
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledTimes(1);
+    expect(sleep).toHaveBeenNthCalledWith(1, 400, undefined);
+    expect(requestedUrl(fetcher, 1).searchParams.get("date_from")).toBe("2026-09-14");
+    expect(requestedUrl(fetcher, 1).searchParams.get("api_key")).toBe(API_KEY);
+  });
+
+  it("gives up after three attempts with the error one attempt throws today", async () => {
+    const fetcher = mockFetch(timedOut(), timedOut(), timedOut());
+    const sleep = vi.fn().mockResolvedValue(undefined);
+
+    let error: unknown;
+    try {
+      await readTwoDays({ fetcher, sleep });
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(WindsorError);
+    expect(error).toMatchObject({
+      code: "upstream_unavailable",
+      status: 502,
+      upstreamStatus: null,
+      message: "Windsor could not be reached before the request timeout.",
+    });
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(sleep.mock.calls.map(([milliseconds]) => milliseconds)).toEqual([400, 1_200]);
+  });
+
+  it("retries a 5xx but never a refused redirect", async () => {
+    const failing = mockFetch(
+      new Response("boom", { status: 503 }),
+      jsonResponse({ data: [ONE_DAY] }),
+    );
+    await expect(
+      readTwoDays({ fetcher: failing, sleep: instantly }),
+    ).resolves.toEqual([ONE_DAY_READ]);
+    expect(failing).toHaveBeenCalledTimes(2);
+
+    const redirected = mockFetch(
+      new Response(null, {
+        status: 302,
+        headers: { location: "https://attacker.invalid/capture" },
+      }),
+      jsonResponse({ data: [ONE_DAY] }),
+    );
+    await expect(
+      readTwoDays({ fetcher: redirected, sleep: instantly }),
+    ).rejects.toMatchObject({ code: "upstream_unavailable", upstreamStatus: 302 });
+    expect(redirected).toHaveBeenCalledTimes(1);
+  });
+
+  it("waits exactly as long as a 429 asked for, when it can", async () => {
+    const fetcher = mockFetch(
+      jsonResponse({ error: "quota" }, { status: 429, headers: { "retry-after": "2" } }),
+      jsonResponse({ error: "quota" }, { status: 429, headers: { "retry-after": "3" } }),
+      jsonResponse({ data: [ONE_DAY] }),
+    );
+    const sleep = vi.fn().mockResolvedValue(undefined);
+
+    await expect(readTwoDays({ fetcher, sleep })).resolves.toEqual([ONE_DAY_READ]);
+
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(sleep.mock.calls.map(([milliseconds]) => milliseconds)).toEqual([2_000, 3_000]);
+  });
+
+  it.each([
+    ["Retry-After: 0", "0"],
+    ["an HTTP date already in the past", "Thu, 01 Jan 2026 00:00:00 GMT"],
+  ])("never fires back to back over %s", async (_label, hint) => {
+    // Both hints mean "you may go now". The ladder is the floor, never the
+    // ceiling: three requests with no wait at all is precisely what a server
+    // answering 429 is asking this client to stop doing.
+    const throttled = () =>
+      jsonResponse({ error: "quota" }, { status: 429, headers: { "retry-after": hint } });
+    const fetcher = mockFetch(throttled(), throttled(), jsonResponse({ data: [ONE_DAY] }));
+    const sleep = vi.fn().mockResolvedValue(undefined);
+
+    await expect(readTwoDays({ fetcher, sleep })).resolves.toEqual([ONE_DAY_READ]);
+
+    expect(sleep.mock.calls.map(([milliseconds]) => milliseconds)).toEqual([400, 1_200]);
+  });
+
+  it("stops asking rather than retry inside a wait it cannot sit out", async () => {
+    // A 429 is Windsor naming a quota, not a transport accident. Asking again
+    // after 3 s when it said 45 would put three times the load on the one
+    // resource already saturated, so the hint ends the retrying instead.
+    const fetcher = mockFetch(
+      jsonResponse({ error: "quota" }, { status: 429, headers: { "retry-after": "45" } }),
+      jsonResponse({ data: [ONE_DAY] }),
+    );
+    const sleep = vi.fn().mockResolvedValue(undefined);
+
+    await expect(readTwoDays({ fetcher, sleep })).rejects.toMatchObject({
+      code: "rate_limited",
+      status: 429,
+      upstreamStatus: 429,
+    });
+
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["a rejected server key", new Response("no", { status: 401 }), "authentication_failed"],
+    ["a forbidden workspace", new Response("no", { status: 403 }), "forbidden"],
+    ["a missing resource", new Response("no", { status: 404 }), "not_found"],
+    ["a rejected request", new Response("no", { status: 400 }), "invalid_request"],
+    ["a malformed body", new Response("{not json", { status: 200 }), "invalid_response"],
+  ])("never repeats %s", async (_label, response, code) => {
+    const fetcher = mockFetch(response, jsonResponse({ data: [ONE_DAY] }));
+    const sleep = vi.fn().mockResolvedValue(undefined);
+
+    await expect(readTwoDays({ fetcher, sleep })).rejects.toMatchObject({ code });
+
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("never retries an answer that reports nothing", async () => {
+    // A closed Google account legitimately reports no rows. Asking again would
+    // be the first step towards rewriting a booked day.
+    const fetcher = mockFetch(jsonResponse({ data: [] }), jsonResponse({ data: [ONE_DAY] }));
+    const sleep = vi.fn().mockResolvedValue(undefined);
+
+    await expect(readTwoDays({ fetcher, sleep })).resolves.toEqual([]);
+
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("refuses an empty answer that only arrived after a timed out attempt", async () => {
+    // Windsor is demonstrably degraded at this instant: that is the only
+    // reason a second attempt exists. A replica behind the others answering
+    // 200 with no rows here is not a measurement. The reporting merge reads
+    // "no rows" for a closed day as zero and writes it over booked ad spend,
+    // and the failure is exactly what makes it keep the stored figures
+    // instead. So the failure stands, as it did before this read was retried.
+    const fetcher = mockFetch(timedOut(), jsonResponse({ data: [] }));
+    const sleep = vi.fn().mockResolvedValue(undefined);
+
+    await expect(readTwoDays({ fetcher, sleep })).rejects.toMatchObject({
+      code: "upstream_unavailable",
+      status: 502,
+      message: "Windsor could not be reached before the request timeout.",
+    });
+
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses an empty answer that only arrived after a throttled attempt", async () => {
+    // The same rule, and the caller still sees the failure it would have seen:
+    // the throttle, classified exactly as one attempt classified it.
+    const fetcher = mockFetch(
+      new Response("slow down", { status: 429 }),
+      jsonResponse({ data: [] }),
+    );
+
+    await expect(readTwoDays({ fetcher, sleep: instantly })).rejects.toMatchObject({
+      code: "rate_limited",
+      status: 429,
+      upstreamStatus: 429,
+    });
+
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a recovered answer that actually carries rows", async () => {
+    // The guard above is about emptiness alone. A retry that recovers real
+    // rows is the whole point and returns them untouched.
+    const fetcher = mockFetch(timedOut(), jsonResponse({ data: [ONE_DAY] }));
+
+    await expect(
+      readTwoDays({ fetcher, sleep: instantly }),
+    ).resolves.toEqual([ONE_DAY_READ]);
+  });
+
+  it("never repeats the request that mints a co-user link", async () => {
+    // A GET that changes state upstream: a timeout is no evidence the link was
+    // not created, so three attempts would leave two orphan authorizations
+    // behind. It is also the slowest request here, at 25 s, and the only one a
+    // person is sitting in front of.
+    const fetcher = mockFetch(
+      timedOut(),
+      jsonResponse({
+        url:
+          `https://onboard.windsor.ai/token-login?access_token=${ACCESS_TOKEN}` +
+          "&allowed_sources=google_ads",
+      }),
+    );
+    const sleep = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      createGoogleAdsAuthorization({ fetcher: fetcher as typeof fetch, sleep }),
+    ).rejects.toMatchObject({ code: "upstream_unavailable" });
+
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("stops at once when the caller has already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const fetcher = mockFetch(timedOut(), jsonResponse({ data: [ONE_DAY] }));
+    const sleep = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      readTwoDays({ fetcher, sleep, signal: controller.signal }),
+    ).rejects.toMatchObject({ code: "aborted", status: 499 });
+
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("gives every attempt its own fresh timeout", async () => {
+    vi.useFakeTimers();
+    let attempts = 0;
+    const fetcher = vi.fn((_input: URL | RequestInfo, init?: RequestInit) => {
+      attempts += 1;
+      if (attempts > 1) return Promise.resolve(jsonResponse({ data: [ONE_DAY] }));
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          "abort",
+          () => reject(new DOMException("Aborted", "AbortError")),
+          { once: true },
+        );
+      });
+    });
+
+    const pending = readTwoDays({ fetcher, sleep: instantly });
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    await expect(pending).resolves.toEqual([ONE_DAY_READ]);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("leaves the authorization poll to its own ladder", async () => {
+    const fetcher = mockFetch(timedOut());
+    const sleep = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      pollLinkedGoogleAdsAccounts({
+        accessToken: ACCESS_TOKEN,
+        maxAttempts: 3,
+        sleep,
+        fetcher: fetcher as typeof fetch,
+      }),
+    ).rejects.toMatchObject({ code: "upstream_unavailable" });
+
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
   });
 });
