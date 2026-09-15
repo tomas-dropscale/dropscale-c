@@ -43,7 +43,7 @@ import {
   type ShopifyLandingSessionsRow,
   type ShopifyReportingAdapter,
 } from "@/lib/reporting/shopify";
-import { collectionHandleFromUrl, decodePercentEscapes } from "@/lib/finance/rev-share";
+import { collectionHandleFromUrl, decodePercentEscapes, normalizePath } from "@/lib/finance/rev-share";
 import { loadCostContext } from "@/lib/cogs/context";
 import { orderCogs, type CostContext } from "@/lib/cogs/engine";
 import { fxDailyRates, rateOn } from "@/lib/shopify/fx";
@@ -115,6 +115,41 @@ export type AdminAnalyticsCampaignTimelinePoint = {
   collectionUnits?: number | null;
   collectionOrders?: number | null;
   collectionAddedToCart?: number | null;
+  /**
+   * How the collection's sales arrived. The campaign advertises a collection
+   * PAGE, so the sheet splits its own total by whether the buyer came in
+   * through that page: collectionLanded* is the part of collectionRevenue,
+   * Units and Orders bought by customers whose FIRST visit landed there,
+   * collectionUnknown* is the part whose first visit Shopify does not report
+   * at all, and what is left of the total is the part measured to have
+   * arrived some other way.
+   *
+   * collectionBrought* is the money the page made that the collection total
+   * never sees: orders that landed on the page and bought NOTHING of the
+   * collection, counted whole, the way an order is read everywhere else.
+   * Those orders are outside collectionRevenue by design and must never be
+   * added to it. Both mixes are real and vary enormously by store: one store
+   * has 95% of a collection's revenue from people who landed on its page,
+   * another has 100% of it from people who never saw that page.
+   *
+   * Shared between campaigns landing on the same page, and null, exactly as
+   * collectionRevenue is.
+   */
+  collectionLandedRevenue?: number | null;
+  collectionLandedUnits?: number | null;
+  collectionLandedOrders?: number | null;
+  /**
+   * The part of the same total whose arrival was never measured: Shopify
+   * reports no customer journey for the order, so it neither landed on the
+   * page nor is known to have come in elsewhere. It is its own figure and not
+   * folded into either, because the field can be absent for a whole store or
+   * an older period, and a sheet that hands those sales to "found the items
+   * another way" claims the advertised page did nothing on no evidence at all.
+   */
+  collectionUnknownRevenue?: number | null;
+  collectionUnknownOrders?: number | null;
+  collectionBroughtRevenue?: number | null;
+  collectionBroughtOrders?: number | null;
   /** Cost of the collection units attributed here, from the store's product costs; null when costs could not be read. */
   cogs?: number | null;
   googleRevenue: number;
@@ -1717,6 +1752,16 @@ function campaignFamily(
                   collectionRevenue: figures ? figures.revenue : nothing(salesKnown),
                   collectionUnits: figures ? figures.units : nothing(salesKnown),
                   collectionOrders: figures ? figures.orders : nothing(salesKnown),
+                  // How the same total arrived, and what the page brought in
+                  // beside it: read from the orders, so they are known
+                  // exactly when the sales are.
+                  collectionLandedRevenue: figures ? figures.landedRevenue : nothing(salesKnown),
+                  collectionLandedUnits: figures ? figures.landedUnits : nothing(salesKnown),
+                  collectionLandedOrders: figures ? figures.landedOrders : nothing(salesKnown),
+                  collectionUnknownRevenue: figures ? figures.unknownRevenue : nothing(salesKnown),
+                  collectionUnknownOrders: figures ? figures.unknownOrders : nothing(salesKnown),
+                  collectionBroughtRevenue: figures ? figures.broughtRevenue : nothing(salesKnown),
+                  collectionBroughtOrders: figures ? figures.broughtOrders : nothing(salesKnown),
                   collectionAddedToCart: figures ? figures.addedToCart : nothing(landingKnown),
                   cogs: figures ? figures.cogs : nothing(cogsKnown),
                 };
@@ -1725,6 +1770,13 @@ function campaignFamily(
                 collectionRevenue: null,
                 collectionUnits: null,
                 collectionOrders: null,
+                collectionLandedRevenue: null,
+                collectionLandedUnits: null,
+                collectionLandedOrders: null,
+                collectionUnknownRevenue: null,
+                collectionUnknownOrders: null,
+                collectionBroughtRevenue: null,
+                collectionBroughtOrders: null,
                 collectionAddedToCart: null,
                 cogs: null,
               }),
@@ -2037,6 +2089,35 @@ export type CampaignCollectionDay = {
   units: number | null;
   /** Orders holding at least one collection item; null with revenue. */
   orders: number | null;
+  /**
+   * The same three figures restricted to the orders whose customer FIRST
+   * landed on the collection's own page: the part of the total the advertised
+   * page can be said to have carried. null with revenue.
+   */
+  landedRevenue: number | null;
+  landedUnits: number | null;
+  landedOrders: number | null;
+  /**
+   * The part of the total the split cannot speak for: Shopify reports no
+   * customer journey for the order, so where it came in was never measured.
+   * Kept apart from the landed figures rather than left to be inferred from
+   * them, so what is left of the total is only the orders actually measured
+   * to have arrived some other way. There is no unknownUnits: the sheet
+   * prints money and orders for this part, and a units figure nobody reads
+   * would still have to be carried through every sum. null with revenue.
+   */
+  unknownRevenue: number | null;
+  unknownOrders: number | null;
+  /**
+   * Orders that landed on the collection's page and bought NOTHING of the
+   * collection, counted whole (what the customer paid, less what came back),
+   * because no line of theirs belongs to the collection and the sheet has no
+   * other honest way to size them. This is money the page made that the
+   * collection total does not contain, so it is kept apart from revenue,
+   * units and orders and never added to them. null with revenue.
+   */
+  broughtRevenue: number | null;
+  broughtOrders: number | null;
   /** null when the landing sessions could not be read. */
   addedToCart: number | null;
   /** null when the store's costs could not be read. */
@@ -2198,6 +2279,33 @@ async function mapWithConcurrency<T, R>(
  * sheet does not follow: read that way, the sheet over-read the client's
  * figures by 40% and more.
  *
+ * That total is then split by HOW the sale arrived, because the campaign
+ * advertises a collection PAGE and the owner wants to know whether the page
+ * is doing the work. Each order is classified by the page its customer first
+ * landed on: landedRevenue, landedUnits and landedOrders are the part of the
+ * same total bought by customers who landed on /collections/<handle> (or a
+ * page under it). Measured on production, the mix is nothing like uniform:
+ * one store's collection took 95% of its revenue from people who landed on
+ * its page, while another's took every last sale from people who never saw
+ * it, so neither path can be assumed away.
+ *
+ * unknownRevenue and unknownOrders are the third state, and the reason the
+ * split cannot be read as a straight two-way one: Shopify reports no customer
+ * journey for plenty of orders (and can report none for a whole store or an
+ * older period), and such an order landed nowhere the sheet can see. It is
+ * counted apart so that what is left of the total after landed and unknown is
+ * only the orders measured to have arrived some other way, rather than every
+ * order the journey field failed to describe.
+ *
+ * broughtRevenue and broughtOrders are the third figure, and the reason the
+ * split is worth having: orders that landed on the collection page and
+ * bought NOTHING of the collection. They hold no line the sheet could read,
+ * so they are counted whole - what the customer paid less what came back,
+ * the way an order is read everywhere else - and kept strictly apart from
+ * revenue, units and orders, which stay the client's own figures to the
+ * cent. On one store that was half a million forint of sales the campaign
+ * made that the collection sheet reads as zero.
+ *
  * Cart additions are the Google sessions that landed on the collection
  * page. COGS is what the collection lines cost, priced by the store's own
  * product costs order by order - manual cost, tiers and cost collections
@@ -2308,8 +2416,36 @@ export async function attributeCampaignCollections(input: {
     }
   }
 
-  // What each collection earned per day, from the orders, by the client's rule.
-  type EarnedDay = { revenue: number; units: number; orders: number; cogs: number | null };
+  // What each collection earned per day, from the orders, by the client's
+  // rule, plus how those sales arrived and what the page brought in beside
+  // them. The landed, unknown and brought figures never touch revenue, units,
+  // orders or cogs: those stay the client's own total to the cent.
+  type EarnedDay = {
+    revenue: number;
+    units: number;
+    orders: number;
+    cogs: number | null;
+    landedRevenue: number;
+    landedUnits: number;
+    landedOrders: number;
+    unknownRevenue: number;
+    unknownOrders: number;
+    broughtRevenue: number;
+    broughtOrders: number;
+  };
+  const emptyEarnedDay = (): EarnedDay => ({
+    revenue: 0,
+    units: 0,
+    orders: 0,
+    cogs: input.costs ? 0 : null,
+    landedRevenue: 0,
+    landedUnits: 0,
+    landedOrders: 0,
+    unknownRevenue: 0,
+    unknownOrders: 0,
+    broughtRevenue: 0,
+    broughtOrders: 0,
+  });
   const earnedByHandleDay = new Map<string, EarnedDay>();
   if (input.orders.ok) {
     const rates = input.orders.value.currency === input.targetCurrency || input.orders.value.orders.length === 0
@@ -2321,9 +2457,29 @@ export async function attributeCampaignCollections(input: {
       productKeys: productKeysByHandle.get(handle) ?? new Set<string>(),
     }));
     for (const order of input.orders.value.orders) {
+      // Where the customer FIRST came in, decoded and stripped the same way
+      // the collection page is spelled, so a non-ASCII handle that Shopify
+      // percent-encodes in the landing page still matches its plain handle.
+      // Null is not "somewhere else": Shopify reports no journey at all for
+      // plenty of orders, and the order is counted as unmeasured below.
+      const landing = normalizePath(order.landingPath);
+      const journeyKnown = landing !== null;
       for (const collection of collections) {
+        const page = `/collections/${collection.handle}`;
+        const landedHere = landing !== null && (landing === page || landing.startsWith(`${page}/`));
         const lines = order.lines.filter((line) => collection.productKeys.has(line.productKey));
-        if (lines.length === 0) continue;
+        if (lines.length === 0) {
+          // Landed on the page and bought none of it. The collection earns
+          // nothing here - that is the client's rule and it stays - but the
+          // page did bring the order in, so it is counted whole, apart.
+          if (!landedHere) continue;
+          const key = `${collection.handle}|${order.date}`;
+          const current = earnedByHandleDay.get(key) ?? emptyEarnedDay();
+          current.broughtRevenue += convert(Math.max(0, order.total - order.refunded), order.date);
+          current.broughtOrders += 1;
+          earnedByHandleDay.set(key, current);
+          continue;
+        }
         // Each line at what it was charged, less what came back on it. A
         // refund booked on no line (a custom amount) stays with the order
         // and does not reach the collection, as it does not in the client's
@@ -2337,10 +2493,19 @@ export async function attributeCampaignCollections(input: {
           0,
         );
         const key = `${collection.handle}|${order.date}`;
-        const current = earnedByHandleDay.get(key) ?? { revenue: 0, units: 0, orders: 0, cogs: input.costs ? 0 : null };
-        current.revenue += convert(revenue, order.date);
+        const current = earnedByHandleDay.get(key) ?? emptyEarnedDay();
+        const converted = convert(revenue, order.date);
+        current.revenue += converted;
         current.units += units;
         current.orders += 1;
+        if (landedHere) {
+          current.landedRevenue += converted;
+          current.landedUnits += units;
+          current.landedOrders += 1;
+        } else if (!journeyKnown) {
+          current.unknownRevenue += converted;
+          current.unknownOrders += 1;
+        }
         if (current.cogs !== null && input.costs) {
           // The cost context is already in the reporting currency - a manual
           // cost is stored in euros on a forint store - so the engine must run
@@ -2390,12 +2555,7 @@ export async function attributeCampaignCollections(input: {
       const shares = campaignKeys.map((_key, index) =>
         totalSpend > 0 ? (spends[index] ?? 0) / totalSpend : 1 / campaignKeys.length,
       );
-      const earned = earnedByHandleDay.get(`${handle}|${day}`) ?? {
-        revenue: 0,
-        units: 0,
-        orders: 0,
-        cogs: input.costs ? 0 : null,
-      };
+      const earned = earnedByHandleDay.get(`${handle}|${day}`) ?? emptyEarnedDay();
       const landed = landingByHandleDay.get(`${handle}|${day}`) ?? { addedToCart: 0, completedCheckout: 0 };
 
       campaignKeys.forEach((key, index) => {
@@ -2406,6 +2566,13 @@ export async function attributeCampaignCollections(input: {
           revenue: input.orders.ok ? earned.revenue * share : null,
           units: input.orders.ok ? earned.units * share : null,
           orders: input.orders.ok ? earned.orders * share : null,
+          landedRevenue: input.orders.ok ? earned.landedRevenue * share : null,
+          landedUnits: input.orders.ok ? earned.landedUnits * share : null,
+          landedOrders: input.orders.ok ? earned.landedOrders * share : null,
+          unknownRevenue: input.orders.ok ? earned.unknownRevenue * share : null,
+          unknownOrders: input.orders.ok ? earned.unknownOrders * share : null,
+          broughtRevenue: input.orders.ok ? earned.broughtRevenue * share : null,
+          broughtOrders: input.orders.ok ? earned.broughtOrders * share : null,
           addedToCart: input.landing.ok ? landed.addedToCart * share : null,
           cogs: earned.cogs === null || !input.orders.ok ? null : earned.cogs * share,
         });

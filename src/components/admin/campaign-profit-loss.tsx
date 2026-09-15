@@ -95,9 +95,46 @@ export type CampaignProfitLossRow = {
 
 export type CampaignRevenueBasis = "shopify" | "collection" | "google";
 
+/**
+ * How the collection's sales arrived, on the collection basis: the campaign
+ * advertises a collection PAGE, so the sheet's own total is split by whether
+ * the buyer came in through it.
+ *
+ * landed* is the part of the total bought by customers whose FIRST visit
+ * landed on the page, unknown* is the part Shopify reports no journey for at
+ * all, and the rest of the total is what customers measured to have arrived
+ * some other way bought. All three are inside the sheet's revenue, so they
+ * add back up to it.
+ *
+ * brought* is money the sheet's total never sees: orders that landed on the
+ * page and bought nothing of the collection, counted whole. The page made it
+ * and the client's per-collection sheet does not count it, so it is shown
+ * apart and never added in.
+ *
+ * Only the collection basis has these: on the Shopify or the Google basis the
+ * revenue is not the collection's, and a share of it would put two different
+ * measures over one another. Null when the split was not measured on every
+ * day whose revenue the total holds - see the arrival sum in the builder.
+ */
+export type CampaignCollectionArrival = {
+  landedRevenue: number | null;
+  landedUnits: number | null;
+  landedOrders: number | null;
+  unknownRevenue: number | null;
+  unknownOrders: number | null;
+  broughtRevenue: number | null;
+  broughtOrders: number | null;
+};
+
 export type CampaignProfitLoss = {
   rows: CampaignProfitLossRow[];
-  total: Omit<CampaignProfitLossRow, "day" | "inProgress" | "cumulative">;
+  /**
+   * The foot of the sheet, plus the arrival split, which lives in the total
+   * alone: the daily table is already eighteen columns wide, and where a sale
+   * came from is a fact about the period the reader asks once, not a column
+   * they scan day by day.
+   */
+  total: Omit<CampaignProfitLossRow, "day" | "inProgress" | "cumulative"> & CampaignCollectionArrival;
   /** Which revenue profit is measured against - Shopify's real sales when the campaign has them, else Google's conversion value. */
   revenueBasis: CampaignRevenueBasis;
   /**
@@ -111,6 +148,18 @@ export type CampaignProfitLoss = {
 function ratio(numerator: number | null, denominator: number | null): number | null {
   if (numerator === null || denominator === null) return null;
   return denominator > 0 ? numerator / denominator : null;
+}
+
+/**
+ * The rest of a whole after a part of it, with the float residue of a share
+ * read as the zero it is. What landed on the page and what did not are two
+ * sums of the same orders, each carried as a spend share, so their difference
+ * can miss the whole by 1e-10; printed as money that reads "-0.00", which
+ * says a page sold a negative amount.
+ */
+export function restOf(whole: number, part: number): number {
+  const left = whole - part;
+  return Math.abs(left) < 1e-9 ? 0 : left;
 }
 
 function sumNullable(values: Array<number | null>): number | null {
@@ -291,6 +340,31 @@ export function buildCampaignProfitLoss(
   const orders = sumNullable(rows.map((row) => row.orders));
   const units = sumNullable(rows.map((row) => row.units));
   const cogs = sumNullable(rows.map((row) => row.cogs));
+  // Folded from the timeline rather than from the rows, which do not carry
+  // these figures, and only on the basis whose revenue they describe.
+  //
+  // The sum fails closed, unlike every other sum on this sheet: a day that
+  // measured the collection's revenue but not how it arrived would otherwise
+  // be summed into the total while its arrival was not, and the rest of the
+  // total - the part the sheet prints as having found the items another way -
+  // would silently swallow a day nobody measured. Unknown is the honest
+  // answer there, so the whole block is withheld instead.
+  const contributing = campaign.timeline.filter((point) => typeof point.collectionRevenue === "number");
+  const arrival = (
+    field:
+      | "collectionLandedRevenue"
+      | "collectionLandedUnits"
+      | "collectionLandedOrders"
+      | "collectionUnknownRevenue"
+      | "collectionUnknownOrders"
+      | "collectionBroughtRevenue"
+      | "collectionBroughtOrders",
+  ): number | null =>
+    revenueBasis === "collection" &&
+    contributing.length > 0 &&
+    contributing.every((point) => typeof point[field] === "number")
+      ? contributing.reduce((sum, point) => sum + (point[field] ?? 0), 0)
+      : null;
   const predatesSheet =
     campaign.timeline.length > 0 &&
     campaign.timeline.every(
@@ -326,6 +400,13 @@ export function buildCampaignProfitLoss(
       shipping: sumNullable(rows.map((row) => row.shipping)),
       agencyFee: sumNullable(rows.map((row) => row.agencyFee)),
       profit: totalProfit,
+      landedRevenue: arrival("collectionLandedRevenue"),
+      landedUnits: arrival("collectionLandedUnits"),
+      landedOrders: arrival("collectionLandedOrders"),
+      unknownRevenue: arrival("collectionUnknownRevenue"),
+      unknownOrders: arrival("collectionUnknownOrders"),
+      broughtRevenue: arrival("collectionBroughtRevenue"),
+      broughtOrders: arrival("collectionBroughtOrders"),
     },
   };
 }
@@ -416,12 +497,40 @@ function sumTimelines(
         "collectionRevenue",
         "collectionUnits",
         "collectionOrders",
+        "collectionLandedRevenue",
+        "collectionLandedUnits",
+        "collectionLandedOrders",
+        "collectionUnknownRevenue",
+        "collectionUnknownOrders",
+        "collectionBroughtRevenue",
+        "collectionBroughtOrders",
         "collectionAddedToCart",
         "cogs",
       ] as const;
       for (const field of optional) {
         const value = sumOptional(points.map((point) => point[field]));
         if (value !== undefined) summed[field] = value;
+      }
+      // The arrival fields are the exception to the permissive rule above: a
+      // member that measured the day's collection revenue and not how it
+      // arrived must not have its revenue added while its arrival is left
+      // out, which would print one member's split against every member's
+      // money. Unknown for the day, and the sheet withholds the block.
+      const arrival = [
+        "collectionLandedRevenue",
+        "collectionLandedUnits",
+        "collectionLandedOrders",
+        "collectionUnknownRevenue",
+        "collectionUnknownOrders",
+        "collectionBroughtRevenue",
+        "collectionBroughtOrders",
+      ] as const;
+      for (const field of arrival) {
+        if (summed[field] === undefined || summed[field] === null) continue;
+        const missed = points.some(
+          (point) => typeof point.collectionRevenue === "number" && typeof point[field] !== "number",
+        );
+        if (missed) summed[field] = null;
       }
       return summed;
     });
@@ -543,6 +652,57 @@ function ProfitCell({ value, currency }: { value: number | null; currency: strin
   );
 }
 
+/** An order count that reads as one when it is one; a share may be fractional. */
+function orderWord(value: number): string {
+  return value === 1 ? "order" : "orders";
+}
+
+/**
+ * One line of the arrival block: what it is, what it made, on how many orders,
+ * and - only for a line that is part of the total - its share of it.
+ *
+ * A line beside the total carries no share on purpose. Its money is not part
+ * of the collection revenue it would be divided by, and it is not even the
+ * same measure: what the page brought in is whole orders, shipping included,
+ * while the total is collection line items. A percentage under two lines that
+ * already partition the total would read as a third slice of one whole and
+ * push the three past 100%, and the number is the thing a reader copies.
+ */
+function ArrivalLine({
+  label,
+  revenue,
+  orders,
+  share = null,
+  currency,
+  aside = false,
+}: {
+  label: string;
+  revenue: number;
+  orders: number;
+  share?: number | null;
+  currency: string;
+  /** The line is beside the total rather than part of it, and reads muted. */
+  aside?: boolean;
+}) {
+  return (
+    <li
+      className={cn(
+        "flex flex-wrap items-baseline gap-x-2 text-[11px]",
+        aside ? "text-[var(--text-muted)]" : "text-[var(--text-secondary)]",
+      )}
+    >
+      <span className="min-w-[200px] flex-1">{label}</span>
+      <span className={cn("tabular-nums", aside ? "" : "font-medium text-[var(--text-primary)]")}>
+        {money(revenue, currency)}
+      </span>
+      <span className="tabular-nums">
+        {count(orders)} {orderWord(orders)}
+        {share === null ? "" : ` · ${percent(share)}`}
+      </span>
+    </li>
+  );
+}
+
 export type CampaignProfitLossSheetCampaign = Pick<
   AdminAnalyticsCampaign,
   "timeline" | "attributionState" | "collectionHandle" | "collectionSource" | "collectionSharedWith"
@@ -574,6 +734,48 @@ export function CampaignProfitLossSheet({
   const muted = cn(cell, "text-[var(--text-secondary)]");
   const headers = sheetHeaders(sheet.revenueBasis);
   const members = campaign.members ?? 1;
+
+  // Where the sales came from, on the collection basis and only once the
+  // figures are known: the campaign buys a collection PAGE, and the sheet's
+  // total says nothing about whether that page did the work. Every path is
+  // real and the mix is a store's own: one collection takes 95% of its
+  // revenue from people who landed on the page, another takes none of it.
+  // The shares are taken from the sums, so the lines that are inside the
+  // total always add to 100% of it.
+  //
+  // The unmeasured part is one of those lines rather than a silence: the
+  // orders Shopify reports no journey for cannot be handed to either of the
+  // other two, and printing them as sales that found the items another way
+  // would be a claim about the advertised page that nobody measured.
+  const arrival =
+    sheet.revenueBasis === "collection" &&
+    sheet.total.revenue !== null &&
+    sheet.total.orders !== null &&
+    sheet.total.landedRevenue !== null &&
+    sheet.total.landedOrders !== null &&
+    sheet.total.unknownRevenue !== null &&
+    sheet.total.unknownOrders !== null
+      ? {
+          total: sheet.total.revenue,
+          landedRevenue: sheet.total.landedRevenue,
+          landedOrders: sheet.total.landedOrders,
+          unknownRevenue: sheet.total.unknownRevenue,
+          unknownOrders: sheet.total.unknownOrders,
+          // The rest of the same total, so no order and no forint is counted
+          // twice or lost between the lines.
+          elsewhereRevenue: restOf(sheet.total.revenue, sheet.total.landedRevenue + sheet.total.unknownRevenue),
+          elsewhereOrders: restOf(sheet.total.orders, sheet.total.landedOrders + sheet.total.unknownOrders),
+          broughtRevenue: sheet.total.broughtRevenue,
+          broughtOrders: sheet.total.broughtOrders,
+        }
+      : null;
+  // Pulled out whole so the line and the sentence below it are shown on the
+  // same condition: what the page brought in is a figure of its own and can
+  // be unknown while the split of the total is known.
+  const brought =
+    arrival && arrival.broughtRevenue !== null && arrival.broughtOrders !== null
+      ? { revenue: arrival.broughtRevenue, orders: arrival.broughtOrders }
+      : null;
 
   // Said from the sheet itself, so the caption can never promise a basis the
   // cells do not use.
@@ -711,6 +913,59 @@ export function CampaignProfitLossSheet({
           </table>
         </div>
       )}
+      {arrival ? (
+        <div
+          className="border-t border-[var(--border-subtle)] px-4 py-2.5"
+          role="group"
+          aria-label={`${title}: where the collection's sales came from`}
+        >
+          <p className="label-caps text-[10.5px] text-[var(--text-secondary)]">Where the sales came from</p>
+          <ul className="mt-1.5 space-y-1">
+            <ArrivalLine
+              label={`First visit landed on /collections/${campaign.collectionHandle ?? ""}`}
+              revenue={arrival.landedRevenue}
+              orders={arrival.landedOrders}
+              share={ratio(arrival.landedRevenue, arrival.total)}
+              currency={currency}
+            />
+            <ArrivalLine
+              label="First visit landed elsewhere"
+              revenue={arrival.elsewhereRevenue}
+              orders={arrival.elsewhereOrders}
+              share={ratio(arrival.elsewhereRevenue, arrival.total)}
+              currency={currency}
+            />
+            {arrival.unknownRevenue > 0 || arrival.unknownOrders > 0 ? (
+              <ArrivalLine
+                label="First visit not reported by Shopify"
+                revenue={arrival.unknownRevenue}
+                orders={arrival.unknownOrders}
+                share={ratio(arrival.unknownRevenue, arrival.total)}
+                currency={currency}
+              />
+            ) : null}
+            {brought ? (
+              <ArrivalLine
+                aside
+                label="First visit landed on the page, bought none of the collection"
+                revenue={brought.revenue}
+                orders={brought.orders}
+                currency={currency}
+              />
+            ) : null}
+          </ul>
+          <p className="mt-1.5 text-[10.5px] text-[var(--text-muted)]">
+            Shopify reports only the first session of a customer&apos;s journey, so someone who first arrived
+            another way and clicked the ad straight onto the page later reads as having landed elsewhere. A
+            product page under the collection counts as the collection&apos;s own page.
+          </p>
+          <p className="mt-1 text-[10.5px] text-[var(--text-muted)]">
+            {brought
+              ? `Every line but the last adds up to the Revenue column. The page also brought ${count(brought.orders)} ${orderWord(brought.orders)} worth ${money(brought.revenue, currency)} that bought nothing from the collection, which the client's per-collection sheet counts as zero and some other collection's revenue holds.`
+              : "The lines above add up to the Revenue column."}
+          </p>
+        </div>
+      ) : null}
     </div>
   );
 }

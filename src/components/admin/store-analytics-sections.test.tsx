@@ -118,7 +118,17 @@ function point(over: Partial<AdminAnalyticsCampaignTimelinePoint> & { bucket: st
 function landing(
   name: string,
   handle: string,
-  shares: { spend: number; revenue: number; orders: number },
+  shares: {
+    spend: number;
+    revenue: number;
+    orders: number;
+    /** The part of the share bought by people whose first visit landed on the page, when the snapshot carries it. */
+    landed?: { revenue: number; orders: number };
+    /** The part of the share Shopify reported no journey for; zero unless the fixture says otherwise. */
+    unknown?: { revenue: number; orders: number };
+    /** What the page brought in beside the collection's own sales. */
+    brought?: { revenue: number; orders: number };
+  },
 ): AdminAnalyticsCampaign {
   return campaign({
     campaignId: name,
@@ -136,6 +146,13 @@ function landing(
         collectionRevenue: shares.revenue,
         collectionUnits: 1,
         collectionOrders: shares.orders,
+        collectionLandedRevenue: shares.landed?.revenue ?? null,
+        collectionLandedUnits: shares.landed ? 1 : null,
+        collectionLandedOrders: shares.landed?.orders ?? null,
+        collectionUnknownRevenue: shares.landed ? shares.unknown?.revenue ?? 0 : null,
+        collectionUnknownOrders: shares.landed ? shares.unknown?.orders ?? 0 : null,
+        collectionBroughtRevenue: shares.brought?.revenue ?? null,
+        collectionBroughtOrders: shares.brought?.orders ?? null,
         collectionAddedToCart: 10,
         cogs: 5,
       }),
@@ -144,8 +161,15 @@ function landing(
 }
 
 const BLUSAS = ["[HU] BLUSAS - 27/08", "[HU] BLUSAS #2", "[HU] BLUSAS #3", "[HU] BLUSAS #4"].map((name) =>
-  landing(name, "mintas-kardiganok", { spend: 25, revenue: 100, orders: 0.5 }),
+  landing(name, "mintas-kardiganok", {
+    spend: 25,
+    revenue: 100,
+    orders: 0.5,
+    landed: { revenue: 75, orders: 0.25 },
+    brought: { revenue: 25, orders: 0.5 },
+  }),
 );
+/** The BOHO snapshot was taken before the split existed, so its row has none to show. */
 const BOHO = landing("BOHO - HU - 30/07", "kenyelmes-ruhak", { spend: 40, revenue: 80, orders: 1 });
 
 /** The collections family knows the BLUSAS collection by title; the BOHO one did not sell, so it is absent. */
@@ -379,6 +403,55 @@ describe("CampaignCollectionsBlock", () => {
     // The other collection's sheet stays closed.
     expect(html).not.toContain("P&amp;L sheet: kenyelmes-ruhak");
     expect(html).toContain('aria-expanded="false"');
+  });
+
+  it("says under each row how that collection's sales arrived", () => {
+    const html = block(new Set());
+
+    // Four shares of 75 landed and 25 brought in add back to the page's
+    // whole: 300 of the 400 the row shows, and 100 the row counts as zero.
+    // "first visit" because that is the only visit Shopify reports.
+    expect(html).toContain(
+      "first visit landed GBP 300.00 (75.0%) · elsewhere GBP 100.00 · brought in GBP 100.00 that bought nothing here",
+    );
+    // The collection whose snapshot has no split says nothing rather than
+    // printing a zero for a number nobody measured.
+    expect((html.match(/first visit landed GBP/g) ?? []).length).toBe(1);
+    // And the row above it is unchanged.
+    expect(html).toContain("GBP 400.00");
+    expect(html).toContain("/collections/kenyelmes-ruhak · 1 campaign<");
+    // An order counted as brought in bought some other collection's items,
+    // which are that row's revenue, so the caption warns off adding the two
+    // down the table.
+    expect(html).toContain("the brought figures do not add across the table");
+  });
+
+  it("names the part of a row Shopify reported no journey for", () => {
+    // Folded into "elsewhere" the row would say the page lost GBP 100.00 of
+    // sales that were never measured either way.
+    const html = renderToStaticMarkup(
+      <CampaignCollectionsBlock
+        rows={[
+          landing("[HU] BLUSAS - 27/08", "mintas-kardiganok", {
+            spend: 25,
+            revenue: 400,
+            orders: 2,
+            landed: { revenue: 240, orders: 1 },
+            unknown: { revenue: 100, orders: 0.5 },
+          }),
+        ]}
+        collections={COLLECTIONS}
+        currency="GBP"
+        today="2026-08-07"
+        fees={null}
+        openSheets={new Set()}
+        onToggleSheet={() => undefined}
+      />,
+    );
+
+    expect(html).toContain(
+      "first visit landed GBP 240.00 (60.0%) · elsewhere GBP 60.00 · not reported GBP 100.00",
+    );
   });
 
   it("renders nothing when no row lands on a collection", () => {

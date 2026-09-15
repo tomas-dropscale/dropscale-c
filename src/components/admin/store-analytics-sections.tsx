@@ -22,6 +22,7 @@ import {
   buildCampaignProfitLoss,
   buildCollectionCampaign,
   CampaignProfitLossSheet,
+  restOf,
 } from "./campaign-profit-loss";
 import { Badge } from "@/components/ui/badge";
 import type {
@@ -546,7 +547,7 @@ export function CampaignCollectionsBlock({
       <div className="flex flex-wrap items-baseline justify-between gap-2 px-5 pt-3 pb-1.5">
         <p className="text-[12px] font-semibold text-[var(--text-primary)]">Collections</p>
         <p className="text-[10.5px] text-[var(--text-muted)]">
-          One row per collection the campaigns land on, its campaigns summed day by day, the way the client keeps a sheet per collection. Open its P&amp;L for the collection&apos;s own day-by-day sheet.
+          One row per collection the campaigns land on, its campaigns summed day by day, the way the client keeps a sheet per collection. Open its P&amp;L for the collection&apos;s own day-by-day sheet. What a row brought in is counted whole beside its revenue and bought nothing of that collection, so those items are some other row&apos;s revenue: the brought figures do not add across the table.
         </p>
       </div>
       <table className="w-full min-w-[1180px] text-[11.5px]">
@@ -572,6 +573,25 @@ export function CampaignCollectionsBlock({
             const title = titles.get(group.handle) ?? group.handle;
             const open = openSheets.has(group.handle);
             const memberCount = `${group.members.length} ${group.members.length === 1 ? "campaign" : "campaigns"}`;
+            // How the row's revenue arrived, in the short form: the split the
+            // collection's own sheet spells out, so the reader can see which
+            // collections the page is selling and which sell in spite of it
+            // without opening five sheets. "brought in" is beside the row's
+            // revenue, never inside it, and the part Shopify reported no
+            // journey for is named rather than left with "elsewhere", which
+            // would say the page did nothing for sales nobody measured.
+            const landed = total.landedRevenue;
+            const unknown = total.unknownRevenue;
+            const arrival =
+              landed !== null && unknown !== null && total.revenue !== null
+                ? {
+                    landed,
+                    share: total.revenue > 0 ? landed / total.revenue : null,
+                    elsewhere: restOf(total.revenue, landed + unknown),
+                    unknown,
+                    brought: total.broughtRevenue,
+                  }
+                : null;
             return (
               <React.Fragment key={group.handle}>
                 <tr className="transition-smooth border-t border-[var(--border-subtle)] first:border-t-0 hover:bg-[var(--bg-panel-hover)]">
@@ -608,6 +628,18 @@ export function CampaignCollectionsBlock({
                     </button>
                   </td>
                 </tr>
+                {arrival ? (
+                  <tr className="text-[var(--text-muted)]">
+                    <td colSpan={12} className="px-5 pt-0 pb-2 text-[10px]">
+                      first visit landed {money(arrival.landed, currency)} ({percent(arrival.share)}) ·
+                      elsewhere {money(arrival.elsewhere, currency)}
+                      {arrival.unknown > 0 ? ` · not reported ${money(arrival.unknown, currency)}` : ""}
+                      {arrival.brought !== null
+                        ? ` · brought in ${money(arrival.brought, currency)} that bought nothing here`
+                        : ""}
+                    </td>
+                  </tr>
+                ) : null}
                 {open ? (
                   <tr className="border-t border-[var(--border-subtle)] bg-[var(--bg-base)]">
                     <td colSpan={12} className="px-5 py-3">

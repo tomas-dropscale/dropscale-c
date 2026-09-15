@@ -644,6 +644,344 @@ describe("the fee columns", () => {
   });
 });
 
+describe("where the collection's sales came from", () => {
+  /**
+   * The Emma Gyor shape, rounded: most of the page's revenue is bought by
+   * people who landed on it, a little by people who found the items some
+   * other way, and the page separately brings in orders that buy nothing of
+   * the collection at all, which the client's own sheet counts as zero.
+   */
+  const days = [
+    collectionDay("2026-09-05", {
+      spend: 100, googleRevenue: 300,
+      collectionRevenue: 300, collectionUnits: 3, collectionOrders: 3, collectionAddedToCart: 40, cogs: 60,
+      collectionLandedRevenue: 240, collectionLandedUnits: 2, collectionLandedOrders: 2,
+      collectionUnknownRevenue: 0, collectionUnknownOrders: 0,
+      collectionBroughtRevenue: 150, collectionBroughtOrders: 1,
+    }),
+    collectionDay("2026-09-06", {
+      spend: 50, googleRevenue: 100,
+      collectionRevenue: 100, collectionUnits: 1, collectionOrders: 1, collectionAddedToCart: 12, cogs: 20,
+      collectionLandedRevenue: 60, collectionLandedUnits: 1, collectionLandedOrders: 1,
+      collectionUnknownRevenue: 0, collectionUnknownOrders: 0,
+      collectionBroughtRevenue: 50, collectionBroughtOrders: 1,
+    }),
+  ];
+
+  /** The same days before the split was computed: the total is there, its arrival is not. */
+  const withoutSplit = days.map((day) =>
+    collectionDay(day.bucket, {
+      ...day,
+      collectionLandedRevenue: null, collectionLandedUnits: null, collectionLandedOrders: null,
+      collectionUnknownRevenue: null, collectionUnknownOrders: null,
+      collectionBroughtRevenue: null, collectionBroughtOrders: null,
+    }),
+  );
+
+  const sheetOf = (timeline: AdminAnalyticsCampaignTimelinePoint[], over: Record<string, unknown> = {}) =>
+    renderToStaticMarkup(
+      <CampaignProfitLossSheet
+        title="BOHO - HU - 30/07"
+        currency="EUR"
+        today="2026-09-11"
+        campaign={{
+          attributionState: "unmatched",
+          collectionHandle: "kenyelmes-ruhak",
+          collectionSharedWith: 1,
+          timeline,
+          ...over,
+        }}
+      />,
+    );
+
+  it("folds the split into the total, and leaves the daily rows the width they were", () => {
+    const sheet = buildCampaignProfitLoss({ timeline: days }, "2026-09-11");
+
+    expect(sheet.revenueBasis).toBe("collection");
+    expect(sheet.total).toMatchObject({
+      revenue: 400,
+      orders: 4,
+      landedRevenue: 300,
+      landedUnits: 3,
+      landedOrders: 3,
+      broughtRevenue: 200,
+      broughtOrders: 2,
+    });
+    // The landed part is inside the total; what the page brought in is not.
+    expect(sheet.total.landedRevenue! + (sheet.total.revenue! - sheet.total.landedRevenue!)).toBe(400);
+    expect(sheet.rows[0]).not.toHaveProperty("landedRevenue");
+  });
+
+  it("withholds the split when a day whose revenue is in the total never measured its arrival", () => {
+    // Summed permissively this reads 240 landed of 400, and the other day's
+    // 100 falls into the line that says the page did nothing for it - a
+    // measurement that day never made. Unknown is the only honest answer.
+    const mixed = buildCampaignProfitLoss({ timeline: [days[0]!, withoutSplit[1]!] }, "2026-09-11");
+    expect(mixed.total).toMatchObject({
+      revenue: 400,
+      landedRevenue: null,
+      unknownRevenue: null,
+      broughtRevenue: null,
+    });
+    expect(sheetOf([days[0]!, withoutSplit[1]!])).not.toContain("Where the sales came from");
+
+    // A day the orders could not be read for at all is in neither sum: the
+    // revenue total is the days that answered, and so is their split.
+    const unread = collectionDay("2026-09-06", {
+      spend: 50, collectionRevenue: null, collectionUnits: null, collectionOrders: null,
+      collectionAddedToCart: null, cogs: null,
+      collectionLandedRevenue: null, collectionLandedUnits: null, collectionLandedOrders: null,
+      collectionUnknownRevenue: null, collectionUnknownOrders: null,
+      collectionBroughtRevenue: null, collectionBroughtOrders: null,
+    });
+    expect(buildCampaignProfitLoss({ timeline: [days[0]!, unread] }, "2026-09-11").total).toMatchObject({
+      revenue: 300,
+      landedRevenue: 240,
+      broughtRevenue: 150,
+    });
+
+    const none = buildCampaignProfitLoss({ timeline: withoutSplit }, "2026-09-11");
+    expect(none.total).toMatchObject({
+      revenue: 400,
+      landedRevenue: null,
+      landedUnits: null,
+      landedOrders: null,
+      unknownRevenue: null,
+      unknownOrders: null,
+      broughtRevenue: null,
+      broughtOrders: null,
+    });
+  });
+
+  it("says nothing about arrival on the Shopify or the Google basis", () => {
+    // Shopify matched this campaign's own UTMs, so the sheet's revenue is not
+    // the collection's and a share of it would divide two different measures.
+    const shopify = buildCampaignProfitLoss(
+      {
+        timeline: [
+          point({
+            bucket: "2026-09-05", spend: 10, addedToCart: 5, shopifyRevenue: 40, shopifyOrders: 1, units: 1,
+            collectionRevenue: 300, collectionUnits: 3, collectionOrders: 3, collectionAddedToCart: 40, cogs: 60,
+            collectionLandedRevenue: 240, collectionLandedUnits: 2, collectionLandedOrders: 2,
+            collectionBroughtRevenue: 150, collectionBroughtOrders: 1,
+          }),
+        ],
+      },
+      "2026-09-11",
+    );
+    expect(shopify.revenueBasis).toBe("shopify");
+    expect(shopify.total).toMatchObject({ landedRevenue: null, landedOrders: null, broughtRevenue: null });
+    expect(
+      renderToStaticMarkup(
+        <CampaignProfitLossSheet
+          title="Matched"
+          currency="EUR"
+          today="2026-09-11"
+          campaign={{
+            attributionState: "matched",
+            collectionHandle: "kenyelmes-ruhak",
+            timeline: [
+              point({
+                bucket: "2026-09-05", spend: 10, addedToCart: 5, shopifyRevenue: 40, shopifyOrders: 1, units: 1,
+                collectionRevenue: 300, collectionUnits: 3, collectionOrders: 3, collectionAddedToCart: 40, cogs: 60,
+                collectionLandedRevenue: 240, collectionLandedUnits: 2, collectionLandedOrders: 2,
+                collectionBroughtRevenue: 150, collectionBroughtOrders: 1,
+              }),
+            ],
+          }}
+        />,
+      ),
+    ).not.toContain("Where the sales came from");
+
+    // Nothing was read from the orders at all, so the basis is Google's
+    // conversion value and there is no collection total to split.
+    const unknown = { collectionRevenue: null, collectionUnits: null, collectionOrders: null, collectionAddedToCart: null, cogs: null };
+    const google = buildCampaignProfitLoss(
+      {
+        timeline: [
+          collectionDay("2026-09-05", {
+            spend: 10, googleRevenue: 30, ...unknown,
+            collectionLandedRevenue: 240, collectionLandedUnits: 2, collectionLandedOrders: 2,
+            collectionBroughtRevenue: 150, collectionBroughtOrders: 1,
+          }),
+        ],
+      },
+      "2026-09-11",
+    );
+    expect(google.revenueBasis).toBe("google");
+    expect(google.total).toMatchObject({ landedRevenue: null, broughtRevenue: null });
+    expect(
+      sheetOf([
+        collectionDay("2026-09-05", {
+          spend: 10, googleRevenue: 30, ...unknown,
+          collectionLandedRevenue: 240, collectionLandedUnits: 2, collectionLandedOrders: 2,
+          collectionBroughtRevenue: 150, collectionBroughtOrders: 1,
+        }),
+      ]),
+    ).not.toContain("Where the sales came from");
+  });
+
+  it("names the visit it is talking about, and shares only the lines that are part of the total", () => {
+    const html = sheetOf(days);
+
+    expect(html).toContain("Where the sales came from");
+    // "First visit" and not "Landed": Shopify reports the first session of a
+    // journey, so a buyer who arrived from Instagram and clicked the ad onto
+    // the page a week later is on the second line, not the first. The sheet
+    // has to say so, because the block exists to answer that very question.
+    expect(html).toContain("First visit landed on /collections/kenyelmes-ruhak");
+    expect(html).toContain("Shopify reports only the first session of a customer");
+    // 300 of the 400 the sheet's Revenue column already shows, on 3 orders.
+    expect(html).toContain("EUR 300.00");
+    expect(html).toContain("3 orders · 75.0%");
+    expect(html).toContain("First visit landed elsewhere");
+    expect(html).toContain("1 order · 25.0%");
+    // Beside the total, so no share: the brought money is whole orders,
+    // shipping and all, and dividing it by a collection line total would put
+    // a third slice under two that already make 100%.
+    expect(html).toContain("First visit landed on the page, bought none of the collection");
+    expect(html).toContain("EUR 200.00");
+    expect(html).not.toContain("2 orders · 50.0%");
+    expect(html).toContain(
+      "Every line but the last adds up to the Revenue column. The page also brought 2 orders worth EUR 200.00 that bought nothing from the collection",
+    );
+    // Nothing went unmeasured here, so no line claims it did.
+    expect(html).not.toContain("First visit not reported");
+    // The captions the sheet already carried are still there.
+    expect(html).toContain("Profit on /collections/kenyelmes-ruhak");
+    expect(html).toContain("Revenue is the collection items in every order");
+    expect(html).toContain("fee settings could not be read");
+  });
+
+  it("gives the sales Shopify reported no journey for their own line", () => {
+    // 100 of the 300 has no customer journey at all. Folded into the second
+    // line the sheet would print "First visit landed elsewhere EUR 160.00
+    // (53.3%)" and say the advertised page lost sales nobody measured.
+    const html = sheetOf([
+      collectionDay("2026-09-05", {
+        spend: 100,
+        collectionRevenue: 300, collectionUnits: 3, collectionOrders: 5, collectionAddedToCart: 40, cogs: 60,
+        collectionLandedRevenue: 140, collectionLandedUnits: 2, collectionLandedOrders: 2,
+        collectionUnknownRevenue: 100, collectionUnknownOrders: 2,
+        collectionBroughtRevenue: null, collectionBroughtOrders: null,
+      }),
+    ]);
+
+    expect(html).toContain("First visit not reported by Shopify");
+    // Landed 140 (46.7%), never measured 100 (33.3%), and the 60 left over
+    // is the only part actually seen to arrive some other way.
+    expect(html).toContain("2 orders · 46.7%");
+    expect(html).toContain("EUR 100.00");
+    expect(html).toContain("2 orders · 33.3%");
+    expect(html).toContain("1 order · 20.0%");
+    expect(html).toContain("EUR 60.00");
+    // Nothing is known about what the page brought in, so nothing is said.
+    expect(html).not.toContain("bought none of the collection");
+    expect(html).toContain("The lines above add up to the Revenue column.");
+  });
+
+  it("reads a page that sold the lot as nothing left over, never a negative sale", () => {
+    // The two parts are carried as spend shares, so their sum can miss the
+    // total by a float's width; 0.1 + 0.2 is the classic one.
+    const html = sheetOf([
+      collectionDay("2026-09-05", {
+        spend: 10,
+        collectionRevenue: 0.3, collectionUnits: 1, collectionOrders: 1, collectionAddedToCart: 2, cogs: 0,
+        collectionLandedRevenue: 0.1 + 0.2, collectionLandedUnits: 1, collectionLandedOrders: 1,
+        collectionUnknownRevenue: 0, collectionUnknownOrders: 0,
+        collectionBroughtRevenue: 0, collectionBroughtOrders: 0,
+      }),
+    ]);
+
+    expect(html).toContain("First visit landed elsewhere");
+    expect(html).not.toContain("-EUR 0.00");
+    expect(html).toContain("0 orders · 0.0%");
+  });
+
+  it("says nothing when the split is not known", () => {
+    const html = sheetOf(withoutSplit);
+
+    expect(html).toContain("Profit on /collections/kenyelmes-ruhak");
+    expect(html).toContain("EUR 400.00");
+    expect(html).not.toContain("Where the sales came from");
+    expect(html).not.toContain("First visit landed");
+  });
+
+  it("carries the split through the sum of the campaigns landing on one page", () => {
+    // Each campaign holds its spend share of the same day; the collection's
+    // sheet adds the shares back to the page's whole, arrival included.
+    const first = member({
+      timeline: [
+        collectionDay("2026-09-05", {
+          spend: 60, collectionRevenue: 300, collectionUnits: 2, collectionOrders: 1.5, collectionAddedToCart: 30, cogs: 60,
+          collectionLandedRevenue: 240, collectionLandedUnits: 1.5, collectionLandedOrders: 1,
+          collectionUnknownRevenue: 30, collectionUnknownOrders: 0.5,
+          collectionBroughtRevenue: 90, collectionBroughtOrders: 0.5,
+        }),
+      ],
+    });
+    const second = member({
+      timeline: [
+        collectionDay("2026-09-05", {
+          spend: 40, collectionRevenue: 150, collectionUnits: 1, collectionOrders: 0.5, collectionAddedToCart: 20, cogs: 30,
+          collectionLandedRevenue: 60, collectionLandedUnits: 0.5, collectionLandedOrders: 1,
+          collectionUnknownRevenue: 10, collectionUnknownOrders: 0.5,
+          collectionBroughtRevenue: 60, collectionBroughtOrders: 0.5,
+        }),
+      ],
+    });
+    const collection = buildCollectionCampaign([first, second])!;
+    expect(collection.timeline[0]).toMatchObject({
+      collectionRevenue: 450,
+      collectionLandedRevenue: 300,
+      collectionLandedUnits: 2,
+      collectionLandedOrders: 2,
+      collectionUnknownRevenue: 40,
+      collectionUnknownOrders: 1,
+      collectionBroughtRevenue: 150,
+      collectionBroughtOrders: 1,
+    });
+    const sheet = buildCampaignProfitLoss(collection, "2026-09-11");
+    expect(sheet.total).toMatchObject({ revenue: 450, landedRevenue: 300, unknownRevenue: 40, broughtRevenue: 150 });
+  });
+
+  it("will not build one member's split over every member's money", () => {
+    // A member whose day measured the collection's revenue but not how it
+    // arrived would otherwise contribute its 150 to the sum and nothing to
+    // the split, printing the other member's 240 as the landed part of 450.
+    const measured = member({
+      timeline: [
+        collectionDay("2026-09-05", {
+          spend: 60, collectionRevenue: 300, collectionUnits: 2, collectionOrders: 1.5, collectionAddedToCart: 30, cogs: 60,
+          collectionLandedRevenue: 240, collectionLandedUnits: 1.5, collectionLandedOrders: 1,
+          collectionUnknownRevenue: 0, collectionUnknownOrders: 0,
+          collectionBroughtRevenue: 90, collectionBroughtOrders: 0.5,
+        }),
+      ],
+    });
+    const older = member({
+      timeline: [
+        collectionDay("2026-09-05", {
+          spend: 40, collectionRevenue: 150, collectionUnits: 1, collectionOrders: 0.5, collectionAddedToCart: 20, cogs: 30,
+        }),
+      ],
+    });
+
+    const collection = buildCollectionCampaign([measured, older])!;
+    expect(collection.timeline[0]).toMatchObject({
+      collectionRevenue: 450,
+      collectionLandedRevenue: null,
+      collectionUnknownRevenue: null,
+      collectionBroughtRevenue: null,
+    });
+    expect(buildCampaignProfitLoss(collection, "2026-09-11").total).toMatchObject({
+      revenue: 450,
+      landedRevenue: null,
+      broughtRevenue: null,
+    });
+  });
+});
+
 describe("buildCollectionCampaign", () => {
   it("sums the campaigns sharing a collection to the collection's whole figures", () => {
     // Two BLUSAS campaigns, each holding its spend share of the day's sales.
