@@ -86,7 +86,7 @@ vi.mock("@/lib/i18n/provider", async () => {
 import type { RangeSelection } from "@/lib/portal/range";
 import type { AdminOperations } from "@/lib/admin/operations-overview";
 
-import { OverviewView, figuresKey, figuresStore, relativeFromNow } from "./overview-view";
+import { OverviewView, figuresKey, figuresStore, pulseTone, relativeFromNow } from "./overview-view";
 
 const RANGE: RangeSelection = { key: "d30", from: "2026-08-17", to: "2026-09-15" };
 
@@ -236,7 +236,9 @@ describe("the admin overview", () => {
     expect(html).toContain("The reporting pulse could not be read.");
     expect(html).toContain("Snapshot health could not be read.");
     expect(html).toContain("The client count could not be read.");
-    expect(html).toContain("—");
+    // The placeholder reads as an answer that is missing, never as a value of
+    // nothing, and it is the one the rest of the page already uses.
+    expect(html).toContain("…");
 
     // "No store is silent" and "we could not ask" are different facts.
     expect(html).not.toContain(">0<");
@@ -249,10 +251,11 @@ describe("the admin overview", () => {
 
     expect(html).toContain("How reporting is running");
     expect(html).toContain("Stores reporting today");
-    expect(html).toContain("3/5");
+    // The hero says it as a count and an "of", and the bar beneath it carries
+    // the name of what the length is a share of.
+    expect(html).toContain(">3<");
+    expect(html).toContain("of 5");
     expect(html).toContain("5 stores bound");
-    expect(html).toContain("Stores silent today");
-    expect(html).toContain(">2<");
     expect(html).toContain("Last metric written");
     expect(html).toContain("Snapshots fresh");
     expect(html).toContain("4/6");
@@ -260,6 +263,10 @@ describe("the admin overview", () => {
     expect(html).toContain("Active clients");
     expect(html).toContain("clients with a live store");
     expect(html).toContain(">4<");
+
+    // The stores that went silent are the hero subtracted from itself, so the
+    // supporting row says something the hero cannot instead of echoing it.
+    expect(html).not.toContain("Stores silent today");
 
     // Relative times wait for the browser: the server has neither the reader's
     // clock nor the reader's timezone, so it renders the placeholder instead.
@@ -277,10 +284,215 @@ describe("the admin overview", () => {
       snapshots: { fresh: 0, total: 6, oldestSuccessAt: null },
     });
 
-    expect(html).toContain("0/5");
+    expect(html).toContain(">0<");
+    expect(html).toContain("of 5");
     expect(html).toContain("nothing written today");
     expect(html).toContain("0/6");
     expect(html).toContain("no successful run recorded");
+  });
+
+  it("colours the pulse by how many bound stores went silent today", () => {
+    const healthy = render({
+      reporting: {
+        storesBound: 5,
+        storesReportingToday: 5,
+        storesSilentToday: 0,
+        lastMetricAt: "2026-09-15T10:00:00Z",
+      },
+    });
+    expect(healthy).toMatch(/data-tone="healthy"[^>]*text-\[var\(--success-green\)\]/);
+    expect(healthy).toContain('class="h-full rounded-full transition-smooth bg-[var(--success-green)]"');
+    expect(healthy).toContain("Healthy");
+
+    // One store quiet on a working morning is a store without its first sale
+    // yet, so it is gold: worth a glance, not an alarm.
+    const watch = render({
+      reporting: {
+        storesBound: 5,
+        storesReportingToday: 4,
+        storesSilentToday: 1,
+        lastMetricAt: "2026-09-15T10:00:00Z",
+      },
+    });
+    expect(watch).toMatch(/data-tone="watch"[^>]*text-\[var\(--accent-gold-strong\)\]/);
+    expect(watch).toContain('class="h-full rounded-full transition-smooth bg-[var(--accent-gold)]"');
+    expect(watch).toContain("Watch");
+
+    const behind = render({
+      reporting: {
+        storesBound: 5,
+        storesReportingToday: 1,
+        storesSilentToday: 4,
+        lastMetricAt: "2026-09-15T10:00:00Z",
+      },
+    });
+    expect(behind).toMatch(/data-tone="behind"[^>]*text-\[var\(--danger-red\)\]/);
+    expect(behind).toContain('class="h-full rounded-full transition-smooth bg-[var(--danger-red)]"');
+    expect(behind).toContain("Behind");
+
+    // "No store is silent" and "we could not ask" must never wear one colour,
+    // and the one state that needs a person to go and look is drawn in
+    // secondary text rather than the 2.4:1 muted grey it used to carry.
+    const unknown = render({ reporting: null });
+    expect(unknown).toMatch(/data-tone="unknown"[^>]*text-\[var\(--text-secondary\)\]/);
+    expect(unknown).not.toMatch(/data-tone="unknown"[^>]*text-\[var\(--text-muted\)\]/);
+    expect(unknown).toContain("Unknown");
+  });
+
+  it("refuses to call an empty measurement healthy", () => {
+    const html = render({
+      reporting: {
+        storesBound: 0,
+        storesReportingToday: 0,
+        storesSilentToday: 0,
+        lastMetricAt: null,
+      },
+    });
+
+    // Zero silent out of zero bound clears every threshold, which is how a
+    // green "Healthy" ended up over a bar measuring nothing at all.
+    expect(html).toMatch(/data-tone="unknown"/);
+    expect(html).not.toContain("Healthy");
+    expect(html).toContain("No store is bound yet, so there is no pulse to read.");
+    expect(html).toContain("of 0");
+  });
+
+  it("gives a check it could not read a mark of its own, not a grey sentence", () => {
+    const html = render({ needsDecision: null });
+
+    // The all clear had an icon and the two failures had one muted line, so a
+    // failed check read as a quiet morning to anyone skimming the panel.
+    expect(html).toContain("lucide-circle-alert");
+    expect(html).toContain("This check could not be read, so treat it as unknown.");
+    expect(html).not.toContain("lucide-circle-check");
+  });
+
+  it("keeps both header buttons at a real thumb target on a phone", () => {
+    const html = render();
+
+    // The important modifier is the fix, not decoration: the unlayered phone
+    // block in globals.css floors every button at 36px and outranks anything
+    // in @layer utilities, so a plain min-h-11 loses on the only device that
+    // has thumbs.
+    expect(html.match(/min-h-11!/g)).toHaveLength(2);
+  });
+
+  it("keeps the progress track on screen at zero width when nothing is bound", () => {
+    const html = render({
+      reporting: {
+        storesBound: 0,
+        storesReportingToday: 0,
+        storesSilentToday: 0,
+        lastMetricAt: null,
+      },
+    });
+
+    // Drawn, not hidden: the panel keeps its height on the day the last
+    // binding is removed.
+    expect(html).toContain('role="progressbar"');
+    expect(html).toMatch(/style="width:\s*0%"/);
+  });
+
+  it("counts the total beside the heading only when something is actually waiting", () => {
+    const waiting = render({
+      needsDecision: {
+        pendingClients: 2,
+        pendingAccounts: 0,
+        accountRequests: 1,
+        newCreatives: 0,
+        failingConnections: 3,
+      },
+    });
+
+    // Six decisions, not three rows: it counts the things, not the kinds, and
+    // it says the word rather than hiding it in a label only a screen reader
+    // was given.
+    expect(waiting).toMatch(/>6 waiting</);
+
+    // A quantity is not a verdict, so it wears none of the pill's gold: the
+    // only capsule on the page is the one judging the reporting.
+    expect(waiting).not.toMatch(/rounded-full bg-\[var\(--accent-gold-dim\)\] px-2\.5/);
+
+    // A quiet morning gets no count at all rather than one reading zero.
+    expect(render()).not.toMatch(/>\d+ waiting</);
+  });
+
+  it("paints a broken connection as a fault, not as another queue", () => {
+    const html = render({
+      needsDecision: {
+        pendingClients: 2,
+        pendingAccounts: 0,
+        accountRequests: 0,
+        newCreatives: 0,
+        failingConnections: 3,
+      },
+    });
+
+    // Gold is the colour of work waiting. A connection answering with an error
+    // is already broken, and it was wearing the same gold as a new creative
+    // while silent stores were drawn in red one panel below.
+    expect(html).toMatch(/text-\[var\(--danger-red\)\][^<]*>[\s]*3[\s]*</);
+    expect(html).toContain("Connections reporting an error");
+    expect(html).toContain("Clients waiting for approval");
+  });
+
+  it("draws the all clear as a block with its mark, not as a bare sentence", () => {
+    const html = render();
+
+    expect(html).toContain("lucide-circle-check");
+    expect(html).toContain("Nothing is waiting on you.");
+
+    // And it leaves the moment there is something to decide.
+    const waiting = render({
+      needsDecision: {
+        pendingClients: 1,
+        pendingAccounts: 0,
+        accountRequests: 0,
+        newCreatives: 0,
+        failingConnections: 0,
+      },
+    });
+    expect(waiting).not.toContain("lucide-circle-check");
+  });
+
+  it("keeps the reveal in the header rather than in a panel of its own", () => {
+    const html = render();
+
+    // The mocked PageContainer prints its actions before its children, so the
+    // toggle standing before the first panel is the toggle having left the body.
+    expect(html.indexOf("Show figures")).toBeGreaterThan(-1);
+    expect(html.indexOf("Show figures")).toBeLessThan(html.indexOf("Needs you"));
+
+    // The window belongs to the figures, so it is not on a page showing none.
+    expect(html).not.toContain(RANGE.from);
+  });
+});
+
+describe("pulseTone", () => {
+  const reporting = (storesSilentToday: number) => ({
+    storesBound: 5,
+    storesReportingToday: 5 - storesSilentToday,
+    storesSilentToday,
+    lastMetricAt: null,
+  });
+
+  it("turns on silence, and keeps a pulse it could not read apart from a quiet one", () => {
+    expect(pulseTone(reporting(0))).toBe("healthy");
+    expect(pulseTone(reporting(1))).toBe("watch");
+    expect(pulseTone(reporting(2))).toBe("watch");
+    expect(pulseTone(reporting(3))).toBe("behind");
+    expect(pulseTone(null)).toBe("unknown");
+  });
+
+  it("treats nothing bound as nothing measured, not as health", () => {
+    expect(
+      pulseTone({
+        storesBound: 0,
+        storesReportingToday: 0,
+        storesSilentToday: 0,
+        lastMetricAt: null,
+      }),
+    ).toBe("unknown");
   });
 });
 
