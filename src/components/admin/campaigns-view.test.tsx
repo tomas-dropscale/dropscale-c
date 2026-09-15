@@ -71,6 +71,9 @@ vi.mock("@/lib/utils", () => ({
   cn: (...values: Array<string | false | null | undefined>) => values.filter(Boolean).join(" "),
 }));
 
+vi.mock("@/lib/portal/range", async () => import("../../lib/portal/range"));
+
+import { presetSelection } from "../../lib/portal/range";
 import { CampaignsView } from "./campaigns-view";
 
 const clients: CampaignViewClient[] = [
@@ -256,6 +259,88 @@ describe("CampaignsView approved visual structure", () => {
     expect(html).not.toContain("Refresh failed");
     expect(html).not.toContain("error provider_failed");
     expect(html).toContain("DGEN · Summer Living · Scale");
+    // An older snapshot names its day: a bare time would read as today's.
+    expect(html).toContain("Snapshot 14 Aug, 11:00");
+  });
+
+  it("says at what time today's campaign snapshot was taken, and nothing when there is none", () => {
+    // A 0.00 spend read at 09:05 is Windsor's day in progress, not a missing
+    // account, and only the time of the snapshot tells the two apart.
+    const now = new Date();
+    const takenAt = new Intl.DateTimeFormat("en-GB", {
+      timeStyle: "short",
+      timeZone: "Europe/Lisbon",
+    }).format(now);
+    const stamped: CampaignViewClient[] = [{
+      ...clients[0],
+      stores: [
+        {
+          ...clients[0].stores[0],
+          providerFreshness: {
+            state: "ready",
+            refreshedAt: now.toISOString(),
+            lastAttemptAt: now.toISOString(),
+            lastErrorCode: null,
+            stale: false,
+          },
+        },
+        {
+          ...clients[0].stores[0],
+          id: "store-2",
+          name: "Northwind Garden",
+          domain: "northwind-garden.com",
+          campaigns: [],
+          campaignState: "not_synced",
+        },
+      ],
+    }];
+    const html = renderToStaticMarkup(
+      <CampaignsView
+        clients={stamped}
+        history={history}
+        historyTruncated={false}
+        range={presetSelection("today", now)}
+      />,
+    );
+
+    expect(html).toContain(`Snapshot ${takenAt}`);
+    expect(html.match(/Snapshot /g)).toHaveLength(1);
+  });
+
+  it("notes that the current day fills in batches only when the range is today", () => {
+    const note = "Windsor fills the current day in batches through the day";
+    const now = new Date();
+
+    const todayHtml = renderToStaticMarkup(
+      <CampaignsView
+        clients={clients}
+        history={history}
+        historyTruncated={false}
+        range={presetSelection("today", now)}
+      />,
+    );
+    expect(todayHtml).toContain(note);
+
+    const rollingHtml = renderToStaticMarkup(
+      <CampaignsView
+        clients={clients}
+        history={history}
+        historyTruncated={false}
+        range={presetSelection("d7", now)}
+      />,
+    );
+    expect(rollingHtml).not.toContain(note);
+
+    // Yesterday is a single closed day: nothing is still filling.
+    const yesterdayHtml = renderToStaticMarkup(
+      <CampaignsView
+        clients={clients}
+        history={history}
+        historyTruncated={false}
+        range={presetSelection("yesterday", now)}
+      />,
+    );
+    expect(yesterdayHtml).not.toContain(note);
   });
 
   it("shows unavailable totals without hiding live campaigns when rollup coverage fails", () => {

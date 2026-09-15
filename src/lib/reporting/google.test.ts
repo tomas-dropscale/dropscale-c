@@ -217,6 +217,134 @@ describe("Google V2 reporting adapter", () => {
         "2026-08-13",
         null,
         fetcher,
+        async () => [],
+      ),
+    ).rejects.toThrow(/different Google Ads reporting identity/);
+  });
+
+  /** One Windsor campaign-hour row for the verified source. */
+  function hourRow(campaignId: string, hour: number, spend: number) {
+    return {
+      date: "2026-09-15",
+      bucket: `2026-09-15T${String(hour).padStart(2, "0")}:00:00`,
+      granularity: "hour" as const,
+      accountId: "111-222-3333",
+      customerId: "1112223333",
+      currency: "EUR",
+      timeZone: "Europe/Lisbon",
+      campaignId,
+      spend,
+      impressions: 10,
+      clicks: 2,
+      conversions: 0.5,
+      conversionValue: spend * 3,
+    };
+  }
+
+  it("reads today's campaigns from whichever Windsor table is fresher", async () => {
+    // Measured 2026-09-15: Windsor filled the two tables at different paces
+    // and answered the same query from replicas hours apart (118.61 daily and
+    // 118.40 hours at 09:55 UTC, nothing at 10:02, 118.99 at 10:03). Campaign
+    // 42 is ahead in the hours, campaign 43 in the daily table; each keeps the
+    // five metrics of the table its spend came from, never a mix.
+    const fetcher = vi.fn(async () => [
+      { ...campaignRow("42"), spend: 0, impressions: 0, clicks: 0, conversions: 0, conversionValue: 0 },
+      campaignRow("43"),
+    ]);
+    const timelineFetcher = vi.fn(async () => [
+      hourRow("42", 8, 60.2),
+      hourRow("42", 9, 58.2),
+      // Hours behind the daily table for this campaign: the daily row stands.
+      hourRow("43", 8, 40),
+      // A campaign the daily table does not name has no row to refresh.
+      hourRow("99", 8, 500),
+    ]);
+
+    const campaigns = await fetchGoogleReportingCampaigns(
+      source,
+      "2026-09-15",
+      "2026-09-15",
+      null,
+      fetcher,
+      timelineFetcher,
+    );
+
+    expect(timelineFetcher).toHaveBeenCalledWith("111-222-3333", "2026-09-15", "2026-09-15");
+    expect(campaigns).toEqual([
+      expect.objectContaining({
+        providerCampaignId: "42",
+        spend: 118.4,
+        impressions: 20,
+        clicks: 4,
+        conversions: 1,
+        conversionValue: 355.2,
+        ctr: 0.2,
+        cpc: 29.6,
+        googleRoas: expect.closeTo(3, 9),
+      }),
+      expect.objectContaining({
+        providerCampaignId: "43",
+        spend: 100,
+        impressions: 1_000,
+        clicks: 50,
+        conversions: 4,
+        conversionValue: 320,
+      }),
+    ]);
+  });
+
+  it("never reads the hours for a multi-day range", async () => {
+    const fetcher = vi.fn(async () => [campaignRow("42")]);
+    const timelineFetcher = vi.fn(async () => [hourRow("42", 8, 500)]);
+
+    const campaigns = await fetchGoogleReportingCampaigns(
+      source,
+      "2026-09-14",
+      "2026-09-15",
+      null,
+      fetcher,
+      timelineFetcher,
+    );
+
+    expect(timelineFetcher).not.toHaveBeenCalled();
+    expect(campaigns[0]).toMatchObject({ providerCampaignId: "42", spend: 100 });
+  });
+
+  it("keeps the daily-table figures when the hour read fails, and says so once", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const fetcher = vi.fn(async () => [campaignRow("42")]);
+    const timelineFetcher = vi.fn(async () => {
+      throw new Error("Windsor is rate limiting requests.");
+    });
+
+    const campaigns = await fetchGoogleReportingCampaigns(
+      source,
+      "2026-09-15",
+      "2026-09-15",
+      null,
+      fetcher,
+      timelineFetcher,
+    );
+
+    expect(campaigns).toHaveLength(1);
+    expect(campaigns[0]).toMatchObject({ providerCampaignId: "42", spend: 100, clicks: 50 });
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]?.[0]).toContain("campaign hours could not be read");
+    warn.mockRestore();
+  });
+
+  it("fails closed when the hour rows carry another reporting identity", async () => {
+    const fetcher = vi.fn(async () => [campaignRow("42")]);
+    const timelineFetcher = vi.fn(async () => [{ ...hourRow("42", 8, 500), currency: "USD" }]);
+
+    await expect(
+      fetchGoogleReportingCampaigns(
+        source,
+        "2026-09-15",
+        "2026-09-15",
+        null,
+        fetcher,
+        timelineFetcher,
       ),
     ).rejects.toThrow(/different Google Ads reporting identity/);
   });

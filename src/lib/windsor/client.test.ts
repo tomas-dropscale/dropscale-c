@@ -476,35 +476,73 @@ describe("Windsor Google Ads server adapter", () => {
     expect(upstream.searchParams.has("date_preset")).toBe(false);
   });
 
-  it("builds today's daily metric from current campaign-hour rows", async () => {
-    const fetcher = mockFetch(jsonResponse({ data: [
-      {
-        date: "2026-08-17",
-        hour_of_day: 10,
-        account_id: "123-456-7890",
-        account_currency_code: "EUR",
-        account_time_zone: "Europe/Lisbon",
-        campaign_id: "1",
-        spend: 12,
-        impressions: 100,
-        clicks: 10,
-        conversions: 1,
-        conversion_value: 20,
-      },
-      {
-        date: "2026-08-17",
-        hour_of_day: 11,
-        account_id: "123-456-7890",
-        account_currency_code: "EUR",
-        account_time_zone: "Europe/Lisbon",
-        campaign_id: "2",
-        spend: 21,
-        impressions: 200,
-        clicks: 20,
-        conversions: 2,
-        conversion_value: 40,
-      },
-    ] }));
+  /** One Windsor account-table row for the account under test. */
+  const todayAccountRow = (
+    date: string,
+    spend: number,
+    metrics: Partial<{
+      account_currency_code: string;
+      impressions: number;
+      clicks: number;
+      conversions: number;
+      conversion_value: number;
+    }> = {},
+  ) => ({
+    date,
+    account_id: "123-456-7890",
+    account_currency_code: "EUR",
+    account_time_zone: "Europe/Lisbon",
+    spend,
+    impressions: 900,
+    clicks: 60,
+    conversions: 3,
+    conversion_value: 100,
+    ...metrics,
+  });
+
+  /** One Windsor campaign-hour row for the account under test. */
+  const todayHourRow = (
+    date: string,
+    hour_of_day: number,
+    campaign_id: string,
+    spend: number,
+    metrics: Partial<{
+      account_currency_code: string;
+      impressions: number;
+      clicks: number;
+      conversions: number;
+      conversion_value: number;
+    }> = {},
+  ) => ({
+    date,
+    hour_of_day,
+    account_id: "123-456-7890",
+    account_currency_code: "EUR",
+    account_time_zone: "Europe/Lisbon",
+    campaign_id,
+    spend,
+    impressions: 100,
+    clicks: 10,
+    conversions: 1,
+    conversion_value: 20,
+    ...metrics,
+  });
+
+  it("builds today from the campaign hours when they lead the account table", async () => {
+    // The account table has written 20 of the day so far; the hours already
+    // sum to 33. The fresher table wins, and the other four metrics follow.
+    const fetcher = mockFetch(
+      jsonResponse({ data: [todayAccountRow("2026-08-17", 20)] }),
+      jsonResponse({ data: [
+        todayHourRow("2026-08-17", 10, "1", 12),
+        todayHourRow("2026-08-17", 11, "2", 21, {
+          impressions: 200,
+          clicks: 20,
+          conversions: 2,
+          conversion_value: 40,
+        }),
+      ] }),
+    );
 
     await expect(fetchGoogleAdsDailyBreakdown(
       "123-456-7890",
@@ -512,17 +550,134 @@ describe("Windsor Google Ads server adapter", () => {
       "2026-08-17",
       { fetcher: fetcher as typeof fetch },
     )).resolves.toEqual([
-      expect.objectContaining({
+      {
         date: "2026-08-17",
+        accountId: "123-456-7890",
+        customerId: "1234567890",
+        currency: "EUR",
+        timeZone: "Europe/Lisbon",
         spend: 33,
         impressions: 300,
         clicks: 30,
         conversions: 3,
         conversionValue: 60,
-      }),
+      },
     ]);
-    expect(requestedUrl(fetcher).searchParams.get("fields")?.split(","))
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(requestedUrl(fetcher, 0).searchParams.get("fields")?.split(","))
+      .not.toContain("hour_of_day");
+    expect(requestedUrl(fetcher, 1).searchParams.get("fields")?.split(","))
       .toContain("hour_of_day");
+  });
+
+  it("keeps the account table's figure for today when it leads the campaign hours", async () => {
+    // Measured 2026-08-31: 47.78 in the account table against 5.89 summed
+    // from the campaign hours, same account and day. The today leg of a
+    // refresh used to write the hour sum over the 47.78 the rolling leg had
+    // just written; with the account table competing it cannot end lower.
+    const fetcher = mockFetch(
+      jsonResponse({ data: [todayAccountRow("2026-08-31", 47.78)] }),
+      jsonResponse({ data: [
+        todayHourRow("2026-08-31", 8, "1", 3.89),
+        todayHourRow("2026-08-31", 9, "2", 2),
+      ] }),
+    );
+
+    await expect(fetchGoogleAdsDailyBreakdown(
+      "123-456-7890",
+      "2026-08-31",
+      "2026-08-31",
+      { fetcher: fetcher as typeof fetch },
+    )).resolves.toEqual([
+      {
+        date: "2026-08-31",
+        accountId: "123-456-7890",
+        customerId: "1234567890",
+        currency: "EUR",
+        timeZone: "Europe/Lisbon",
+        spend: 47.78,
+        impressions: 900,
+        clicks: 60,
+        conversions: 3,
+        conversionValue: 100,
+      },
+    ]);
+  });
+
+  it("keeps the exact account read for today on a tie", async () => {
+    // A closed day reads the same spend from either table; the account row
+    // is the exact read, so its clicks stand even when the hours differ.
+    const fetcher = mockFetch(
+      jsonResponse({ data: [todayAccountRow("2026-08-30", 33, { clicks: 61 })] }),
+      jsonResponse({ data: [
+        todayHourRow("2026-08-30", 10, "1", 12),
+        todayHourRow("2026-08-30", 11, "2", 21),
+      ] }),
+    );
+
+    await expect(fetchGoogleAdsDailyBreakdown(
+      "123-456-7890",
+      "2026-08-30",
+      "2026-08-30",
+      { fetcher: fetcher as typeof fetch },
+    )).resolves.toEqual([
+      expect.objectContaining({ date: "2026-08-30", spend: 33, clicks: 61 }),
+    ]);
+  });
+
+  it("answers today from whichever table already carries it, or not at all", async () => {
+    const onlyAccount = mockFetch(
+      jsonResponse({ data: [todayAccountRow("2026-08-17", 20)] }),
+      jsonResponse({ data: [] }),
+    );
+    await expect(fetchGoogleAdsDailyBreakdown(
+      "123-456-7890",
+      "2026-08-17",
+      "2026-08-17",
+      { fetcher: onlyAccount as typeof fetch },
+    )).resolves.toEqual([
+      expect.objectContaining({ date: "2026-08-17", spend: 20, clicks: 60 }),
+    ]);
+
+    const onlyHours = mockFetch(
+      jsonResponse({ data: [] }),
+      jsonResponse({ data: [todayHourRow("2026-08-17", 10, "1", 12)] }),
+    );
+    await expect(fetchGoogleAdsDailyBreakdown(
+      "123-456-7890",
+      "2026-08-17",
+      "2026-08-17",
+      { fetcher: onlyHours as typeof fetch },
+    )).resolves.toEqual([
+      expect.objectContaining({ date: "2026-08-17", spend: 12, clicks: 10 }),
+    ]);
+
+    const neither = mockFetch(
+      jsonResponse({ data: [] }),
+      jsonResponse({ data: [] }),
+    );
+    await expect(fetchGoogleAdsDailyBreakdown(
+      "123-456-7890",
+      "2026-08-17",
+      "2026-08-17",
+      { fetcher: neither as typeof fetch },
+    )).resolves.toEqual([]);
+  });
+
+  it("rejects today when the two tables report different reporting identities", async () => {
+    const fetcher = mockFetch(
+      jsonResponse({ data: [todayAccountRow("2026-08-17", 20)] }),
+      jsonResponse({ data: [
+        todayHourRow("2026-08-17", 10, "1", 12, { account_currency_code: "USD" }),
+      ] }),
+    );
+
+    await expect(fetchGoogleAdsDailyBreakdown(
+      "123-456-7890",
+      "2026-08-17",
+      "2026-08-17",
+      { fetcher: fetcher as typeof fetch },
+    )).rejects.toMatchObject({ code: "invalid_response", status: 502 });
   });
 
   it("segments campaign timelines by local hour only for a one-day range", async () => {
@@ -601,6 +756,8 @@ describe("Windsor Google Ads server adapter", () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
+  // The single-day reads below also read the campaign hours; an empty hour
+  // table keeps the account row's validation the only thing under test.
   it("rejects daily metrics returned for another Google Ads account", async () => {
     const fetcher = mockFetch(
       jsonResponse({
@@ -618,6 +775,7 @@ describe("Windsor Google Ads server adapter", () => {
           },
         ],
       }),
+      jsonResponse({ data: [] }),
     );
 
     await expect(
@@ -655,6 +813,7 @@ describe("Windsor Google Ads server adapter", () => {
           },
         ],
       }),
+      jsonResponse({ data: [] }),
     );
 
     await expect(
@@ -708,6 +867,7 @@ describe("Windsor Google Ads server adapter", () => {
     };
     const fetcher = mockFetch(
       jsonResponse({ data: [row, { ...row }] }),
+      jsonResponse({ data: [] }),
       jsonResponse({ data: [row, { ...row }] }),
       jsonResponse({ data: [row, { ...row, spend: 2 }] }),
     );
@@ -737,6 +897,7 @@ describe("Windsor Google Ads server adapter", () => {
           "content-length": "1000001",
         },
       }),
+      jsonResponse({ data: [] }),
     );
 
     await expect(
@@ -1438,10 +1599,10 @@ describe("Windsor store-scoped daily breakdown", () => {
     expect(urls.has("2")).toBe(false);
   });
 
-  it("takes the fresh account total less any spend that belongs elsewhere", async () => {
-    // The account read comes first: Windsor keeps it current while its campaign
-    // tables lag hours behind on the day in progress, so the store's spend is
-    // that total minus the campaigns proved to point at another store.
+  it("takes the account total less any spend that belongs elsewhere", async () => {
+    // Both days close with the account and the campaign tables agreeing, as
+    // every closed day does; the tie keeps the exact account read, minus the
+    // campaigns proved to point at another store.
     const accountRow = (date: string, spend: number, impressions: number) => ({
       date,
       account_id: "123-456-7890",
@@ -1509,6 +1670,302 @@ describe("Windsor store-scoped daily breakdown", () => {
         conversionValue: 24.5,
       }),
     ]);
+  });
+
+  /** One Windsor account-table row for the store's account. */
+  const accountDay = (
+    date: string,
+    spend: number,
+    metrics: Partial<{
+      impressions: number;
+      clicks: number;
+      conversions: string;
+      conversion_value: number;
+    }> = {},
+  ) => ({
+    date,
+    account_id: "123-456-7890",
+    account_currency_code: "EUR",
+    account_time_zone: "Europe/Lisbon",
+    spend,
+    impressions: 200,
+    clicks: 20,
+    conversions: "1",
+    conversion_value: spend * 2,
+    ...metrics,
+  });
+
+  /** Campaign 1 is the store's, campaign 2 is provably another store's. */
+  const ownerEvidence = () =>
+    jsonResponse({
+      data: [
+        {
+          account_id: "123-456-7890",
+          campaign_id: "1",
+          final_url: "https://akinikko.com/collections/bags",
+        },
+        {
+          account_id: "123-456-7890",
+          campaign_id: "2",
+          final_url: "https://casa-luna-artesanias.com/en/collections/lamparas",
+        },
+      ],
+    });
+
+  it("lets the campaign tables lead when they carry more of the day in progress", async () => {
+    // Measured 2026-09-15 at 09:55 UTC: the account table read 118.19 for
+    // Amelia Bristol while the campaign table already read 118.61. The fresher
+    // source wins, and the day's five metrics all come from it.
+    const fetcher = mockFetch(
+      jsonResponse({
+        data: [
+          accountDay("2026-09-15", 118.19, {
+            impressions: 900,
+            clicks: 40,
+            conversions: "2",
+            conversion_value: 300,
+          }),
+        ],
+      }),
+      jsonResponse({
+        data: [
+          {
+            ...timelineRow("1", "2026-09-15", 60.61),
+            impressions: 500,
+            clicks: 30,
+            conversions: "1.5",
+            conversion_value: 150,
+          },
+          {
+            ...timelineRow("3", "2026-09-15", 58),
+            impressions: 480,
+            clicks: 25,
+            conversions: "1",
+            conversion_value: 160,
+          },
+        ],
+      }),
+      ownerEvidence(),
+    );
+
+    const rows = await fetchGoogleAdsDailyBreakdownForStore(
+      "123-456-7890",
+      "2026-09-14",
+      "2026-09-15",
+      ["akinikko.com"],
+      { fetcher: fetcher as typeof fetch },
+    );
+
+    expect(rows).toEqual([
+      {
+        date: "2026-09-15",
+        accountId: "123-456-7890",
+        customerId: "1234567890",
+        currency: "EUR",
+        timeZone: "Europe/Lisbon",
+        spend: 118.61,
+        impressions: 980,
+        clicks: 55,
+        conversions: 2.5,
+        conversionValue: 310,
+      },
+    ]);
+  });
+
+  it("keeps the account read, net of the foreign share, when it leads", async () => {
+    // Measured 2026-08-31: account 47.78 against 5.89 summed from the
+    // campaigns. The account wins, but the foreign campaign's share is still
+    // taken out of it, metric by metric.
+    const fetcher = mockFetch(
+      jsonResponse({
+        data: [
+          accountDay("2026-08-31", 47.78, {
+            impressions: 900,
+            clicks: 60,
+            conversions: "3",
+            conversion_value: 100,
+          }),
+        ],
+      }),
+      jsonResponse({
+        data: [
+          timelineRow("1", "2026-08-31", 3.89),
+          {
+            ...timelineRow("2", "2026-08-31", 2),
+            impressions: 50,
+            clicks: 5,
+            conversions: "0.5",
+            conversion_value: 4,
+          },
+          timelineRow("3", "2026-08-31", 2),
+        ],
+      }),
+      ownerEvidence(),
+    );
+
+    const rows = await fetchGoogleAdsDailyBreakdownForStore(
+      "123-456-7890",
+      "2026-08-30",
+      "2026-08-31",
+      ["akinikko.com"],
+      { fetcher: fetcher as typeof fetch },
+    );
+
+    expect(rows).toEqual([
+      expect.objectContaining({
+        date: "2026-08-31",
+        spend: 45.78,
+        impressions: 850,
+        clicks: 55,
+        conversions: 2.5,
+        conversionValue: 96,
+      }),
+    ]);
+  });
+
+  it("reports a day only the campaign rows carry from those rows", async () => {
+    // The account table has not written the newest day yet; the campaign
+    // table has. That day is still answered, from what is known about it.
+    const fetcher = mockFetch(
+      jsonResponse({ data: [accountDay("2026-08-10", 10)] }),
+      jsonResponse({
+        data: [
+          timelineRow("1", "2026-08-10", 4),
+          timelineRow("1", "2026-08-11", 5.25),
+          timelineRow("2", "2026-08-11", 99),
+        ],
+      }),
+      ownerEvidence(),
+    );
+
+    const rows = await fetchGoogleAdsDailyBreakdownForStore(
+      "123-456-7890",
+      "2026-08-10",
+      "2026-08-11",
+      ["akinikko.com"],
+      { fetcher: fetcher as typeof fetch },
+    );
+
+    expect(rows).toEqual([
+      expect.objectContaining({ date: "2026-08-10", spend: 10, impressions: 200 }),
+      {
+        date: "2026-08-11",
+        accountId: "123-456-7890",
+        customerId: "1234567890",
+        currency: "EUR",
+        timeZone: "Europe/Lisbon",
+        spend: 5.25,
+        impressions: 100,
+        clicks: 10,
+        conversions: 0.5,
+        conversionValue: 10.5,
+      },
+    ]);
+  });
+
+  it("never mixes the metrics of the two sources within a day", async () => {
+    // Spend decides the source; the other four metrics follow it even when
+    // the losing source carries more of one of them.
+    const fetcher = mockFetch(
+      jsonResponse({
+        data: [
+          accountDay("2026-09-14", 50, { clicks: 5 }),
+          accountDay("2026-09-15", 55, { impressions: 5_000 }),
+        ],
+      }),
+      jsonResponse({
+        data: [
+          { ...timelineRow("1", "2026-09-14", 40), clicks: 90 },
+          { ...timelineRow("1", "2026-09-15", 60), impressions: 10 },
+        ],
+      }),
+      ownerEvidence(),
+    );
+
+    const rows = await fetchGoogleAdsDailyBreakdownForStore(
+      "123-456-7890",
+      "2026-09-14",
+      "2026-09-15",
+      ["akinikko.com"],
+      { fetcher: fetcher as typeof fetch },
+    );
+
+    expect(rows).toEqual([
+      expect.objectContaining({
+        date: "2026-09-14",
+        spend: 50,
+        impressions: 200,
+        clicks: 5,
+        conversions: 1,
+        conversionValue: 100,
+      }),
+      expect.objectContaining({
+        date: "2026-09-15",
+        spend: 60,
+        impressions: 10,
+        clicks: 10,
+        conversions: 0.5,
+        conversionValue: 120,
+      }),
+    ]);
+  });
+
+  it("competes the account table against the campaign hours for the today window", async () => {
+    // The today leg reads a single day. Its account base is the account table
+    // itself, not the hour sum a single-day account read would build from the
+    // same campaign rows, so the 2026-08-31 case (account 47.78, hours 5.89)
+    // keeps the account figure net of the foreign campaign here as well.
+    const fetcher = mockFetch(
+      jsonResponse({
+        data: [
+          accountDay("2026-08-31", 47.78, {
+            impressions: 900,
+            clicks: 60,
+            conversions: "3",
+            conversion_value: 100,
+          }),
+        ],
+      }),
+      jsonResponse({
+        data: [
+          { ...timelineRow("1", "2026-08-31", 3.89), hour_of_day: 8 },
+          {
+            ...timelineRow("2", "2026-08-31", 2),
+            hour_of_day: 9,
+            impressions: 50,
+            clicks: 5,
+            conversions: "0.5",
+            conversion_value: 4,
+          },
+          { ...timelineRow("3", "2026-08-31", 2), hour_of_day: 9 },
+        ],
+      }),
+      ownerEvidence(),
+    );
+
+    const rows = await fetchGoogleAdsDailyBreakdownForStore(
+      "123-456-7890",
+      "2026-08-31",
+      "2026-08-31",
+      ["akinikko.com"],
+      { fetcher: fetcher as typeof fetch },
+    );
+
+    expect(rows).toEqual([
+      expect.objectContaining({
+        date: "2026-08-31",
+        spend: 45.78,
+        impressions: 850,
+        clicks: 55,
+        conversions: 2.5,
+        conversionValue: 96,
+      }),
+    ]);
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(requestedUrl(fetcher, 0).searchParams.get("fields")?.split(","))
+      .not.toContain("hour_of_day");
+    expect(requestedUrl(fetcher, 1).searchParams.get("fields")?.split(","))
+      .toContain("hour_of_day");
   });
 
   it("stays an exact account-level read when the store has no domains", async () => {
@@ -1767,6 +2224,7 @@ describe("Single-day hourly aggregation money contract", () => {
       conversion_value: spend,
     });
     const fetcher = mockFetch(
+      jsonResponse({ data: [] }),
       jsonResponse({ data: [hour(1, 4.121), hour(2, 9.212)] }),
     );
     const rows = await fetchGoogleAdsDailyBreakdown(

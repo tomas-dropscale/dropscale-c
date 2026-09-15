@@ -34,7 +34,7 @@ import {
   type ProjectedCampaignClient,
 } from "@/lib/admin/campaigns-view";
 import { money, multiplier } from "@/lib/format";
-import type { RangeSelection } from "@/lib/portal/range";
+import { presetSelection, type RangeSelection } from "@/lib/portal/range";
 import { cn } from "@/lib/utils";
 
 // Header, total and campaign rows are separate grids. Keep the budget track at
@@ -48,6 +48,42 @@ const SCALE_DATE_TIME = new Intl.DateTimeFormat("en-GB", {
   timeStyle: "short",
   timeZone: "Europe/Lisbon",
 });
+
+const SNAPSHOT_TIME = new Intl.DateTimeFormat("en-GB", {
+  timeStyle: "short",
+  timeZone: "Europe/Lisbon",
+});
+
+const SNAPSHOT_DATE_TIME = new Intl.DateTimeFormat("en-GB", {
+  day: "numeric",
+  month: "short",
+  hour: "2-digit",
+  minute: "2-digit",
+  timeZone: "Europe/Lisbon",
+});
+
+const SNAPSHOT_DAY = new Intl.DateTimeFormat("en-CA", {
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  timeZone: "Europe/Lisbon",
+});
+
+/**
+ * When the campaign snapshot for the selected range was taken, in reporting
+ * time. A 0.00 spend at 09:05 reads as a missing account unless the page says
+ * the figure is from 09:05, before Windsor had filled the day; the time alone
+ * says that when the snapshot is today's, and the day comes along when it is
+ * older, since a bare time would then read as today's.
+ */
+function snapshotLabel(refreshedAt: string | null | undefined, today: string): string | null {
+  if (!refreshedAt) return null;
+  const timestamp = Date.parse(refreshedAt);
+  if (Number.isNaN(timestamp)) return null;
+  return SNAPSHOT_DAY.format(timestamp) === today
+    ? SNAPSHOT_TIME.format(timestamp)
+    : SNAPSHOT_DATE_TIME.format(timestamp);
+}
 
 type ActionResult = { ok: true } | { ok: false; error: string };
 
@@ -586,6 +622,7 @@ function StoreGroup({
   clientId,
   store,
   range,
+  today,
   pending,
   statusErrors,
   onBudgetChange,
@@ -594,12 +631,15 @@ function StoreGroup({
   clientId: string;
   store: ProjectedCampaignClient["stores"][number];
   range: RangeSelection;
+  /** The current reporting day, so a snapshot taken today shows its time alone. */
+  today: string;
   pending: Set<string>;
   statusErrors: Record<string, string>;
   onBudgetChange: (campaign: ProjectedCampaign, nextDailyBudget: string) => Promise<ActionResult>;
   onStatusChange: (campaign: ProjectedCampaign) => void;
 }) {
   const headingId = React.useId();
+  const snapshot = snapshotLabel(store.providerFreshness?.refreshedAt, today);
   const spend = store.rollupSpend;
   const budgets = store.campaigns.map((campaign) =>
     campaign.dailyBudget === null ? null : Number(campaign.dailyBudget),
@@ -636,6 +676,14 @@ function StoreGroup({
             >
               {storeLabel}
             </h3>
+            {snapshot && (
+              <p
+                className="mt-0.5 truncate text-[11px] text-[var(--text-muted)]"
+                title="When the campaign rows shown for this period were last read from Google"
+              >
+                Snapshot {snapshot}
+              </p>
+            )}
           </div>
         </div>
 
@@ -754,6 +802,7 @@ function StoreGroup({
 function ClientSection({
   client,
   range,
+  today,
   open,
   pending,
   statusErrors,
@@ -763,6 +812,7 @@ function ClientSection({
 }: {
   client: ProjectedCampaignClient;
   range: RangeSelection;
+  today: string;
   open: boolean;
   pending: Set<string>;
   statusErrors: Record<string, string>;
@@ -835,6 +885,7 @@ function ClientSection({
               clientId={client.id}
               store={store}
               range={range}
+              today={today}
               pending={pending}
               statusErrors={statusErrors}
               onBudgetChange={onBudgetChange}
@@ -872,6 +923,11 @@ export function CampaignsView({
     () => filterCampaignClients(projected, query),
     [projected, query],
   );
+  // The reporting day, as the range presets count it. A range that is exactly
+  // that day shows Windsor's day in progress, which fills in batches through
+  // the day, so a low figure early on is not a missing account.
+  const today = presetSelection("today", new Date()).to;
+  const currentDay = range.from === range.to && range.to === today;
 
   function toggleClient(clientId: string) {
     setOpenClients((current) => {
@@ -982,6 +1038,11 @@ export function CampaignsView({
           <p className="mt-1 text-[11.5px] text-[var(--text-muted)]">
             Open a client to review every store and its Google campaigns.
           </p>
+          {currentDay && (
+            <p className="mt-1 text-[11px] text-[var(--text-muted)]">
+              Windsor fills the current day in batches through the day; the figures grow with each refresh.
+            </p>
+          )}
           {historyTruncated && (
             <p className="mt-1 text-[11px] text-[var(--accent-gold-strong)]">
               Scale history is limited to the 1,000 most recent verified changes.
@@ -1034,6 +1095,7 @@ export function CampaignsView({
             key={client.id}
             client={client}
             range={range}
+            today={today}
             open={openClients.has(client.id)}
             pending={pending}
             statusErrors={statusErrors}

@@ -14,6 +14,20 @@ name: Hourly reporting sync
 # and reads nothing from Shopify or Google for them; a store that failed or
 # was cut by the route budget at :00 is retried here. The portfolio Google
 # leg, the metrics rollup and the ledger have no such gate and run each time.
+#
+# GitHub queues scheduled runs hours late under load: on 14 and 15 Sep 2026
+# the ":07" runs actually started at 06:03, 12:33, 18:31, 22:24, 01:21 and
+# 07:36, gaps of 3 to 6 hours in which today's ad spend sat at whatever the
+# last landed run wrote. Two attempts an hour raise the odds of one landing
+# inside any given hour. The second attempt is not cheap when the first did
+# land: the store gate above is 20 minutes, so a run at :37 finds every
+# store's snapshots 30 minutes old or more and reads them all again from
+# Shopify and Google, and the portfolio Google leg, the metrics rollup and
+# the ledger run ungated either way. On an hour where :00 or :07 landed this
+# is a second full refresh; that load is accepted for the hours where neither
+# did. If Shopify throttles start cutting refreshes short, widen
+# STORE_FRESHNESS_WINDOW_MS in src/app/api/admin/sync-reporting/route.ts past
+# 30 minutes so the :37 run skips the stores the :00 or :07 run refreshed.
 # The legs run d7 -> d30 -> today, the same order as the Worker cron, and
 # the order matters: every leg upserts today's daily_metrics row, and the
 # today leg reads it from a different Windsor feed than the rolling legs, so
@@ -31,6 +45,7 @@ name: Hourly reporting sync
 on:
   schedule:
     - cron: "7 * * * *" # hourly, offset from the Worker's :00
+    - cron: "37 * * * *" # second attempt: GitHub queues one late, the other may land
   workflow_dispatch: {}
 
 concurrency:

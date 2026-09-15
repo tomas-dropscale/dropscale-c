@@ -116,6 +116,46 @@ function landingPagesByCampaign(
   );
 }
 
+type CampaignMetrics = {
+  spend: number;
+  impressions: number;
+  clicks: number;
+  conversions: number;
+  conversionValue: number;
+};
+
+/**
+ * Sums the hour rows of one day per campaign, within the six-decimal money
+ * contract: an IEEE artifact like 13.332999999999998 must not reach a snapshot.
+ */
+function campaignTotalsFromHours(
+  rows: readonly WindsorGoogleAdsCampaignTimelineRow[],
+): Map<string, CampaignMetrics> {
+  const totals = new Map<string, CampaignMetrics>();
+  for (const row of rows) {
+    const total = totals.get(row.campaignId) ?? {
+      spend: 0,
+      impressions: 0,
+      clicks: 0,
+      conversions: 0,
+      conversionValue: 0,
+    };
+    total.spend += row.spend;
+    total.impressions += row.impressions;
+    total.clicks += row.clicks;
+    total.conversions += row.conversions;
+    total.conversionValue += row.conversionValue;
+    totals.set(row.campaignId, total);
+  }
+  const round = (value: number) => Math.round(value * 1e6) / 1e6;
+  for (const total of totals.values()) {
+    total.spend = round(total.spend);
+    total.conversions = round(total.conversions);
+    total.conversionValue = round(total.conversionValue);
+  }
+  return totals;
+}
+
 export type ReportingCampaignTimelinePoint = {
   accountId: string;
   campaignId: string;
@@ -232,6 +272,19 @@ export async function fetchGoogleReportingDailyMetrics(
  * which collection a campaign is measured against, so a failed read is logged
  * and the campaigns keep their final URLs, where a failed final-URL read still
  * fails the whole campaign read, as it always did.
+ *
+ * A single-day range is the day in progress (the today window), and Windsor
+ * fills that day in batches, its campaign-daily table and its campaign-hour
+ * table at different paces, and it can answer the same query from a replica
+ * that is hours behind: on 2026-09-15 one account read 118.61 in the daily
+ * table and 118.40 in the hours at 09:55 UTC, nothing at all at 10:02, and
+ * 118.99 at 10:03. Neither table overshoots,
+ * so for that window the hour table is read as well and each campaign takes
+ * the larger of the two, its clicks, impressions and conversions from the
+ * same table as its spend. This read is best-effort too: the daily rows are
+ * the campaigns, the hours only refresh their figures, so a failed hour read
+ * is logged and the daily figures stand. Multi-day ranges never read hours;
+ * a closed day reads the same from either table.
  */
 export async function fetchGoogleReportingCampaigns(
   source: CanonicalReportingSource,
@@ -239,6 +292,7 @@ export async function fetchGoogleReportingCampaigns(
   to: string,
   landingFetcher: LandingPagesFetcher | null = null,
   fetcher: CampaignFetcher = fetchGoogleAdsCampaignBreakdown,
+  timelineFetcher: CampaignTimelineFetcher = fetchGoogleAdsCampaignTimeline,
 ): Promise<ReportingCampaign[]> {
   const google = source.googleAds;
   if (!google?.currency || !google.timeZone) {
@@ -252,12 +306,21 @@ export async function fetchGoogleReportingCampaigns(
     PAUSED: "paused",
     REMOVED: "ended",
   } as const;
-  const [rows, landingRows] = await Promise.all([
+  const [rows, landingRows, hourRows] = await Promise.all([
     fetcher(google.accountId, from, to),
     landingFetcher
       ? landingFetcher(google.accountId, from, to).catch((error: unknown) => {
           console.warn(
             `Google Ads landing pages could not be read for ${google.accountId}; campaigns keep their final URLs only:`,
+            error,
+          );
+          return null;
+        })
+      : null,
+    from === to
+      ? timelineFetcher(google.accountId, from, to).catch((error: unknown) => {
+          console.warn(
+            `Google Ads campaign hours could not be read for ${google.accountId}; today's campaigns keep their daily-table figures:`,
             error,
           );
           return null;
@@ -281,31 +344,38 @@ export async function fetchGoogleReportingCampaigns(
       );
     }
   }
+  // The hours are looked up by the campaigns the daily rows name, so a
+  // foreign campaign's hours never enter; their identity is still checked,
+  // as a wrong account's figures are wrong however fresh they are.
+  for (const row of hourRows ?? []) assertBreakdownIdentity(row, google);
+  const hourTotals = hourRows ? campaignTotalsFromHours(hourRows) : null;
 
   return rows
     .filter((row) => campaignBelongsToStore(row.finalUrls, storeDomains))
     .map((row) => {
       const landed = landingPages?.get(row.campaignId);
+      const hours = hourTotals?.get(row.campaignId);
+      const metrics: CampaignMetrics = hours && hours.spend > row.spend ? hours : row;
       return {
       id: `windsor-${source.adAccountId}-${row.campaignId}`,
       providerCampaignId: row.campaignId,
       ad_account_id: source.adAccountId,
       name: row.name,
       status: status[row.status],
-      spend: row.spend,
-      impressions: row.impressions,
-      clicks: row.clicks,
-      ctr: row.impressions > 0 ? row.clicks / row.impressions : 0,
-      cpc: row.clicks > 0 ? row.spend / row.clicks : 0,
+      spend: metrics.spend,
+      impressions: metrics.impressions,
+      clicks: metrics.clicks,
+      ctr: metrics.impressions > 0 ? metrics.clicks / metrics.impressions : 0,
+      cpc: metrics.clicks > 0 ? metrics.spend / metrics.clicks : 0,
       daily_budget: row.dailyBudget,
       updated_at: new Date().toISOString(),
       startDate: row.startDate,
-      conversions: row.conversions,
+      conversions: metrics.conversions,
       advertisingChannelType: row.advertisingChannelType,
       shoppingFeed: row.shoppingFeed,
       biddingStrategyType: row.biddingStrategyType,
-      conversionValue: row.conversionValue,
-      googleRoas: row.spend > 0 ? row.conversionValue / row.spend : null,
+      conversionValue: metrics.conversionValue,
+      googleRoas: metrics.spend > 0 ? metrics.conversionValue / metrics.spend : null,
       ...(row.finalUrls?.length ? { finalUrls: row.finalUrls } : {}),
       ...(landed?.length ? { landingPages: landed } : {}),
       };

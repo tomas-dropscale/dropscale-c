@@ -935,6 +935,19 @@ export async function probeGoogleAdsCapabilities(
  * Reads daily metrics for one exact Google Ads account and inclusive date
  * range. The caller remains responsible for comparing the returned currency
  * and time zone with its own reporting identity.
+ *
+ * A single-day range is the day in progress (the today window). For that day
+ * Windsor's account table and its campaign-hour table fill in batches at
+ * different paces, so either can be ahead of the other; the measurements are
+ * on fetchGoogleAdsDailyBreakdownForStore. This once read the hours alone for
+ * that window, so a today refresh wrote today from the campaign feed only and
+ * could lower what a rolling refresh had just written from the account table
+ * (2026-08-31: 47.78 in the account table against 5.89 summed from the hours,
+ * same account and day), and the last leg to run decided today's figure. So
+ * for that window both tables are read and the day takes the larger spend,
+ * its other four metrics from the same table; a tie keeps the exact account
+ * read, which is what every closed day is. Multi-day ranges read the account
+ * table alone, as a closed day reads the same from either.
  */
 export async function fetchGoogleAdsDailyBreakdown(
   accountId: string,
@@ -942,39 +955,79 @@ export async function fetchGoogleAdsDailyBreakdown(
   to: string,
   options: WindsorRequestOptions = {},
 ): Promise<WindsorGoogleAdsDailyRow[]> {
-  if (from === to) {
-    const hourly = await fetchGoogleAdsCampaignTimeline(accountId, from, to, options);
-    const first = hourly[0];
-    if (!first) return [];
-    if (
-      hourly.some(
-        (row) =>
-          row.date !== from ||
-          row.accountId !== first.accountId ||
-          row.customerId !== first.customerId ||
-          row.currency !== first.currency ||
-          row.timeZone !== first.timeZone,
-      )
-    ) {
-      throw invalidDailyResponse();
-    }
-    // Float sums must stay within the six-decimal money contract: an IEEE
-    // artifact like 13.332999999999998 poisons daily_metrics and billing.
-    const total = (read: (row: WindsorGoogleAdsCampaignTimelineRow) => number) =>
-      Math.round(hourly.reduce((sum, row) => sum + read(row), 0) * 1e6) / 1e6;
-    return [{
-      date: from,
-      accountId: first.accountId,
-      customerId: first.customerId,
-      currency: first.currency,
-      timeZone: first.timeZone,
-      spend: total((row) => row.spend),
-      impressions: total((row) => row.impressions),
-      clicks: total((row) => row.clicks),
-      conversions: total((row) => row.conversions),
-      conversionValue: total((row) => row.conversionValue),
-    }];
+  if (from !== to) return fetchGoogleAdsAccountDays(accountId, from, to, options);
+  const [accountDays, hourly] = await Promise.all([
+    fetchGoogleAdsAccountDays(accountId, from, to, options),
+    fetchGoogleAdsCampaignTimeline(accountId, from, to, options),
+  ]);
+  const fromAccount = accountDays[0] ?? null;
+  const fromHours = dayFromCampaignHours(from, hourly);
+  if (!fromAccount) return fromHours ? [fromHours] : [];
+  if (!fromHours) return [fromAccount];
+  if (
+    fromHours.accountId !== fromAccount.accountId ||
+    fromHours.customerId !== fromAccount.customerId ||
+    fromHours.currency !== fromAccount.currency ||
+    fromHours.timeZone !== fromAccount.timeZone
+  ) {
+    throw invalidDailyResponse();
   }
+  return [fromHours.spend > fromAccount.spend ? fromHours : fromAccount];
+}
+
+/**
+ * Sums one day's campaign-hour rows into a daily row for the account, or
+ * null when Windsor carries no hours for the day yet. Every row must be that
+ * day and one reporting identity.
+ */
+function dayFromCampaignHours(
+  date: string,
+  hourly: readonly WindsorGoogleAdsCampaignTimelineRow[],
+): WindsorGoogleAdsDailyRow | null {
+  const first = hourly[0];
+  if (!first) return null;
+  if (
+    hourly.some(
+      (row) =>
+        row.date !== date ||
+        row.accountId !== first.accountId ||
+        row.customerId !== first.customerId ||
+        row.currency !== first.currency ||
+        row.timeZone !== first.timeZone,
+    )
+  ) {
+    throw invalidDailyResponse();
+  }
+  // Float sums must stay within the six-decimal money contract: an IEEE
+  // artifact like 13.332999999999998 poisons daily_metrics and billing.
+  const total = (read: (row: WindsorGoogleAdsCampaignTimelineRow) => number) =>
+    Math.round(hourly.reduce((sum, row) => sum + read(row), 0) * 1e6) / 1e6;
+  return {
+    date,
+    accountId: first.accountId,
+    customerId: first.customerId,
+    currency: first.currency,
+    timeZone: first.timeZone,
+    spend: total((row) => row.spend),
+    impressions: total((row) => row.impressions),
+    clicks: total((row) => row.clicks),
+    conversions: total((row) => row.conversions),
+    conversionValue: total((row) => row.conversionValue),
+  };
+}
+
+/**
+ * The account table alone: one row per day Windsor carries for the account,
+ * whatever the range. The store-scoped read takes this as its account base
+ * so that the today window competes the account table against the campaign
+ * hours it reads anyway, not against a second read of the same hours.
+ */
+async function fetchGoogleAdsAccountDays(
+  accountId: string,
+  from: string,
+  to: string,
+  options: WindsorRequestOptions = {},
+): Promise<WindsorGoogleAdsDailyRow[]> {
   const ids = normalizeGoogleAdsCustomerId(accountId);
   const range = reportingRange(from, to);
   const maxRows = range.days + 1;
@@ -1214,6 +1267,25 @@ export async function fetchGoogleAdsLandingPages(
  * account may host another store's campaigns). With no domains this is exactly
  * the account-level read. A campaign whose ad final URLs all point at another
  * domain is excluded; a campaign with no usable URL evidence stays attributed.
+ *
+ * Windsor fills the day in progress in batches, and its account table and its
+ * campaign tables fill at different paces, so on the current day either can
+ * be ahead of the other. Measured 2026-08-31, the account table led (account
+ * 47.78 against 5.89 summed from the campaigns, same account and day); measured
+ * 2026-09-15 at 09:55 UTC, the campaign tables led for every account (Amelia
+ * Bristol 118.19 account against 118.61 campaign-daily, Elena Granada 185.93
+ * against 201.67). Neither table overshoots: each carries a subset of the
+ * day's spend until the day closes, when both agree. So for every day both
+ * sources carry, the store's spend is read from whichever is fresher, which is
+ * the larger one, and a closed day reads the same from either.
+ *
+ * The campaign rows are still the only source that says WHICH spend belongs
+ * to another store, so the account figure competes net of that foreign share.
+ * The five metrics of a day always come from the same source: a spend from
+ * one table next to clicks from the other would describe no real read. The
+ * account base is the account table read directly, the today window
+ * included: fetchGoogleAdsDailyBreakdown would read the same campaign hours
+ * a second time to build that day, and this read already holds them.
  */
 export async function fetchGoogleAdsDailyBreakdownForStore(
   accountId: string,
@@ -1225,20 +1297,8 @@ export async function fetchGoogleAdsDailyBreakdownForStore(
   if (storeDomains.length === 0) {
     return fetchGoogleAdsDailyBreakdown(accountId, from, to, options);
   }
-  // The account total is the freshest figure Windsor has: for the day still in
-  // progress its campaign tables run hours behind the account one (measured
-  // 2026-08-31: account 47.78 vs campaigns 5.89 for the same account and day).
-  // Reading the store's spend from the campaign rows alone therefore reported a
-  // fraction of today's ad spend all morning, every morning.
-  //
-  // So the campaign rows are used for what only they can say — WHICH spend
-  // belongs to another store — and that is subtracted from the account total.
-  // When nothing is excluded, which is every single-store account, the result
-  // is exactly the account total and as fresh as Windsor can be; when a foreign
-  // campaign does spend, its (possibly lagging) share is removed. Both are
-  // closer to the truth than dropping the day to its campaign-table shadow.
   const [accountDays, timeline, finalUrlsByCampaign] = await Promise.all([
-    fetchGoogleAdsDailyBreakdown(accountId, from, to, options),
+    fetchGoogleAdsAccountDays(accountId, from, to, options),
     fetchGoogleAdsCampaignTimeline(accountId, from, to, options),
     fetchGoogleAdsCampaignFinalUrls(accountId, from, to, options),
   ]);
@@ -1288,18 +1348,32 @@ export async function fetchGoogleAdsDailyBreakdownForStore(
 
   const round = (value: number) => Math.round(value * 1e6) / 1e6;
   const atLeastZero = (value: number) => (value > 0 ? value : 0);
+  const fromCampaigns = (totals: Totals): Totals => ({
+    spend: round(totals.spend),
+    impressions: totals.impressions,
+    clicks: totals.clicks,
+    conversions: round(totals.conversions),
+    conversionValue: round(totals.conversionValue),
+  });
   const byDay = new Map<string, WindsorGoogleAdsDailyRow>();
 
   for (const day of accountDays) {
     const away = excluded.get(day.date) ?? zero();
-    byDay.set(day.date, {
-      ...day,
+    const fromAccount: Totals = {
       spend: round(atLeastZero(day.spend - away.spend)),
       impressions: atLeastZero(day.impressions - away.impressions),
       clicks: atLeastZero(day.clicks - away.clicks),
       conversions: round(atLeastZero(day.conversions - away.conversions)),
       conversionValue: round(atLeastZero(day.conversionValue - away.conversionValue)),
-    });
+    };
+    const campaigns = kept.get(day.date);
+    // The fresher source carries more of the day; on a tie (every closed day)
+    // the exact account read stays the answer. The row keeps the account
+    // read's identity either way: only the five metrics change source.
+    const fresher = campaigns && round(campaigns.spend) > fromAccount.spend
+      ? fromCampaigns(campaigns)
+      : fromAccount;
+    byDay.set(day.date, { ...day, ...fresher });
   }
 
   // A day the account read did not carry, but the campaign rows did, still
@@ -1308,14 +1382,7 @@ export async function fetchGoogleAdsDailyBreakdownForStore(
     if (byDay.has(date)) continue;
     const seen = identity.get(date);
     if (!seen) continue;
-    byDay.set(date, {
-      ...seen,
-      spend: round(totals.spend),
-      impressions: totals.impressions,
-      clicks: totals.clicks,
-      conversions: round(totals.conversions),
-      conversionValue: round(totals.conversionValue),
-    });
+    byDay.set(date, { ...seen, ...fromCampaigns(totals) });
   }
   return [...byDay.values()].sort((left, right) => left.date.localeCompare(right.date));
 }

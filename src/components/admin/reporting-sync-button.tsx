@@ -80,10 +80,52 @@ export async function requestReportingSync(
 }
 
 /**
+ * The two reporting legs of the global Sync, in the order the machine
+ * schedule runs them: the last 7 days, then today on its own.
+ *
+ * Today is a separate leg because the route keeps separate snapshots for the
+ * today range (the ones /admin/campaigns shows when its range is today) and
+ * only a request for that exact range rewrites them; the d7 leg leaves them
+ * as the last machine run left them, so an admin pressing Sync at 09:49 still
+ * saw the 09:05 snapshot with 0.00 spend. The route also reads today's
+ * campaign spend from a different Windsor table than the rolling leg, and
+ * every leg upserts today's daily_metrics row, so the leg that runs LAST
+ * decides today's ad spend; each leg competes its table against the account
+ * table, so no leg writes less than the account carried when it ran. The
+ * machine schedule runs today last for that reason; this does the same, and
+ * runs the legs one after the other rather than at once because the provider
+ * load of two portfolio-wide refreshes is the concern, not the wait.
+ * The today leg runs even when the d7 leg failed: it is the figure the admin
+ * is looking at, and a route budget spent on the rolling leg says nothing
+ * about it. Each leg keeps its own classification; the first failure is the
+ * one reported. The ranges are computed at call time so a tab left open
+ * overnight still syncs the right windows.
+ */
+export async function requestGlobalReportingSync(
+  refresh: () => void,
+  fetcher: typeof fetch = fetch,
+  now = new Date(),
+): Promise<void> {
+  let failure: { reason: unknown } | null = null;
+  for (const key of ["d7", "today"] as const) {
+    try {
+      await requestReportingSync(
+        { scope: "all", range: presetSelection(key, now) },
+        refresh,
+        fetcher,
+      );
+    } catch (reason) {
+      failure ??= { reason };
+    }
+  }
+  if (failure) throw failure.reason;
+}
+
+/**
  * The everywhere-Sync in the admin chrome: one click advances the whole
  * automatic chain (metadata, provisioning, billing starts, cutovers) and
- * refreshes every store for the last 7 days. The range is computed at click
- * time so a tab left open overnight still syncs the right window.
+ * refreshes every store for the last 7 days and then for today (see
+ * requestGlobalReportingSync for why today is its own leg).
  */
 export function GlobalReportingSyncButton() {
   const router = useRouter();
@@ -97,10 +139,7 @@ export function GlobalReportingSyncButton() {
       // button means both, so the overview figures catch up on the same
       // click that refreshes the stores.
       const [reporting, ledgers] = await Promise.allSettled([
-        requestReportingSync(
-          { scope: "all", range: presetSelection("d7", new Date()) },
-          () => router.refresh(),
-        ),
+        requestGlobalReportingSync(() => router.refresh()),
         fetch("/api/admin/sync-ledgers", { method: "POST" }).then((res) => {
           if (!res.ok) throw new Error("The finance ledger did not sync.");
         }),
