@@ -157,10 +157,9 @@ function googleFrom(row: DailyMetricRow) {
  * conversions, conversion value) and neither Windsor table overshoots, so the
  * larger of the stored spend and the answer just read is always at least as
  * true as the smaller, and it converges on the final figure as fresh answers
- * arrive. A smaller answer, a missing row that would write GOOGLE_ZERO
- * included, therefore keeps the stored family whole: the five metrics travel
- * together, never mixed across two reads. A larger answer is written. An
- * equal one is written only when none of the other four metrics fell: a day
+ * arrive. A smaller answer therefore keeps the stored family whole: the five
+ * metrics travel together, never mixed across two reads. A larger answer is
+ * written. An equal one is written only when none of the other four fell: a day
  * whose budget is spent plateaus (118.99 sat unchanged across those eight
  * samples) while Google keeps attributing conversions hours after their
  * clicks, so a replica behind another answers the same spend with fewer
@@ -173,10 +172,21 @@ function googleFrom(row: DailyMetricRow) {
  * store reports.
  */
 function googleForDay(
-  fresh: Omit<GoogleDailyMetric, "day">,
+  fresh: Omit<GoogleDailyMetric, "day"> | undefined,
   stored: DailyMetricRow | undefined,
   inProgress: boolean,
 ): Omit<GoogleDailyMetric, "day"> {
+  // The answer carries no line for this day. On a CLOSED day that is Windsor
+  // final and a measured zero: a day without spend has no line, the same rule
+  // the Windsor client and sourceWentSilent already read it by. On the day in
+  // progress it only means the account's figures have not landed yet, so the
+  // stored family stands. With nothing stored there is no floor to stand on
+  // and the zero is written, as the first write of any day always did — the
+  // row has to exist for the Shopify family that shares it.
+  //
+  // Absence is decided here, before any number is compared, because it is not
+  // a measurement. The comparison below then only ever weighs two readings.
+  if (!fresh) return inProgress && stored ? googleFrom(stored) : GOOGLE_ZERO;
   if (!inProgress || !stored) return fresh;
   const kept = googleFrom(stored);
   const spend = Number(fresh.ad_spend);
@@ -283,7 +293,7 @@ export function mergeDailyMetricFamilies({
     // that never had a row.
     const googleFamily =
       google.state === "succeeded"
-        ? googleForDay(googleRows?.get(day) ?? GOOGLE_ZERO, stored, day >= today)
+        ? googleForDay(googleRows?.get(day), stored, day >= today)
         : google.state === "failed"
           ? googleFrom(stored!)
           : stored

@@ -287,6 +287,41 @@ describe("the day in progress never regresses its Google family", () => {
     });
   });
 
+  it("decides a missing row for today without looking at the numbers", () => {
+    // Same answer as before this branch existed, and deliberately so: with a
+    // stored family of zeros the old comparison reached the tie-break and
+    // returned zeros too. What changes is why. Absence is now settled before
+    // any figure is read, so the protection no longer rides on 0 never being
+    // larger than what is stored — a tie-break someone will edit one day.
+    const [result] = merge({
+      existing: [row(TODAY, { ad_spend: 0, impressions: 0, clicks: 0, conversions: 0, conversion_value: 0, revenue: 40 })],
+      google: { state: "succeeded", rows: [] },
+    });
+    expect(result).toMatchObject({
+      day: TODAY,
+      ad_spend: 0,
+      impressions: 0,
+      clicks: 0,
+      conversions: 0,
+      conversion_value: 0,
+      computed_at: COMPUTED_AT,
+    });
+  });
+
+  it("writes a zero today when the Google source reported one", () => {
+    // The counterpart, and the reason absence cannot simply be read as zero:
+    // an account that is live but spent nothing yet answers WITH a row, and
+    // that row is a measurement like any other.
+    const [result] = merge({
+      existing: [row(TODAY, { ad_spend: 0, impressions: 0, clicks: 0, conversions: 0, conversion_value: 0 })],
+      google: {
+        state: "succeeded",
+        rows: [google(TODAY, { ad_spend: 0, impressions: 0, clicks: 0, conversions: 0, conversion_value: 0 })],
+      },
+    });
+    expect(result).toMatchObject({ day: TODAY, ad_spend: 0, computed_at: COMPUTED_AT });
+  });
+
   it("keeps the stored family whole when today comes back smaller", () => {
     // Account 310-375-0707 at 10:05:30: 51.90 after 185.93. The smaller state
     // is older, so every one of its five metrics is older too; none of them

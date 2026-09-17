@@ -454,7 +454,14 @@ async function hstSettledThrough(supabase: Supabase): Promise<string | null> {
     .order("covers_through", { ascending: false })
     .limit(1)
     .maybeSingle();
-  if (error) return null;
+  // The exemption is for the table not being there, which genuinely means
+  // nothing has been paid. Every other error was landing here too, and a null
+  // settlement books the whole window as confirmed — including days the
+  // supplier has already paid, which is the one thing this figure decides.
+  if (error) {
+    if (error.code === "42P01" || error.code === "PGRST205") return null;
+    throw new HstError("Couldn't read which HST commissions are settled.");
+  }
   return data?.covers_through ?? null;
 }
 

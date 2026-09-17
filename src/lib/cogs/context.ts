@@ -92,6 +92,12 @@ async function fetchProductCosts(
     .from("product_costs")
     .select("product_id, cost, currency, effective_from")
     .in("product_id", productIds);
+  // The retry exists for a database without the `source` column, not for a
+  // refused read. Returning null here put every product on the default
+  // percentage, which writes a product_cost the merchant never agreed to.
+  if (legacy.error) {
+    throw new Error("The product costs could not be read.");
+  }
   return { data: (legacy.data ?? null) as unknown as CostRow[] | null };
 }
 
@@ -121,10 +127,17 @@ export async function loadCostContext(
   defaultCostPct: number,
   reportingCurrency: string,
 ): Promise<CostContext> {
-  const { data: products } = await supabase
+  // A store with no products degrades to the default percentage on purpose.
+  // A read that was refused is not that store: it would put every line of a
+  // fully costed catalogue on the default too, and the difference lands in
+  // product_cost, in the client's P&L and in what the agency invoices.
+  const { data: products, error: productsError } = await supabase
     .from("store_products")
     .select("id, platform_key")
     .eq("ad_account_id", adAccountId);
+  if (productsError) {
+    throw new Error("The store products could not be read for costing.");
+  }
   const keyById = new Map((products ?? []).map((row) => [row.id, row.platform_key]));
   const productIds = [...keyById.keys()];
 
@@ -141,6 +154,14 @@ export async function loadCostContext(
       supabase.from("cogs_collections").select("id, cogs_collection_tiers ( min_qty, total_cost )").eq("ad_account_id", adAccountId),
     ]);
     void collectionsRes;
+
+    // The same rule for the rest of the costing tables. No rows means a store
+    // that priced nothing in tiers or packs; a refused read means a catalogue
+    // we cannot see, and costing that one by the default percentage quietly
+    // undercharges the pack prices the merchant actually agreed.
+    if (tiersRes.error || membersRes.error || cTiersRes.error) {
+      throw new Error("The cost tiers could not be read.");
+    }
 
     // One cost per product per day, decided here rather than by row order.
     const chosen = new Map<string, CostRow>();

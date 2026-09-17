@@ -1217,11 +1217,18 @@ export async function syncRevenueShareLedger(opts?: SyncOpts): Promise<void> {
   try {
     const supabase = opts?.client ?? (await createClient());
 
-    const { data: source } = await supabase
+    // Each read below fails the pass rather than answering "nothing to book".
+    // A refused read looked exactly like an account list with no rev-share in
+    // it, so the pass returned early, marked itself run, and real revenue
+    // share stopped being booked for an hour at a time with nothing logged.
+    const { data: source, error: sourceError } = await supabase
       .from("revenue_sources")
       .select("id")
       .eq("name", REV_SHARE_SOURCE)
       .maybeSingle();
+    if (sourceError) {
+      throw new Error("The revenue source could not be read for the rev-share ledger.");
+    }
     if (!source) {
       console.error(
         "Rev-share sync: revenue source missing — run migration 0010.",
@@ -1229,10 +1236,13 @@ export async function syncRevenueShareLedger(opts?: SyncOpts): Promise<void> {
       return;
     }
 
-    const { data: accountRows } = await supabase
+    const { data: accountRows, error: accountsError } = await supabase
       .from("ad_accounts")
       .select("id, client_id, store_name, currency, revenue_share_enabled")
       .eq("revenue_share_enabled", true);
+    if (accountsError) {
+      throw new Error("The rev-share accounts could not be read.");
+    }
     const accounts = (accountRows ?? []) as unknown as Pick<
       AdAccount,
       "id" | "client_id" | "store_name" | "currency" | "revenue_share_enabled"
@@ -1253,10 +1263,13 @@ export async function syncRevenueShareLedger(opts?: SyncOpts): Promise<void> {
       return;
     }
 
-    const { data: portalClients } = await supabase
+    const { data: portalClients, error: portalClientsError } = await supabase
       .from("portal_clients")
       .select("id, crm_client_id, full_name")
       .in("id", [...new Set(billable.map((account) => account.client_id))]);
+    if (portalClientsError) {
+      throw new Error("The rev-share client names could not be read.");
+    }
     const crmByLogin = new Map(
       (portalClients ?? []).map((row) => [row.id, row.crm_client_id]),
     );
@@ -1269,24 +1282,33 @@ export async function syncRevenueShareLedger(opts?: SyncOpts): Promise<void> {
     const accountIds = billable.map((account) => account.id);
 
     // The days that actually carry a rev-share amount, straight from the rollup.
-    const { data: metricRows } = await supabase
+    const { data: metricRows, error: metricRowsError } = await supabase
       .from("daily_metrics")
       .select("ad_account_id, day, revenue_share_base, revenue_share_amount")
       .in("ad_account_id", accountIds)
       .gte("day", from)
       .gt("revenue_share_amount", 0);
+    if (metricRowsError) {
+      throw new Error("The rev-share days could not be read from the rollup.");
+    }
     if (!metricRows || metricRows.length === 0) {
       lastRevShareRunAt = Date.now();
       return;
     }
 
     // Existing rev-share rows in the window, keyed (account|day), to update in place.
-    const { data: existingRows } = await supabase
+    // Losing this one is worse than losing a read: an empty map makes every
+    // day look unbooked, so each one is inserted again and the unique index
+    // rejects it, leaving the amount frozen at whatever was booked before.
+    const { data: existingRows, error: existingRowsError } = await supabase
       .from("commissions")
       .select("id, ad_account_id, occurred_on, amount")
       .eq("source_id", source.id)
       .in("ad_account_id", accountIds)
       .gte("occurred_on", from);
+    if (existingRowsError) {
+      throw new Error("The booked rev-share rows could not be read.");
+    }
     const existing = new Map(
       (existingRows ?? []).map((row) => [
         `${row.ad_account_id}|${row.occurred_on}`,

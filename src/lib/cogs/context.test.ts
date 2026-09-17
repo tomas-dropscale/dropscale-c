@@ -27,15 +27,26 @@ type CostRow = {
  * A Supabase double that can also refuse the `source` column, which is how a
  * database without migration 0087 answers.
  */
-function service(costs: CostRow[], opts: { hasSourceColumn?: boolean } = {}) {
+function service(
+  costs: CostRow[],
+  opts: {
+    hasSourceColumn?: boolean;
+    /** Which read comes back refused, the way RLS or a dropped grant answers. */
+    refuse?: "store_products" | "legacy_costs" | "tiers";
+  } = {},
+) {
   const hasSourceColumn = opts.hasSourceColumn ?? true;
+  const refused = { data: null, error: { code: "42501", message: "permission denied" } };
   const asked: string[] = [];
 
   const from = vi.fn((table: string) => {
     if (table === "store_products") {
       return {
         select: () => ({
-          eq: async () => ({ data: [{ id: "p1", platform_key: "SKU-1" }], error: null }),
+          eq: async () =>
+            opts.refuse === "store_products"
+              ? refused
+              : { data: [{ id: "p1", platform_key: "SKU-1" }], error: null },
         }),
       };
     }
@@ -48,7 +59,9 @@ function service(costs: CostRow[], opts: { hasSourceColumn?: boolean } = {}) {
             in: async () =>
               wantsSource && !hasSourceColumn
                 ? { data: null, error: { message: 'column "source" does not exist' } }
-                : {
+                : !wantsSource && opts.refuse === "legacy_costs"
+                  ? refused
+                  : {
                     data: costs.map((row) =>
                       wantsSource ? row : { ...row, source: undefined },
                     ),
@@ -61,8 +74,8 @@ function service(costs: CostRow[], opts: { hasSourceColumn?: boolean } = {}) {
     // Tiers, collections and members are not what these tests are about.
     return {
       select: () => ({
-        eq: async () => ({ data: [], error: null }),
-        in: async () => ({ data: [], error: null }),
+        eq: async () => (opts.refuse === "tiers" ? refused : { data: [], error: null }),
+        in: async () => (opts.refuse === "tiers" ? refused : { data: [], error: null }),
       }),
     };
   });
@@ -138,5 +151,44 @@ describe("cost context", () => {
     expect(asked[0]).toContain("source");
     expect(asked[1]).not.toContain("source");
     expect(ctx.manualCosts.get("SKU-1")).toEqual([{ cost: 20, effectiveFrom: TODAY }]);
+  });
+
+  it("fails closed when the catalogue is refused, instead of costing it by default", async () => {
+    // A store with no products legitimately falls back to the percentage. A
+    // refused read looked identical, so a fully costed catalogue was written
+    // at the default too — and the difference lands in product_cost, in the
+    // client's P&L and in what the agency invoices.
+    await expect(
+      loadCostContext(service([], { refuse: "store_products" }).client, ACCOUNT, 30, "EUR"),
+    ).rejects.toThrow(/store products could not be read/i);
+  });
+
+  it("fails closed when the pre-0087 retry is refused rather than missing a column", async () => {
+    await expect(
+      loadCostContext(
+        service([{ product_id: "p1", cost: 20, currency: "EUR", effective_from: TODAY }], {
+          hasSourceColumn: false,
+          refuse: "legacy_costs",
+        }).client,
+        ACCOUNT,
+        30,
+        "EUR",
+      ),
+    ).rejects.toThrow(/product costs could not be read/i);
+  });
+
+  it("fails closed when the tier tables are refused", async () => {
+    // No tiers means a store that priced no packs; refused means packs we
+    // cannot see, and costing those lines per unit undercharges every one.
+    await expect(
+      loadCostContext(
+        service([{ product_id: "p1", cost: 20, currency: "EUR", effective_from: TODAY }], {
+          refuse: "tiers",
+        }).client,
+        ACCOUNT,
+        30,
+        "EUR",
+      ),
+    ).rejects.toThrow(/cost tiers could not be read/i);
   });
 });

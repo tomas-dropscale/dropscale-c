@@ -1104,12 +1104,21 @@ async function syncAccountWindow(
    */
   const carried = new Map<string, DailyMetricAdColumns>();
   if (!googleSynced) {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("daily_metrics")
       .select("day, ad_spend, impressions, clicks, conversions, conversion_value")
       .eq("ad_account_id", account.id)
       .gte("day", from)
       .lte("day", to);
+    // A read that fails is not an empty window. Swallowing it emptied the
+    // carry, and the upsert below then wrote ad_spend 0 over spend that was
+    // synced correctly — the exact loss the carry exists to prevent, across
+    // the whole leg, on the number the commission ledger and the weekly
+    // invoice are built from. Fail the account instead: the callers isolate
+    // one account's failure and the next leg recomputes the window.
+    if (error) {
+      throw new Error("The stored ad figures could not be read to carry forward.");
+    }
 
     for (const row of data ?? []) {
       carried.set(row.day, {
