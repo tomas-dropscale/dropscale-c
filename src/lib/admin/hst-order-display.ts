@@ -27,6 +27,8 @@ export type HstOrderDisplay = {
   goods: number;
   /** The per-order EU/US import tariff, on its own. */
   tariff: number;
+  /** The ERP's own discount on the order, already off the total; 0 when none. */
+  discount: number;
   /** What HST charges for the order in total: goods + tariff. */
   total: number;
   /** The settlement currency of the three figures above (usually EUR). */
@@ -55,6 +57,13 @@ function money(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+/** The currency the ERP writes beside a money figure — "112.8 USD" — or null. */
+function textCurrency(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const match = /^-?[\d.,]+\s+([A-Za-z]{3})$/.exec(value.trim());
+  return match ? match[1].toUpperCase() : null;
+}
+
 type RawPage = { data?: { data?: unknown } };
 
 /**
@@ -71,6 +80,21 @@ export function parseHstOrderDisplay(
   const out: HstOrderDisplay[] = [];
   const cap = Math.max(1, opts.limit ?? 60);
 
+  // The shop's settlement currency as its quoted lines state it, for an order
+  // the ERP names none for. A dollar-billed account leaves g_currency blank
+  // on every order while each line still says USD; defaulting showed the
+  // client its dollar figures under a euro sign (Elena Granada, 2026-09).
+  const pageCurrencies = new Set<string>();
+  for (const entry of rows) {
+    const row = (entry ?? {}) as Record<string, unknown>;
+    if (text(row.shopId) !== opts.shopId) continue;
+    for (const rawItem of Array.isArray(row.items) ? (row.items as unknown[]) : []) {
+      const code = text(((rawItem ?? {}) as Record<string, unknown>).baojia_currency).toUpperCase();
+      if (CURRENCY.test(code)) pageCurrencies.add(code);
+    }
+  }
+  const shopCurrency = pageCurrencies.size === 1 ? [...pageCurrencies][0] : null;
+
   for (const entry of rows) {
     if (out.length >= cap) break;
     const row = (entry ?? {}) as Record<string, unknown>;
@@ -81,11 +105,28 @@ export function parseHstOrderDisplay(
 
     const total = money(row.g_cost) ?? 0;
     const tariff = money(row.g_tariff) ?? 0;
-    // Goods is what is left once the tariff is taken back out of the total HST
-    // bills — the same split the cost sync proves (Σ line + tariff = g_cost).
-    const goods = Math.max(0, total - tariff);
-    const currencyRaw = text(row.g_currency).toUpperCase();
-    const currency = CURRENCY.test(currencyRaw) ? currencyRaw : "EUR";
+    const discount = money(row.g_discount) ?? 0;
+    // Goods is what the lines were quoted at: the total HST bills, with the
+    // tariff taken back out and the discount it took off put back — the
+    // identity the cost sync proves (Σ lines + tariff − discount = g_cost).
+    const goods = Math.max(0, total - tariff + discount);
+    // The total's own declared currency ("112.8 USD") first; g_currency, when
+    // present, agrees. It is absent on a dollar-billed account while every
+    // quoted line says USD, and defaulting showed dollars under a euro sign.
+    const currencyRaw =
+      textCurrency(row.g_cost_text) ??
+      textCurrency(row.g_tariff_text) ??
+      text(row.g_currency).toUpperCase();
+    const lineCurrencies = new Set(
+      (Array.isArray(row.items) ? (row.items as unknown[]) : [])
+        .map((item) => text(((item ?? {}) as Record<string, unknown>).baojia_currency).toUpperCase())
+        .filter((code) => CURRENCY.test(code)),
+    );
+    const currency = CURRENCY.test(currencyRaw)
+      ? currencyRaw
+      : lineCurrencies.size === 1
+        ? [...lineCurrencies][0]
+        : (shopCurrency ?? "EUR");
 
     const sold = money(row.itemTotalOrigin);
     const soldCurrencyRaw = text(row.currencyId).toUpperCase();
@@ -102,6 +143,7 @@ export function parseHstOrderDisplay(
       status: text(row.order_status_text),
       goods,
       tariff,
+      discount,
       total,
       currency,
       sold,

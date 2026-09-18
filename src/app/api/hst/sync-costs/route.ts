@@ -64,7 +64,21 @@ export async function POST(request: NextRequest) {
     try {
       await resyncAccountNow(adAccountId, { client: service });
     } catch (error) {
+      // The sync itself succeeded, but the P&L the caller is about to open
+      // has not been redone. Saying "ok" here sent them to look at the old
+      // figures; the answer names the step that did not happen instead.
       console.error(`Rollup refresh after HST cost sync failed for ${adAccountId}:`, error);
+      const rollupError = error instanceof Error ? error.message : String(error);
+      return NextResponse.json(
+        {
+          ...result,
+          rollup: "failed",
+          rollupError,
+          // What the portal shows: the costs did sync; the P&L is what is stale.
+          error: `Costs synced, but the P&L refresh failed: ${rollupError}`,
+        },
+        { status: 502 },
+      );
     }
   }
 

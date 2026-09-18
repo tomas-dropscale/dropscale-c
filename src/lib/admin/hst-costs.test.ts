@@ -71,10 +71,15 @@ function service(seed: { products?: Row[]; costs?: Row[] } = {}) {
 function order(overrides: Partial<HstOrderCost> = {}): HstOrderCost {
   return {
     platformOrderId: "8004536729939",
+    baseOrderId: "8004536729939",
+    split: false,
+    coveredByParent: null,
     orderDay: "2026-08-26",
-    paidAt: "2026-08-26T14:50:04.000Z",
+    unquotedLines: 0,
+    linesTotal: 20.99,
     tariff: 3,
     totalCost: 23.99,
+    discount: 0,
     currency: "EUR",
     items: [{ keys: ["44551122"], unitCost: 20.99, currency: "EUR", quantity: 1 }],
     ...overrides,
@@ -268,5 +273,129 @@ describe("HST supplier costs", () => {
 
     expect(outcome).toMatchObject({ written: 0, charges: 0 });
     expect(from).not.toHaveBeenCalled();
+  });
+
+  it("books the supplier's total as the order's charge, and keeps no instant beside the day", async () => {
+    const { client, writes } = service({
+      products: [{ id: "p1", platform_key: "44551122" }],
+    });
+
+    await applyHstCosts({
+      service: client,
+      adAccountId: ACCOUNT,
+      orders: [order({ totalCost: 23.99, currency: "USD" })],
+      now: NOW,
+    });
+
+    expect(writes.upserted[0]).toMatchObject({ our_cost: 23.99, currency: "USD", paid_at: null });
+  });
+
+  it("charges a package nothing when its parent's bill already holds it", async () => {
+    // 8110621458771 bills 112.80 for every package's lines plus one tariff;
+    // "_1" carries its own 19.02 and tariff 3.44 in the ERP's books and is
+    // settled at nothing. Booked as its own charge, the day counted it twice.
+    const { client, writes } = service({
+      products: [{ id: "p1", platform_key: "44551122" }],
+    });
+
+    await applyHstCosts({
+      service: client,
+      adAccountId: ACCOUNT,
+      orders: [
+        order({ platformOrderId: "8110621458771", baseOrderId: "8110621458771", totalCost: 112.8, tariff: 3.44 }),
+        order({
+          platformOrderId: "8110621458771_1",
+          baseOrderId: "8110621458771",
+          split: true,
+          coveredByParent: true,
+          totalCost: 19.02,
+          tariff: 3.44,
+        }),
+      ],
+      now: NOW,
+    });
+
+    expect(writes.upserted.map((row) => [row.platform_order_id, row.our_cost, row.tariff])).toEqual([
+      ["8110621458771", 112.8, 3.44],
+      ["8110621458771_1", 0, 0],
+    ]);
+  });
+
+  it("bills a package on its own when the parent's bill does not carry it", async () => {
+    // Stockholm Slojd's multi-package families: the parent holds its own
+    // lines only and each package carries real cost, tariff included.
+    const { client, writes } = service({
+      products: [{ id: "p1", platform_key: "44551122" }],
+    });
+
+    await applyHstCosts({
+      service: client,
+      adAccountId: ACCOUNT,
+      orders: [
+        order({ platformOrderId: "7987533316435", baseOrderId: "7987533316435", totalCost: 32.65, tariff: 3 }),
+        order({
+          platformOrderId: "7987533316435_1",
+          baseOrderId: "7987533316435",
+          split: true,
+          coveredByParent: false,
+          totalCost: 55.09,
+          tariff: 3,
+        }),
+      ],
+      now: NOW,
+    });
+
+    expect(writes.upserted.map((row) => [row.platform_order_id, row.our_cost, row.tariff])).toEqual([
+      ["7987533316435", 32.65, 3],
+      ["7987533316435_1", 55.09, 3],
+    ]);
+  });
+
+  it("writes a wait, never a known zero, for anything the ERP has not named", async () => {
+    // A covered package with no figure and an unquoted line (the fourth item
+    // of 8015506997587, waiting for its quote), a package whose parent was
+    // not collected, and a row with no figure at all: each is null, so the
+    // reach-back re-reads it — a 0 would have closed the book on money still
+    // to come. The undecided package carries no tariff: what it shows is the
+    // parent's, copied.
+    const { client, writes } = service({
+      products: [{ id: "p1", platform_key: "44551122" }],
+    });
+
+    await applyHstCosts({
+      service: client,
+      adAccountId: ACCOUNT,
+      orders: [
+        order({ platformOrderId: "8015506997587_1", baseOrderId: "8015506997587", split: true, coveredByParent: true, unquotedLines: 1, linesTotal: 0, totalCost: 0, tariff: 0 }),
+        order({ platformOrderId: "orphan_1", baseOrderId: "orphan", split: true, coveredByParent: null, totalCost: 18.58, tariff: 3 }),
+        order({ platformOrderId: "no-figure", totalCost: 0, tariff: 0 }),
+      ],
+      now: NOW,
+    });
+
+    expect(writes.upserted.map((row) => [row.platform_order_id, row.our_cost, row.tariff])).toEqual([
+      ["8015506997587_1", null, 0],
+      ["orphan_1", null, 0],
+      ["no-figure", null, 0],
+    ]);
+  });
+
+  it("bills a row the ERP has priced even when one of its lines is unquoted", async () => {
+    // Stockholm Slojd sells shipping protection on half its orders and the
+    // supplier never quotes it — the line is an upsell, not a wait. The
+    // total the ERP names already says what it covers; nulling the row would
+    // have swapped a real bill for a guess, on half the store, for good.
+    const { client, writes } = service({
+      products: [{ id: "p1", platform_key: "44551122" }],
+    });
+
+    await applyHstCosts({
+      service: client,
+      adAccountId: ACCOUNT,
+      orders: [order({ unquotedLines: 1, totalCost: 23.99, tariff: 3 })],
+      now: NOW,
+    });
+
+    expect(writes.upserted[0]).toMatchObject({ our_cost: 23.99, tariff: 3 });
   });
 });

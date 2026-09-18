@@ -193,6 +193,11 @@ export function HstOrderList({ adAccountId, storeName }: Props) {
                     </td>
                     <td className="px-4 py-2.5 text-right whitespace-nowrap text-[var(--text-secondary)]">
                       {money(order.goods, order.currency)}
+                      {order.discount > 0 && (
+                        <span className="block text-[11px] text-[var(--text-muted)]">
+                          −{money(order.discount, order.currency)} discount
+                        </span>
+                      )}
                     </td>
                     <td className="px-4 py-2.5 text-right whitespace-nowrap">
                       {order.tariff > 0 ? (

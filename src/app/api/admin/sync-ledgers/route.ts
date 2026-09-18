@@ -189,7 +189,15 @@ async function run(
         .map((store) => store.adAccountId);
       if (costAccountIds.length > 0) {
         try {
-          await refreshAccountsNow(costAccountIds, { client: opts.client });
+          // Exactly as far back as the cost sync reached this run: a quote
+          // that lands on a day older than the rolling week would otherwise
+          // sit in hst_order_charges and never reach the P&L until a manual
+          // resync — and a run that reached no further than usual costs the
+          // rollup no more than usual.
+          await refreshAccountsNow(costAccountIds, {
+            client: opts.client,
+            ...(hstCosts.since ? { from: hstCosts.since } : {}),
+          });
         } catch (error) {
           console.error("Rollup refresh after HST cost sync failed:", error);
         }
@@ -284,6 +292,7 @@ function emptyHstCostResult(): HstCostSyncResult {
     charges: 0,
     unquotedLines: 0,
     pages: 0,
+    since: null,
     stores: [],
   };
 }

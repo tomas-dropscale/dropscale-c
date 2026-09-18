@@ -235,6 +235,8 @@ describe("V2 Shopify reporting adapter", () => {
               refundedQuantity: 0,
             },
           ],
+          // Shopify's numeric order id, the number a supplier bills against.
+          platformOrderId: "1",
         },
       ],
     });

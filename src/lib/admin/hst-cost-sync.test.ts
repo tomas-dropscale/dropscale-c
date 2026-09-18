@@ -48,7 +48,15 @@ type Account = { id: string; client_id: string; hst_shop_id: string | null };
  * followed by `.in(ids)` when only some are — so what it returns has to be both
  * a thenable and a builder.
  */
-function service(accounts: Account[]) {
+function service(
+  accounts: Account[],
+  opts: {
+    /** The oldest order on file the supplier has not priced yet, per store. */
+    unpriced?: Record<string, string>;
+    /** The reach back to unpriced orders comes back refused, RLS-style. */
+    refuseUnpriced?: boolean;
+  } = {},
+) {
   const narrowed: { ids?: string[] } = {};
   const answer = { data: accounts, error: null };
 
@@ -60,10 +68,29 @@ function service(accounts: Account[]) {
     },
   };
 
-  const query: Record<string, unknown> = {};
-  query.select = () => query;
-  query.not = () => afterNot;
-  return { client: { from: vi.fn(() => query) } as never, narrowed };
+  const accountsQuery: Record<string, unknown> = {};
+  accountsQuery.select = () => accountsQuery;
+  accountsQuery.not = () => afterNot;
+
+  // The reach back to the oldest unpriced order: one row or none.
+  const chargesQuery: Record<string, unknown> & { account?: string } = {};
+  for (const step of ["select", "is", "gte", "order", "limit"]) {
+    chargesQuery[step] = () => chargesQuery;
+  }
+  chargesQuery.eq = (_column: string, id: string) => {
+    chargesQuery.account = id;
+    return chargesQuery;
+  };
+  chargesQuery.maybeSingle = async () => {
+    if (opts.refuseUnpriced) return { data: null, error: { message: "permission denied" } };
+    const day = chargesQuery.account ? opts.unpriced?.[chargesQuery.account] : undefined;
+    return { data: day ? { order_day: day } : null, error: null };
+  };
+
+  const from = vi.fn((table: string) =>
+    table === "hst_order_charges" ? chargesQuery : accountsQuery,
+  );
+  return { client: { from } as never, narrowed };
 }
 
 /** One Order List page, with `paidTime` written the way the ERP writes it. */
@@ -296,5 +323,54 @@ describe("HST cost sync", () => {
         (order: { platformOrderId: string }) => order.platformOrderId,
       ),
     ).toEqual(["mine"]);
+  });
+
+  it("reaches back to the oldest order the supplier has not priced yet", async () => {
+    // Elena Granada, 2026-09-10/11: four orders synced unpriced, and the
+    // three-day window never read them again once the ERP quoted them. An
+    // unpriced order on file widens the window to its day.
+    mocks.hstGet.mockImplementation(async (url: string) => {
+      const page = Number(new URL(url).searchParams.get("page"));
+      return payload(
+        [
+          {
+            id: `order-${page}`,
+            // Page 2 is outside three days, inside the reach to the 10th.
+            paidTime: page === 1 ? "2026-08-28 06:00:00" : "2026-08-11 06:00:00",
+          },
+        ],
+        3,
+      );
+    });
+
+    const result = await syncHstCosts({
+      client: service([{ id: ACCOUNT, client_id: CLIENT, hst_shop_id: SHOP }], {
+        unpriced: { [ACCOUNT]: "2026-08-10" },
+      }).client,
+      now: NOW,
+    });
+
+    expect(result.pages).toBe(3);
+    expect(
+      mocks.applyHstCosts.mock.calls[0][0].orders.map(
+        (order: { platformOrderId: string }) => order.platformOrderId,
+      ),
+    ).toEqual(["order-1", "order-2", "order-3"]);
+  });
+
+  it("keeps the default window when the unpriced reach cannot be read", async () => {
+    // The reach is an extra, not the sync: a refused read logs and the
+    // three-day window still runs.
+    const { client } = service([{ id: ACCOUNT, client_id: CLIENT, hst_shop_id: SHOP }], {
+      refuseUnpriced: true,
+    });
+    const warn = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const result = await syncHstCosts({ client, now: NOW });
+
+    expect(result.ok).toBe(true);
+    expect(result.stores[0]?.error).toBeUndefined();
+    expect(mocks.applyHstCosts).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
   });
 });

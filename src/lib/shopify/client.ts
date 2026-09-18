@@ -280,6 +280,12 @@ export type SyncedOrder = {
   /** What has been refunded on this order so far, store base currency. */
   refunded: number;
   lines: SyncedOrderLine[];
+  /**
+   * Shopify's numeric order id — the number a supplier reports back as the
+   * platform order (HST's platformOrderId), so a per-order charge can be
+   * matched to the order it bills for. Absent only on fixtures built by hand.
+   */
+  platformOrderId?: string;
 };
 
 // Each temporal chunk reads at most 10 × 250 orders. A saturated multi-day
@@ -863,6 +869,8 @@ export async function fetchDailySales(
       landingPath: visit?.landingPage ?? null,
       refunded,
       lines,
+      // Validated above as gid://shopify/Order/<digits>; the digits are the id.
+      platformOrderId: order.id.slice("gid://shopify/Order/".length),
     });
   }
 

@@ -6,7 +6,7 @@ import { createClient } from "@/lib/supabase/server";
 import { HstError, hstGet } from "@/lib/hst/erp";
 import { clientHstToken, noteClientHstError, storeHstShops } from "@/lib/portal/client-hst";
 import { applyHstCosts, type HstOrderCost } from "./hst-costs";
-import { parseHstOrderPage, type HstShop } from "./hst-orders";
+import { decideFamilies, parseHstOrderPage, type HstShop } from "./hst-orders";
 import { parseHstOrderDisplay, type HstOrderDisplay } from "./hst-order-display";
 import type { Database } from "@/lib/supabase/types";
 
@@ -39,7 +39,24 @@ const MAX_PAGES = 30;
  * written stay written, so the record fills in as it goes rather than being
  * re-fetched. `sinceDays` widens it for a deliberate backfill.
  */
-const DEFAULT_SINCE_DAYS = 3;
+/**
+ * Ten days, not three. The ERP reprices an order after quoting it — the
+ * import tariff lands an hour to nearly three days after the first cost
+ * (measured 2026-09-18 on Elena Granada: 31 of 64 orders moved, all upward)
+ * — and a three-day window read each order once and never again, so the
+ * reprice never landed. The list is newest-first by payment day, so ten days
+ * is a page for a small store and four or five for one shipping thirty a day.
+ */
+const DEFAULT_SINCE_DAYS = 10;
+/**
+ * How far back an order the supplier has not priced yet keeps being re-read,
+ * and how far back the rollup is refreshed after a cost sync so a late quote
+ * reaches the P&L. Thirty days: the longest wait measured was 29 (a package
+ * "Pending Similar Item Confirmation" from 2026-08-29 into September), and a
+ * cap short of the tail turns a wait into a permanent hole. Beyond it the
+ * store's own Sync now reaches ninety.
+ */
+export const HST_COST_REACH_DAYS = 30;
 
 export type HstCostSyncResult = {
   ok: boolean;
@@ -52,6 +69,11 @@ export type HstCostSyncResult = {
   /** Supplier lines still awaiting a quote — skipped, never priced at zero. */
   unquotedLines: number;
   pages: number;
+  /**
+   * The earliest day any store's window reached back to (ISO), so the rollup
+   * can be refreshed exactly that far; null when nothing was read.
+   */
+  since: string | null;
   error?: string;
   /** Per store, so one broken connection is legible in the cron log. */
   stores: Array<{
@@ -74,6 +96,7 @@ function emptyResult(): HstCostSyncResult {
     charges: 0,
     unquotedLines: 0,
     pages: 0,
+    since: null,
     stores: [],
   };
 }
@@ -113,31 +136,36 @@ function ordersUrl(shopId: string, page: number): string {
 async function collectOrders(
   token: string,
   shopId: string,
-  timeZone: string,
   since: Date,
 ): Promise<{ orders: HstOrderCost[]; shops: HstShop[]; pages: number; unquotedLines: number }> {
   const orders: HstOrderCost[] = [];
   let shops: HstShop[] = [];
   let pages = 0;
   let unquotedLines = 0;
+  // The window is a question about days: an order's day is the store's own,
+  // as the ERP states its payment time in it, and needs no zone to read.
+  const sinceDay = since.toISOString().slice(0, 10);
 
   for (let page = 1; page <= MAX_PAGES; page += 1) {
     const payload = await hstGet(ordersUrl(shopId, page), token);
-    const parsed = parseHstOrderPage(payload, { shopId, timeZone });
+    const parsed = parseHstOrderPage(payload, { shopId });
     pages += 1;
     if (parsed.shops.length > 0) shops = parsed.shops;
     unquotedLines += parsed.unquotedLines;
 
     for (const order of parsed.orders) {
-      if (new Date(order.paidAt) >= since) orders.push(order);
+      if (order.orderDay >= sinceDay) orders.push(order);
     }
 
-    const oldest = parsed.oldestPaidAt ? new Date(parsed.oldestPaidAt) : null;
     // A page with nothing readable on it is the end of anything useful; one
     // that reached past the window means the next page is older still.
-    if (!oldest || oldest < since) break;
+    if (!parsed.oldestOrderDay || parsed.oldestOrderDay < sinceDay) break;
     if (page >= parsed.lastPage) break;
   }
+
+  // Over everything collected, never per page: a family straddling a page
+  // boundary would otherwise be judged on half its rows.
+  decideFamilies(orders);
 
   return { orders, shops, pages, unquotedLines };
 }
@@ -156,8 +184,6 @@ export async function syncHstCosts(opts?: {
   /** Narrow to specific stores — the per-store "Sync now" button. */
   adAccountIds?: string[];
   sinceDays?: number;
-  /** Overrides the day-attribution zone; see hst_order_charges.paid_at in 0087. */
-  timeZone?: string;
   now?: Date;
 }): Promise<HstCostSyncResult> {
   const result = emptyResult();
@@ -165,11 +191,6 @@ export async function syncHstCosts(opts?: {
   const now = opts?.now ?? new Date();
   const sinceDays = Math.max(1, Math.floor(opts?.sinceDays ?? DEFAULT_SINCE_DAYS));
   const since = new Date(now.getTime() - sinceDays * 24 * 60 * 60 * 1000);
-  // The store's own calendar is what an order day means, and it is Shopify
-  // that knows it. Until it is stored, UTC is the neutral choice and the
-  // instant is kept alongside so the day can be corrected without re-fetching.
-  const timeZone = opts?.timeZone ?? "UTC";
-
   const wanted = opts?.adAccountIds;
   const query = service
     .from("ad_accounts")
@@ -210,9 +231,39 @@ export async function syncHstCosts(opts?: {
         tokens.set(account.client_id, token);
       }
 
+      // An order the supplier has not priced yet is re-read until it is, back
+      // to the oldest one on file (capped). This read is an extra reach, not
+      // the sync itself: if it fails, the normal window still runs, and the
+      // hole it would have closed waits for the next hour rather than taking
+      // the store's whole cost sync down with it.
+      let accountSince = since;
+      const floorDay = new Date(now.getTime() - HST_COST_REACH_DAYS * 24 * 60 * 60 * 1000)
+        .toISOString()
+        .slice(0, 10);
+      const { data: unpriced, error: unpricedError } = await service
+        .from("hst_order_charges")
+        .select("order_day")
+        .eq("ad_account_id", account.id)
+        .is("our_cost", null)
+        .gte("order_day", floorDay)
+        .order("order_day", { ascending: true })
+        .limit(1)
+        .maybeSingle();
+      if (unpricedError) {
+        console.error(
+          `HST cost sync: unpriced orders of ${account.id} could not be read; using the default window:`,
+          unpricedError.message,
+        );
+      } else if (unpriced?.order_day) {
+        const oldest = new Date(`${unpriced.order_day}T00:00:00.000Z`);
+        if (oldest < accountSince) accountSince = oldest;
+      }
+      const sinceDay = accountSince.toISOString().slice(0, 10);
+      if (result.since === null || sinceDay < result.since) result.since = sinceDay;
+
       let collected;
       try {
-        collected = await collectOrders(token, account.hst_shop_id, timeZone, since);
+        collected = await collectOrders(token, account.hst_shop_id, accountSince);
       } catch (error) {
         // One retry per client on a refusal, and only one: a renewal that does
         // not help must not be attempted once per store they own.
@@ -226,7 +277,7 @@ export async function syncHstCosts(opts?: {
         renewed.add(account.client_id);
         token = await clientHstToken(service, account.client_id, { forceRenew: true });
         tokens.set(account.client_id, token);
-        collected = await collectOrders(token, account.hst_shop_id, timeZone, since);
+        collected = await collectOrders(token, account.hst_shop_id, accountSince);
       }
 
       result.pages += collected.pages;
@@ -285,7 +336,7 @@ export async function fetchHstShops(input: {
   // accounts take ~14s to list — worth waiting for once so every later render
   // is instant.
   const payload = await hstGet(shopListUrl(), token, 45_000);
-  const shops = parseHstOrderPage(payload, { shopId: "", timeZone: "UTC" }).shops;
+  const shops = parseHstOrderPage(payload, { shopId: "" }).shops;
   await storeHstShops(input.service, input.clientId, shops);
   return shops;
 }

@@ -18,14 +18,64 @@ import type { Database } from "@/lib/supabase/types";
  * figures distinguishable from the supplier's.
  */
 
+/**
+ * What HST bills for a row, or null while it is still a wait.
+ *
+ * A figure the ERP has named is the bill, unquoted lines and all: an unquoted
+ * line is as often an upsell the supplier will never price (Stockholm Slojd's
+ * shipping protection rides on half its orders) as a product still waiting,
+ * and the total already says what it covers. What waits is what the ERP has
+ * not named: a row with no figure; a package whose parent was not collected,
+ * so it cannot be told from one the parent covers; and a package the parent
+ * covers by arithmetic that still has no figure and an unquoted line — the
+ * fourth item of 8015506997587, split into a package of its own and waiting
+ * for its quote, which a zero would have closed the book on. A package the
+ * parent's bill covers is otherwise a known zero; one it does not cover bills
+ * on its own. g_audit_time decides nothing: it stamps the first cost
+ * calculation, and 31 of 64 rows moved after it.
+ */
+function chargedCost(order: HstOrderCost): number | null {
+  if (order.split) {
+    if (order.coveredByParent === null) return null;
+    if (order.coveredByParent === true) {
+      return order.totalCost <= 0 && order.unquotedLines > 0 ? null : 0;
+    }
+  }
+  if (!Number.isFinite(order.totalCost) || order.totalCost < 0) return null;
+  return order.totalCost > 0 ? order.totalCost : null;
+}
+
 /** One order as the supplier reports it, already normalised off the wire. */
 export type HstOrderCost = {
   /** The platform (Shopify) order id — what the metrics sync sees too. */
   platformOrderId: string;
-  /** YYYY-MM-DD in the account's reporting zone, the day the order belongs to. */
+  /**
+   * The Shopify order this row bills for — the id above with any split-package
+   * suffix ("_1") taken off. What the metrics sync's own orders are keyed by.
+   */
+  baseOrderId: string;
+  /** A split package of a parent order, filed as "<parent id>_<n>". */
+  split: boolean;
+  /**
+   * For a package: whether the parent's bill already holds its lines, in
+   * which case HST settles the package at nothing and it is never a charge of
+   * its own. False when the package carries cost the parent does not; null
+   * when the parent was not on the page to compare against. Always null on a
+   * parent.
+   */
+  coveredByParent: boolean | null;
+  /**
+   * YYYY-MM-DD, the day the order belongs to: the store's own calendar day as
+   * the ERP states the payment time in it, the same day its revenue sits on.
+   */
   orderDay: string;
-  /** When the customer paid, as a real instant — the day above is derived. */
-  paidAt: string;
+  /**
+   * Lines of this row the supplier has not quoted yet. A row with any is a
+   * wait, whatever its total says: the total is for the lines it has priced.
+   */
+  unquotedLines: number;
+  /** Σ unit cost × quantity over this row's quoted lines, in `currency`. */
+  linesTotal: number;
   /** EU/US import tariff for the whole order; 0 when the supplier sends "-". */
   tariff: number;
   /**
@@ -34,6 +84,8 @@ export type HstOrderCost = {
    * per-order billing, not the per-product estimate. 0 when the ERP sends "-".
    */
   totalCost: number;
+  /** The ERP's own discount on the order, already taken off totalCost. */
+  discount: number;
   currency: string;
   items: Array<{
     /**
@@ -224,12 +276,19 @@ export async function applyHstCosts(input: {
       ad_account_id: adAccountId,
       platform_order_id: order.platformOrderId,
       order_day: order.orderDay,
-      paid_at: order.paidAt,
-      tariff: order.tariff,
-      // The supplier's own total for the order — what an HST store's COGS
-      // reconciles to. Null when the ERP has not priced it (never 0-as-known).
-      our_cost:
-        Number.isFinite(order.totalCost) && order.totalCost > 0 ? order.totalCost : null,
+      // The store's day is the ERP's own statement and there is no instant to
+      // keep beside it. A stored one is a legacy reading — the ERP's wall
+      // clock minus eight hours, which was never the payment instant — and
+      // this write retires it.
+      paid_at: null,
+      // A package the parent's bill already covers is settled at nothing: its
+      // own figures are the ERP's bookkeeping, not a bill — booked, they were
+      // counted twice. A package the parent does not cover bills on its own,
+      // tariff included (Stockholm Slojd's multi-package families; a package
+      // split off before the parent's cost was set). One not yet told apart
+      // carries no tariff either: the figure it shows is the parent's, copied.
+      tariff: order.split && order.coveredByParent !== false ? 0 : order.tariff,
+      our_cost: chargedCost(order),
       currency: order.currency,
       synced_at: new Date().toISOString(),
     }));

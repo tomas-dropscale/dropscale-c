@@ -23,6 +23,16 @@ type Supabase = SupabaseClient<Database>;
 export type CostByDay = Map<string, { product: number; fees: number; shipping: number }>;
 
 /**
+ * The store's own orders, keyed by Shopify order id (the number HST reports
+ * back as platformOrderId): the day each one's revenue sits on and the
+ * per-product cost estimated for it before the supplier's figure is known.
+ */
+export type HstOrderEstimates = Map<string, { day: string; product: number }>;
+
+/** A split package: the ERP files it as "<parent order id>_<n>". */
+const SPLIT_SUFFIX = /_\d+$/;
+
+/**
  * Add every tariff charged between `from` and `to` into `costByDay`.
  *
  * Only days already present are touched. A tariff whose order never reached
@@ -105,14 +115,21 @@ export async function addHstTariffs(input: {
  * The per-product model (product_costs → orderCogs) applies one latest unit cost
  * to every unit, which over-counts against what HST really billed — the supplier
  * quotes and bills each ORDER (g_cost), spread across days. `our_cost` is that
- * real per-order total (goods + tariff). This buckets it to the order's day from
- * the paid_at instant IN THE STORE'S ZONE — the same zone the revenue was
- * bucketed in, so cost and revenue land together — and OVERWRITES that day's
- * product cost with the sum.
+ * real per-order total (goods + tariff − discount). Each charge is matched to
+ * the store's own order by Shopify order id, so the cost lands on the day that
+ * order's revenue sits on — whatever day the ERP filed the row under, and
+ * whatever a row written under the old reading of the ERP's clock carries.
  *
- * Only days the supplier has actually priced are touched. A day with revenue but
- * no quoted order keeps the per-product estimate `addHstTariffs` already left,
- * so a not-yet-quoted order is a wait, not a zero. Call this AFTER addHstTariffs:
+ * The day is recomposed order by order, from the store's own orders: one the
+ * supplier has priced contributes what HST billed, converted at the day's
+ * rate; one still unquoted keeps its own per-product estimate, plus whatever
+ * tariff the ERP already knows for it. Booking only the priced orders counted
+ * the rest at nothing (Elena Granada, 2026-09-11: four orders, two quoted,
+ * €53.01 for all four), and parking the whole day on the estimate priced the
+ * quoted ones at a guess. A split package never counts: its parent's bill
+ * already holds it. Only days with at least one priced order are touched; a
+ * day with revenue but no quoted order keeps what `addHstTariffs` left. Call
+ * this AFTER addHstTariffs:
  * the override discards that day's tariff-plus-estimate in favour of the actual,
  * with no double count.
  *
@@ -125,15 +142,20 @@ export async function applyHstOrderCosts(input: {
   from: string;
   to: string;
   reportingCurrency: string;
-  /** The store's reporting zone — bucket paid_at the way the revenue was. */
-  timeZone: string;
   costByDay: CostByDay;
+  /**
+   * The store's own orders in the window, keyed by Shopify order id, each
+   * with the day its revenue sits on and the per-product cost estimated for
+   * it. This is what an HST charge is matched to — by id, never by day.
+   */
+  estimates: HstOrderEstimates;
 }): Promise<number> {
-  const { service, adAccountId, from, to, reportingCurrency, timeZone, costByDay } = input;
-  if (costByDay.size === 0) return 0;
+  const { service, adAccountId, from, to, reportingCurrency, costByDay, estimates } = input;
+  if (costByDay.size === 0 || estimates.size === 0) return 0;
 
-  // order_day is stored in UTC; the store's day can fall a calendar day either
-  // side, so pad the fetch and re-bucket precisely from paid_at below.
+  // A row's order_day is the store's day as the ERP states it; a row written
+  // before that was so can sit a calendar day either side. The match below is
+  // by order id, so the fetch only has to be wide enough to hold the window.
   const shift = (day: string, delta: number) => {
     const dt = new Date(`${day}T00:00:00Z`);
     dt.setUTCDate(dt.getUTCDate() + delta);
@@ -142,33 +164,45 @@ export async function applyHstOrderCosts(input: {
 
   const { data, error } = await service
     .from("hst_order_charges")
-    .select("order_day, paid_at, our_cost, currency")
+    .select("platform_order_id, tariff, our_cost, currency")
     .eq("ad_account_id", adAccountId)
     .gte("order_day", shift(from, -1))
-    .lte("order_day", shift(to, 1))
-    .not("our_cost", "is", null);
+    .lte("order_day", shift(to, 1));
   if (error) {
     console.error(`HST order costs not applied for ${adAccountId}: ${error.message}`);
     return 0;
   }
 
   const rows = (data ?? []) as Array<{
-    order_day: string;
-    paid_at: string | null;
-    our_cost: number;
+    platform_order_id: string;
+    tariff: number;
+    our_cost: number | null;
     currency: string;
   }>;
   if (rows.length === 0) return 0;
 
-  const dayFor = (row: { paid_at: string | null; order_day: string }): string => {
-    if (!row.paid_at) return row.order_day;
-    return new Intl.DateTimeFormat("en-CA", {
-      timeZone,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    }).format(new Date(row.paid_at));
-  };
+  // One charge per Shopify order, summed over the family the ERP filed it as:
+  // the parent row and any split packages ("<id>_1"). The sync writes a
+  // package the parent's bill already covers as a known zero, and one the
+  // parent does not cover at its own figure, so the family's sum is what HST
+  // bills for the order — never twice, never short. A package still waiting
+  // for its quote is null and adds nothing yet; the family stays billed on
+  // what is known, and the reach-back re-reads it until the package is priced.
+  type Charge = { billed: number | null; tariff: number; currency: string };
+  const chargeByOrder = new Map<string, Charge>();
+  for (const row of rows) {
+    const orderId = row.platform_order_id.replace(SPLIT_SUFFIX, "");
+    const charge = chargeByOrder.get(orderId) ?? { billed: null, tariff: 0, currency: row.currency };
+    if (row.our_cost !== null && row.our_cost !== undefined) {
+      const amount = Number(row.our_cost);
+      // A package's known zero adds nothing and, alone, bills nothing: a family
+      // whose parent still waits is not billed because its package is settled.
+      if (Number.isFinite(amount) && amount > 0) charge.billed = (charge.billed ?? 0) + amount;
+    }
+    const tariff = Number(row.tariff);
+    if (Number.isFinite(tariff) && tariff > 0) charge.tariff += tariff;
+    chargeByOrder.set(orderId, charge);
+  }
 
   const series = new Map<string, Awaited<ReturnType<typeof fxDailyRates>> | null>();
   for (const currency of new Set(rows.map((row) => row.currency))) {
@@ -186,25 +220,44 @@ export async function applyHstOrderCosts(input: {
       series.set(currency, null);
     }
   }
+  // The rate a charge's currency converts at on a day, or undefined for one
+  // we could not convert — which is then read as no figure at all, never at
+  // face value: 3 forint-priced euros booked as forints would read as margin.
+  const rateFor = (currency: string, day: string): number | undefined => {
+    const pairs = series.get(currency);
+    if (pairs === undefined) return undefined;
+    if (pairs === null) return currency === reportingCurrency ? 1 : undefined;
+    return rateOn(pairs, day);
+  };
 
-  // Sum the actual per-order cost into the store-zone day it belongs to.
-  const totalByDay = new Map<string, number>();
-  for (const row of rows) {
-    const amount = Number(row.our_cost);
-    if (!Number.isFinite(amount) || amount < 0) continue;
-    const pairs = series.get(row.currency);
-    if (pairs === undefined) continue;
-    if (pairs === null && row.currency !== reportingCurrency) continue;
-    const day = dayFor(row);
-    totalByDay.set(day, (totalByDay.get(day) ?? 0) + amount * (pairs ? rateOn(pairs, day) : 1));
+  // The days to recompose: those where at least one of the store's orders has
+  // a priced charge. Everything else keeps what addHstTariffs left.
+  const daysToCompose = new Set<string>();
+  for (const [orderId, estimate] of estimates) {
+    const charge = chargeByOrder.get(orderId);
+    if (charge && charge.billed !== null) daysToCompose.add(estimate.day);
   }
 
   let applied = 0;
-  for (const [day, total] of totalByDay) {
+  for (const day of daysToCompose) {
     const entry = costByDay.get(day);
     // Only days that actually have revenue in this window — never invent a day.
     if (!entry) continue;
-    entry.product = total;
+    let product = 0;
+    for (const [orderId, estimate] of estimates) {
+      if (estimate.day !== day) continue;
+      const charge = chargeByOrder.get(orderId);
+      const rate = charge ? rateFor(charge.currency, day) : undefined;
+      if (charge && charge.billed !== null && rate !== undefined) {
+        product += charge.billed * rate;
+        continue;
+      }
+      // Unquoted, or unconvertible: the order's own estimate stands, plus the
+      // tariff the ERP already knows for it, if it can be read in our money.
+      product += estimate.product;
+      if (charge && rate !== undefined && charge.tariff > 0) product += charge.tariff * rate;
+    }
+    entry.product = product;
     applied += 1;
   }
 

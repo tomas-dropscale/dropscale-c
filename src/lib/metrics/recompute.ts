@@ -38,7 +38,11 @@ import {
 import { fxDailyRates, rateOn } from "@/lib/shopify/fx";
 import { orderCogs, paymentFee } from "@/lib/cogs/engine";
 import { loadCostContext, registerSoldProducts } from "@/lib/cogs/context";
-import { addHstTariffs, applyHstOrderCosts } from "@/lib/cogs/hst-tariff";
+import {
+  addHstTariffs,
+  applyHstOrderCosts,
+  type HstOrderEstimates,
+} from "@/lib/cogs/hst-tariff";
 import { dealsFromCampaigns, orderRevShare, type AttributionDeal } from "@/lib/finance/rev-share";
 import type { DailyMetricRow } from "./queries";
 import {
@@ -440,6 +444,9 @@ async function fetchShopifyReportingDailyMetrics(
   const result = await adapter.fetchDailySales(from, to);
   let sales = result.days;
   const costByDay = new Map<string, { product: number; fees: number; shipping: number }>();
+  // Each order's own estimate, by Shopify order id, for the supplier's
+  // per-order figures to be matched against — see cogs/hst-tariff.ts.
+  const hstEstimates: HstOrderEstimates = new Map();
 
   const needsFx = Boolean(result.currency && result.currency !== account.currency);
   const rates =
@@ -479,7 +486,11 @@ async function fetchShopifyReportingDailyMetrics(
         unitPrice: line.unitPrice * rate,
       }));
       const entry = costByDay.get(order.date) ?? { product: 0, fees: 0, shipping: 0 };
-      entry.product += orderCogs(lines, order.date, ctx);
+      const product = orderCogs(lines, order.date, ctx);
+      entry.product += product;
+      if (order.platformOrderId) {
+        hstEstimates.set(order.platformOrderId, { day: order.date, product });
+      }
       entry.fees += paymentFee(
         order.total * rate,
         Number(account.payment_fee_pct),
@@ -511,8 +522,8 @@ async function fetchShopifyReportingDailyMetrics(
       from,
       to,
       reportingCurrency: account.currency,
-      timeZone: result.timeZone || "UTC",
       costByDay,
+      estimates: hstEstimates,
     });
   }
 
@@ -972,6 +983,9 @@ async function syncAccountWindow(
         Number(account.default_product_cost_pct),
         account.currency,
       );
+      // Each order's own estimate, by Shopify order id, for the supplier's
+      // per-order figures to be matched against — see cogs/hst-tariff.ts.
+      const hstEstimates: HstOrderEstimates = new Map();
 
       for (const order of result.orders as SyncedOrder[]) {
         const rate = rates ? rateOn(rates, order.date) : 1;
@@ -982,7 +996,11 @@ async function syncAccountWindow(
         }));
 
         const entry = costByDay.get(order.date) ?? { product: 0, fees: 0, shipping: 0 };
-        entry.product += orderCogs(lines, order.date, ctx);
+        const product = orderCogs(lines, order.date, ctx);
+        entry.product += product;
+        if (order.platformOrderId) {
+          hstEstimates.set(order.platformOrderId, { day: order.date, product });
+        }
         entry.fees += paymentFee(
           order.total * rate,
           Number(account.payment_fee_pct),
@@ -1012,8 +1030,8 @@ async function syncAccountWindow(
           from,
           to,
           reportingCurrency: account.currency,
-          timeZone: result.timeZone || "UTC",
           costByDay,
+          estimates: hstEstimates,
         });
       }
     }
