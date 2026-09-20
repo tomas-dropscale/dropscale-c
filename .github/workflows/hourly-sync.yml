@@ -67,6 +67,7 @@ jobs:
           fi
 
           fail=0
+          portfolio_missed=0
           for path in \
             "api/admin/sync-reporting?range=d7" \
             "api/admin/sync-reporting?range=d30" \
@@ -89,9 +90,32 @@ jobs:
               # means every step behind the commission ledger — revenue share,
               # HST commission, supplier COGS, the daily rollup and the referral
               # cache — was skipped this hour.
-              502) echo "::warning::/$path returned 502 — partial refresh. The body above names what did not update; repeated hours mean something is broken, not slow." ;;
+              502)
+                echo "::warning::/$path returned 502 — partial refresh. The body above names what did not update; repeated hours mean something is broken, not slow."
+                # The portfolio phase writes every Google account's metrics and
+                # the campaign sheet in one pass. This signature is the route
+                # giving up on WAITING for it, not the phase failing: the work
+                # is not confirmed either way. One leg missing it is noise; all
+                # three legs of a run missing it is how today's ad spend read
+                # €0 for every client until noon on 2026-09-19, three weeks
+                # into a run of green jobs.
+                case "$path" in
+                  api/admin/sync-reporting*)
+                    if grep -q '"accounts":0,"metricCoverage":null' /tmp/body; then
+                      echo "::warning::/$path — the portfolio phase did not confirm within its deadline; this leg wrote no account metrics that it can vouch for."
+                      portfolio_missed=$((portfolio_missed + 1))
+                    fi ;;
+                esac ;;
               401 | 403) echo "::error::/$path was rejected ($code) — CRON_SECRET does not match the Worker's."; fail=1 ;;
               *) echo "::warning::/$path returned $code"; fail=1 ;;
             esac
           done
+          # Three reporting legs, none of which confirmed the portfolio phase:
+          # nothing this run can vouch for today's ad spend. That is the one
+          # 502 that must go red, because from 26 Aug to 19 Sep 2026 it was
+          # the normal hour and every job stayed green.
+          if [ "$portfolio_missed" -ge 3 ]; then
+            echo "::error::No reporting leg confirmed the portfolio phase this run — today's ad spend has no writer that answered. If the next run says the same, the phase is not slow, it is broken."
+            fail=1
+          fi
           exit $fail

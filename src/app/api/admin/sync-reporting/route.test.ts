@@ -584,6 +584,50 @@ describe("admin exact-range reporting sync route", () => {
     });
   });
 
+  it("waits for the portfolio phase past the 45-second store deadline", async () => {
+    // Measured 2026-08-30 → 09-19: the portfolio phase takes 48–118 s when it
+    // shares the isolate's outbound connections with the store fan-out. Under
+    // the store deadline it answered "accounts: 0" on 93% of hourly legs and
+    // the today leg never wrote the day in progress.
+    let releaseCampaigns: (() => void) | undefined;
+    mocks.refreshAdminCampaignSnapshots.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseCampaigns = () => resolve({ ...campaignReady, attempted: 29, refreshed: 29 });
+        }),
+    );
+
+    const responsePromise = POST(cronRequest("today"));
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(90_000);
+    releaseCampaigns?.();
+    await flushMicrotasks();
+
+    const response = await responsePromise;
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      campaigns: { attempted: 29, refreshed: 29, failed: 0 },
+    });
+  });
+
+  it("gives the portfolio phase up at 105 seconds and says so in the body", async () => {
+    mocks.refreshAdminCampaignSnapshots.mockImplementationOnce(
+      () => new Promise(() => undefined),
+    );
+
+    const responsePromise = POST(cronRequest("today"));
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(105_001);
+    await flushMicrotasks();
+
+    const response = await responsePromise;
+    expect(response.status).toBe(502);
+    // The hourly workflow greps this exact pair to tell a leg that gave up
+    // waiting from one whose stores merely degraded.
+    expect(await response.text()).toContain('"accounts":0,"metricCoverage":null');
+  });
+
   it("stops launching hourly store batches at the 120-second route budget", async () => {
     const scopes = Array.from({ length: 17 }, (_, index) => reportingScope(index));
     mocks.listAdminReportingStoreScopes.mockResolvedValueOnce(scopes);

@@ -34,6 +34,22 @@ const NO_STORE_HEADERS = { "Cache-Control": "private, no-store, max-age=0" };
 const STORE_REFRESH_BATCH_SIZE = 15;
 const REPORTING_ROUTE_BUDGET_MS = 120_000;
 const PROVIDER_REFRESH_TIMEOUT_MS = 45_000;
+/**
+ * The portfolio phase — every Google account's metrics and the campaign
+ * sheet, in one pass — gets a deadline of its own, because the store deadline
+ * above stopped fitting it on 26 August, when the V2 population doubled, and
+ * nothing said so. Measured on 147 hourly runs (2026-08-30 → 09-19): the
+ * phase lands in 33–46 s when it has the isolate's six outbound connections
+ * to itself and in 48–118 s when the store fan-out shares them, so 45 s let
+ * 93% of legs answer "accounts: 0" as a 502 the workflow only warned about.
+ * The race below does not cancel the work; it only stops the request from
+ * waiting for it, and the request ending is what killed it — the today leg
+ * then never wrote the day in progress, and every spending client read €0
+ * from the daily close until a leg happened to land (2026-09-19: 00:55 to
+ * 12:29 Lisbon). 105 s keeps the request open for the measured range and
+ * still answers inside the Worker's 180 s abort and the fallback's 200 s.
+ */
+const PORTFOLIO_REFRESH_TIMEOUT_MS = 105_000;
 // The Worker cron fires at :00 and the GitHub Actions fallback at :07, and the
 // claim lease is only 300 s, so on an hour where both run every provider read
 // happened twice. A store whose three families all succeeded this recently is
@@ -70,7 +86,10 @@ function response(body: unknown, status = 200) {
   return NextResponse.json(body, { status, headers: NO_STORE_HEADERS });
 }
 
-async function withinProviderDeadline<T>(promise: Promise<T>): Promise<T> {
+async function withinProviderDeadline<T>(
+  promise: Promise<T>,
+  deadlineMs = PROVIDER_REFRESH_TIMEOUT_MS,
+): Promise<T> {
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
@@ -78,7 +97,7 @@ async function withinProviderDeadline<T>(promise: Promise<T>): Promise<T> {
       new Promise<never>((_resolve, reject) => {
         timeout = setTimeout(
           () => reject(new Error("Reporting provider refresh timed out.")),
-          PROVIDER_REFRESH_TIMEOUT_MS,
+          deadlineMs,
         );
       }),
     ]);
@@ -315,6 +334,7 @@ async function refreshAll(
       client: service,
       ...(refreshMetrics ? { refreshMetrics: true } : {}),
     }),
+    PORTFOLIO_REFRESH_TIMEOUT_MS,
   ).catch(() => ({
       from: range.from,
       to: range.to,
