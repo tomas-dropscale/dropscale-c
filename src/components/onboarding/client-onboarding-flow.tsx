@@ -1353,8 +1353,8 @@ export function ClientOnboardingFlow({ sessionId }: { sessionId: string }) {
                       “Dropscale Reporting”.
                     </li>
                     <li>
-                      Remove the embedded app URL and add the read-only scopes
-                      below.
+                      Leave the embedded app URL unchanged and add the read-only
+                      scopes below.
                     </li>
                     <li>
                       Copy the Client ID and Client Secret before installing the

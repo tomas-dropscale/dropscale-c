@@ -286,8 +286,8 @@ export function ShopifyAuditOnboarding({ connectionId }: { connectionId: string 
               continue.
             </span>,
             <span key="two">
-              In the app setup, remove the
-              <strong className="font-medium text-[var(--text-primary)]"> embedded app URL</strong>. Add
+              In the app setup, leave the
+              <strong className="font-medium text-[var(--text-primary)]"> embedded app URL</strong> unchanged. Add
               every scope in the full-clearance profile below, then finish creating the app.
             </span>,
             <span key="three">
