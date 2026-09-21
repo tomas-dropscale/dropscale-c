@@ -16,6 +16,24 @@ import { fxDailyRates, rateOn } from "@/lib/shopify/fx";
 
 type Supabase = SupabaseClient<Database>;
 
+// UUID filters become part of the request URL. A catalogue of 656 products
+// exceeded the gateway limit and blocked the whole Shopify revenue refresh.
+const ID_BATCH_SIZE = 50;
+const READ_PAGE_SIZE = 500;
+
+async function readPages<T>(
+  page: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: unknown }>,
+  failure: string,
+): Promise<T[]> {
+  const rows: T[] = [];
+  for (let offset = 0; ; offset += READ_PAGE_SIZE) {
+    const result = await page(offset, offset + READ_PAGE_SIZE - 1);
+    if (result.error || !Array.isArray(result.data)) throw new Error(failure);
+    rows.push(...result.data);
+    if (result.data.length < READ_PAGE_SIZE) return rows;
+  }
+}
+
 /** Latest single rate, via the same ECB series the revenue conversion uses. */
 async function latestRate(base: string, quote: string): Promise<number> {
   if (base === quote) return 1;
@@ -81,24 +99,25 @@ type CostRow = {
 async function fetchProductCosts(
   supabase: Supabase,
   productIds: string[],
-): Promise<{ data: CostRow[] | null }> {
-  const withSource = await supabase
-    .from("product_costs")
-    .select("product_id, cost, currency, effective_from, source")
-    .in("product_id", productIds);
-  if (!withSource.error) return { data: withSource.data as unknown as CostRow[] };
+): Promise<CostRow[]> {
+  return readPages<CostRow>(async (from, to) => {
+    const withSource = await supabase
+      .from("product_costs")
+      .select("product_id, cost, currency, effective_from, source")
+      .in("product_id", productIds)
+      .order("id")
+      .range(from, to);
+    if (!withSource.error) return withSource;
 
-  const legacy = await supabase
-    .from("product_costs")
-    .select("product_id, cost, currency, effective_from")
-    .in("product_id", productIds);
-  // The retry exists for a database without the `source` column, not for a
-  // refused read. Returning null here put every product on the default
-  // percentage, which writes a product_cost the merchant never agreed to.
-  if (legacy.error) {
-    throw new Error("The product costs could not be read.");
-  }
-  return { data: (legacy.data ?? null) as unknown as CostRow[] | null };
+    // Preserve pre-0087 compatibility, but never accept a refused page as
+    // an empty catalogue or publish only the batches that happened to work.
+    return supabase
+      .from("product_costs")
+      .select("product_id, cost, currency, effective_from")
+      .in("product_id", productIds)
+      .order("id")
+      .range(from, to);
+  }, "The product costs could not be read.");
 }
 
 /**
@@ -131,14 +150,13 @@ export async function loadCostContext(
   // A read that was refused is not that store: it would put every line of a
   // fully costed catalogue on the default too, and the difference lands in
   // product_cost, in the client's P&L and in what the agency invoices.
-  const { data: products, error: productsError } = await supabase
-    .from("store_products")
-    .select("id, platform_key")
-    .eq("ad_account_id", adAccountId);
-  if (productsError) {
-    throw new Error("The store products could not be read for costing.");
-  }
-  const keyById = new Map((products ?? []).map((row) => [row.id, row.platform_key]));
+  const products = await readPages(
+    (from, to) => supabase.from("store_products")
+      .select("id, platform_key").eq("ad_account_id", adAccountId)
+      .order("id").range(from, to),
+    "The store products could not be read for costing.",
+  );
+  const keyById = new Map(products.map((row) => [row.id, row.platform_key]));
   const productIds = [...keyById.keys()];
 
   const manualCosts = new Map<string, ManualCost[]>();
@@ -146,26 +164,40 @@ export async function loadCostContext(
   const collections: CostContext["collections"] = [];
 
   if (productIds.length > 0) {
-    const [costsRes, tiersRes, collectionsRes, membersRes, cTiersRes] = await Promise.all([
-      fetchProductCosts(supabase, productIds),
-      supabase.from("product_cost_tiers").select("product_id, min_qty, total_cost").in("product_id", productIds),
-      supabase.from("cogs_collections").select("id").eq("ad_account_id", adAccountId),
-      supabase.from("cogs_collection_members").select("collection_id, product_id").in("product_id", productIds),
-      supabase.from("cogs_collections").select("id, cogs_collection_tiers ( min_qty, total_cost )").eq("ad_account_id", adAccountId),
-    ]);
-    void collectionsRes;
-
-    // The same rule for the rest of the costing tables. No rows means a store
-    // that priced nothing in tiers or packs; a refused read means a catalogue
-    // we cannot see, and costing that one by the default percentage quietly
-    // undercharges the pack prices the merchant actually agreed.
-    if (tiersRes.error || membersRes.error || cTiersRes.error) {
-      throw new Error("The cost tiers could not be read.");
+    const costRows: CostRow[] = [];
+    const tierRows: { product_id: string; min_qty: number; total_cost: number }[] = [];
+    const memberRows: { collection_id: string; product_id: string }[] = [];
+    for (let offset = 0; offset < productIds.length; offset += ID_BATCH_SIZE) {
+      const ids = productIds.slice(offset, offset + ID_BATCH_SIZE);
+      const [costs, productTiers, members] = await Promise.all([
+        fetchProductCosts(supabase, ids),
+        readPages(
+          (from, to) => supabase.from("product_cost_tiers")
+            .select("product_id, min_qty, total_cost").in("product_id", ids)
+            .order("id").range(from, to),
+          "The cost tiers could not be read.",
+        ),
+        readPages(
+          (from, to) => supabase.from("cogs_collection_members")
+            .select("collection_id, product_id").in("product_id", ids)
+            .order("product_id").range(from, to),
+          "The cost tiers could not be read.",
+        ),
+      ]);
+      costRows.push(...costs);
+      tierRows.push(...productTiers);
+      memberRows.push(...members);
     }
+    const collectionRows = await readPages(
+      (from, to) => supabase.from("cogs_collections")
+        .select("id, cogs_collection_tiers ( min_qty, total_cost )")
+        .eq("ad_account_id", adAccountId).order("id").range(from, to),
+      "The cost tiers could not be read.",
+    );
 
     // One cost per product per day, decided here rather than by row order.
     const chosen = new Map<string, CostRow>();
-    for (const row of costsRes.data ?? []) {
+    for (const row of costRows) {
       const slot = `${row.product_id}|${row.effective_from}`;
       const held = chosen.get(slot);
       chosen.set(slot, held ? preferred(held, row) : row);
@@ -186,7 +218,7 @@ export async function loadCostContext(
       manualCosts.set(key, bucket);
     }
 
-    for (const row of tiersRes.data ?? []) {
+    for (const row of tierRows) {
       const key = keyById.get(row.product_id);
       if (!key) continue;
       const bucket = tiers.get(key) ?? [];
@@ -195,7 +227,7 @@ export async function loadCostContext(
     }
 
     const membersByCollection = new Map<string, Set<string>>();
-    for (const row of membersRes.data ?? []) {
+    for (const row of memberRows) {
       const key = keyById.get(row.product_id);
       if (!key) continue;
       const set = membersByCollection.get(row.collection_id) ?? new Set<string>();
@@ -203,7 +235,7 @@ export async function loadCostContext(
       membersByCollection.set(row.collection_id, set);
     }
 
-    for (const row of cTiersRes.data ?? []) {
+    for (const row of collectionRows) {
       const memberKeys = membersByCollection.get(row.id);
       if (!memberKeys || memberKeys.size === 0) continue;
       collections.push({

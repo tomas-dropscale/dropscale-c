@@ -1371,7 +1371,7 @@ async function rollupFamilies(
   topology: StoreTopology,
   accountIds: string[],
   range: Pick<RangeSelection, "from" | "to">,
-  refreshMissing = false,
+  refresh = false,
 ): Promise<Pick<AdminStoreAnalytics, "spend" | "rollupCoverage">> {
   const days = rangeDays(range);
   const revenueAccountId = topology.kind === "v2"
@@ -1386,10 +1386,12 @@ async function rollupFamilies(
       revenueAccountId,
       false,
     );
-    if (current?.rollupCoverage.state === "ready" || (current && !refreshMissing)) {
+    // A complete grid can still contain figures captured before an order.
+    // Explicit Sync must refresh it; ordinary page reads stay provider-free.
+    if (current && !refresh) {
       return current;
     }
-    if (!current && !refreshMissing) {
+    if (!current && !refresh) {
       return {
         spend: failed("Stored spend rows are invalid for the selected period."),
         rollupCoverage: failed("The selected-period reporting rollup could not be verified."),
@@ -3635,8 +3637,8 @@ export async function refreshAdminStoreAnalyticsSnapshots(
 }
 
 /**
- * Materialises and proves only the daily rollup needed by the All Stores
- * Analytics cards. It deliberately does not open ShopifyQL or campaign reads.
+ * Refreshes and proves the exact daily rollup requested by manual store Sync,
+ * including already-materialised days. Does not open ShopifyQL or campaigns.
  */
 export async function ensureAdminAnalyticsRollupCoverage(
   input: EnsureAdminAnalyticsRollupCoverageInput,

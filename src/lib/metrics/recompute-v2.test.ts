@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
 
@@ -481,6 +481,7 @@ function successfulShopify(revenue = 100, currency = "EUR") {
 }
 
 describe("V2 daily-metrics recompute", () => {
+  afterEach(() => vi.useRealTimers());
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.hasGoogleAdsEnv.mockReturnValue(true);
@@ -860,6 +861,9 @@ describe("V2 daily-metrics recompute", () => {
   });
 
   it("expands an exact store anchor to its Google children and no other store", async () => {
+    // The implicit seven-day refresh must include the fixture's reporting day.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-08-15T12:00:00.000Z"));
     const OTHER = "70000000-0000-4000-8000-000000000008";
     const accounts = [
       account(ANCHOR),

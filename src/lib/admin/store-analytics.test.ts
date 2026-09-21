@@ -3520,6 +3520,37 @@ describe("admin store analytics DAL", () => {
     expect(mocks.createLegacyShopifyReportingAdapter).not.toHaveBeenCalled();
   });
 
+  it("refreshes an already complete zero-sales grid on explicit store Sync", async () => {
+    const stale = Array.from({ length: 7 }, (_, index) => ({
+      ad_account_id: STORE_ID,
+      day: `2026-08-${String(index + 8).padStart(2, "0")}`,
+      ad_spend: 10,
+      attributed_revenue: 0,
+      attributed_orders: 0,
+      computed_at: "2026-08-14T11:05:00.000Z",
+    }));
+    const updated = stale.map(row => ({
+      ...row,
+      attributed_revenue: row.day === "2026-08-14" ? 39.95 : 0,
+      attributed_orders: row.day === "2026-08-14" ? 1 : 0,
+      computed_at: "2026-08-15T10:00:00.000Z",
+    }));
+    const scopedService = service([account()], null, [stale, updated]);
+    mocks.createServiceClient.mockReturnValue(scopedService);
+
+    await expect(ensureAdminAnalyticsRollupCoverage({
+      clientId: CLIENT_ID,
+      stores: [{ accountId: STORE_ID, activityAccountIds: [STORE_ID], currency: "EUR" }],
+      range: RANGE,
+    })).resolves.toMatchObject({ state: "ready", data: { refreshed: true } });
+
+    expect(mocks.refreshAccountsNow).toHaveBeenCalledExactlyOnceWith([STORE_ID], {
+      client: scopedService, reportingClient: scopedService,
+      from: RANGE.from, to: RANGE.to,
+    });
+    expect(mocks.fetchLiveCampaignsDetailed).not.toHaveBeenCalled();
+  });
+
   it("keeps a 5/7 spend grid partial after manual refresh and reports exact coverage", async () => {
     const partial = ["08", "09", "10", "11", "12"].map((day, index) => ({
       ad_account_id: STORE_ID,
