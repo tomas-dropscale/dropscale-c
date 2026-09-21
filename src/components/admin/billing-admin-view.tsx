@@ -334,6 +334,12 @@ export function BillingAdminView({
   );
   const [unskippingId, setUnskippingId] = React.useState<string | null>(null);
   const [issueDialogOpen, setIssueDialogOpen] = React.useState(false);
+  const [issuePeriodStart, setIssuePeriodStart] = React.useState(
+    dashboard.selectedWeek.start,
+  );
+  const issuePeriod = dashboard.weeks.find(
+    (week) => week.start === issuePeriodStart,
+  );
   const [issuingAll, setIssuingAll] = React.useState(false);
   const [issueFeedback, setIssueFeedback] = React.useState<Feedback>(null);
 
@@ -491,11 +497,14 @@ export function BillingAdminView({
   }
 
   async function issueAllInvoices() {
+    if (!issuePeriod) return;
     setIssuingAll(true);
     setIssueFeedback(null);
     try {
       const response = await fetch("/api/billing/issue-all", {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ periodStart: issuePeriod.start }),
       });
       const body = (await response.json().catch(() => null)) as
         | IssueAllResponse
@@ -557,7 +566,10 @@ export function BillingAdminView({
             type="button"
             variant="primary"
             disabled={issuingAll}
-            onClick={() => setIssueDialogOpen(true)}
+            onClick={() => {
+              setIssuePeriodStart(dashboard.selectedWeek.start);
+              setIssueDialogOpen(true);
+            }}
           >
             <ReceiptText />
             Emitir faturas
@@ -1169,12 +1181,43 @@ export function BillingAdminView({
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Emitir faturas do último ciclo?</DialogTitle>
+            <DialogTitle>Emitir faturas de um ciclo?</DialogTitle>
             <DialogDescription>
-              O sistema atualiza a prova Google e emite na Stripe todas as
-              faturas elegíveis do último ciclo fechado.
+              Escolhe a semana fechada. O sistema atualiza os dados Google e
+              emite na Stripe as faturas elegíveis desse período.
             </DialogDescription>
           </DialogHeader>
+
+          <div className="space-y-2">
+            <label htmlFor="invoice-period" className="label-caps">
+              Semana a faturar
+            </label>
+            <Select
+              value={issuePeriodStart}
+              onValueChange={setIssuePeriodStart}
+              disabled={issuingAll}
+            >
+              <SelectTrigger id="invoice-period">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {dashboard.weeks.map((week) => (
+                  <SelectItem key={week.start} value={week.start}>
+                    {formatPeriod(week.start, week.end, intl)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {issuePeriod && (
+              <p className="text-[12px] text-[var(--text-secondary)]">
+                Vais emitir faturas de{" "}
+                <strong>
+                  {formatPeriod(issuePeriod.start, issuePeriod.end, intl)}
+                </strong>
+                .
+              </p>
+            )}
+          </div>
 
           <div className="rounded-xl border border-[var(--warning-orange)]/25 bg-[var(--warning-orange)]/10 p-3 text-[12px] leading-relaxed text-[var(--text-secondary)]">
             Clientes com skip, fatura já emitida ou dados incompletos não serão
@@ -1194,6 +1237,7 @@ export function BillingAdminView({
               type="button"
               variant="primary"
               loading={issuingAll}
+              disabled={!issuePeriod}
               onClick={issueAllInvoices}
             >
               <ReceiptText />

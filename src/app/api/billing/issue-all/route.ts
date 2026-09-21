@@ -12,6 +12,7 @@ import { billingIssuanceEnabled } from "@/lib/billing/issuance-gate";
 import {
   billingEvidenceIsReady,
   billingEvidenceReadyAt,
+  closedWeekStarting,
   closedWeeks,
 } from "@/lib/billing/weekly";
 import { createServiceClient } from "@/lib/supabase/service";
@@ -48,24 +49,51 @@ function summary(result: BillingBatchResult) {
   };
 }
 
-/** POST - refresh and issue every eligible client for the latest closed week. */
+/** POST - refresh and issue every eligible client for one confirmed closed week. */
 export async function POST(request: NextRequest) {
   const { user, profile } = await getSessionProfile();
   if (!user) return response({ error: "Unauthorised." }, 401);
   if (profile?.role !== "admin") return response({ error: "Forbidden." }, 403);
   if (!sameOrigin(request)) return response({ error: "Forbidden." }, 403);
-  if ((await request.text()).length !== 0) {
-    return response({ error: "This action does not accept a body." }, 400);
-  }
   if (!billingIssuanceEnabled()) {
     return response({ error: "Billing issuance is disabled." }, 503);
   }
 
-  const period = closedWeeks(new Date(), 1)[0];
+  const now = new Date();
+  const rawBody = await request.text();
+  let period;
+  if (rawBody.length === 0) {
+    // Keep older open dashboards working. Updated dialogs pin their selection.
+    period = closedWeeks(now, 1)[0];
+  } else {
+    let body: unknown;
+    try {
+      body = JSON.parse(rawBody);
+    } catch {
+      return response({ error: "Invalid JSON request." }, 400);
+    }
+    if (
+      !body ||
+      typeof body !== "object" ||
+      Array.isArray(body) ||
+      !("periodStart" in body) ||
+      typeof body.periodStart !== "string" ||
+      Object.keys(body).length !== 1
+    ) {
+      return response({ error: "A periodStart date is required." }, 400);
+    }
+    period = closedWeekStarting(body.periodStart, now);
+    if (!period) {
+      return response(
+        { error: "Select a fully closed Monday-to-Sunday week." },
+        422,
+      );
+    }
+  }
   if (!period) {
     return response({ error: "No closed billing week is available." }, 409);
   }
-  if (!billingEvidenceIsReady(period.end)) {
+  if (!billingEvidenceIsReady(period.end, now)) {
     return response(
       {
         error: "Google's Sunday spend is still settling.",

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 
 const mocks = vi.hoisted(() => ({
@@ -23,7 +23,8 @@ vi.mock("@/lib/billing/invoices", () => ({
 vi.mock("@/lib/billing/issuance-gate", () => ({
   billingIssuanceEnabled: mocks.billingIssuanceEnabled,
 }));
-vi.mock("@/lib/billing/weekly", () => ({
+vi.mock("@/lib/billing/weekly", async () => ({
+  ...(await import("../../../../lib/billing/weekly")),
   billingEvidenceIsReady: mocks.billingEvidenceIsReady,
   billingEvidenceReadyAt: mocks.billingEvidenceReadyAt,
   closedWeeks: mocks.closedWeeks,
@@ -65,7 +66,9 @@ function request(options: { origin?: string; body?: string } = {}) {
 
 describe("bulk billing issue route", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-08-17T15:00:00.000Z"));
     mocks.getSessionProfile.mockResolvedValue({
       user: { id: ADMIN_ID },
       profile: { id: ADMIN_ID, role: "admin" },
@@ -80,13 +83,81 @@ describe("bulk billing issue route", () => {
     mocks.issueClosedBillingWeekBatch.mockResolvedValue(RESULT);
   });
 
-  it("rejects non-admin, cross-origin and non-empty requests before financial work", async () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("rejects unauthenticated, non-admin and cross-origin requests before financial work", async () => {
     mocks.getSessionProfile.mockResolvedValueOnce({ user: null, profile: null });
     expect((await POST(request())).status).toBe(401);
+    mocks.getSessionProfile.mockResolvedValueOnce({
+      user: { id: ADMIN_ID },
+      profile: { id: ADMIN_ID, role: "client" },
+    });
+    expect((await POST(request())).status).toBe(403);
     expect(
       (await POST(request({ origin: "https://attacker.example" }))).status,
     ).toBe(403);
-    expect((await POST(request({ body: "{}" }))).status).toBe(400);
+    expect(mocks.createServiceClient).not.toHaveBeenCalled();
+    expect(mocks.issueClosedBillingWeekBatch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "{}",
+    "null",
+    "[]",
+    "not json",
+    JSON.stringify({ periodStart: 123 }),
+    JSON.stringify({ periodStart: PERIOD.start, amount: 1 }),
+  ])("rejects malformed selections before financial work: %s", async (body) => {
+    expect((await POST(request({ body }))).status).toBe(400);
+    expect(mocks.createServiceClient).not.toHaveBeenCalled();
+    expect(mocks.purgeAdminAccountRevenue).not.toHaveBeenCalled();
+    expect(mocks.issueClosedBillingWeekBatch).not.toHaveBeenCalled();
+  });
+
+  it.each(["2026-08-17", "2026-08-24", "2026-08-11", "2026-02-30", ""])(
+    "rejects open, future or invalid cycles: %s",
+    async (periodStart) => {
+      const response = await POST(request({ body: JSON.stringify({ periodStart }) }));
+      expect(response.status).toBe(422);
+      expect(mocks.createServiceClient).not.toHaveBeenCalled();
+      expect(mocks.syncCommissionLedger).not.toHaveBeenCalled();
+      expect(mocks.issueClosedBillingWeekBatch).not.toHaveBeenCalled();
+    },
+  );
+
+  it("refreshes and issues the selected older week instead of the latest cycle", async () => {
+    const older = { start: "2026-08-03", end: "2026-08-09" };
+    mocks.issueClosedBillingWeekBatch.mockResolvedValue({ ...RESULT, period: older });
+    const response = await POST(request({ body: JSON.stringify({ periodStart: older.start }) }));
+    expect(response.status).toBe(200);
+    expect((await response.json()).period).toEqual(older);
+    expect(mocks.closedWeeks).not.toHaveBeenCalled();
+    expect(mocks.billingEvidenceIsReady).toHaveBeenCalledWith(older.end, expect.any(Date));
+    expect(mocks.purgeAdminAccountRevenue).toHaveBeenCalledWith({ force: true, client: SERVICE, period: older });
+    expect(mocks.syncCommissionLedger).toHaveBeenCalledWith({ force: true, client: SERVICE, period: older });
+    expect(mocks.issueClosedBillingWeekBatch).toHaveBeenCalledWith({ periodStart: older.start, issuedBy: ADMIN_ID, client: SERVICE });
+  });
+
+  it("keeps the confirmed cycle when a new Monday has begun", async () => {
+    vi.setSystemTime(new Date("2026-08-24T15:00:00.000Z"));
+    mocks.closedWeeks.mockReturnValue([{ start: "2026-08-17", end: "2026-08-23" }]);
+    const response = await POST(request({ body: JSON.stringify({ periodStart: PERIOD.start }) }));
+    expect(response.status).toBe(200);
+    expect(mocks.issueClosedBillingWeekBatch).toHaveBeenCalledWith({ periodStart: PERIOD.start, issuedBy: ADMIN_ID, client: SERVICE });
+  });
+
+  it("keeps issuance disabled for an explicitly selected week", async () => {
+    mocks.billingIssuanceEnabled.mockReturnValue(false);
+    expect((await POST(request({ body: JSON.stringify({ periodStart: PERIOD.start }) }))).status).toBe(503);
+    expect(mocks.createServiceClient).not.toHaveBeenCalled();
+    expect(mocks.issueClosedBillingWeekBatch).not.toHaveBeenCalled();
+  });
+
+  it("blocks a selected cycle until its Google evidence cutoff", async () => {
+    mocks.billingEvidenceIsReady.mockReturnValue(false);
+    const response = await POST(request({ body: JSON.stringify({ periodStart: PERIOD.start }) }));
+    expect(response.status).toBe(409);
+    expect((await response.json()).readyAt).toBe("2026-08-17T13:00:00.000Z");
     expect(mocks.createServiceClient).not.toHaveBeenCalled();
     expect(mocks.issueClosedBillingWeekBatch).not.toHaveBeenCalled();
   });
