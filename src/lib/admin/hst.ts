@@ -521,7 +521,22 @@ async function fetchPage(token: string, page: number): Promise<HstResponse> {
       `HST answered ${COMMISSION_URL} with "${contentType || "no content-type"}" instead of JSON — that URL looks like the ERP page, not its API endpoint.`,
     );
   }
-  return (await res.json()) as HstResponse;
+  const body: unknown = await res.json();
+  const envelope = body as { code?: unknown; success?: unknown; data?: { data?: unknown } } | null;
+  // HST also rejects expired sessions with HTTP 200 and { code: 401,
+  // data: null }. Treat that like an HTTP refusal so the single renewal retry
+  // runs before we touch the ledger.
+  const code = Number(envelope?.code);
+  if (code === 401 || code === 403) {
+    throw new HstError("HST rejected the token — sign in to HST again if renewal fails.", true);
+  }
+  if (envelope?.success === false || (Number.isFinite(code) && code >= 400)) {
+    throw new HstError("HST could not return commissions — ledger left untouched.");
+  }
+  if (!Array.isArray(envelope?.data?.data)) {
+    throw new HstError("HST returned an invalid commission response — ledger left untouched.");
+  }
+  return body as HstResponse;
 }
 
 /**
