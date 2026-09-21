@@ -46,10 +46,16 @@ const PROVIDER_REFRESH_TIMEOUT_MS = 45_000;
  * waiting for it, and the request ending is what killed it — the today leg
  * then never wrote the day in progress, and every spending client read €0
  * from the daily close until a leg happened to land (2026-09-19: 00:55 to
- * 12:29 Lisbon). 105 s keeps the request open for the measured range and
- * still answers inside the Worker's 180 s abort and the fallback's 200 s.
+ * 12:29 Lisbon). 105 s kept the request open for the measured range; the
+ * first two runs under it answered in 85–110 s with every account written.
+ * The today leg now asks Windsor for the day in progress fresh instead of
+ * from its six-hour cache (refresh_interval=1h, see windsor/client.ts), and
+ * a fresh answer took 0.4–5.5 s per request where a cached one took 0.1 s:
+ * roughly 90 such requests over six connections is another 15–70 s on that
+ * leg. 150 s covers it and still answers inside the Worker's 180 s abort and
+ * the fallback's 200 s; the store fan-out keeps its own 120 s budget.
  */
-const PORTFOLIO_REFRESH_TIMEOUT_MS = 105_000;
+const PORTFOLIO_REFRESH_TIMEOUT_MS = 150_000;
 // The Worker cron fires at :00 and the GitHub Actions fallback at :07, and the
 // claim lease is only 300 s, so on an hour where both run every provider read
 // happened twice. A store whose three families all succeeded this recently is

@@ -482,6 +482,9 @@ describe("Windsor Google Ads server adapter", () => {
     expect(upstream.searchParams.get("_max_rows")).toBe("4");
     expect(upstream.searchParams.get("_renderer")).toBe("json");
     expect(upstream.searchParams.has("date_preset")).toBe(false);
+    // A rolling window keeps Windsor's cached answer: a closed day reads the
+    // same however fresh it is, and a re-pull costs seconds per request.
+    expect(upstream.searchParams.has("refresh_interval")).toBe(false);
   });
 
   /** One Windsor account-table row for the account under test. */
@@ -731,6 +734,10 @@ describe("Windsor Google Ads server adapter", () => {
     ]);
     expect(requestedUrl(hourlyFetcher).searchParams.get("fields")?.split(","))
       .toContain("hour_of_day");
+    // The single-day window is the read that decides the day in progress.
+    // Without this, Windsor serves the same URL from its query cache for six
+    // hours and the day freezes at the first read of the window.
+    expect(requestedUrl(hourlyFetcher).searchParams.get("refresh_interval")).toBe("1h");
 
     await expect(fetchGoogleAdsCampaignTimeline(
       "123-456-7890",
@@ -746,6 +753,7 @@ describe("Windsor Google Ads server adapter", () => {
     ]);
     expect(requestedUrl(dailyFetcher).searchParams.get("fields")?.split(","))
       .not.toContain("hour_of_day");
+    expect(requestedUrl(dailyFetcher).searchParams.has("refresh_interval")).toBe(false);
   });
 
   it.each([

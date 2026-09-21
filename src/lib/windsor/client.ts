@@ -17,6 +17,13 @@ import { campaignBelongsToStore } from "../reporting/store-domain-match";
 const WINDSOR_DATASOURCE = "google_ads" as const;
 const ONBOARD_ORIGIN = "https://onboard.windsor.ai";
 const CONNECTORS_ORIGIN = "https://connectors.windsor.ai";
+/**
+ * How often Windsor may re-pull the last three days from Google for a dated
+ * read, and the shortest interval the STANDARD plan accepts (15min is refused
+ * with an error). Its default is 6h, which is also how long an exact Connector
+ * URL is served from Windsor's query cache — see requestJson.
+ */
+const WINDSOR_REFRESH_INTERVAL = "1h";
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 const AUTHORIZATION_REQUEST_TIMEOUT_MS = 25_000;
 /**
@@ -901,6 +908,31 @@ async function requestJson(
   }
 
   url.searchParams.set("api_key", apiKey);
+  // Windsor answers an exact Connector URL from a query cache for six hours,
+  // and re-pulls the last three days from Google only every six hours unless
+  // asked otherwise. Every hourly leg asks for the day in progress with the
+  // same URL all day, so what clients read as "today" was whatever Windsor
+  // had the first time that URL was asked in the window: measured 2026-09-20
+  // 17:05Z, the sync's own URL answered 55.02 for an account whose fresh
+  // figure was 87.44, and 101.61 against 104.23 for a store that had stopped
+  // spending ten hours earlier. refresh_interval=1h is the shortest this plan
+  // allows; it bounds the day in progress at an hour old instead of six.
+  //
+  // Only the single-day window carries it. That is the read that decides the
+  // day in progress (the today leg, and a report's own-day refresh), and a
+  // re-pull is not free: a fresh answer took 0.4–5.5 s where a cached one
+  // took 0.1 s, and the hourly legs already run 85–110 s against a 150 s
+  // portfolio deadline. The rolling windows keep their cached answers: a
+  // closed day reads the same however fresh it is, and today's row is
+  // decided by the today leg, which runs last. date_preset reads (health)
+  // and the account inventory stay exactly as they were.
+  if (
+    url.pathname === `/${WINDSOR_DATASOURCE}` &&
+    url.searchParams.has("date_to") &&
+    url.searchParams.get("date_from") === url.searchParams.get("date_to")
+  ) {
+    url.searchParams.set("refresh_interval", WINDSOR_REFRESH_INTERVAL);
+  }
   const maxRetries = options.maxRetries ?? RETRY_DELAYS_MS.length;
   const sleep = options.sleep ?? defaultRetrySleep;
   /** The transient failure the attempt now running is trying to recover from. */

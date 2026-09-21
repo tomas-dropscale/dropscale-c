@@ -611,14 +611,14 @@ describe("admin exact-range reporting sync route", () => {
     });
   });
 
-  it("gives the portfolio phase up at 105 seconds and says so in the body", async () => {
+  it("gives the portfolio phase up at 150 seconds and says so in the body", async () => {
     mocks.refreshAdminCampaignSnapshots.mockImplementationOnce(
       () => new Promise(() => undefined),
     );
 
     const responsePromise = POST(cronRequest("today"));
     await flushMicrotasks();
-    await vi.advanceTimersByTimeAsync(105_001);
+    await vi.advanceTimersByTimeAsync(150_001);
     await flushMicrotasks();
 
     const response = await responsePromise;
