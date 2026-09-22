@@ -196,6 +196,7 @@ export type ReportingCutoverClient = {
     | "ready_to_sync"
     | "ready_to_activate"
     | "active"
+    | "active_pending_metadata"
     | "replacement_required"
     | "blocked";
   sourceCount: number;
@@ -964,6 +965,17 @@ async function buildClientReportingCutoverQueue(
       sourceCoverageExact &&
       authoritativeBindings.some((binding) => binding.shopify_connection_id);
 
+    // An unused Google connection without metadata does not stop the sources
+    // already reporting. This changes only the displayed workflow state: the
+    // missing source must still pass the normal staging and activation gates.
+    const onlyUnboundMetadataPending =
+      validCutover &&
+      authoritativeBindingsHealthy &&
+      authoritativeBindings.some((binding) => binding.shopify_connection_id) &&
+      metadataPending.length > 0 &&
+      metadataPending.every((source) => !coveredGoogle.has(source.id)) &&
+      boundSourceCount + metadataPending.length === sourceCount;
+
     let syncedSourceCount = validCutover ? boundSourceCount : 0;
     if (!validCutover) {
       for (const binding of authoritativeBindings) {
@@ -1179,19 +1191,21 @@ async function buildClientReportingCutoverQueue(
       unsafePostCutoverActive ||
       !authoritativeBindingsHealthy ||
       !billingCurrencySupported ||
-      (validCutover && !exactCoverage && !replacementRequired) ||
+      (validCutover && !exactCoverage && !replacementRequired && !onlyUnboundMetadataPending) ||
       shopifyRequired ||
       activationSessionBlocked
       ? "blocked"
       : replacementRequired
         ? "replacement_required"
-        : validCutover
-          ? "active"
-          : !exactCoverage
-            ? "bindings_required"
-            : syncReady
-              ? "ready_to_activate"
-              : "ready_to_sync";
+        : onlyUnboundMetadataPending
+          ? "active_pending_metadata"
+          : validCutover
+            ? "active"
+            : !exactCoverage
+              ? "bindings_required"
+              : syncReady
+                ? "ready_to_activate"
+                : "ready_to_sync";
     const message = rollback
       ? "Legacy rollback overrides the reporting marker."
       : inconsistentMarker
@@ -1203,9 +1217,9 @@ async function buildClientReportingCutoverQueue(
           : !billingCurrencySupported
             ? "A Google source bills in a currency the ECB publishes no rate for, so its spend can never be converted. No staging or activation action is available."
             : metadataPending.length > 0
-              ? `Google has reported no currency or time zone for ${metadataPending
+              ? `${onlyUnboundMetadataPending ? "Existing sources remain live and continue syncing. " : ""}Waiting for Google Ads to provide the currency and time zone for ${metadataPending
                   .map((source) => source.account_name || source.windsor_account_id)
-                  .join(", ")}. That metadata only arrives once an account has spend, so the source stays unusable — and unstageable — until it runs. Disconnect it, or leave it and it enriches on its own within the hour after its first spend.`
+                  .join(", ")}. The pending source cannot be added to reporting until those details are available and verified. We check again automatically.`
               : validCutover && !exactCoverage && !healthy
               ? "The existing reporting authority remains active, but a new connected source is blocked until it is verified and healthy; then it can be staged explicitly."
             : shopifyRequired

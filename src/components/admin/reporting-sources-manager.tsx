@@ -41,12 +41,16 @@ const STATUS_LABEL: Record<ReportingCutoverClient["status"], string> = {
   ready_to_sync: "Ready to sync",
   ready_to_activate: "Ready to activate",
   active: "Live",
+  active_pending_metadata: "Live · awaiting Google data",
   replacement_required: "Replacement required",
   blocked: "Blocked",
 };
 
 function statusBadge(status: ReportingCutoverClient["status"]) {
   if (status === "active") return <Badge variant="success">Live</Badge>;
+  if (status === "active_pending_metadata") {
+    return <Badge variant="warning">{STATUS_LABEL[status]}</Badge>;
+  }
   if (status === "blocked" || status === "replacement_required") {
     return <Badge variant="danger">{STATUS_LABEL[status]}</Badge>;
   }

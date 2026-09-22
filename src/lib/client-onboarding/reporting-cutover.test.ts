@@ -498,8 +498,78 @@ describe("Phase 2 admin reporting cutover workflow", () => {
       false,
     );
     expect(queue.clients[0].message).toContain("Yuna Kamakura");
-    expect(queue.clients[0].message).toContain("once an account has spend");
+    expect(queue.clients[0].status).toBe("bindings_required");
+    expect(queue.clients[0].message).toContain("available and verified");
     expect(queue.clients[0].message).not.toContain("EUR-only");
+  });
+
+  function liveWithUnboundMetadata() {
+    const data = boundSnapshot(true);
+    data.rolloutStates[0] = {
+      ...data.rolloutStates[0],
+      operational_surface: "v2_active",
+      reporting_cutover_at: "2026-08-14T02:00:00.000Z",
+      reporting_cutover_by: ADMIN,
+      reporting_cutover_reason: "Initial reporting cutover",
+    };
+    data.googleConnections.push({
+      ...data.googleConnections[0],
+      id: GOOGLE_2,
+      windsor_account_id: "987-654-3210",
+      account_name: "Tsuki Kyoto",
+      currency: null,
+      time_zone: null,
+    });
+    return data;
+  }
+
+  it("shows existing reporting as live while an unused Google source awaits metadata", async () => {
+    const queue = await projectClientReportingCutover(liveWithUnboundMetadata());
+
+    expect(queue.clients[0]).toMatchObject({
+      status: "active_pending_metadata",
+      sourceCount: 3,
+      boundSourceCount: 2,
+      syncedSourceCount: 2,
+      syncActionId: null,
+      activateActionId: null,
+      stagedSources: [],
+    });
+    expect(queue.clients[0].message).toContain("Existing sources remain live");
+    expect(queue.clients[0].message).toContain("Tsuki Kyoto");
+    expect(queue.candidates).toEqual([]);
+  });
+
+  it("keeps broken existing authority blocked even when a new source awaits metadata", async () => {
+    const data = liveWithUnboundMetadata();
+    data.googleConnections[0].currency = null;
+    data.googleConnections[0].time_zone = null;
+
+    const queue = await projectClientReportingCutover(data);
+
+    expect(queue.clients[0]).toMatchObject({
+      status: "blocked",
+      syncActionId: null,
+      activateActionId: null,
+      message: expect.stringContaining("authoritative reporting binding"),
+    });
+  });
+
+  it("does not hide other uncovered sources behind a metadata-only pending status", async () => {
+    const data = liveWithUnboundMetadata();
+    data.googleConnections.push({
+      ...data.googleConnections[0],
+      id: "65000000-0000-4000-8000-000000000032",
+      windsor_account_id: "555-666-7777",
+    });
+
+    const queue = await projectClientReportingCutover(data);
+
+    expect(queue.clients[0]).toMatchObject({
+      status: "blocked",
+      syncActionId: null,
+      activateActionId: null,
+    });
   });
 
   it("does not offer restage for an abandoned identity with terminal billing history", async () => {
