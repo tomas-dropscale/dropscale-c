@@ -19,7 +19,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { decryptToken } from "@/lib/google-ads/crypto";
 import { googleRoas } from "@/lib/admin/google-attribution";
-import { currencyScope, displayCurrency } from "@/lib/portal/currency";
+import { euroReportConverter } from "@/lib/reports/euro";
 import { hasGoogleAdsEnv } from "@/lib/google-ads/env";
 import { fetchLiveCampaignsDetailed } from "@/lib/google-ads/portal";
 import { sumMetrics, type DailyMetricRow } from "@/lib/metrics/queries";
@@ -48,12 +48,8 @@ export type ReportCampaign = {
 };
 
 /**
- * Everything the client's own Dashboard shows, in the same arithmetic.
- *
- * Mirrored field by field on purpose: the report is read next to that screen,
- * and two numbers for the same thing is the fastest way to lose the client's
- * trust in both. Anything here can be checked against /dashboard for the same
- * day and must match exactly.
+ * The dashboard's arithmetic, with every money amount converted to EUR for
+ * the Discord report. Counts and rates retain their original units.
  */
 export type ReportMetrics = {
   /** Gross Shopify revenue, before refunds. */
@@ -115,6 +111,7 @@ export type ReportMetrics = {
 export type ReportStore = ReportMetrics & {
   id: string;
   nome: string;
+  moeda: "EUR";
   dominio: string | null;
   /** When this store's rollup was last computed. Null = never. */
   atualizado_em: string | null;
@@ -127,6 +124,7 @@ export type ReportStore = ReportMetrics & {
 export type ReportClient = {
   id: string;
   nome: string;
+  moeda: "EUR";
   email: string;
   /** Management fee + revenue share. What the agency bills for the day. */
   comissao_agencia: number;
@@ -137,14 +135,10 @@ export type ReportClient = {
 
 export type DailyReport = {
   data: string;
-  moeda: string;
-  /**
-   * The report spans more than one currency. Amounts are NOT converted, so
-   * anything summed across clients or stores in this state is a sum of unlike
-   * quantities. Per-store figures remain correct in their own currency.
-   */
-  moedas_mistas: boolean;
-  /** Every currency present, sorted. Empty when nothing is set. */
+  moeda: "EUR";
+  /** Compatibility fields: all returned amounts now share EUR. */
+  moedas_mistas: false;
+  /** Output currencies, not the underlying accounts' source currencies. */
   moedas: string[];
   fuso_horario: string;
   clientes: ReportClient[];
@@ -225,8 +219,12 @@ export async function buildDailyReport(
     .eq("day", day);
 
   const metricsByAccount = new Map<string, DailyMetricRow>();
+  const euro = euroReportConverter(day);
+  const accountById = new Map(accounts.map((account) => [account.id, account]));
   for (const row of (metricRows ?? []) as DailyMetricRow[]) {
-    metricsByAccount.set(row.ad_account_id, row);
+    const account = accountById.get(row.ad_account_id);
+    if (!account) throw new Error("Daily report metric has no currency owner.");
+    metricsByAccount.set(row.ad_account_id, await euro.row(row, account.currency));
   }
 
   // Campaigns are one Google round trip per connected account. Done in parallel
@@ -251,11 +249,12 @@ export async function buildDailyReport(
               token,
               account.id,
               { key: "custom", from: day, to: day },
+              account.currency,
             );
 
             campaignsByAccount.set(
               account.id,
-              live.map((campaign) => ({
+              await Promise.all(live.map(async (campaign) => ({
                 id: campaign.id,
                 nome: campaign.name,
                 // The only ad platform this product integrates. Stated rather
@@ -264,9 +263,9 @@ export async function buildDailyReport(
                 estado: ESTADO[campaign.status] ?? campaign.status,
                 inicio: campaign.startDate,
                 dias_a_rodar: daysRunning(campaign.startDate, day),
-                gasto: round(campaign.spend),
+                gasto: round(await euro.money(campaign.spend, account.currency)),
                 conversoes: round(campaign.conversions),
-              })),
+              }))),
             );
           } catch (error) {
             campaignErrors.set(
@@ -309,6 +308,7 @@ export async function buildDailyReport(
         return {
           id: account.id,
           nome: account.store_name,
+          moeda: "EUR",
           dominio: account.shopify_url,
           ...metricsBlock(totals, fee, revShare),
           atualizado_em: row?.computed_at ?? null,
@@ -328,6 +328,7 @@ export async function buildDailyReport(
       return {
         id: client.id,
         nome: client.full_name,
+        moeda: "EUR",
         email: client.email,
         comissao_agencia: round(clientFee + clientRevShare),
         totais: metricsBlock(sumMetrics(clientRows), clientFee, clientRevShare),
@@ -335,18 +336,11 @@ export async function buildDailyReport(
       };
     });
 
-  // Across EVERY client in the report, so mixed currencies are likelier here
-  // than anywhere in the portal. The consumer is told rather than left to
-  // assume one symbol covers the lot.
-  const currencies = currencyScope(accounts);
-
   return {
     data: day,
-    moeda: displayCurrency(currencies),
-    /** True when the report spans more than one currency; amounts are NOT
-     *  converted, so cross-client totals should not be added up. */
-    moedas_mistas: currencies.mixed,
-    moedas: currencies.currencies,
+    moeda: "EUR",
+    moedas_mistas: false,
+    moedas: accounts.length > 0 ? ["EUR"] : [],
     // Not Europe/Lisbon, and saying so is the point: the day boundary is
     // whatever timezone each Google Ads account and Shopify store reports in.
     fuso_horario: "conta de anúncios / loja",

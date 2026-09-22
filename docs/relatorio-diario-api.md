@@ -1,8 +1,26 @@
 # Dropscale IO — API de leitura para o relatório diário
 
-Versão 2. Muda duas coisas em relação à primeira: existe um parâmetro
-`?ao_vivo=1`, e está explicada a razão de os números não baterem certo com o
-painel — que eram **duas** razões, não uma.
+Versão 3. **Todos os valores monetários do relatório são enviados em EUR**, mesmo
+quando a conta Google ou a loja usam outra moeda. O parâmetro `?ao_vivo=1`
+continua disponível para atualizar os dados antes da leitura.
+
+### Moeda do relatório
+
+`moeda` é sempre `"EUR"`, também em cada cliente e loja. `moedas_mistas` é
+`false` e `moedas` contém apenas `"EUR"` quando existem contas. O bot deve
+formatar receita, gasto, custos, comissões e gasto por campanha em euros,
+sem aplicar uma segunda conversão. Uma curva criada pelo bot a partir de
+outra fonte também tem de ser convertida para EUR antes de ser apresentada.
+
+A conversão usa o câmbio de referência do dia do relatório ou o último dia
+útil anterior. Os totais e rácios são calculados depois da conversão. A receita
+original Shopify é usada quando está disponível, evitando uma conversão de
+ida e volta. Por exemplo, €84,90 da Rosa D'ouro deixam de ser apresentados
+como €97,55 só porque a conta de anúncios reporta em USD.
+
+Se não for possível obter um câmbio válido, o relatório falha em vez de enviar
+valores de outra moeda com o rótulo EUR. A conversão é apenas de leitura:
+não muda a moeda das contas, os dados guardados nem a faturação.
 
 ---
 
@@ -120,8 +138,9 @@ não ficar do tamanho de uma página.)*
 
 ### Os campos numéricos, e a que card correspondem
 
-Estes são exactamente os números do Dashboard do cliente. Podem abri-lo para o
-mesmo dia e confrontar — se algum não bater, é um bug nosso e queremos saber.
+Estes campos usam o mesmo cálculo do Dashboard, mas são sempre apresentados em
+euros. Se o painel estiver noutra moeda, os valores monetários são convertidos
+para o relatório; encomendas, cliques e impressões mantêm-se.
 
 | Campo                 | Card no painel        | Nota                                       |
 |-----------------------|-----------------------|--------------------------------------------|
