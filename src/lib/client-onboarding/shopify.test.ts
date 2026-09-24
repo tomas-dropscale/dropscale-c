@@ -78,6 +78,58 @@ describe("reporting Shopify domain boundary", () => {
 });
 
 describe("reporting Shopify credential exchange", () => {
+  it.each([
+    ["app_not_installed", "app_not_installed", "not installed"],
+    ["application_cannot_be_found", "app_not_found", "cannot find"],
+  ])("classifies Shopify's HTML OAuth failure %s without exposing its body", async (providerCode, code, message) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
+      `<html><title>400 - Oauth error ${providerCode}</title><body>client-secret-value-123456</body></html>`,
+      { status: 400, headers: { "content-type": "text/html" } },
+    )));
+    const failure = await exchangeReportingClientCredentials({
+      shopDomain: "northwind-demo.myshopify.com",
+      clientId: "client-id-123456",
+      clientSecret: "client-secret-value-123456",
+    }).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ code, retryable: false });
+    expect(String(failure)).toContain(message);
+    expect(String(failure)).not.toContain("client-secret-value-123456");
+  });
+
+  it("also recognises an uninstalled app in a JSON response", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ error: "app_not_installed", error_description: "private-provider-response" }),
+      { status: 400 },
+    )));
+    const failure = await exchangeReportingClientCredentials({
+      shopDomain: "northwind-demo.myshopify.com",
+      clientId: "client-id-123456",
+      clientSecret: "client-secret-value-123456",
+    }).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ code: "app_not_installed", retryable: false });
+    expect(String(failure)).not.toContain("private-provider-response");
+  });
+
+  it("does not infer an uninstalled app from arbitrary response text", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
+      "Invalid secret: app_not_installed client-secret-value-123456", { status: 400 },
+    )));
+    await expect(exchangeReportingClientCredentials({
+      shopDomain: "northwind-demo.myshopify.com",
+      clientId: "client-id-123456",
+      clientSecret: "client-secret-value-123456",
+    })).rejects.toMatchObject({ code: "invalid_credentials", retryable: false });
+  });
+
+  it("distinguishes a store unavailable with HTTP 402 from rejected app credentials", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("Unavailable Shop", { status: 402 })));
+    await expect(exchangeReportingClientCredentials({
+      shopDomain: "northwind-demo.myshopify.com",
+      clientId: "client-id-123456",
+      clientSecret: "client-secret-value-123456",
+    })).rejects.toMatchObject({ code: "shop_inactive", retryable: false });
+  });
+
   it("sends the merchant secret only in a fresh, no-redirect form body", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(
@@ -141,6 +193,18 @@ describe("reporting Shopify credential exchange", () => {
 });
 
 describe("reporting Shopify identity and scope verification", () => {
+  it("reports an unavailable store even when its token exchange succeeded", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ errors: "Unavailable Shop" }), { status: 402 },
+    ));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(verifyReportingShop({
+      shopDomain: "northwind-demo.myshopify.com",
+      accessToken: "temporary-access-token-123",
+    })).rejects.toMatchObject({ code: "shop_inactive", retryable: false });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("pins the stable API version and returns only verified metadata", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       graphqlResponse({

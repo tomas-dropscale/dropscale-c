@@ -68,18 +68,43 @@ jobs:
 
           fail=0
           portfolio_missed=0
+          body=$(mktemp)
+          trap 'rm -f "$body"' EXIT
           for path in \
             "api/admin/sync-reporting?range=d7" \
             "api/admin/sync-reporting?range=d30" \
             "api/admin/sync-reporting?range=today" \
             "api/admin/sync-ledgers"; do
             echo "POST /$path"
-            code=$(curl -sS -o /tmp/body -w "%{http_code}" -X POST "$BASE/$path" \
-              -H "Authorization: Bearer $SECRET" \
-              -H "Content-Type: application/json" \
-              --max-time 200 || echo "000")
+            # Retry an interrupted connection once, before advancing to the
+            # next leg. These refreshes are idempotent; today must still run
+            # after both history ranges. HTTP failures keep their real status.
+            for attempt in 1 2; do
+              : > "$body"
+              transport=0
+              code=$(curl -sS -o "$body" -w "%{http_code}" -X POST "$BASE/$path" \
+                -H "Authorization: Bearer $SECRET" \
+                -H "Content-Type: application/json" \
+                --max-time 200) || transport=$?
+              if [ "$transport" -eq 0 ]; then
+                break
+              fi
+              # A transport failure can leave headers or half a JSON body.
+              # Neither is evidence that the refresh finished successfully.
+              code=000
+              : > "$body"
+              case "$transport" in
+                5 | 6 | 7 | 18 | 28 | 35 | 52 | 55 | 56 | 92)
+                  if [ "$attempt" -eq 1 ]; then
+                    echo "::warning::/$path connection interrupted (curl $transport); retrying once in 10 seconds."
+                    sleep 10
+                    continue
+                  fi ;;
+              esac
+              break
+            done
             echo "  status=$code"
-            head -c 400 /tmp/body 2>/dev/null || true
+            head -c 400 "$body" 2>/dev/null || true
             echo
             case "$code" in
               200) ;;
@@ -101,7 +126,7 @@ jobs:
                 # into a run of green jobs.
                 case "$path" in
                   api/admin/sync-reporting*)
-                    if grep -q '"accounts":0,"metricCoverage":null' /tmp/body; then
+                    if grep -q '"accounts":0,"metricCoverage":null' "$body"; then
                       echo "::warning::/$path — the portfolio phase did not confirm within its deadline; this leg wrote no account metrics that it can vouch for."
                       portfolio_missed=$((portfolio_missed + 1))
                     fi ;;

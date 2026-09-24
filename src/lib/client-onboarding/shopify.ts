@@ -28,6 +28,9 @@ const GRAPHQL_DENIED_MESSAGE =
 export type ShopifyReportingErrorCode =
   | "invalid_domain"
   | "invalid_credentials"
+  | "app_not_installed"
+  | "app_not_found"
+  | "shop_inactive"
   | "shopify_unavailable"
   | "shopify_rate_limited"
   | "unsupported_api_version"
@@ -344,6 +347,12 @@ function classifyResponseStatus(response: Response): void {
   if (response.status === 429) {
     throw new ShopifyThrottledError(retryAfterMs(response));
   }
+  if (response.status === 402) {
+    throw new ShopifyReportingError(
+      "shop_inactive",
+      "Shopify has made this store unavailable (HTTP 402). The store owner must check its status and billing in Shopify before reporting can resume.",
+    );
+  }
   if (response.status === 401 || response.status === 403) {
     throw new ShopifyReportingError(
       "invalid_credentials",
@@ -424,6 +433,31 @@ export async function exchangeReportingClientCredentials({
     );
   }
   if (!response.ok) {
+    if (response.status === 402) classifyResponseStatus(response);
+    // Shopify also returns OAuth failures as HTML, not just JSON. Match only
+    // known error identifiers and use our own messages: never echo a response
+    // that could contain a submitted credential into logs, snapshots or UI.
+    if (response.status === 400 || response.status === 401 || response.status === 403) {
+      const body = await response.text().catch(() => "");
+      let code: unknown;
+      try {
+        code = (JSON.parse(body) as { error?: unknown } | null)?.error;
+      } catch {
+        code = body.match(/<title[^>]*>\s*\d{3}\s*-\s*Oauth error (app_not_installed|application_cannot_be_found)\s*<\/title>/i)?.[1]?.toLowerCase();
+      }
+      if (code === "app_not_installed") {
+        throw new ShopifyReportingError(
+          "app_not_installed",
+          "The reporting app is not installed on this Shopify store. The store owner must reinstall the same app, or reconnect the store with its current reporting app.",
+        );
+      }
+      if (code === "application_cannot_be_found") {
+        throw new ShopifyReportingError(
+          "app_not_found",
+          "Shopify cannot find the reporting app for this Client ID. The store owner must check that the app still exists and reconnect with its current credentials.",
+        );
+      }
+    }
     throw new ShopifyReportingError(
       response.status >= 500 ? "shopify_unavailable" : "invalid_credentials",
       response.status >= 500
