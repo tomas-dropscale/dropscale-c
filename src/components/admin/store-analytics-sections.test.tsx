@@ -424,3 +424,17 @@ describe("CampaignCollectionsBlock", () => {
     expect(html).toBe("");
   });
 });
+
+
+it("shares collection real ROAS while preserving each campaign's Google individual ROAS", () => {
+  const rows = [
+    { ...landing("First", "summer", { spend: 20, revenue: 900, orders: 2, landed: { revenue: 60, orders: 1 } }), googleRoas: 1.25 },
+    { ...landing("Second", "summer", { spend: 40, revenue: 1800, orders: 4, landed: { revenue: 120, orders: 2 } }), googleRoas: 0 },
+  ];
+  for (const row of rows) row.timeline[0].firstLanding!.campaignComplete = false;
+  const html = render(campaigns({ data: { granularity: "day", rows } }), null);
+  const renderedRows = html.split("</tr>");
+  expect(renderedRows.find((row) => row.includes("Google individual: 1.25x"))).toContain("3.00x");
+  expect(renderedRows.find((row) => row.includes("Google individual: 0.00x"))).toContain("3.00x");
+  expect(html).not.toContain("45.00x");
+});

@@ -381,8 +381,8 @@ function BudgetControl({
         className="size-10 shrink-0 aria-disabled:cursor-not-allowed aria-disabled:opacity-50 xl:size-7"
         aria-label={
           canEdit
-            ? `Edit daily budget for ${campaign.name}; hover or focus for scale history`
-            : `View scale history for ${campaign.name}`
+            ? `Edit daily budget for ${campaign.name}; hover or focus for budget history`
+            : `View budget history for ${campaign.name}`
         }
         aria-describedby={historyOpen ? historyId : undefined}
         aria-expanded={editing}
@@ -410,7 +410,7 @@ function BudgetControl({
             ref={historyPanel}
             id={historyId}
             role="region"
-            aria-label={`Scale history for ${campaign.name}`}
+            aria-label={`Budget history for ${campaign.name}`}
             tabIndex={0}
             style={tooltipPosition.style}
             className={cn(
@@ -432,10 +432,10 @@ function BudgetControl({
               }
             }}
           >
-            <p className="text-[12px] font-semibold text-[var(--text-primary)]">Scale history</p>
-            {campaign.scaleHistory.length > 0 ? (
+            <p className="text-[12px] font-semibold text-[var(--text-primary)]">Budget history</p>
+            {campaign.budgetHistory.length > 0 ? (
               <ol className="mt-2 space-y-2">
-                {campaign.scaleHistory.map((scale) => (
+                {campaign.budgetHistory.map((scale) => (
                   <li
                     key={scale.id}
                     className="border-t border-[var(--border-subtle)] pt-2 first:border-t-0 first:pt-0"
@@ -455,7 +455,7 @@ function BudgetControl({
               </ol>
             ) : (
               <p className="mt-2 text-[11px] text-[var(--text-muted)]">
-                No verified budget scales recorded yet.
+                No verified budget changes recorded yet.
               </p>
             )}
           </div>,
@@ -549,14 +549,15 @@ function CampaignRow({
       )}
     >
       <div className="col-span-2 min-w-0 xl:col-span-1 xl:pl-6">
-        <p className="truncate text-[13px] font-medium text-[var(--text-primary)]">
+        <p className="truncate text-[13px] font-medium text-[var(--text-primary)]" title={campaign.name}>
           {campaign.name}
         </p>
+        <p className="mt-1 text-[11px] text-[var(--text-muted)]" title="Última alteração de orçamento confirmada e registada na Dropscale">
+          {campaign.budgetChangeLabel}
+        </p>
         {campaign.landingRoas && (
-          <p className="mt-1 text-[11px] text-[var(--text-muted)]" title="Collection items from first visits landing on this collection, across all channels, divided by its campaigns' spend">
-            /collections/{campaign.landingRoas.handle} · Overall {campaign.landingRoas.collectionRoas === null ? "—" : multiplier(campaign.landingRoas.collectionRoas)}
-            {(campaign.landingRoas.unassignedGoogleRevenue ?? 0) > 0 && <span className="block">Google campaign attribution incomplete</span>}
-            {campaign.landingRoas.refreshedAt && <span className="block" title="When Shopify first-visit sales for this period were last read">Sales snapshot {campaign.landingRoas.refreshedAt.slice(0, 16).replace("T", " ")} UTC</span>}
+          <p className="mt-1 truncate text-[11px] text-[var(--text-muted)]" title={`/collections/${campaign.landingRoas.handle}${campaign.landingRoas.refreshedAt ? ` · Sales snapshot ${safeDate(SNAPSHOT_DATE_TIME, campaign.landingRoas.refreshedAt)} (Lisbon)` : ""}`}>
+            /collections/{campaign.landingRoas.handle}
           </p>
         )}
       </div>
@@ -589,10 +590,10 @@ function CampaignRow({
       </div>
 
       <CampaignMetric label="Real ROAS">
-        <span title="Collection items from first visits landing on the collection through Google Ads and identifying this campaign">
-          {campaign.landingRoas?.roas == null ? "—" : multiplier(campaign.landingRoas.roas)}
+        <span title="Real collection ROAS: collection items from first visits landing on this collection, across all channels, divided by the combined spend of its campaigns">
+          {campaign.landingRoas?.collectionRoas == null ? "—" : multiplier(campaign.landingRoas.collectionRoas)}
         </span>
-        <span className="block text-[10px] text-[var(--text-muted)]">Google: {campaign.googleRoas === null ? "—" : multiplier(campaign.googleRoas)}</span>
+        <span className="block text-[10px] text-[var(--text-muted)]" title="Individual ROAS reported by Google for this campaign">Google individual: {campaign.googleRoas === null ? "—" : multiplier(campaign.googleRoas)}</span>
       </CampaignMetric>
 
       <div className="flex justify-self-end xl:justify-self-center">
@@ -739,7 +740,7 @@ function StoreGroup({
           )}
         >
           <span className="col-span-2 text-[12px] font-semibold tracking-[0.08em] text-[var(--text-primary)] xl:col-span-1 xl:pl-6">
-            TOTAL
+            STORE TOTAL
           </span>
           <CampaignMetric label="Type">—</CampaignMetric>
           <CampaignMetric label="Status">—</CampaignMetric>
@@ -757,7 +758,7 @@ function StoreGroup({
             )}
           </CampaignMetric>
           <CampaignMetric label="ROAS">
-            {store.realRoas === null ? "—" : multiplier(store.realRoas)}
+            <span title="Whole-store revenue divided by whole-store ad spend">{store.realRoas === null ? "—" : multiplier(store.realRoas)}</span>
           </CampaignMetric>
           <span className="hidden xl:block" aria-hidden />
         </li>
@@ -913,11 +914,13 @@ export function CampaignsView({
   history,
   historyTruncated,
   range,
+  asOf,
 }: {
   clients: CampaignViewClient[];
   history: CampaignActionHistory[];
   historyTruncated: boolean;
   range: RangeSelection;
+  asOf?: string;
 }) {
   const router = useRouter();
   const inFlight = React.useRef(new Set<string>());
@@ -928,7 +931,7 @@ export function CampaignsView({
   );
   const [pending, setPending] = React.useState(() => new Set<string>());
   const [statusErrors, setStatusErrors] = React.useState<Record<string, string>>({});
-  const projected = React.useMemo(() => projectCampaignClients(clients, history), [clients, history]);
+  const projected = React.useMemo(() => projectCampaignClients(clients, history, asOf), [clients, history, asOf]);
   const visibleClients = React.useMemo(
     () => filterCampaignClients(projected, query),
     [projected, query],
@@ -1055,7 +1058,7 @@ export function CampaignsView({
           )}
           {historyTruncated && (
             <p className="mt-1 text-[11px] text-[var(--accent-gold-strong)]">
-              Scale history is limited to the 1,000 most recent verified changes.
+              Budget history is limited to the 1,000 most recent verified changes.
             </p>
           )}
         </div>

@@ -85,6 +85,8 @@ export type CampaignScaleHistory = CampaignActionHistory & {
 };
 
 export type ProjectedCampaign = CampaignViewCampaign & {
+  budgetHistory: CampaignScaleHistory[];
+  budgetChangeLabel: string;
   scaleHistory: CampaignScaleHistory[];
   lastScaledAt: string | null;
 };
@@ -117,32 +119,54 @@ export function filterCampaignClients<T extends CampaignViewClient>(clients: T[]
   );
 }
 
-function isScale(entry: CampaignActionHistory): entry is CampaignScaleHistory {
+function isBudgetChange(entry: CampaignActionHistory): entry is CampaignScaleHistory {
   return (
     entry.outcome === "succeeded" &&
     entry.action === "budget_changed" &&
     entry.previousDailyBudget !== null &&
     entry.nextDailyBudget !== null &&
-    entry.nextDailyBudget > entry.previousDailyBudget
+    Number.isFinite(entry.previousDailyBudget) &&
+    Number.isFinite(entry.nextDailyBudget) &&
+    entry.previousDailyBudget >= 0 &&
+    entry.nextDailyBudget > 0 &&
+    entry.nextDailyBudget !== entry.previousDailyBudget &&
+    Number.isFinite(Date.parse(entry.occurredAt))
   );
+}
+
+const LISBON_DAY = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Europe/Lisbon", year: "numeric", month: "2-digit", day: "2-digit",
+});
+
+/** Calendar days in Lisbon, including changes across midnight and DST. */
+export function campaignBudgetChangeLabel(change: CampaignScaleHistory | undefined, asOf: string): string {
+  if (!change || !isBudgetChange(change) || !Number.isFinite(Date.parse(asOf)) || Date.parse(change.occurredAt) > Date.parse(asOf)) {
+    return "Sem alterações registadas";
+  }
+  const today = Date.parse(LISBON_DAY.format(new Date(asOf)));
+  const changedOn = Date.parse(LISBON_DAY.format(new Date(change.occurredAt)));
+  const days = Math.round((today - changedOn) / 86_400_000);
+  const direction = change.nextDailyBudget > change.previousDailyBudget ? "Escalada" : "Descalada";
+  return `${direction} ${days === 0 ? "hoje" : `há ${days} ${days === 1 ? "dia" : "dias"}`}`;
 }
 
 export function projectCampaignClients(
   clients: CampaignViewClient[],
   history: CampaignActionHistory[],
+  asOf = new Date().toISOString(),
 ): ProjectedCampaignClient[] {
-  const scales = new Map<string, CampaignScaleHistory[]>();
+  const changes = new Map<string, CampaignScaleHistory[]>();
 
   for (const entry of history) {
-    if (!isScale(entry)) continue;
+    if (!isBudgetChange(entry) || Date.parse(entry.occurredAt) > Date.parse(asOf)) continue;
     const key = campaignKey(entry.adAccountId, entry.providerCampaignId);
-    const current = scales.get(key) ?? [];
+    const current = changes.get(key) ?? [];
     current.push(entry);
-    scales.set(key, current);
+    changes.set(key, current);
   }
 
-  for (const entries of scales.values()) {
-    entries.sort((left, right) => right.occurredAt.localeCompare(left.occurredAt));
+  for (const entries of changes.values()) {
+    entries.sort((left, right) => Date.parse(right.occurredAt) - Date.parse(left.occurredAt));
   }
 
   return clients.map((client) => ({
@@ -150,11 +174,14 @@ export function projectCampaignClients(
     stores: client.stores.map((store) => ({
       ...store,
       campaigns: store.campaigns.map((campaign) => {
-        const scaleHistory = scales.get(
+        const budgetHistory = changes.get(
           campaignKey(campaign.adAccountId, campaign.providerCampaignId),
         ) ?? [];
+        const scaleHistory = budgetHistory.filter((entry) => entry.nextDailyBudget > entry.previousDailyBudget);
         return {
           ...campaign,
+          budgetHistory,
+          budgetChangeLabel: campaignBudgetChangeLabel(budgetHistory[0], asOf),
           scaleHistory,
           lastScaledAt: scaleHistory[0]?.occurredAt ?? null,
         };

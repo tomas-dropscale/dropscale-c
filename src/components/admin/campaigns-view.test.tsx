@@ -179,7 +179,7 @@ describe("CampaignsView approved visual structure", () => {
     );
     expect(html).toContain('aria-label="Pause DGEN · Summer Living · Scale"');
     expect(html).toContain('aria-label="Enable PMax · Best sellers · EU"');
-    expect(html).toContain("hover or focus for scale history");
+    expect(html).toContain("hover or focus for budget history");
     const campaignGrid =
       "xl:grid-cols-[minmax(190px,1.65fr)_repeat(3,minmax(88px,1fr))_minmax(196px,1fr)_repeat(2,minmax(88px,1fr))]";
     expect(html.split(campaignGrid)).toHaveLength(6);
@@ -224,18 +224,23 @@ describe("CampaignsView approved visual structure", () => {
     expect(html).toContain(message);
   });
 
-  it("distinguishes collection overall, real campaign ROAS and Google's comparison, with sales freshness", () => {
+  it("shows real collection ROAS and Google individual even without a Shopify campaign ID", () => {
     const data = structuredClone(clients);
-    data[0].stores[0].campaigns[0].landingRoas = { handle: "summer", revenue: 2500, roas: 1.25, collectionRevenue: 4800, collectionRoas: 1.6, unassignedGoogleRevenue: 0, refreshedAt: "2026-09-25T14:00:00Z" };
+    data[0].stores[0].campaigns[0].landingRoas = { handle: "summer", revenue: null, roas: null, collectionRevenue: 4800, collectionRoas: 1.6, unassignedGoogleRevenue: 100, refreshedAt: "2026-09-25T14:00:00Z" };
     const html = renderToStaticMarkup(<CampaignsView clients={data} history={[]} historyTruncated={false} range={range} />);
     expect(html).toContain("/collections/summer");
-    expect(html).toContain("Overall 1.60x");
-    expect(html).toContain("1.25x");
-    expect(html).toContain("Google: ");
-    expect(html).toContain("Sales snapshot 2026-09-25 14:00 UTC");
-    data[0].stores[0].campaigns[0].landingRoas.roas = null;
-    data[0].stores[0].campaigns[0].landingRoas.unassignedGoogleRevenue = 100;
-    expect(renderToStaticMarkup(<CampaignsView clients={data} history={[]} historyTruncated={false} range={range} />)).toContain("Google campaign attribution incomplete");
+    expect(html).toContain("1.60x");
+    expect(html).toContain("Google individual: 2.50x");
+    expect(html).toContain("Sales snapshot 25 Sept, 15:00 (Lisbon)");
+    expect(html).not.toContain("attribution incomplete");
+    expect(html).toContain("STORE TOTAL");
+  });
+
+  it("shows the latest budget direction and age independently of the report dates", () => {
+    const render = (changes: CampaignActionHistory[]) => renderToStaticMarkup(<CampaignsView clients={clients} history={changes} historyTruncated={false} range={range} asOf="2026-08-17T12:00:00Z" />);
+    expect(render(history)).toContain("Escalada há 3 dias");
+    expect(render([{ ...history[0], previousDailyBudget: 120, nextDailyBudget: 100 }])).toContain("Descalada há 3 dias");
+    expect(render([])).toContain("Sem alterações registadas");
   });
 
   it("keeps successful source rows while warning that a store is partial", () => {

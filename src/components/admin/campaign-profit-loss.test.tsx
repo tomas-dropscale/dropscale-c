@@ -73,8 +73,9 @@ describe("a campaign's profit and loss by day", () => {
     expect(buildCampaignProfitLoss({ timeline }, "2026-09-25", FEES, true).total.roas).toBeNull();
     expect(buildCampaignProfitLoss({ timeline, members: 2 }, "2026-09-25", FEES, true).total.roas).toBe(6);
     const html = renderToStaticMarkup(<CampaignProfitLossSheet title="Summer" currency="EUR" today="2026-09-25" campaign={{ timeline, collectionHandle: "summer", attributionState: "unmatched" }} />);
-    expect(html).toContain("individual ROAS is unavailable");
-    expect(html).toContain("utm_campaign={campaignid}");
+    expect(html).toContain("Individual campaign ROAS and conversion value reported by Google");
+    expect(html).toContain("0.00x");
+    expect(html).not.toContain("utm_campaign={campaignid}");
     const zeroShare = { ...timeline[0], firstLanding: { ...timeline[0].firstLanding!, unassignedGoogleRevenue: 0 } };
     expect(buildCampaignProfitLoss({ timeline: [zeroShare] }, "2026-09-25", FEES, true).total.roas).toBeNull();
   });
@@ -89,8 +90,9 @@ describe("a campaign's profit and loss by day", () => {
     expect(own.total.profit).toBeCloseTo(60 - 20 - 15 - 1.27 - 1.5 - 2);
     expect(overall.total).toMatchObject({ revenue: 120, roas: 6, orders: 3, units: 4, cogs: 30 });
     const html = renderToStaticMarkup(<CampaignProfitLossSheet title="Summer" currency="EUR" today="2026-09-25" campaign={{ timeline, collectionHandle: "summer", attributionState: "matched" }} fees={FEES} />);
-    expect(html).toContain("Only Google Ads visits identifying this campaign");
-    expect(html).toContain("EUR 60.00");
+    expect(html).toContain("Individual campaign ROAS and conversion value reported by Google");
+    expect(html).toContain("EUR 500.00");
+    expect(html).toContain("25.00x");
     expect(html).not.toContain("Where the sales came from");
   });
 
@@ -175,7 +177,8 @@ describe("a campaign's profit and loss by day", () => {
     expect(sheet.rows[1]!.cumulative).toBeCloseTo(210 - 213.28, 6);
     expect(sheet.total.profit).toBeCloseTo(210 - 213.28, 6);
     // Shopify's own columns keep their dash: the basis changed, the facts did not.
-    expect(sheet.total).toMatchObject({ revenue: null, orders: null, roas: null });
+    expect(sheet.total).toMatchObject({ revenue: null, orders: null });
+    expect(sheet.total.roas).toBeCloseTo(210 / 213.28);
   });
 
   it("keeps a Shopify-basis sheet honest on a day Shopify left unanswered", () => {
@@ -295,7 +298,7 @@ describe("a campaign's profit and loss by day", () => {
         }}
       />,
     );
-    expect(html).toContain("First-visit attribution has not been refreshed");
+    expect(html).toContain("Individual campaign ROAS and conversion value reported by Google");
     expect(html).not.toContain("lands on no single collection");
   });
 
@@ -326,8 +329,7 @@ describe("a campaign's profit and loss by day", () => {
   });
 
   it("keeps a day Shopify has not answered for apart from a day it answered zero", () => {
-    // A dash is the absence of a fact; a zero is one. Attribution unavailable
-    // arrives as null, and the ratios that need it stay null with it.
+    // Shopify fields stay unknown; Google's measured zero is still a fact.
     const sheet = buildCampaignProfitLoss(
       {
         timeline: [
@@ -344,7 +346,7 @@ describe("a campaign's profit and loss by day", () => {
       orders: null,
       units: null,
       cvr: null,
-      roas: null,
+      roas: 0,
       cpa: null,
     });
     expect(sheet.rows[0]!.ctr).toBeCloseTo(0.1, 6);
@@ -848,4 +850,15 @@ describe("buildCollectionCampaign", () => {
     expect(buildCollectionCampaign([member({ collectionHandle: null, timeline: [] })])).toBeNull();
   });
 
+});
+
+
+it("keeps Google campaign ROAS independent of Shopify coverage, and weights totals by spend", () => {
+  const timeline = [point({ bucket: "2026-09-20", spend: 20, googleRevenue: 60, shopifyRevenue: 900, collectionRevenue: 1000 }), point({ bucket: "2026-09-21", spend: 40, googleRevenue: 0 })];
+  const sheet = buildCampaignProfitLoss({ timeline }, "2026-09-25", FEES, "google");
+  expect(sheet.revenueBasis).toBe("google");
+  expect(sheet.rows.map((row) => row.roas)).toEqual([3, 0]);
+  expect(sheet.total).toMatchObject({ googleRevenue: 60, revenue: null, roas: 1, cogs: null, orders: null, paymentFees: null, shipping: null, agencyFee: 6, profit: -6 });
+  expect(sheet.predatesSheet).toBe(false);
+  expect(buildCampaignProfitLoss({ timeline: [point({ bucket: "2026-09-20", spend: 0, googleRevenue: 60 })] }, "2026-09-25", null, "google").total.roas).toBeNull();
 });

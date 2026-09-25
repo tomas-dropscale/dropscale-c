@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   campaignActionBindingIds,
+  campaignBudgetChangeLabel,
+  type CampaignScaleHistory,
   dailyBudgetDraft,
   dailyBudgetWithinLimit,
   filterCampaignClients,
@@ -340,5 +342,38 @@ describe("Campaigns view model", () => {
       projectAdminCampaignsView(overview as unknown as AdminCampaignsOverview, state).clients[0]
         .realRoas,
     ).toBeNull();
+  });
+});
+
+
+describe("latest budget change age", () => {
+  const change: CampaignScaleHistory = { id: "up", adAccountId: "account-1", providerCampaignId: "77", campaignName: "Summer", action: "budget_changed", outcome: "succeeded", previousDailyBudget: 50, nextDailyBudget: 60, currency: "EUR", occurredAt: "2026-09-24T22:59:00Z", actorName: "Ana" };
+  it("uses Lisbon calendar days across midnight and daylight saving changes", () => {
+    expect(campaignBudgetChangeLabel(change, "2026-09-24T22:59:59Z")).toBe("Escalada hoje");
+    expect(campaignBudgetChangeLabel(change, "2026-09-24T23:01:00Z")).toBe("Escalada há 1 dia");
+    expect(campaignBudgetChangeLabel(change, "2026-09-27T12:00:00Z")).toBe("Escalada há 3 dias");
+    expect(campaignBudgetChangeLabel({ ...change, occurredAt: "2026-10-24T23:30:00Z" }, "2026-10-26T00:15:00Z")).toBe("Escalada há 1 dia");
+    expect(campaignBudgetChangeLabel({ ...change, occurredAt: "2026-03-28T23:30:00Z" }, "2026-03-29T23:15:00Z")).toBe("Escalada há 2 dias");
+  });
+  it("selects the latest successful change in either direction for the exact campaign", () => {
+    const down = { ...change, id: "down", previousDailyBudget: 60, nextDailyBudget: 40, occurredAt: "2026-09-25T10:00:00Z" };
+    const rows: CampaignActionHistory[] = [
+      change, down,
+      { ...down, id: "failed", outcome: "failed", occurredAt: "2026-09-25T11:00:00Z" },
+      { ...down, id: "pending", outcome: "requested" },
+      { ...down, id: "uncertain", outcome: "uncertain" },
+      { ...down, id: "noop", previousDailyBudget: 40 },
+      { ...down, id: "invalid", nextDailyBudget: NaN },
+      { ...down, id: "bad-date", occurredAt: "invalid" },
+      { ...down, id: "future", occurredAt: "2026-09-27T12:00:00Z" },
+      { ...down, id: "other-account", adAccountId: "account-2" },
+      { ...down, id: "other-campaign", providerCampaignId: "88" },
+      { ...down, id: "pause", action: "campaign_paused" },
+    ];
+    const campaign = projectCampaignClients(clients, rows, "2026-09-26T12:00:00Z")[0].stores[0].campaigns[0];
+    expect(campaign.budgetHistory.map((entry) => entry.id)).toEqual(["down", "up"]);
+    expect(campaign.budgetChangeLabel).toBe("Descalada há 1 dia");
+    expect(campaign.scaleHistory.map((entry) => entry.id)).toEqual(["up"]);
+    expect(campaignBudgetChangeLabel(undefined, "2026-09-26T12:00:00Z")).toBe("Sem alterações registadas");
   });
 });

@@ -218,10 +218,11 @@ export function buildCampaignProfitLoss(
   campaign: Pick<AdminAnalyticsCampaign, "timeline"> & { members?: number },
   today: string,
   fees: CampaignSheetFees | null = null,
-  firstLanding = false,
+  mode: boolean | "google" = false,
 ): CampaignProfitLoss {
-  // The new reporting rule never falls back to product sales or Google estimates.
-  // Old snapshots keep their dashes until refreshed with first-visit evidence.
+  const firstLanding = mode === true;
+  // Real collection ROAS requires first-visit evidence. Individual Google
+  // sheets use Google's own conversion value regardless of Shopify coverage.
   const originalTimeline = campaign.timeline;
   const missingDays = new Set<string>();
   if (firstLanding) {
@@ -311,7 +312,7 @@ export function buildCampaignProfitLoss(
   }
   const collectionSheet = campaign.members !== undefined;
   const revenueBasis: CampaignRevenueBasis =
-    firstLanding ? "collection" : !collectionSheet && allFacts.some((fact) => fact.utm.revenue !== null)
+    mode === "google" ? "google" : firstLanding ? "collection" : !collectionSheet && allFacts.some((fact) => fact.utm.revenue !== null)
       ? "shopify"
       : allFacts.some((fact) => fact.collection.revenue !== null)
         ? "collection"
@@ -350,7 +351,7 @@ export function buildCampaignProfitLoss(
         ...costs,
         ctr: ratio(row.clicks, row.impressions),
         cvr: ratio(row.orders, row.addedToCart),
-        roas: ratio(row.revenue, row.spend > 0 ? row.spend : null),
+        roas: ratio(revenueBasis === "google" ? row.googleRevenue : row.revenue, row.spend > 0 ? row.spend : null),
         cpa: row.orders !== null && row.orders > 0 ? row.spend / row.orders : null,
         profit,
         cumulative: profit === null ? null : running,
@@ -392,7 +393,7 @@ export function buildCampaignProfitLoss(
     contributing.every((point) => typeof point[field] === "number")
       ? contributing.reduce((sum, point) => sum + (point[field] ?? 0), 0)
       : null;
-  const predatesSheet = firstLanding ? originalTimeline.some((point) => !point.firstLanding) :
+  const predatesSheet = mode === "google" ? false : firstLanding ? originalTimeline.some((point) => !point.firstLanding) :
     campaign.timeline.length > 0 &&
     campaign.timeline.every(
       (point) => point.shopifyOrders === undefined && point.collectionRevenue === undefined,
@@ -419,7 +420,7 @@ export function buildCampaignProfitLoss(
       orders,
       units,
       cvr: ratio(orders, addedToCart),
-      roas: ratio(revenue, spend > 0 ? spend : null),
+      roas: ratio(revenueBasis === "google" ? googleRevenue : revenue, spend > 0 ? spend : null),
       cpa: orders !== null && orders > 0 ? spend / orders : null,
       googleRevenue,
       cogs,
@@ -642,14 +643,14 @@ function sheetHeaders(revenueBasis: CampaignRevenueBasis): SheetHeader[] {
     { label: "Orders", align: "right" },
     { label: "Units", align: "right" },
     { label: "CVR (orders / ATC)", align: "right" },
-    { label: "ROAS", align: "right" },
+    { label: revenueBasis === "google" ? "ROAS (Google)" : "Real ROAS", align: "right" },
     { label: "CPA", align: "right" },
     { label: "COGS", align: "right" },
     { label: "Shopify fees", align: "right" },
     { label: "Shipping", align: "right" },
     { label: "Agency fee", align: "right" },
-    { label: "Profit", align: "right" },
-    { label: "Cumulative", align: "right" },
+    { label: revenueBasis === "google" ? "Estimated profit" : "Profit", align: "right" },
+    { label: revenueBasis === "google" ? "Estimated cumulative" : "Cumulative", align: "right" },
   ];
 }
 
@@ -759,7 +760,7 @@ export function CampaignProfitLossSheet({
   /** The store's per-order fee settings; null when unknown, and the fee columns read "—". */
   fees?: CampaignSheetFees | null;
 }) {
-  const sheet = React.useMemo(() => buildCampaignProfitLoss(campaign, today, fees, true), [campaign, today, fees]);
+  const sheet = React.useMemo(() => buildCampaignProfitLoss(campaign, today, fees, campaign.members !== undefined ? true : "google"), [campaign, today, fees]);
   const cell = "px-2.5 py-2 text-right tabular-nums";
   const muted = cn(cell, "text-[var(--text-secondary)]");
   const headers = sheetHeaders(sheet.revenueBasis);
@@ -810,12 +811,11 @@ export function CampaignProfitLossSheet({
   // Said from the sheet itself, so the caption can never promise a basis the
   // cells do not use.
   const collectionSheet = campaign.members !== undefined;
-  const unassigned = sumFirstLanding(campaign.timeline.map((point) => point.firstLanding)).unassignedGoogleRevenue;
-  const basisCaption = sheet.predatesSheet
-    ? "First-visit attribution has not been refreshed for this period. Refresh the report to calculate real ROAS."
-    : `Collection items after discounts and refunds, only from orders whose first visit landed on /collections/${campaign.collectionHandle ?? ""}. ${collectionSheet
-      ? `All channels; spend from ${members} ${members === 1 ? "campaign" : "campaigns"}.`
-      : "Only Google Ads visits identifying this campaign. Unidentified sales are not allocated by spend."} Sales use the order date. Orders without a recorded first landing are excluded. Profit deducts ad spend, available product costs and the fees below; cart conversion is not measured for this model.${unassigned !== null && unassigned > 0 ? ` ${money(unassigned, currency)} of Google collection sales have no confirmed ad campaign; individual ROAS is unavailable.` : ""}`;
+  const basisCaption = !collectionSheet
+    ? "Individual campaign ROAS and conversion value reported by Google. Estimated profit deducts ad spend and agency fees; product costs, payment fees and shipping are unknown. Real collection ROAS is available in the collection P&L."
+    : sheet.predatesSheet
+      ? "First-visit attribution has not been refreshed for this period. Refresh the report to calculate real ROAS."
+      : `Collection items after discounts and refunds, only from orders whose first visit landed on /collections/${campaign.collectionHandle ?? ""}. All channels; spend from ${members} ${members === 1 ? "campaign" : "campaigns"}. Sales use the order date. Orders without a recorded first landing are excluded. Profit deducts ad spend, available product costs and the fees below; cart conversion is not measured for this model.`;
 
   return (
     <div
@@ -828,11 +828,6 @@ export function CampaignProfitLossSheet({
         <p className="text-[10.5px] text-[var(--text-muted)]">
           {basisCaption} · {feesCaption(fees, currency)}
         </p>
-        {unassigned !== null && unassigned > 0 && (
-          <p className="text-[10.5px] text-[var(--text-muted)]">
-            For future Google Ads visits, use tracking: <code>utm_source=google&amp;utm_medium=cpc&amp;utm_campaign={"{campaignid}"}</code>. Missing campaign IDs on previous orders cannot be reconstructed from these visits.
-          </p>
-        )}
       </div>
       {sheet.rows.length === 0 ? (
         <p className="px-4 py-3 text-[11px] text-[var(--text-muted)]">No days were returned for this period.</p>

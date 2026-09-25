@@ -183,6 +183,7 @@ export default async function AdminCampaignsPage({
         clients={campaignView.clients}
         history={campaignView.history}
         historyTruncated={campaignView.historyTruncated}
+        asOf={new Date().toISOString()}
         range={range}
       />
 
