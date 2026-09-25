@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { firstLandingCampaignSales, sumFirstLanding } from "../../lib/admin/campaign-first-landing";
 
 import type {
   AdminAnalyticsCampaign,
@@ -217,7 +218,28 @@ export function buildCampaignProfitLoss(
   campaign: Pick<AdminAnalyticsCampaign, "timeline"> & { members?: number },
   today: string,
   fees: CampaignSheetFees | null = null,
+  firstLanding = false,
 ): CampaignProfitLoss {
+  // The new reporting rule never falls back to product sales or Google estimates.
+  // Old snapshots keep their dashes until refreshed with first-visit evidence.
+  const originalTimeline = campaign.timeline;
+  const missingDays = new Set<string>();
+  if (firstLanding) {
+    campaign = { ...campaign, timeline: campaign.timeline.map((point) => {
+      const sales = campaign.members !== undefined ? point.firstLanding?.collection : firstLandingCampaignSales(point.firstLanding);
+      if (!sales) missingDays.add(dayOf(point.bucket));
+      return {
+        ...point,
+        shopifyRevenue: null, shopifyOrders: null, units: null,
+        collectionRevenue: sales?.revenue ?? null,
+        collectionOrders: sales?.orders ?? null,
+        collectionUnits: sales?.units ?? null,
+        cogs: sales?.cogs ?? null,
+        // Cart sessions are a different attribution model; do not invent a matching CVR.
+        collectionAddedToCart: null,
+      };
+    }) };
+  }
   const byDay = new Map<string, CampaignProfitLossRow>();
   const facts = new Map<string, DayFacts>();
   for (const point of campaign.timeline) {
@@ -283,9 +305,13 @@ export function buildCampaignProfitLoss(
   // than that to everyone. A day left unanswered on a Shopify or collection
   // basis keeps its dash rather than borrowing the next basis's number.
   const allFacts = [...facts.values()];
+  for (const day of missingDays) {
+    const fact = facts.get(day);
+    if (fact) fact.collection = { addedToCart: null, revenue: null, orders: null, units: null, cogs: null };
+  }
   const collectionSheet = campaign.members !== undefined;
   const revenueBasis: CampaignRevenueBasis =
-    !collectionSheet && allFacts.some((fact) => fact.utm.revenue !== null)
+    firstLanding ? "collection" : !collectionSheet && allFacts.some((fact) => fact.utm.revenue !== null)
       ? "shopify"
       : allFacts.some((fact) => fact.collection.revenue !== null)
         ? "collection"
@@ -336,9 +362,10 @@ export function buildCampaignProfitLoss(
   const impressions = rows.reduce((sum, row) => sum + row.impressions, 0);
   const googleRevenue = rows.reduce((sum, row) => sum + row.googleRevenue, 0);
   const addedToCart = sumNullable(rows.map((row) => row.addedToCart));
-  const revenue = sumNullable(rows.map((row) => row.revenue));
-  const orders = sumNullable(rows.map((row) => row.orders));
-  const units = sumNullable(rows.map((row) => row.units));
+  const complete = !firstLanding || missingDays.size === 0;
+  const revenue = complete ? sumNullable(rows.map((row) => row.revenue)) : null;
+  const orders = complete ? sumNullable(rows.map((row) => row.orders)) : null;
+  const units = complete ? sumNullable(rows.map((row) => row.units)) : null;
   const cogs = sumNullable(rows.map((row) => row.cogs));
   // Folded from the timeline rather than from the rows, which do not carry
   // these figures, and only on the basis whose revenue they describe.
@@ -360,12 +387,12 @@ export function buildCampaignProfitLoss(
       | "collectionBroughtRevenue"
       | "collectionBroughtOrders",
   ): number | null =>
-    revenueBasis === "collection" &&
+    !firstLanding && revenueBasis === "collection" &&
     contributing.length > 0 &&
     contributing.every((point) => typeof point[field] === "number")
       ? contributing.reduce((sum, point) => sum + (point[field] ?? 0), 0)
       : null;
-  const predatesSheet =
+  const predatesSheet = firstLanding ? originalTimeline.some((point) => !point.firstLanding) :
     campaign.timeline.length > 0 &&
     campaign.timeline.every(
       (point) => point.shopifyOrders === undefined && point.collectionRevenue === undefined,
@@ -377,7 +404,7 @@ export function buildCampaignProfitLoss(
   // The fee columns sum the same way, so a day that could not price a fee
   // adds nothing to the foot, exactly as it added nothing to its own profit.
   const rowProfits = rows.map((row) => row.profit);
-  const totalProfit = sumNullable(rowProfits);
+  const totalProfit = complete ? sumNullable(rowProfits) : null;
   return {
     rows,
     revenueBasis,
@@ -487,6 +514,9 @@ function sumTimelines(
         realRoas: spend > 0 && shopifyRevenue !== null ? shopifyRevenue / spend : null,
         googleRoas: spend > 0 ? googleRevenue / spend : null,
       };
+      if (points.some((point) => point.firstLanding)) {
+        summed.firstLanding = sumFirstLanding(points.map((point) => point.firstLanding));
+      }
       // Assigned only when some member carried the field, so a sum of points
       // written before the sheet existed still reads as one to the sheet.
       const optional = [
@@ -729,7 +759,7 @@ export function CampaignProfitLossSheet({
   /** The store's per-order fee settings; null when unknown, and the fee columns read "—". */
   fees?: CampaignSheetFees | null;
 }) {
-  const sheet = React.useMemo(() => buildCampaignProfitLoss(campaign, today, fees), [campaign, today, fees]);
+  const sheet = React.useMemo(() => buildCampaignProfitLoss(campaign, today, fees, true), [campaign, today, fees]);
   const cell = "px-2.5 py-2 text-right tabular-nums";
   const muted = cn(cell, "text-[var(--text-secondary)]");
   const headers = sheetHeaders(sheet.revenueBasis);
@@ -779,43 +809,13 @@ export function CampaignProfitLossSheet({
 
   // Said from the sheet itself, so the caption can never promise a basis the
   // cells do not use.
+  const collectionSheet = campaign.members !== undefined;
+  const unassigned = sumFirstLanding(campaign.timeline.map((point) => point.firstLanding)).unassignedGoogleRevenue;
   const basisCaption = sheet.predatesSheet
-    ? "This period's snapshot was taken before the sheet existed, so the Shopify columns and COGS are not computed yet. Snapshots refresh every hour; profit reads Google's conversion value until then."
-    : sheet.revenueBasis === "shopify"
-      ? "Profit on Shopify's real sales for this campaign (last non-direct click), minus ad spend and fees · Google delivery"
-      : sheet.revenueBasis === "collection"
-        ? `Profit on /collections/${campaign.collectionHandle ?? ""}${
-            members > 1
-              ? `, the ${members} campaigns that land there summed`
-              : (campaign.collectionSharedWith ?? 1) > 1
-                ? `, split between the ${campaign.collectionSharedWith} campaigns that land there in proportion to spend, so orders and units are shares and need not be whole`
-                : ""
-          }. Revenue is the collection items in every order, after discounts and refunds, from any channel; Orders are the orders holding at least one of them; ATC is Google sessions that landed on the collection page and added to cart. Profit is revenue minus ad spend${
-            sheet.total.cogs !== null ? ", the product costs of those items" : ""
-          }, Shopify fees, shipping and the agency fee${
-            sheet.total.cogs !== null
-              ? ""
-              : " · product costs could not be read, so COGS reads “—” and is not subtracted"
-          }${
-            sheet.total.addedToCart !== null
-              ? ""
-              : " · landing sessions could not be read, so ATC reads “—”"
-          }${
-            // The clicks named the collection because nothing else did.
-            // That is the whole of what is known: a Performance Max or
-            // Shopping campaign has no final URL at all, but a Search or
-            // Demand Gen ad may point at a page that is not a collection,
-            // or at a product Shopify redirects to one, and the caption
-            // must not claim its ads name no URL when they do.
-            campaign.collectionSource === "landing"
-              ? " · the collection was read from where its clicks landed, as neither the campaign's final URLs nor its name names one"
-              : ""
-          }`
-        : campaign.attributionState === "unmatched"
-          ? `Profit on Google's reported conversion value, minus ad spend and the agency fee · Shopify sees no utm_campaign on this campaign's traffic${
-              campaign.collectionHandle ? "" : " and it lands on no single collection the store has"
-            }, so its sales read “—”. Tag the ads with utm_campaign={campaignid} to measure real sales.`
-          : "Profit on Google's reported conversion value, minus ad spend and the agency fee · Shopify attribution unavailable, so its sales read “—”";
+    ? "First-visit attribution has not been refreshed for this period. Refresh the report to calculate real ROAS."
+    : `Collection items after discounts and refunds, only from orders whose first visit landed on /collections/${campaign.collectionHandle ?? ""}. ${collectionSheet
+      ? `All channels; spend from ${members} ${members === 1 ? "campaign" : "campaigns"}.`
+      : "Only Google Ads visits identifying this campaign. Unidentified sales are not allocated by spend."} Sales use the order date. Orders without a recorded first landing are excluded. Profit deducts ad spend, available product costs and the fees below; cart conversion is not measured for this model.${unassigned !== null && unassigned > 0 ? ` ${money(unassigned, currency)} of Google collection sales have no confirmed ad campaign; individual ROAS is unavailable.` : ""}`;
 
   return (
     <div
@@ -828,6 +828,11 @@ export function CampaignProfitLossSheet({
         <p className="text-[10.5px] text-[var(--text-muted)]">
           {basisCaption} · {feesCaption(fees, currency)}
         </p>
+        {unassigned !== null && unassigned > 0 && (
+          <p className="text-[10.5px] text-[var(--text-muted)]">
+            For future Google Ads visits, use tracking: <code>utm_source=google&amp;utm_medium=cpc&amp;utm_campaign={"{campaignid}"}</code>. Missing campaign IDs on previous orders cannot be reconstructed from these visits.
+          </p>
+        )}
       </div>
       {sheet.rows.length === 0 ? (
         <p className="px-4 py-3 text-[11px] text-[var(--text-muted)]">No days were returned for this period.</p>

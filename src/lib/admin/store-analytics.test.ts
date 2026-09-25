@@ -132,6 +132,7 @@ import {
   ensureAdminAnalyticsRollupCoverage,
   fetchAdminStoreAnalytics,
   fetchCachedAdminStoreAnalytics,
+  readCampaignFirstLandingSnapshot,
   refreshAdminStoreAnalyticsSnapshots,
 } from "./store-analytics";
 import { ShopifyReportingError } from "@/lib/client-onboarding/shopify";
@@ -1293,7 +1294,7 @@ describe("admin store analytics DAL", () => {
     // brought figure included, so every column of the sheet is shared alike.
     // Of the 120, the 80 of the order that landed on the page is the landed
     // part; the other order came in through the homepage.
-    expect(first.byDay.get("2026-08-14")).toEqual({
+    expect(first.byDay.get("2026-08-14")).toMatchObject({
       revenue: 90,
       units: 2.25,
       orders: 1.5,
@@ -1307,7 +1308,7 @@ describe("admin store analytics DAL", () => {
       addedToCart: 6,
       cogs: 45,
     });
-    expect(second.byDay.get("2026-08-14")).toEqual({
+    expect(second.byDay.get("2026-08-14")).toMatchObject({
       revenue: 30,
       units: 0.75,
       orders: 0.5,
@@ -1366,7 +1367,7 @@ describe("admin store analytics DAL", () => {
 
     // The landed split is read from the orders, not from the sessions, so a
     // failed landing read leaves it a measured number.
-    expect(attribution.get(`${STORE_ID}:987654321`)!.byDay.get("2026-08-14")).toEqual({
+    expect(attribution.get(`${STORE_ID}:987654321`)!.byDay.get("2026-08-14")).toMatchObject({
       revenue: 120,
       units: 3,
       orders: 2,
@@ -1554,7 +1555,7 @@ describe("admin store analytics DAL", () => {
     // Both orders landed on the page, so the Lamp one is the whole landed
     // split; the Vase one bought none of the collection and is the brought
     // figure, counted whole at its 100 and kept out of revenue and orders.
-    expect(attribution.get(`${STORE_ID}:987654321`)!.byDay.get("2026-08-14")).toEqual({
+    expect(attribution.get(`${STORE_ID}:987654321`)!.byDay.get("2026-08-14")).toMatchObject({
       revenue: 40,
       units: 1,
       orders: 1,
@@ -1641,7 +1642,7 @@ describe("admin store analytics DAL", () => {
     // Three orders hold a Lamp line: 80 + 40 + 40. Two of them came in
     // through the page (80 + 40). The Vase order is not one of the three -
     // it would have made revenue 260 and orders 4 - and sits at 100 apart.
-    expect(attribution.get(`${STORE_ID}:987654321`)!.byDay.get("2026-08-14")).toEqual({
+    expect(attribution.get(`${STORE_ID}:987654321`)!.byDay.get("2026-08-14")).toMatchObject({
       revenue: 160,
       units: 4,
       orders: 3,
@@ -1728,7 +1729,7 @@ describe("admin store analytics DAL", () => {
     // The client's total is all three Lamp orders (40 + 40 + 80) on 4 units;
     // 40 of it landed, 80 was never measured, and the 40 left over is the one
     // order actually seen to arrive another way.
-    expect(attribution.get(`${STORE_ID}:987654321`)!.byDay.get("2026-08-14")).toEqual({
+    expect(attribution.get(`${STORE_ID}:987654321`)!.byDay.get("2026-08-14")).toMatchObject({
       revenue: 160,
       units: 4,
       orders: 3,
@@ -1783,7 +1784,7 @@ describe("admin store analytics DAL", () => {
 
     const entry = attribution.get(`${STORE_ID}:987654321`)!;
     expect(entry.handle).toBe(handle);
-    expect(entry.byDay.get("2026-08-14")).toEqual({
+    expect(entry.byDay.get("2026-08-14")).toMatchObject({
       revenue: 30,
       units: 1,
       orders: 1,
@@ -1847,7 +1848,7 @@ describe("admin store analytics DAL", () => {
       costs: null,
     });
 
-    expect(attribution.get(`${STORE_ID}:987654321`)!.byDay.get("2026-08-14")).toEqual({
+    expect(attribution.get(`${STORE_ID}:987654321`)!.byDay.get("2026-08-14")).toMatchObject({
       revenue: 30,
       units: 0.75,
       orders: 0.75,
@@ -1861,7 +1862,7 @@ describe("admin store analytics DAL", () => {
       addedToCart: 0,
       cogs: null,
     });
-    expect(attribution.get(`${STORE_ID}:111`)!.byDay.get("2026-08-14")).toEqual({
+    expect(attribution.get(`${STORE_ID}:111`)!.byDay.get("2026-08-14")).toMatchObject({
       revenue: 10,
       units: 0.25,
       orders: 0.25,
@@ -1997,7 +1998,7 @@ describe("admin store analytics DAL", () => {
       costs: null,
     });
 
-    expect(attribution.get(`${STORE_ID}:987654321`)!.byDay.get("2026-08-14")).toEqual({
+    expect(attribution.get(`${STORE_ID}:987654321`)!.byDay.get("2026-08-14")).toMatchObject({
       revenue: null,
       units: null,
       orders: null,
@@ -2041,7 +2042,7 @@ describe("admin store analytics DAL", () => {
     expect(collectionProductKeys).toHaveBeenCalledWith("best-sellers");
     const entry = attribution.get(`${STORE_ID}:987654321`)!;
     expect(entry).toMatchObject({ handle: "best-sellers", sharedWith: 1, costsKnown: true, salesKnown: true, landingKnown: true });
-    expect(entry.byDay.get("2026-08-14")).toEqual({
+    expect(entry.byDay.get("2026-08-14")).toMatchObject({
       revenue: 0,
       units: 0,
       orders: 0,
@@ -2083,7 +2084,7 @@ describe("admin store analytics DAL", () => {
 
     // Both orders count their Lamp lines (80 and 40), the Lamp known from the
     // lookup, not the sales report. Only the first came in through the page.
-    expect(attribution.get(`${STORE_ID}:987654321`)!.byDay.get("2026-08-14")).toEqual({
+    expect(attribution.get(`${STORE_ID}:987654321`)!.byDay.get("2026-08-14")).toMatchObject({
       revenue: 120,
       units: 3,
       orders: 2,
@@ -2196,7 +2197,7 @@ describe("admin store analytics DAL", () => {
 
     const entry = attribution.get(`${STORE_ID}:987654321`)!;
     expect(entry).toMatchObject({ handle: "best-sellers", salesKnown: false, landingKnown: false });
-    expect(entry.byDay.get("2026-08-14")).toEqual({
+    expect(entry.byDay.get("2026-08-14")).toMatchObject({
       revenue: null,
       units: null,
       orders: null,
@@ -2708,7 +2709,7 @@ describe("admin store analytics DAL", () => {
     // landing page still reads as the collection's page, so that first order
     // is the brought figure, whole at its 100, and the Bag order - which came
     // in through the homepage - leaves the landed split at zero.
-    expect(entry.byDay.get("2026-08-14")).toEqual({
+    expect(entry.byDay.get("2026-08-14")).toMatchObject({
       revenue: 30,
       units: 1,
       orders: 1,
@@ -3549,6 +3550,57 @@ describe("admin store analytics DAL", () => {
       from: RANGE.from, to: RANGE.to,
     });
     expect(mocks.fetchLiveCampaignsDetailed).not.toHaveBeenCalled();
+  });
+
+  it("reads campaign attribution only for the exact period and current store authority", async () => {
+    mocks.createServiceClient.mockReturnValue(service([account()], null));
+    const rows = [{ accountId: STORE_ID, campaignId: "123", timeline: [] }];
+    const selection = exactSelection({ state: "ready", rows: [{ rows }], refreshedAt: "2026-08-15T10:00:00Z" });
+    mocks.readAdminReportingSnapshotFamilySelections.mockResolvedValue(new Map([["store_campaign_performance", selection]]));
+    const input = { clientId: CLIENT_ID, store: { accountId: STORE_ID, activityAccountIds: [STORE_ID], currency: "EUR", days: [] }, range: RANGE };
+    expect(await readCampaignFirstLandingSnapshot(input)).toEqual({ rows, refreshedAt: "2026-08-15T10:00:00Z" });
+    expect(mocks.readAdminReportingSnapshotFamilySelections).toHaveBeenCalledWith(expect.objectContaining({ authorityKey: "a".repeat(64), accountId: STORE_ID, from: RANGE.from, to: RANGE.to }));
+    mocks.readAdminReportingSnapshotFamilySelections.mockResolvedValue(new Map([["store_campaign_performance", { ...selection, exact: false }]]));
+    expect((await readCampaignFirstLandingSnapshot(input)).rows).toEqual([]);
+    mocks.readAdminReportingSnapshotFamilySelections.mockResolvedValue(new Map([["store_campaign_performance", { ...selection, snapshot: { ...selection.snapshot as object, rows: [{ rows: [{ ...rows[0], accountId: CHILD_ID }] }] } }]]));
+    expect((await readCampaignFirstLandingSnapshot(input)).rows).toEqual([]);
+    expect(mocks.fetchLiveCampaignsDetailed).not.toHaveBeenCalled();
+    expect(mocks.createShopifyReportingAdapter).not.toHaveBeenCalled();
+  });
+
+  it("counts first-landing collection items across channels, and Google orders only for their identified campaign", async () => {
+    const makeOrder = (landingPath: string | null, source: string, campaign: string | null, revenue = 40) => ({
+      date: "2026-08-14", total: revenue + 100, paid: true, landingPath, refunded: 10,
+      firstVisit: { source, medium: source === "google" ? "cpc" : "social", campaign },
+      lines: [{ ...line("LAMP-1", "Lamp", 2, revenue / 2), refundedAmount: 10, refundedQuantity: 1 }, line("OTHER", "Other", 1, 100)],
+    });
+    const result = await attributeCampaignCollections({
+      orders: { ok: true, value: { currency: "EUR", orders: [
+        makeOrder("/collections/best-sellers?x=1", "google", "987654321"),
+        makeOrder("https://northwind.example/collections/best-sellers/", "facebook", null),
+        makeOrder("/collections/best-sellers", "google", "111", 60),
+        makeOrder("/collections/best-sellers", "google", null),
+        makeOrder("/", "google", "987654321", 500),
+        makeOrder(null, "google", "987654321", 500),
+        makeOrder("/collections/best-sellers/products/lamp", "google", "987654321", 500),
+      ] } },
+      collectionProductKeys: async () => new Set(["LAMP-1"]), targetCurrency: "EUR", range: RANGE,
+      google: { ok: true, value: {
+        rows: [
+          { ...googleCampaign(), finalUrls: ["https://northwind.example/collections/best-sellers"] },
+          { ...googleCampaign(), providerCampaignId: "111", finalUrls: ["https://northwind.example/collections/best-sellers"] },
+        ] as never, granularity: "day",
+        timeline: [deliveredDay(STORE_ID, "987654321", 150), deliveredDay(STORE_ID, "111", 50)],
+      } },
+      collectionSales: { ok: true, value: [] }, landing: { ok: true, value: [] }, costs: null,
+    });
+    const a = result.get(`${STORE_ID}:987654321`)!.byDay.get("2026-08-14")!.firstLanding!;
+    const b = result.get(`${STORE_ID}:111`)!.byDay.get("2026-08-14")!.firstLanding!;
+    expect(a.collection!.revenue + b.collection!.revenue).toBe(140);
+    expect(a.collection!.orders + b.collection!.orders).toBe(4);
+    expect(a.campaign).toEqual({ revenue: 30, units: 1, orders: 1, cogs: null });
+    expect(b.campaign).toEqual({ revenue: 50, units: 1, orders: 1, cogs: null });
+    expect(a.unassignedGoogleRevenue! + b.unassignedGoogleRevenue!).toBe(30);
   });
 
   it("keeps a 5/7 spend grid partial after manual refresh and reports exact coverage", async () => {

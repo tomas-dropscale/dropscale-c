@@ -1,5 +1,6 @@
 import type { CampaignActionViewState } from "@/lib/admin/campaign-actions";
 import type { AdminCampaignsOverview } from "@/lib/admin/campaigns";
+import type { CampaignLandingRoas } from "@/lib/admin/campaign-first-landing";
 
 export type CampaignViewStatus = "active" | "paused" | "ended";
 export type CampaignViewLoadState =
@@ -10,6 +11,7 @@ export type CampaignViewLoadState =
   | "not_synced"
   | "disconnected";
 export type CampaignViewCampaign = {
+  landingRoas?: CampaignLandingRoas;
   bindingId: string;
   adAccountId: string;
   providerCampaignId: string;
@@ -321,6 +323,7 @@ export function projectAdminCampaignsView(
           type: campaign.advertisingChannelType,
           shoppingFeed: campaign.shoppingFeed,
           googleRoas: Number.isFinite(campaign.googleRoas) ? campaign.googleRoas : null,
+          landingRoas: campaign.landingRoas,
           actionable: bindingId.length > 0,
         };
       }),

@@ -552,6 +552,13 @@ function CampaignRow({
         <p className="truncate text-[13px] font-medium text-[var(--text-primary)]">
           {campaign.name}
         </p>
+        {campaign.landingRoas && (
+          <p className="mt-1 text-[11px] text-[var(--text-muted)]" title="Collection items from first visits landing on this collection, across all channels, divided by its campaigns' spend">
+            /collections/{campaign.landingRoas.handle} · Overall {campaign.landingRoas.collectionRoas === null ? "—" : multiplier(campaign.landingRoas.collectionRoas)}
+            {(campaign.landingRoas.unassignedGoogleRevenue ?? 0) > 0 && <span className="block">Google campaign attribution incomplete</span>}
+            {campaign.landingRoas.refreshedAt && <span className="block" title="When Shopify first-visit sales for this period were last read">Sales snapshot {campaign.landingRoas.refreshedAt.slice(0, 16).replace("T", " ")} UTC</span>}
+          </p>
+        )}
       </div>
 
       <div className="min-w-0 xl:text-center">
@@ -581,8 +588,11 @@ function CampaignRow({
         />
       </div>
 
-      <CampaignMetric label="ROAS">
-        {campaign.googleRoas === null ? "—" : multiplier(campaign.googleRoas)}
+      <CampaignMetric label="Real ROAS">
+        <span title="Collection items from first visits landing on the collection through Google Ads and identifying this campaign">
+          {campaign.landingRoas?.roas == null ? "—" : multiplier(campaign.landingRoas.roas)}
+        </span>
+        <span className="block text-[10px] text-[var(--text-muted)]">Google: {campaign.googleRoas === null ? "—" : multiplier(campaign.googleRoas)}</span>
       </CampaignMetric>
 
       <div className="flex justify-self-end xl:justify-self-center">
@@ -717,7 +727,7 @@ function StoreGroup({
         <span
           className="label-caps text-center"
         >
-          ROAS
+          Real ROAS
         </span>
         <span className="label-caps text-center">Action</span>
       </div>

@@ -1,4 +1,5 @@
 import "server-only";
+import { emptyLandingSales, firstVisitGoogleCampaign, matchFirstVisitCampaign, scaleLandingSales, type FirstLandingAttribution, type LandingSales } from "./campaign-first-landing";
 
 import { requireClientOnboardingAdmin } from "@/lib/client-onboarding/sessions";
 import { ShopifyReportingError } from "@/lib/client-onboarding/shopify";
@@ -92,6 +93,7 @@ export type AdminAnalyticsFunnelDay = {
 export type AdminAnalyticsGranularity = "hour" | "day";
 
 export type AdminAnalyticsCampaignTimelinePoint = {
+  firstLanding?: FirstLandingAttribution;
   bucket: string;
   spend: number;
   impressions?: number;
@@ -1751,6 +1753,11 @@ function campaignFamily(
                   ? dayFigures.cogs !== null
                   : landed.costsKnown && landed.salesKnown;
                 return {
+                  firstLanding: carries && dayFigures?.firstLanding ? dayFigures.firstLanding : {
+                    collection: salesKnown ? emptyLandingSales(cogsKnown) : null,
+                    campaign: salesKnown ? emptyLandingSales(cogsKnown) : null,
+                    unassignedGoogleRevenue: salesKnown ? 0 : null,
+                  },
                   collectionRevenue: figures ? figures.revenue : nothing(salesKnown),
                   collectionUnits: figures ? figures.units : nothing(salesKnown),
                   collectionOrders: figures ? figures.orders : nothing(salesKnown),
@@ -1769,6 +1776,7 @@ function campaignFamily(
                 };
               })()
             : {
+                firstLanding: { collection: null, campaign: null, unassignedGoogleRevenue: null },
                 collectionRevenue: null,
                 collectionUnits: null,
                 collectionOrders: null,
@@ -2080,6 +2088,7 @@ async function shopifyFamilies(
 const GOOGLE_LANDING_PLATFORMS = new Set(["google", "alphabet"]);
 
 export type CampaignCollectionDay = {
+  firstLanding?: FirstLandingAttribution;
   /**
    * What the collection's items earned, the way the client's own sheet reads
    * it: every order's collection lines at what they were charged, net of
@@ -2449,6 +2458,14 @@ export async function attributeCampaignCollections(input: {
     broughtOrders: 0,
   });
   const earnedByHandleDay = new Map<string, EarnedDay>();
+  const firstCollection = new Map<string, LandingSales>();
+  const firstCampaign = new Map<string, LandingSales>();
+  const unassignedGoogle = new Map<string, number>();
+  const identities = input.google.value.rows.map((campaign) => ({
+    key: `${campaign.ad_account_id}:${campaign.providerCampaignId}`,
+    id: campaign.providerCampaignId,
+    name: campaign.name,
+  }));
   if (input.orders.ok) {
     const rates = input.orders.value.currency === input.targetCurrency || input.orders.value.orders.length === 0
       ? null
@@ -2465,6 +2482,9 @@ export async function attributeCampaignCollections(input: {
       // Null is not "somewhere else": Shopify reports no journey at all for
       // plenty of orders, and the order is counted as unmeasured below.
       const landing = normalizePath(order.landingPath);
+      const collectionLanding = landing?.replace(/^\/[a-z]{2}(?:-[a-z]{2})?\/collections\//, "/collections/");
+      const firstGoogle = firstVisitGoogleCampaign(order.landingPath, order.firstVisit);
+      const matchedKey = firstGoogle.googleAds ? matchFirstVisitCampaign(firstGoogle.campaign, identities) : null;
       const journeyKnown = landing !== null;
       for (const collection of collections) {
         const page = `/collections/${collection.handle}`;
@@ -2497,6 +2517,28 @@ export async function attributeCampaignCollections(input: {
         const key = `${collection.handle}|${order.date}`;
         const current = earnedByHandleDay.get(key) ?? emptyEarnedDay();
         const converted = convert(revenue, order.date);
+        // A product URL under /collections/... is not the collection page.
+        // Count collection items only, on the order day, never other basket items.
+        if (collectionLanding === page) {
+          const sale: LandingSales = {
+            revenue: converted, units, orders: 1,
+            cogs: input.costs ? orderCogs(lines.map((line) => ({ ...line, unitPrice: convert(line.unitPrice, order.date) })), order.date, input.costs) : null,
+          };
+          const add = (map: Map<string, LandingSales>, target: string) => {
+            const value = map.get(target) ?? emptyLandingSales(input.costs !== null);
+            value.revenue += sale.revenue;
+            value.units += sale.units;
+            value.orders += sale.orders;
+            value.cogs = value.cogs === null || sale.cogs === null ? null : value.cogs + sale.cogs;
+            map.set(target, value);
+          };
+          add(firstCollection, key);
+          if (matchedKey && handleByCampaign.get(matchedKey) === collection.handle) {
+            add(firstCampaign, `${matchedKey}|${order.date}`);
+          } else if (firstGoogle.googleAds || firstGoogle.unclassifiedGoogle) {
+            unassignedGoogle.set(key, (unassignedGoogle.get(key) ?? 0) + converted);
+          }
+        }
         current.revenue += converted;
         current.units += units;
         current.orders += 1;
@@ -2565,6 +2607,12 @@ export async function attributeCampaignCollections(input: {
         const entry = attribution.get(key);
         if (!entry) return;
         entry.byDay.set(day, {
+          firstLanding: {
+            campaignComplete: input.orders.ok && (unassignedGoogle.get(`${handle}|${day}`) ?? 0) === 0,
+            collection: input.orders.ok ? scaleLandingSales(firstCollection.get(`${handle}|${day}`) ?? emptyLandingSales(input.costs !== null), share) : null,
+            campaign: input.orders.ok ? firstCampaign.get(`${key}|${day}`) ?? emptyLandingSales(input.costs !== null) : null,
+            unassignedGoogleRevenue: input.orders.ok ? (unassignedGoogle.get(`${handle}|${day}`) ?? 0) * share : null,
+          },
           revenue: input.orders.ok ? earned.revenue * share : null,
           units: input.orders.ok ? earned.units * share : null,
           orders: input.orders.ok ? earned.orders * share : null,
@@ -3474,6 +3522,27 @@ export async function fetchCachedAdminStoreAnalytics(
       : campaignsFreshness,
     shopifyProvenance: topology.shopifyProvenance,
   };
+}
+
+/** Campaigns page reads only the exact, authority-checked stored attribution. No provider calls. */
+export async function readCampaignFirstLandingSnapshot(input: FetchAdminStoreAnalyticsInput): Promise<{
+  rows: AdminAnalyticsCampaign[];
+  refreshedAt: string | null;
+}> {
+  assertInput(input);
+  const topology = await loadTopology(input);
+  const selections = await readAdminReportingSnapshotFamilySelections({
+    client: topology.service, families: ["store_campaign_performance"],
+    accountId: input.store.accountId, authorityKey: topology.authority.key,
+    from: input.range.from, to: input.range.to,
+  });
+  const selection = selections.get("store_campaign_performance");
+  if (!selection?.exact || !["ready", "partial"].includes(selection.snapshot.state)) return { rows: [], refreshedAt: null };
+  const data = selection.snapshot.rows[0] as { rows?: AdminAnalyticsCampaign[] } | undefined;
+  const allowed = new Set(input.store.activityAccountIds);
+  const rows = data?.rows ?? [];
+  if (rows.some((row) => !allowed.has(row.accountId))) return { rows: [], refreshedAt: null };
+  return { rows, refreshedAt: selection.snapshot.refreshedAt };
 }
 
 /**

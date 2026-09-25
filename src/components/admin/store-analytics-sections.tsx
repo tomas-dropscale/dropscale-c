@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { firstLandingCampaignSales } from "../../lib/admin/campaign-first-landing";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -523,7 +524,7 @@ export function CampaignCollectionsBlock({
       campaignCollections(rows).flatMap((group) => {
         const campaign = buildCollectionCampaign(group.members);
         return campaign
-          ? [{ ...group, campaign, total: buildCampaignProfitLoss(campaign, today, fees).total }]
+          ? [{ ...group, campaign, total: buildCampaignProfitLoss(campaign, today, fees, true).total }]
           : [];
       }),
     [rows, today, fees],
@@ -547,7 +548,7 @@ export function CampaignCollectionsBlock({
       <div className="flex flex-wrap items-baseline justify-between gap-2 px-5 pt-3 pb-1.5">
         <p className="text-[12px] font-semibold text-[var(--text-primary)]">Collections</p>
         <p className="text-[10.5px] text-[var(--text-muted)]">
-          One row per collection the campaigns land on, its campaigns summed day by day, the way the client keeps a sheet per collection. Open its P&amp;L for the collection&apos;s own day-by-day sheet. What a row brought in is counted whole beside its revenue and bought nothing of that collection, so those items are some other row&apos;s revenue: the brought figures do not add across the table.
+          Overall ROAS counts collection items only when the first visit landed on that collection, across all channels. Campaign ROAS below counts only identified Google Ads visits. Discounts and refunds are deducted; unknown first visits are excluded.
         </p>
       </div>
       <table className="w-full min-w-[1180px] text-[11.5px]">
@@ -704,7 +705,7 @@ export function CampaignPerformanceSection({
           Campaign Performance
         </h2>
         <p className="mt-0.5 text-[11px] text-[var(--text-muted)]">
-          Google delivery and Shopify last-non-direct-click UTM attribution for the selected period. Open a campaign for its assets, or its P&amp;L for the day-by-day sheet; a collection&apos;s P&amp;L sums the campaigns that land there.
+          Google delivery and real ROAS from Shopify first visits to the collection. Open a campaign or collection P&amp;L for its daily figures. Google&apos;s reported ROAS is shown separately for comparison.
         </p>
       </header>
 
@@ -744,7 +745,7 @@ export function CampaignPerformanceSection({
                 <th className="px-2.5 py-2.5 text-center font-medium">CPM</th>
                 <th className="px-2.5 py-2.5 text-center font-medium">CPA</th>
                 <th className="px-2.5 py-2.5 text-center font-medium">Conv.</th>
-                <th className="px-2.5 py-2.5 text-center font-medium">Google ROAS</th>
+                <th className="px-2.5 py-2.5 text-center font-medium">Real ROAS</th>
                 <th className="px-5 py-2.5 text-center font-medium">Tracking</th>
               </tr>
             </thead>
@@ -753,6 +754,7 @@ export function CampaignPerformanceSection({
                 const key = `${campaign.accountId}:${campaign.campaignId}`;
                 const open = openCampaigns.has(key);
                 const sheetOpen = openSheets.has(key);
+                const real = buildCampaignProfitLoss(campaign, today, fees, true).total;
                 const breakdownWarnings = campaign.breakdown.sources
                   .filter((source) => source.state === "failed" || source.state === "unavailable")
                   .map((source) => source.reason)
@@ -796,16 +798,16 @@ export function CampaignPerformanceSection({
                       <td className="px-2.5 py-3 text-center tabular-nums">{campaign.cpm === null ? "—" : money(campaign.cpm, currency)}</td>
                       <td className="px-2.5 py-3 text-center tabular-nums">{campaign.cpa === null ? "—" : money(campaign.cpa, currency)}</td>
                       <td className="px-2.5 py-3 text-center tabular-nums">{campaign.conversions === null ? "—" : integer(campaign.conversions)}</td>
-                      <td className="px-2.5 py-3 text-center tabular-nums">{campaign.googleRoas === null ? "—" : multiplier(campaign.googleRoas)}</td>
+                      <td className="px-2.5 py-3 text-center tabular-nums">{real.roas === null ? "—" : multiplier(real.roas)}<span className="block text-[10px] text-[var(--text-muted)]">Google: {campaign.googleRoas === null ? "—" : multiplier(campaign.googleRoas)}</span></td>
                       <td className="px-5 py-2 text-center">
                         <div className="flex items-center justify-center gap-2">
                           <RoasEvolutionHover
-                            label="Google ROAS evolution"
+                            label="Real ROAS evolution"
                             windows={roasEvolutionWindows(
                               (campaign.trackingTimeline ?? campaign.timeline).map((point) => ({
                                 bucket: point.bucket,
                                 spend: point.spend,
-                                revenue: point.googleRevenue,
+                                revenue: firstLandingCampaignSales(point.firstLanding)?.revenue ?? null,
                               })),
                               lisbonToday(),
                             )}

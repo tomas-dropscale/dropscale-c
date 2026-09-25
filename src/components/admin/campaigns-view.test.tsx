@@ -224,6 +224,20 @@ describe("CampaignsView approved visual structure", () => {
     expect(html).toContain(message);
   });
 
+  it("distinguishes collection overall, real campaign ROAS and Google's comparison, with sales freshness", () => {
+    const data = structuredClone(clients);
+    data[0].stores[0].campaigns[0].landingRoas = { handle: "summer", revenue: 2500, roas: 1.25, collectionRevenue: 4800, collectionRoas: 1.6, unassignedGoogleRevenue: 0, refreshedAt: "2026-09-25T14:00:00Z" };
+    const html = renderToStaticMarkup(<CampaignsView clients={data} history={[]} historyTruncated={false} range={range} />);
+    expect(html).toContain("/collections/summer");
+    expect(html).toContain("Overall 1.60x");
+    expect(html).toContain("1.25x");
+    expect(html).toContain("Google: ");
+    expect(html).toContain("Sales snapshot 2026-09-25 14:00 UTC");
+    data[0].stores[0].campaigns[0].landingRoas.roas = null;
+    data[0].stores[0].campaigns[0].landingRoas.unassignedGoogleRevenue = 100;
+    expect(renderToStaticMarkup(<CampaignsView clients={data} history={[]} historyTruncated={false} range={range} />)).toContain("Google campaign attribution incomplete");
+  });
+
   it("keeps successful source rows while warning that a store is partial", () => {
     const partialClients: CampaignViewClient[] = [{
       ...clients[0],

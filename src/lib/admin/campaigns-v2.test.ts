@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CanonicalReportingSource } from "@/lib/reporting/sources";
 import type { AdAccount } from "@/lib/supabase/types";
+vi.mock("@/lib/admin/store-analytics", () => ({ readCampaignFirstLandingSnapshot: async () => ({ rows: [], refreshedAt: null }) }));
 
 const mocks = vi.hoisted(() => ({
   fxDailyRates: vi.fn(),

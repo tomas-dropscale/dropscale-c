@@ -94,6 +94,12 @@ const GBP_ORDER = order(
   { amount: "10.00", currencyCode: "GBP" },
   { amount: "50.00", currencyCode: "GBP" },
 );
+
+it("retains first-visit paid source and campaign without changing daily sales", async () => {
+  const visit = { landingPage: "https://northwind.example/collections/summer", source: "google", referrerUrl: "https://google.com", utmParameters: { source: "google", medium: "cpc", campaign: "123" } };
+  const result = await fetchDailySales(SHOP, TOKEN, "2026-09-08", "2026-09-08", executor([{ ...GBP_ORDER, customerJourneySummary: { firstVisit: visit } }]));
+  expect(result.orders[0]).toMatchObject({ landingPath: visit.landingPage, firstVisit: { source: "google", medium: "cpc", campaign: "123" } });
+});
 const CZK_ORDER = order(
   2,
   "2026-09-03T10:00:00Z",

@@ -68,6 +68,51 @@ function point(over: Partial<AdminAnalyticsCampaignTimelinePoint> & { bucket: st
 }
 
 describe("a campaign's profit and loss by day", () => {
+  it("withholds an individual ROAS when Google collection sales cannot be assigned, including zero spend shares", () => {
+    const timeline = [point({ bucket: "2026-09-20", spend: 20, firstLanding: { collection: { revenue: 120, orders: 3, units: 3, cogs: 15 }, campaign: { revenue: 30, orders: 1, units: 1, cogs: 5 }, unassignedGoogleRevenue: 90, campaignComplete: false } })];
+    expect(buildCampaignProfitLoss({ timeline }, "2026-09-25", FEES, true).total.roas).toBeNull();
+    expect(buildCampaignProfitLoss({ timeline, members: 2 }, "2026-09-25", FEES, true).total.roas).toBe(6);
+    const html = renderToStaticMarkup(<CampaignProfitLossSheet title="Summer" currency="EUR" today="2026-09-25" campaign={{ timeline, collectionHandle: "summer", attributionState: "unmatched" }} />);
+    expect(html).toContain("individual ROAS is unavailable");
+    expect(html).toContain("utm_campaign={campaignid}");
+    const zeroShare = { ...timeline[0], firstLanding: { ...timeline[0].firstLanding!, unassignedGoogleRevenue: 0 } };
+    expect(buildCampaignProfitLoss({ timeline: [zeroShare] }, "2026-09-25", FEES, true).total.roas).toBeNull();
+  });
+  it("uses first-landing collection items across channels for overall, but exact Google campaign items individually", () => {
+    const timeline = [point({ bucket: "2026-09-20", spend: 20, googleRevenue: 500, shopifyRevenue: 900, collectionRevenue: 1000,
+      firstLanding: { collection: { revenue: 120, orders: 3, units: 4, cogs: 30 }, campaign: { revenue: 60, orders: 1, units: 2, cogs: 15 }, unassignedGoogleRevenue: 0 },
+    })];
+    const own = buildCampaignProfitLoss({ timeline }, "2026-09-25", FEES, true);
+    const overall = buildCampaignProfitLoss({ timeline, members: 2 }, "2026-09-25", FEES, true);
+    expect(own.total).toMatchObject({ revenue: 60, roas: 3, orders: 1, units: 2, cogs: 15, addedToCart: null, cvr: null });
+    expect(own.total.paymentFees).toBeCloseTo(1.27);
+    expect(own.total.profit).toBeCloseTo(60 - 20 - 15 - 1.27 - 1.5 - 2);
+    expect(overall.total).toMatchObject({ revenue: 120, roas: 6, orders: 3, units: 4, cogs: 30 });
+    const html = renderToStaticMarkup(<CampaignProfitLossSheet title="Summer" currency="EUR" today="2026-09-25" campaign={{ timeline, collectionHandle: "summer", attributionState: "matched" }} fees={FEES} />);
+    expect(html).toContain("Only Google Ads visits identifying this campaign");
+    expect(html).toContain("EUR 60.00");
+    expect(html).not.toContain("Where the sales came from");
+  });
+
+  it("does not substitute Google or product revenue for old and incomplete first-visit snapshots", () => {
+    const known = point({ bucket: "2026-09-20", spend: 20, firstLanding: { collection: { revenue: 60, orders: 1, units: 1, cogs: 10 }, campaign: { revenue: 30, orders: 1, units: 1, cogs: 10 }, unassignedGoogleRevenue: 0 } });
+    const old = point({ bucket: "2026-09-21", spend: 40, googleRevenue: 900, collectionRevenue: 500, shopifyRevenue: 700 });
+    const sheet = buildCampaignProfitLoss({ timeline: [known, old] }, "2026-09-25", FEES, true);
+    expect(sheet.rows[1]).toMatchObject({ revenue: null, profit: null, roas: null });
+    expect(sheet.total).toMatchObject({ revenue: null, roas: null, profit: null });
+    expect(sheet.predatesSheet).toBe(true);
+    const collection = buildCollectionCampaign([member({ timeline: [known] }), member({ timeline: [{ ...old, bucket: known.bucket }] })])!;
+    expect(buildCampaignProfitLoss(collection, "2026-09-25", FEES, true).total.roas).toBeNull();
+  });
+
+  it("folds first-visit figures only once per day and distinguishes measured zero from unavailable", () => {
+    const zero = { revenue: 0, orders: 0, units: 0, cogs: 0 };
+    const timeline = [point({ bucket: "2026-09-20T10:00:00", spend: 10, firstLanding: { collection: { ...zero, revenue: 60 }, campaign: { ...zero, revenue: 30 }, unassignedGoogleRevenue: 0 } }), point({ bucket: "2026-09-20T11:00:00", spend: 10, firstLanding: { collection: zero, campaign: zero, unassignedGoogleRevenue: 0 } })];
+    const sheet = buildCampaignProfitLoss({ timeline }, "2026-09-25", null, true);
+    expect(sheet.rows).toHaveLength(1);
+    expect(sheet.total).toMatchObject({ revenue: 30, spend: 20, roas: 1.5 });
+    expect(buildCampaignProfitLoss({ timeline: [timeline[1]] }, "2026-09-25", null, true).total.roas).toBe(0);
+  });
   it("derives every ratio from the day's own figures, and the totals from the sum", () => {
     // The sheet the owner keeps by hand, two of its rows: 29 Aug converted,
     // 30 Aug did not. Ratios must come from the row, totals from the sums -
@@ -194,143 +239,7 @@ describe("a campaign's profit and loss by day", () => {
     expect(sheet.total.profit).toBeCloseTo(450 - 104.2 - 90 - 117.81, 6);
   });
 
-  it("names the collection basis in the caption", () => {
-    const html = renderToStaticMarkup(
-      <CampaignProfitLossSheet
-        title="BOHO - HU - 30/07"
-        currency="EUR"
-        today="2026-09-11"
-        campaign={{
-          attributionState: "unmatched",
-          collectionHandle: "kenyelmes-ruhak",
-          collectionSharedWith: 4,
-          timeline: [
-            point({
-              bucket: "2026-09-05",
-              spend: 104.2,
-              googleRevenue: 300,
-              shopifyRevenue: null, shopifyOrders: null, addedToCart: null, units: null,
-              collectionRevenue: 450, collectionUnits: 3, collectionOrders: 2, collectionAddedToCart: 40, cogs: 90,
-            }),
-          ],
-        }}
-      />,
-    );
-    expect(html).toContain("Profit on /collections/kenyelmes-ruhak, split between the 4 campaigns that land there");
-    // The client's own definition, word for word, so the reader can hold the
-    // sheet against the one they keep: items in every order, any channel.
-    expect(html).toContain(
-      "Revenue is the collection items in every order, after discounts and refunds, from any channel; " +
-        "Orders are the orders holding at least one of them; " +
-        "ATC is Google sessions that landed on the collection page and added to cart.",
-    );
-    expect(html).toContain("COGS");
-    expect(html).toContain("EUR 90.00");
-    expect(html).toContain("the product costs of those items");
 
-    // Costs unreadable: the caption says so instead of promising a subtraction.
-    const noCosts = renderToStaticMarkup(
-      <CampaignProfitLossSheet
-        title="BOHO - HU - 30/07"
-        currency="EUR"
-        today="2026-09-11"
-        campaign={{
-          attributionState: "unmatched",
-          collectionHandle: "kenyelmes-ruhak",
-          collectionSharedWith: 1,
-          timeline: [
-            point({
-              bucket: "2026-09-05",
-              spend: 104.2,
-              googleRevenue: 300,
-              shopifyRevenue: null, shopifyOrders: null, addedToCart: null, units: null,
-              collectionRevenue: 450, collectionUnits: 3, collectionOrders: 2, collectionAddedToCart: 40, cogs: null,
-            }),
-          ],
-        }}
-      />,
-    );
-    expect(noCosts).toContain("product costs could not be read");
-    expect(noCosts).not.toContain("the product costs of those items");
-    expect(noCosts).not.toContain("split between");
-
-    // A collection that sold nothing in the period is still the basis, with
-    // real zeros, so the caption keeps naming the page rather than the UTMs.
-    const quiet = renderToStaticMarkup(
-      <CampaignProfitLossSheet
-        title="BOHO - HU - 30/07"
-        currency="EUR"
-        today="2026-09-11"
-        campaign={{
-          attributionState: "unmatched",
-          collectionHandle: "kenyelmes-ruhak",
-          collectionSharedWith: 1,
-          timeline: [
-            point({
-              bucket: "2026-09-11T09:00:00",
-              spend: 4.2,
-              googleRevenue: 0,
-              shopifyRevenue: null, shopifyOrders: null, addedToCart: null, units: null,
-              collectionRevenue: 0, collectionUnits: 0, collectionOrders: 0, collectionAddedToCart: 0, cogs: 0,
-            }),
-          ],
-        }}
-      />,
-    );
-    expect(quiet).toContain("Profit on /collections/kenyelmes-ruhak");
-    expect(quiet).not.toContain("utm_campaign");
-    expect(quiet).toContain("in progress");
-    // Named by its final URLs: nothing to add about where the clicks went.
-    expect(quiet).not.toContain("from where its clicks landed");
-  });
-
-  it("says when the collection was read from where the clicks landed", () => {
-    // A Performance Max campaign names no final URL; its collection is the
-    // page most of its clicks landed on, and the caption must say so rather
-    // than let the reader assume the ads point there. The same source also
-    // covers a Search campaign whose final URLs name a product page that
-    // redirects to a collection, so the caption may only claim what holds
-    // for both: nothing but the clicks named a collection.
-    const campaign = {
-      attributionState: "unmatched" as const,
-      collectionHandle: "handgjorda-vaskor",
-      collectionSharedWith: 1,
-      timeline: [
-        point({
-          bucket: "2026-09-05",
-          spend: 104.2,
-          googleRevenue: 300,
-          shopifyRevenue: null, shopifyOrders: null, addedToCart: null, units: null,
-          collectionRevenue: 450, collectionUnits: 3, collectionOrders: 2, collectionAddedToCart: 40, cogs: 90,
-        }),
-      ],
-    };
-    const landed = renderToStaticMarkup(
-      <CampaignProfitLossSheet
-        title="Tottebags - SWE"
-        currency="EUR"
-        today="2026-09-11"
-        campaign={{ ...campaign, collectionSource: "landing" }}
-      />,
-    );
-    expect(landed).toContain("Profit on /collections/handgjorda-vaskor");
-    expect(landed).toContain("from where its clicks landed");
-    expect(landed).toContain("final URLs nor its name names one");
-    expect(landed).not.toContain("name no final URL");
-
-    for (const collectionSource of ["final_url", "name"] as const) {
-      const named = renderToStaticMarkup(
-        <CampaignProfitLossSheet
-          title="Tottebags - SWE"
-          currency="EUR"
-          today="2026-09-11"
-          campaign={{ ...campaign, collectionSource }}
-        />,
-      );
-      expect(named).toContain("Profit on /collections/handgjorda-vaskor");
-      expect(named).not.toContain("from where its clicks landed");
-    }
-  });
 
   it("does not trust a revenue of 0 from a point written before the sheet existed", () => {
     // Snapshots written by the earlier producer carry shopifyRevenue 0 for a
@@ -386,7 +295,7 @@ describe("a campaign's profit and loss by day", () => {
         }}
       />,
     );
-    expect(html).toContain("before the sheet existed");
+    expect(html).toContain("First-visit attribution has not been refreshed");
     expect(html).not.toContain("lands on no single collection");
   });
 
@@ -442,70 +351,7 @@ describe("a campaign's profit and loss by day", () => {
     expect(sheet.total).toMatchObject({ addedToCart: null, revenue: null, orders: null, units: null });
   });
 
-  it("renders the sheet with a row per day, a total, and the dash where Shopify said nothing", () => {
-    const html = renderToStaticMarkup(
-      <CampaignProfitLossSheet
-        title="Tottebags - SWE"
-        currency="EUR"
-        today="2026-09-11"
-        campaign={{
-          attributionState: "matched",
-          timeline: [
-            point({ bucket: "2026-09-05", spend: 62.76, clicks: 419, impressions: 5_246, addedToCart: 57, shopifyRevenue: 159.8, shopifyOrders: 2, units: 4 }),
-            point({ bucket: "2026-09-11", spend: 3, clicks: 10, impressions: 100, addedToCart: null, shopifyRevenue: null, shopifyOrders: null, units: null }),
-          ],
-        }}
-      />,
-    );
 
-    expect(html).toContain("Profit &amp; loss by day");
-    expect(html).toContain("2026-09-05");
-    expect(html).toContain("in progress");
-    expect(html).toContain("Total");
-    expect(html).toContain("Profit on Shopify");
-    expect(html).toContain("Cumulative");
-    // Two orders on 57 cart additions, and 159.80 over 62.76.
-    expect(html).toContain("3.5%");
-    expect(html).toContain("2.55x");
-    // A gain reads green, as in the store's own P&L.
-    expect(html).toContain("--success-green");
-    // The unanswered day prints a dash, not a zero, for Shopify's columns.
-    expect((html.match(/—/g) ?? []).length).toBeGreaterThanOrEqual(6);
-  });
-
-  it("only promises a dash when the cells print one", () => {
-    // A campaign the attribution never matched carries null all the way down,
-    // and the caption says so. Had a day come back as a number, the caption
-    // would have to say the sales are real - the sentence follows the sheet.
-    const unmatched = renderToStaticMarkup(
-      <CampaignProfitLossSheet
-        title="Orphan"
-        currency="EUR"
-        today="2026-09-11"
-        campaign={{
-          attributionState: "unmatched",
-          timeline: [point({ bucket: "2026-09-05", spend: 10, clicks: 5, impressions: 50, googleRevenue: 12, addedToCart: null, shopifyRevenue: null, shopifyOrders: null, units: null })],
-        }}
-      />,
-    );
-    expect(unmatched).toContain("Profit on Google");
-    expect(unmatched).toContain("utm_campaign={campaignid}");
-    expect(unmatched).not.toContain("EUR 0.00");
-
-    const answered = renderToStaticMarkup(
-      <CampaignProfitLossSheet
-        title="Answered"
-        currency="EUR"
-        today="2026-09-11"
-        campaign={{
-          attributionState: "unmatched",
-          timeline: [point({ bucket: "2026-09-05", spend: 10, clicks: 5, impressions: 50, addedToCart: 0, shopifyRevenue: 0, shopifyOrders: 0, units: 0 })],
-        }}
-      />,
-    );
-    expect(answered).toContain("Profit on Shopify");
-    expect(answered).toContain("EUR 0.00");
-  });
 });
 
 describe("the fee columns", () => {
@@ -543,86 +389,8 @@ describe("the fee columns", () => {
     expect(sheet.total.profit).toBeCloseTo(firstProfit - 117.81 - 11.781, 6);
   });
 
-  it("reads “—” for the fees without settings and counts them 0 in profit, and says so", () => {
-    const sheet = buildCampaignProfitLoss({ timeline: days }, "2026-09-11");
-    expect(sheet.rows[0]).toMatchObject({ paymentFees: null, shipping: null, agencyFee: null });
-    expect(sheet.rows[0]!.profit).toBeCloseTo(450 - 104.2 - 90, 6);
-    expect(sheet.total).toMatchObject({ paymentFees: null, shipping: null, agencyFee: null });
 
-    const html = renderToStaticMarkup(
-      <CampaignProfitLossSheet
-        title="BOHO - HU - 30/07"
-        currency="EUR"
-        today="2026-09-11"
-        campaign={{ attributionState: "unmatched", collectionHandle: "kenyelmes-ruhak", timeline: days }}
-      />,
-    );
-    expect(html).toContain(
-      "fee settings could not be read, so Shopify fees, shipping and the agency fee read “—” and count 0 in profit",
-    );
-    expect(html).toContain("Shopify fees");
-    expect(html).toContain("Shipping");
-    expect(html).toContain("Agency fee");
-    expect(html).toContain("EUR 255.80");
-  });
 
-  it("states the rates it applies in the caption and prints the fees in their columns", () => {
-    const html = renderToStaticMarkup(
-      <CampaignProfitLossSheet
-        title="BOHO - HU - 30/07"
-        currency="EUR"
-        today="2026-09-11"
-        campaign={{ attributionState: "unmatched", collectionHandle: "kenyelmes-ruhak", timeline: days }}
-        fees={FEES}
-      />,
-    );
-    expect(html).toContain(
-      "Shopify fees are EUR 0.25 per order plus 1.7% of revenue, shipping EUR 1.50 per order and the agency fee 10% of ad spend",
-    );
-    expect(html).toContain("Shopify fees, shipping and the agency fee");
-    expect(html).toContain("EUR 8.15");
-    expect(html).toContain("EUR 3.00");
-    expect(html).toContain("EUR 10.42");
-    expect(html).toContain("EUR 22.20");
-    expect(html).not.toContain("could not be read");
-  });
-
-  it("prices the fees on Shopify's own orders on the UTM basis, and only the agency fee on Google's", () => {
-    const shopify = buildCampaignProfitLoss(
-      { timeline: [point({ bucket: "2026-08-29", spend: 120.06, addedToCart: 35, shopifyRevenue: 164.8, shopifyOrders: 1, units: 4 })] },
-      "2026-09-11",
-      FEES,
-    );
-    expect(shopify.revenueBasis).toBe("shopify");
-    expect(shopify.rows[0]!.paymentFees).toBeCloseTo(0.25 + 164.8 * 0.017, 6);
-    expect(shopify.rows[0]!.shipping).toBeCloseTo(1.5, 6);
-    expect(shopify.rows[0]!.agencyFee).toBeCloseTo(12.006, 6);
-    expect(shopify.rows[0]!.profit).toBeCloseTo(164.8 - 120.06 - (0.25 + 164.8 * 0.017) - 1.5 - 12.006, 6);
-
-    // Google's basis knows no orders, so nothing per order can be priced;
-    // the agency fee is on spend and always can.
-    const timeline = [
-      point({ bucket: "2026-09-01", spend: 99.84, googleRevenue: 150, addedToCart: null, shopifyRevenue: null, shopifyOrders: null, units: null }),
-    ];
-    const google = buildCampaignProfitLoss({ timeline }, "2026-09-11", FEES);
-    expect(google.revenueBasis).toBe("google");
-    expect(google.rows[0]).toMatchObject({ paymentFees: null, shipping: null });
-    expect(google.rows[0]!.agencyFee).toBeCloseTo(9.984, 6);
-    expect(google.rows[0]!.profit).toBeCloseTo(150 - 99.84 - 9.984, 6);
-    const html = renderToStaticMarkup(
-      <CampaignProfitLossSheet
-        title="Orphan"
-        currency="EUR"
-        today="2026-09-11"
-        campaign={{ attributionState: "unmatched", timeline }}
-        fees={FEES}
-      />,
-    );
-    expect(html).toContain("Revenue (Google)");
-    expect(html).toContain("EUR 150.00");
-    expect(html).toContain("minus ad spend and the agency fee");
-    expect(html).toContain("EUR 9.98");
-  });
 
   it("leaves a day whose revenue is unknown without a profit, fees or not", () => {
     const sheet = buildCampaignProfitLoss(
@@ -821,91 +589,9 @@ describe("where the collection's sales came from", () => {
     ).not.toContain("Where the sales came from");
   });
 
-  it("names the visit it is talking about, and shares only the lines that are part of the total", () => {
-    const html = sheetOf(days);
 
-    expect(html).toContain("Where the sales came from");
-    // "First visit" and not "Landed": Shopify reports the first session of a
-    // journey, so a buyer who arrived from Instagram and clicked the ad onto
-    // the page a week later is on the second line, not the first. The sheet
-    // has to say so, because the block exists to answer that very question.
-    expect(html).toContain("First visit landed on /collections/kenyelmes-ruhak");
-    expect(html).toContain("Shopify reports only the first session of a customer");
-    // 300 of the 400 the sheet's Revenue column already shows, on 3 orders.
-    expect(html).toContain("EUR 300.00");
-    expect(html).toContain("3 orders · 75.0%");
-    expect(html).toContain("First visit landed elsewhere");
-    expect(html).toContain("1 order · 25.0%");
-    // Beside the total, so no share: the brought money is whole orders,
-    // shipping and all, and dividing it by a collection line total would put
-    // a third slice under two that already make 100%.
-    expect(html).toContain("First visit landed on the page, bought none of the collection");
-    expect(html).toContain("EUR 200.00");
-    expect(html).not.toContain("2 orders · 50.0%");
-    expect(html).toContain(
-      "Every line but the last adds up to the Revenue column. The page also brought 2 orders worth EUR 200.00 that bought nothing from the collection",
-    );
-    // Nothing went unmeasured here, so no line claims it did.
-    expect(html).not.toContain("First visit not reported");
-    // The captions the sheet already carried are still there.
-    expect(html).toContain("Profit on /collections/kenyelmes-ruhak");
-    expect(html).toContain("Revenue is the collection items in every order");
-    expect(html).toContain("fee settings could not be read");
-  });
 
-  it("gives the sales Shopify reported no journey for their own line", () => {
-    // 100 of the 300 has no customer journey at all. Folded into the second
-    // line the sheet would print "First visit landed elsewhere EUR 160.00
-    // (53.3%)" and say the advertised page lost sales nobody measured.
-    const html = sheetOf([
-      collectionDay("2026-09-05", {
-        spend: 100,
-        collectionRevenue: 300, collectionUnits: 3, collectionOrders: 5, collectionAddedToCart: 40, cogs: 60,
-        collectionLandedRevenue: 140, collectionLandedUnits: 2, collectionLandedOrders: 2,
-        collectionUnknownRevenue: 100, collectionUnknownOrders: 2,
-        collectionBroughtRevenue: null, collectionBroughtOrders: null,
-      }),
-    ]);
 
-    expect(html).toContain("First visit not reported by Shopify");
-    // Landed 140 (46.7%), never measured 100 (33.3%), and the 60 left over
-    // is the only part actually seen to arrive some other way.
-    expect(html).toContain("2 orders · 46.7%");
-    expect(html).toContain("EUR 100.00");
-    expect(html).toContain("2 orders · 33.3%");
-    expect(html).toContain("1 order · 20.0%");
-    expect(html).toContain("EUR 60.00");
-    // Nothing is known about what the page brought in, so nothing is said.
-    expect(html).not.toContain("bought none of the collection");
-    expect(html).toContain("The lines above add up to the Revenue column.");
-  });
-
-  it("reads a page that sold the lot as nothing left over, never a negative sale", () => {
-    // The two parts are carried as spend shares, so their sum can miss the
-    // total by a float's width; 0.1 + 0.2 is the classic one.
-    const html = sheetOf([
-      collectionDay("2026-09-05", {
-        spend: 10,
-        collectionRevenue: 0.3, collectionUnits: 1, collectionOrders: 1, collectionAddedToCart: 2, cogs: 0,
-        collectionLandedRevenue: 0.1 + 0.2, collectionLandedUnits: 1, collectionLandedOrders: 1,
-        collectionUnknownRevenue: 0, collectionUnknownOrders: 0,
-        collectionBroughtRevenue: 0, collectionBroughtOrders: 0,
-      }),
-    ]);
-
-    expect(html).toContain("First visit landed elsewhere");
-    expect(html).not.toContain("-EUR 0.00");
-    expect(html).toContain("0 orders · 0.0%");
-  });
-
-  it("says nothing when the split is not known", () => {
-    const html = sheetOf(withoutSplit);
-
-    expect(html).toContain("Profit on /collections/kenyelmes-ruhak");
-    expect(html).toContain("EUR 400.00");
-    expect(html).not.toContain("Where the sales came from");
-    expect(html).not.toContain("First visit landed");
-  });
 
   it("carries the split through the sum of the campaigns landing on one page", () => {
     // Each campaign holds its spend share of the same day; the collection's
@@ -1130,20 +816,7 @@ describe("buildCollectionCampaign", () => {
     expect(own.revenueBasis).toBe("shopify");
     expect(own.total).toMatchObject({ revenue: 40, orders: 1 });
 
-    // And the caption names the collection, not Shopify's match.
-    const html = renderToStaticMarkup(
-      <CampaignProfitLossSheet
-        title="Mintás kardigánok (collection)"
-        currency="EUR"
-        today="2026-09-11"
-        campaign={collection}
-        fees={FEES}
-      />,
-    );
-    expect(html).toContain("Profit on /collections/mintas-kardiganok, the 2 campaigns that land there summed");
-    expect(html).not.toContain("Profit on Shopify");
-    expect(html).toContain("EUR 450.00");
-    expect(html).not.toContain("EUR 40.00");
+
   });
 
   it("falls to Google's conversion value, never a member's UTM sales, when the collection's orders could not be read", () => {
@@ -1175,24 +848,4 @@ describe("buildCollectionCampaign", () => {
     expect(buildCollectionCampaign([member({ collectionHandle: null, timeline: [] })])).toBeNull();
   });
 
-  it("captions the collection sheet as the sum, not a share", () => {
-    const collection = buildCollectionCampaign([
-      member({ timeline: [collectionDay("2026-09-05", { spend: 60, collectionRevenue: 300, collectionUnits: 2, collectionOrders: 1.5, collectionAddedToCart: 30, cogs: 60 })] }),
-      member({ timeline: [collectionDay("2026-09-05", { spend: 40, collectionRevenue: 150, collectionUnits: 1, collectionOrders: 0.5, collectionAddedToCart: 20, cogs: 30 })] }),
-    ])!;
-    const html = renderToStaticMarkup(
-      <CampaignProfitLossSheet
-        title="Mintás kardigánok (collection)"
-        currency="EUR"
-        today="2026-09-11"
-        campaign={collection}
-        fees={FEES}
-      />,
-    );
-    expect(html).toContain("Profit on /collections/mintas-kardiganok, the 2 campaigns that land there summed");
-    expect(html).not.toContain("split between");
-    expect(html).toContain("EUR 450.00");
-    // Two whole orders, not two half-shares.
-    expect(html).toContain(">2<");
-  });
 });

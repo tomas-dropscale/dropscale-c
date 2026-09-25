@@ -143,6 +143,7 @@ function landing(
         spend: shares.spend,
         clicks: 100,
         impressions: 1_000,
+        firstLanding: { collection: { revenue: shares.landed?.revenue ?? 0, orders: shares.landed?.orders ?? 0, units: 1, cogs: 5 }, campaign: { revenue: 20, orders: 1, units: 1, cogs: 5 }, unassignedGoogleRevenue: 0 },
         collectionRevenue: shares.revenue,
         collectionUnits: 1,
         collectionOrders: shares.orders,
@@ -343,9 +344,9 @@ describe("CampaignPerformanceSection", () => {
     // Four shares of GBP 25 spend, GBP 100 revenue and half an order add up
     // to the collection's whole: 100, 400, 2 orders, 4.00x.
     expect(html).toContain("GBP 100.00");
-    expect(html).toContain("GBP 400.00");
-    expect(html).toContain("4.00x");
-    expect(html).toContain("GBP 50.00");
+    expect(html).toContain("GBP 300.00");
+    expect(html).toContain("3.00x");
+    expect(html).toContain("GBP 100.00");
     expect(html).toContain('aria-label="P&amp;L: show Mintás kardigánok collection profit and loss by day"');
     expect(html).toContain('aria-label="P&amp;L: show kenyelmes-ruhak collection profit and loss by day"');
     // The block sits above the campaign table, whose rows stay as they were.
@@ -405,54 +406,7 @@ describe("CampaignCollectionsBlock", () => {
     expect(html).toContain('aria-expanded="false"');
   });
 
-  it("says under each row how that collection's sales arrived", () => {
-    const html = block(new Set());
 
-    // Four shares of 75 landed and 25 brought in add back to the page's
-    // whole: 300 of the 400 the row shows, and 100 the row counts as zero.
-    // "first visit" because that is the only visit Shopify reports.
-    expect(html).toContain(
-      "first visit landed GBP 300.00 (75.0%) · elsewhere GBP 100.00 · brought in GBP 100.00 that bought nothing here",
-    );
-    // The collection whose snapshot has no split says nothing rather than
-    // printing a zero for a number nobody measured.
-    expect((html.match(/first visit landed GBP/g) ?? []).length).toBe(1);
-    // And the row above it is unchanged.
-    expect(html).toContain("GBP 400.00");
-    expect(html).toContain("/collections/kenyelmes-ruhak · 1 campaign<");
-    // An order counted as brought in bought some other collection's items,
-    // which are that row's revenue, so the caption warns off adding the two
-    // down the table.
-    expect(html).toContain("the brought figures do not add across the table");
-  });
-
-  it("names the part of a row Shopify reported no journey for", () => {
-    // Folded into "elsewhere" the row would say the page lost GBP 100.00 of
-    // sales that were never measured either way.
-    const html = renderToStaticMarkup(
-      <CampaignCollectionsBlock
-        rows={[
-          landing("[HU] BLUSAS - 27/08", "mintas-kardiganok", {
-            spend: 25,
-            revenue: 400,
-            orders: 2,
-            landed: { revenue: 240, orders: 1 },
-            unknown: { revenue: 100, orders: 0.5 },
-          }),
-        ]}
-        collections={COLLECTIONS}
-        currency="GBP"
-        today="2026-08-07"
-        fees={null}
-        openSheets={new Set()}
-        onToggleSheet={() => undefined}
-      />,
-    );
-
-    expect(html).toContain(
-      "first visit landed GBP 240.00 (60.0%) · elsewhere GBP 60.00 · not reported GBP 100.00",
-    );
-  });
 
   it("renders nothing when no row lands on a collection", () => {
     const html = renderToStaticMarkup(

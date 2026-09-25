@@ -277,6 +277,7 @@ export type SyncedOrder = {
   paid: boolean;
   /** Path the customer FIRST landed on (rev-share landing rule), or null. */
   landingPath: string | null;
+  firstVisit?: { source: string | null; medium: string | null; campaign: string | null } | null;
   /** What has been refunded on this order so far, store base currency. */
   refunded: number;
   lines: SyncedOrderLine[];
@@ -487,7 +488,7 @@ export async function fetchDailySales(
         landingPage: string | null;
         source: string | null;
         referrerUrl: string | null;
-        utmParameters: { source: string | null } | null;
+        utmParameters: { source: string | null; medium: string | null; campaign: string | null } | null;
       } | null;
     } | null;
     taxesIncluded: boolean;
@@ -572,7 +573,7 @@ export async function fetchDailySales(
                   landingPage
                   source
                   referrerUrl
-                  utmParameters { source }
+                  utmParameters { source medium campaign }
                 }
               }
               taxesIncluded
@@ -867,6 +868,11 @@ export async function fetchDailySales(
       total,
       paid,
       landingPath: visit?.landingPage ?? null,
+      firstVisit: visit ? {
+        source: visit.utmParameters?.source ?? visit.source ?? null,
+        medium: visit.utmParameters?.medium ?? null,
+        campaign: visit.utmParameters?.campaign ?? null,
+      } : null,
       refunded,
       lines,
       // Validated above as gid://shopify/Order/<digits>; the digits are the id.

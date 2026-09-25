@@ -1,4 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { projectFirstLandingRoas, type CampaignLandingRoas } from "./campaign-first-landing";
+import { readCampaignFirstLandingSnapshot } from "@/lib/admin/store-analytics";
 
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/service";
@@ -114,6 +116,7 @@ export type AdminAccountCampaigns = {
 };
 
 export type AdminLiveCampaign = LiveCampaign & {
+  landingRoas?: CampaignLandingRoas;
   /** Only normalized V2 campaigns can be targeted by audited controls. */
   reportingBindingId: string | null;
   googleAdsConnectionId: string | null;
@@ -909,6 +912,7 @@ export async function fetchAdminCampaigns(
       googleSources,
       campaignAccountIds,
       campaignControlsEnabled,
+      metricAccountIds,
     }): Promise<AdminAccountCampaigns> => {
       const connected = googleSources === null
         ? googleConfigured && account.google_ads_connected && Boolean(account.google_ads_customer_id)
@@ -1050,6 +1054,17 @@ export async function fetchAdminCampaigns(
       }
 
       const spend = campaigns.reduce((sum, campaign) => sum + campaign.spend, 0);
+      if (!options.providerOnly && campaigns.length) {
+        const saved = await readCampaignFirstLandingSnapshot({
+          clientId: account.client_id,
+          store: { accountId: account.id, activityAccountIds: metricAccountIds, currency: account.currency, days: [] },
+          range,
+        }).catch(() => ({ rows: [], refreshedAt: null }));
+        const attribution = projectFirstLandingRoas(campaigns, saved.rows, saved.refreshedAt);
+        campaigns = campaigns.map((campaign) => ({
+          ...campaign, landingRoas: attribution.get(`${campaign.ad_account_id}:${campaign.providerCampaignId}`),
+        }));
+      }
       return {
         account,
         campaigns,

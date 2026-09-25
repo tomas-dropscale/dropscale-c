@@ -376,7 +376,7 @@ describe("AnalyticsView", () => {
     // 2d21f50 removed the per-campaign Shopify REV./Real ROAS columns; Google
     // ROAS is the campaign table's return column, while Shopify return (Real
     // ROAS) lives in the Collection Return section.
-    expect(html).toContain(">Google ROAS</th>");
+    expect(html).toContain(">Real ROAS</th>");
     expect(html).not.toContain(">REV.</th>");
     expect(html).toContain(">Real ROAS</th>");
     expect(html).not.toContain("Provider + Shopify");
