@@ -224,13 +224,26 @@ describe("CampaignsView approved visual structure", () => {
     expect(html).toContain(message);
   });
 
-  it("shows real collection ROAS and Google individual even without a Shopify campaign ID", () => {
+  it("shows the shared collection ROAS once and each exact campaign's own Google ROAS", () => {
     const data = structuredClone(clients);
-    data[0].stores[0].campaigns[0].landingRoas = { handle: "summer", revenue: null, roas: null, collectionRevenue: 4800, collectionRoas: 1.6, unassignedGoogleRevenue: 100, refreshedAt: "2026-09-25T14:00:00Z" };
+    const campaigns = data[0].stores[0].campaigns;
+    const landing = { handle: "summer", revenue: null, roas: null, collectionRevenue: 4800, collectionRoas: 1.6, unassignedGoogleRevenue: 100, refreshedAt: "2026-09-25T14:00:00Z" };
+    campaigns[0].landingRoas = landing;
+    campaigns[1].landingRoas = landing;
+    campaigns.push({ ...campaigns[0], providerCampaignId: "99", name: "Third campaign", googleRoas: 0 });
     const html = renderToStaticMarkup(<CampaignsView clients={data} history={[]} historyTruncated={false} range={range} />);
     expect(html).toContain("/collections/summer");
-    expect(html).toContain("1.60x");
-    expect(html).toContain("Google individual: 2.50x");
+    expect(html.match(/1\.60x/g)).toHaveLength(1);
+    const rows = html.split("</li>");
+    const collection = rows.find((row) => row.includes('aria-label="Collection summer overall ROAS"'))!;
+    expect(collection).toContain("1.60x");
+    expect(collection).toContain("3 campanhas");
+    for (const [name, id, roas] of [[campaigns[0].name, "77", "2.50x"], [campaigns[1].name, "88", "1.25x"], [campaigns[2].name, "99", "0.00x"]]) {
+      const row = rows.find((value) => value.includes(`aria-label="Google campaign ${name}"`))!;
+      expect(row).toContain(`ROAS reported by Google for campaign ${id}`);
+      expect(row).toContain(roas);
+      expect(row).not.toContain("1.60x");
+    }
     expect(html).toContain("Sales snapshot 25 Sept, 15:00 (Lisbon)");
     expect(html).not.toContain("attribution incomplete");
     expect(html).toContain("STORE TOTAL");

@@ -1,7 +1,6 @@
 "use client";
 
 import * as React from "react";
-import { projectFirstLandingRoas } from "../../lib/admin/campaign-first-landing";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -694,11 +693,6 @@ export function CampaignPerformanceSection({
       return next;
     });
   }
-  const landingRoas = projectFirstLandingRoas(
-    rows.map((campaign) => ({ ad_account_id: campaign.accountId, providerCampaignId: campaign.campaignId, spend: campaign.spend })),
-    rows,
-    null,
-  );
   const toggleCampaign = (key: string) => toggleIn(setOpenCampaigns, key);
   const toggleSheet = (key: string) => toggleIn(setOpenSheets, key);
   const toggleCollectionSheet = (handle: string) => toggleIn(setOpenCollectionSheets, handle);
@@ -750,7 +744,7 @@ export function CampaignPerformanceSection({
                 <th className="px-2.5 py-2.5 text-center font-medium">CPM</th>
                 <th className="px-2.5 py-2.5 text-center font-medium">CPA</th>
                 <th className="px-2.5 py-2.5 text-center font-medium">Conv.</th>
-                <th className="px-2.5 py-2.5 text-center font-medium">Real ROAS</th>
+                <th className="px-2.5 py-2.5 text-center font-medium">Google individual ROAS</th>
                 <th className="px-5 py-2.5 text-center font-medium">Tracking</th>
               </tr>
             </thead>
@@ -759,7 +753,6 @@ export function CampaignPerformanceSection({
                 const key = `${campaign.accountId}:${campaign.campaignId}`;
                 const open = openCampaigns.has(key);
                 const sheetOpen = openSheets.has(key);
-                const realRoas = landingRoas.get(key)?.collectionRoas ?? null;
                 const breakdownWarnings = campaign.breakdown.sources
                   .filter((source) => source.state === "failed" || source.state === "unavailable")
                   .map((source) => source.reason)
@@ -803,7 +796,7 @@ export function CampaignPerformanceSection({
                       <td className="px-2.5 py-3 text-center tabular-nums">{campaign.cpm === null ? "—" : money(campaign.cpm, currency)}</td>
                       <td className="px-2.5 py-3 text-center tabular-nums">{campaign.cpa === null ? "—" : money(campaign.cpa, currency)}</td>
                       <td className="px-2.5 py-3 text-center tabular-nums">{campaign.conversions === null ? "—" : integer(campaign.conversions)}</td>
-                      <td className="px-2.5 py-3 text-center tabular-nums">{realRoas === null ? "—" : multiplier(realRoas)}<span className="block text-[10px] text-[var(--text-muted)]">Google individual: {campaign.googleRoas === null ? "—" : multiplier(campaign.googleRoas)}</span></td>
+                      <td className="px-2.5 py-3 text-center tabular-nums" title={`Google campaign ${campaign.campaignId}`}>{campaign.googleRoas === null ? "—" : multiplier(campaign.googleRoas)}</td>
                       <td className="px-5 py-2 text-center">
                         <div className="flex items-center justify-center gap-2">
                           <RoasEvolutionHover

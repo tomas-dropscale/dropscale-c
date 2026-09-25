@@ -426,7 +426,7 @@ describe("CampaignCollectionsBlock", () => {
 });
 
 
-it("shares collection real ROAS while preserving each campaign's Google individual ROAS", () => {
+it("keeps collection real ROAS in the collection row and Google individual in campaign rows", () => {
   const rows = [
     { ...landing("First", "summer", { spend: 20, revenue: 900, orders: 2, landed: { revenue: 60, orders: 1 } }), googleRoas: 1.25 },
     { ...landing("Second", "summer", { spend: 40, revenue: 1800, orders: 4, landed: { revenue: 120, orders: 2 } }), googleRoas: 0 },
@@ -434,7 +434,12 @@ it("shares collection real ROAS while preserving each campaign's Google individu
   for (const row of rows) row.timeline[0].firstLanding!.campaignComplete = false;
   const html = render(campaigns({ data: { granularity: "day", rows } }), null);
   const renderedRows = html.split("</tr>");
-  expect(renderedRows.find((row) => row.includes("Google individual: 1.25x"))).toContain("3.00x");
-  expect(renderedRows.find((row) => row.includes("Google individual: 0.00x"))).toContain("3.00x");
+  expect(html.match(/3\.00x/g)).toHaveLength(1);
+  const first = renderedRows.find((row) => row.includes('title="Google campaign First"'))!;
+  const second = renderedRows.find((row) => row.includes('title="Google campaign Second"'))!;
+  expect(first).toContain("1.25x");
+  expect(second).toContain("0.00x");
+  expect(first).not.toContain("3.00x");
+  expect(second).not.toContain("3.00x");
   expect(html).not.toContain("45.00x");
 });

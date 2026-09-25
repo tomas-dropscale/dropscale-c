@@ -543,6 +543,7 @@ function CampaignRow({
 
   return (
     <li
+      aria-label={`Google campaign ${campaign.name}`}
       className={cn(
         "grid grid-cols-2 items-center gap-x-3 gap-y-3 border-t border-[var(--border-subtle)] bg-[var(--bg-base)] px-4 py-3 lg:px-5",
         CAMPAIGN_GRID,
@@ -555,11 +556,7 @@ function CampaignRow({
         <p className="mt-1 text-[11px] text-[var(--text-muted)]" title="Última alteração de orçamento confirmada e registada na Dropscale">
           {campaign.budgetChangeLabel}
         </p>
-        {campaign.landingRoas && (
-          <p className="mt-1 truncate text-[11px] text-[var(--text-muted)]" title={`/collections/${campaign.landingRoas.handle}${campaign.landingRoas.refreshedAt ? ` · Sales snapshot ${safeDate(SNAPSHOT_DATE_TIME, campaign.landingRoas.refreshedAt)} (Lisbon)` : ""}`}>
-            /collections/{campaign.landingRoas.handle}
-          </p>
-        )}
+
       </div>
 
       <div className="min-w-0 xl:text-center">
@@ -589,11 +586,11 @@ function CampaignRow({
         />
       </div>
 
-      <CampaignMetric label="Real ROAS">
-        <span title="Real collection ROAS: collection items from first visits landing on this collection, across all channels, divided by the combined spend of its campaigns">
-          {campaign.landingRoas?.collectionRoas == null ? "—" : multiplier(campaign.landingRoas.collectionRoas)}
+      <CampaignMetric label="Google individual">
+        <span title={`ROAS reported by Google for campaign ${campaign.providerCampaignId}`}>
+          {campaign.googleRoas === null ? "—" : multiplier(campaign.googleRoas)}
         </span>
-        <span className="block text-[10px] text-[var(--text-muted)]" title="Individual ROAS reported by Google for this campaign">Google individual: {campaign.googleRoas === null ? "—" : multiplier(campaign.googleRoas)}</span>
+        <span className="block text-[10px] text-[var(--text-muted)]">Google individual</span>
       </CampaignMetric>
 
       <div className="flex justify-self-end xl:justify-self-center">
@@ -669,6 +666,13 @@ function StoreGroup({
     ? budgets.reduce((sum, budget) => sum + budget, 0)
     : null;
   const storeLabel = store.domain ? `https://${store.domain}` : store.name;
+  const collectionGroups = new Map<string | null, ProjectedCampaign[]>();
+  for (const campaign of store.campaigns) {
+    const handle = campaign.landingRoas?.handle ?? null;
+    const members = collectionGroups.get(handle) ?? [];
+    members.push(campaign);
+    collectionGroups.set(handle, members);
+  }
 
   return (
     <section aria-labelledby={headingId} className="border-t border-[var(--border-strong)] first:border-t-0">
@@ -728,7 +732,7 @@ function StoreGroup({
         <span
           className="label-caps text-center"
         >
-          Real ROAS
+          ROAS
         </span>
         <span className="label-caps text-center">Action</span>
       </div>
@@ -759,6 +763,7 @@ function StoreGroup({
           </CampaignMetric>
           <CampaignMetric label="ROAS">
             <span title="Whole-store revenue divided by whole-store ad spend">{store.realRoas === null ? "—" : multiplier(store.realRoas)}</span>
+            <span className="block text-[10px] text-[var(--text-muted)]">Global da loja</span>
           </CampaignMetric>
           <span className="hidden xl:block" aria-hidden />
         </li>
@@ -792,17 +797,47 @@ function StoreGroup({
           </li>
         )}
 
-        {store.campaigns.map((campaign) => {
-          const key = campaignKey(campaign);
+        {[...collectionGroups].map(([handle, campaigns]) => {
+          const landing = campaigns[0]?.landingRoas;
           return (
-            <CampaignRow
-              key={key}
-              campaign={campaign}
-              busy={pending.has(key)}
-              statusError={statusErrors[key]}
-              onBudgetChange={onBudgetChange}
-              onStatusChange={onStatusChange}
-            />
+            <React.Fragment key={handle === null ? "unmapped" : `collection:${handle}`}>
+              {landing && (
+                <li
+                  aria-label={`Collection ${handle} overall ROAS`}
+                  className={cn("grid grid-cols-2 items-center gap-x-3 gap-y-2 border-t border-[var(--border-strong)] bg-[var(--accent-gold-dim)] px-4 py-3 lg:px-5", CAMPAIGN_GRID)}
+                >
+                  <div className="col-span-2 min-w-0 xl:col-span-5 xl:pl-6">
+                    <p className="truncate text-[12px] font-semibold text-[var(--text-primary)]" title={`/collections/${handle}`}>
+                      Coleção · /collections/{handle}
+                    </p>
+                    <p className="mt-0.5 text-[11px] text-[var(--text-muted)]">
+                      {campaigns.length} {campaigns.length === 1 ? "campanha" : "campanhas"} · todos os canais
+                      {landing.refreshedAt && <span title="When first-visit collection sales were last read"> · Sales snapshot {safeDate(SNAPSHOT_DATE_TIME, landing.refreshedAt)} (Lisbon)</span>}
+                    </p>
+                  </div>
+                  <CampaignMetric label="Real da coleção">
+                    <span title="Collection items from first visits landing on this collection, across all channels, divided by the combined spend of its campaigns">
+                      {landing.collectionRoas === null ? "—" : multiplier(landing.collectionRoas)}
+                    </span>
+                    <span className="block text-[10px] text-[var(--text-muted)]">Real da coleção</span>
+                  </CampaignMetric>
+                  <span className="hidden xl:block" aria-hidden />
+                </li>
+              )}
+              {campaigns.map((campaign) => {
+                const key = campaignKey(campaign);
+                return (
+                  <CampaignRow
+                    key={key}
+                    campaign={campaign}
+                    busy={pending.has(key)}
+                    statusError={statusErrors[key]}
+                    onBudgetChange={onBudgetChange}
+                    onStatusChange={onStatusChange}
+                  />
+                );
+              })}
+            </React.Fragment>
           );
         })}
       </ul>
