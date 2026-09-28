@@ -37,7 +37,7 @@ export function CampaignDecisionPanel({ decision: s, currency, analyticsHref }: 
       </summary>
       <div className="space-y-4 border-t border-[var(--border-subtle)] p-4">
         <p className="text-[12px] leading-relaxed text-[var(--text-primary)]">{s.reason}</p>
-        <p className="text-[var(--text-secondary)]">Esta análise usa {period}. O ROAS na coluna acima usa o período selecionado na tabela e pode ser diferente.</p>
+        <p className="text-[var(--text-secondary)]">{s.days ? `Esta análise usa ${period}.` : "Ainda não há dias completos para esta análise."} O ROAS na coluna acima usa o período selecionado na tabela e pode ser diferente.</p>
         {s.provisional && <p className="rounded-md bg-[var(--warning-orange)]/8 px-3 py-2 leading-relaxed text-[var(--warning-orange)]">Leitura indicativa: não há histórico completo de alterações para este período. Confirma no Google se o orçamento, estado ou estratégia mudaram antes de agir.</p>}
         <dl className="grid grid-cols-2 gap-3 sm:grid-cols-4">
           {[
@@ -53,9 +53,9 @@ export function CampaignDecisionPanel({ decision: s, currency, analyticsHref }: 
             <p className="font-semibold text-[var(--text-primary)]">Como interpretar</p>
             <p>{s.basis === "google" ? "Receita e ROAS pertencem apenas a esta campanha Google. O equilíbrio é uma referência estimada a partir da margem dos produtos da coleção; não é lucro confirmado desta campanha." : "Só produtos da coleção comprados por quem entrou nela na primeira visita. Todos os canais; gasto somado das campanhas desta coleção, sem duplicar vendas."}</p>
             {s.basis === "google" && <p>ROAS real da coleção no mesmo período: <strong>{s.collectionRoas === null ? "—" : multiplier(s.collectionRoas)}</strong>. Diferenças podem resultar da atribuição e do atraso de conversões do Google.</p>}
-            <p>{s.changedAt ? `Período após a última alteração confirmada na Dropscale (${dayLabel(decisionDay(s.changedAt))}). Alterações diretas no Google ainda não são importadas.` : "Sem data de alteração confirmada: usamos os últimos sete dias fechados como referência, não como prova de estabilidade."}</p>
+            <p>{s.changedAt ? `Período após a última alteração confirmada na Dropscale (${dayLabel(decisionDay(s.changedAt))}). Alterações diretas no Google ainda não são importadas.` : s.startedOn && s.days < 7 ? "A referência está limitada aos dias completos após o início da campanha. Alterações diretas no Google ainda precisam de confirmação." : "Sem data de alteração confirmada: usamos os últimos sete dias fechados como referência, não como prova de estabilidade."}</p>
             {s.startedOn && <p>Início indicado pelo Google: {dayLabel(s.startedOn)}. Os dias anteriores ao início não contam para a avaliação.</p>}
-            <Link href={`/admin/analytics?${params}`} className="inline-flex py-1 font-medium text-[var(--accent-gold-strong)] underline underline-offset-4">Abrir Analytics deste período →</Link>
+            {s.days > 0 && <Link href={`/admin/analytics?${params}`} className="inline-flex py-1 font-medium text-[var(--accent-gold-strong)] underline underline-offset-4">Abrir Analytics deste período →</Link>}
           </div>
           <div className="space-y-2 leading-relaxed text-[var(--text-secondary)]">
             <p className="font-semibold text-[var(--text-primary)]">Equilíbrio estimado da coleção</p>

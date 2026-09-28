@@ -289,6 +289,17 @@ describe("CampaignsView approved visual structure", () => {
     expect(html).toContain("Atribuição incompleta · não significa zero vendas.");
     expect(html).not.toContain("Há vendas na loja; nesta atualização nenhuma");
   });
+  it("does not describe a newly launched campaign as having seven days of analysis", () => {
+    const data=structuredClone(clients);
+    const store=data[0].stores[0];
+    store.campaigns=[{...store.campaigns[0],startDate:"2026-09-28"}];
+    store.decisions=buildStoreCampaignDecisions(store.campaigns,[],{rows:[],fees:null,state:"unavailable",refreshedAt:null},"2026-09-28T11:00:00Z");
+    const html=renderToStaticMarkup(<CampaignsView clients={data} history={[]} historyTruncated={false} range={range} />);
+    expect(html).toContain("Ainda não há dias completos para esta análise.");
+    expect(html).toContain("A referência está limitada aos dias completos após o início");
+    expect(html).not.toContain("usamos os últimos sete dias fechados como referência");
+    expect(html).not.toContain("Abrir Analytics deste período");
+  });
 
   it("keeps successful source rows while warning that a store is partial", () => {
     const partialClients: CampaignViewClient[] = [{
