@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { projectFirstLandingRoas, type CampaignLandingRoas } from "./campaign-first-landing";
-import { readCampaignFirstLandingSnapshot } from "@/lib/admin/store-analytics";
+import { campaignCollectionHandle, readCampaignFirstLandingSnapshot } from "@/lib/admin/store-analytics";
 
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/service";
@@ -1061,7 +1061,7 @@ export async function fetchAdminCampaigns(
           store: { accountId: account.id, activityAccountIds: metricAccountIds, currency: account.currency, days: [] },
           range,
         }).catch(() => ({ rows: [], refreshedAt: null }));
-        const attribution = projectFirstLandingRoas(campaigns, saved.rows, saved.refreshedAt);
+        const attribution = projectFirstLandingRoas(campaigns.map(campaign => ({ ...campaign, collectionHandle: campaignCollectionHandle(campaign) })), saved.rows, saved.refreshedAt);
         campaigns = campaigns.map((campaign) => ({
           ...campaign, landingRoas: attribution.get(`${campaign.ad_account_id}:${campaign.providerCampaignId}`),
         }));

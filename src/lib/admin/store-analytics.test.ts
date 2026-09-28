@@ -1739,6 +1739,7 @@ describe("admin store analytics DAL", () => {
       landedOrders: 1,
       unknownRevenue: 80,
       unknownOrders: 1,
+      firstLanding: { collectionComplete: false },
       broughtRevenue: 0,
       broughtOrders: 0,
       addedToCart: 0,
@@ -3565,6 +3566,8 @@ describe("admin store analytics DAL", () => {
     expect((await readCampaignFirstLandingSnapshot(input)).rows).toEqual([]);
     mocks.readAdminReportingSnapshotFamilySelections.mockResolvedValue(new Map([["store_campaign_performance", { ...selection, snapshot: { ...selection.snapshot as object, rows: [{ rows: [{ ...rows[0], accountId: CHILD_ID }] }] } }]]));
     expect((await readCampaignFirstLandingSnapshot(input)).rows).toEqual([]);
+    mocks.readAdminReportingSnapshotFamilySelections.mockResolvedValue(new Map([["store_campaign_performance", { ...selection, snapshot: { ...selection.snapshot as object, rows: [{ rows: [rows[0],rows[0]] }] } }]]));
+    expect((await readCampaignFirstLandingSnapshot(input)).rows).toEqual([]);
     expect(mocks.fetchLiveCampaignsDetailed).not.toHaveBeenCalled();
     expect(mocks.createShopifyReportingAdapter).not.toHaveBeenCalled();
   });
@@ -3583,6 +3586,10 @@ describe("admin store analytics DAL", () => {
     expect(await readCampaignDecisionSnapshot(input)).toEqual({ rows: [row], fees, refreshedAt: "2026-08-15T10:00:00Z", state: "ready" });
     expect(query.eq).toHaveBeenCalledWith("authority_key", "a".repeat(64));
     expect(query.eq).toHaveBeenCalledWith("scope_account_id", STORE_ID);
+    const complete=snapshots[0];
+    snapshots=[{...complete,state:"partial",last_success_at:"2026-08-15T11:00:00Z"},complete];
+    expect((await readCampaignDecisionSnapshot(input)).state).toBe("ready");
+    snapshots=[complete];
     snapshots = [{ ...snapshots[0], last_success_at: "2026-08-14T22:59:00Z" }];
     expect((await readCampaignDecisionSnapshot(input)).state).toBe("unavailable");
     snapshots = [{ ...snapshots[0], last_success_at: "2026-08-15T10:00:00Z", payload: [{ rows: [{...row,accountId: CHILD_ID}], fees }] }];

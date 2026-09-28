@@ -1,6 +1,6 @@
 import "server-only";
 import type { CampaignViewClient, CampaignActionHistory } from "./campaigns-view";
-import { buildStoreCampaignDecisions, decisionRange, lastDecisionChange, type DecisionSnapshot } from "./campaign-decisions";
+import { buildStoreCampaignDecisions, campaignStartedOn, decisionRange, lastDecisionChange, type DecisionSnapshot } from "./campaign-decisions";
 import { readCampaignDecisionSnapshot } from "./store-analytics";
 
 /** Called after the authenticated Campaigns loader. Only cached evidence; never calls an ad mutation. */
@@ -8,7 +8,7 @@ export async function loadCampaignDecisions(clients: CampaignViewClient[], histo
   const next = clients.map(c => ({ ...c, stores: c.stores.map(s => ({ ...s })) }));
   const jobs = next.flatMap(client => client.stores.map(store => async () => {
     if (!store.campaigns.length) return;
-    const ranges = store.campaigns.map(c => decisionRange(lastDecisionChange(c, history, asOf), asOf));
+    const ranges = store.campaigns.map(c => decisionRange(lastDecisionChange(c, history, asOf), asOf, campaignStartedOn(c, asOf)));
     const fallback = decisionRange(null, asOf);
     const from = ranges.map(r => r.from).concat(fallback.from).sort()[0];
     let snapshot: DecisionSnapshot;
@@ -21,6 +21,8 @@ export async function loadCampaignDecisions(clients: CampaignViewClient[], histo
     } catch {
       snapshot = { rows: [], fees: null, refreshedAt: null, state: "unavailable" };
     }
+    // Historical performance cannot prove the current campaign status or collection membership.
+    if (store.campaignState !== "ready" || store.providerFreshness?.stale) snapshot = { ...snapshot, state: "partial" };
     store.decisions = buildStoreCampaignDecisions(store.campaigns, history, snapshot, asOf);
   }));
   // Bound database fan-out on large agency portfolios.

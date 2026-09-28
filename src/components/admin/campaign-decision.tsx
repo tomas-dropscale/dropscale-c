@@ -28,14 +28,16 @@ export function CampaignDecisionPanel({ decision: s, currency, analyticsHref }: 
   return (
     <details className="group/decision col-span-2 min-w-0 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)]/40 text-[11px] xl:col-span-7 xl:ml-6">
       <summary className="flex cursor-pointer list-none flex-wrap items-center gap-x-3 gap-y-2 rounded-lg px-3 py-2 outline-offset-4 focus-visible:outline-2 focus-visible:outline-[var(--accent-gold)]">
+        <span className="font-medium text-[var(--text-secondary)]">Análise até ontem</span>
         <Badge variant={variant}><Icon className="size-3" aria-hidden />{DECISION_LABELS[s.level]}</Badge>
         <span className="text-[var(--text-secondary)]">{scope} · <strong>{s.roas === null ? "—" : multiplier(s.roas)}</strong> <span className="text-[var(--text-muted)]">/ equilíbrio {s.breakEven === null ? "—" : multiplier(s.breakEven)}</span></span>
-        <span className="text-[var(--text-muted)]">{s.changedAt ? "Após alteração" : "Referência · 7 dias"} · {period}</span>
+        <span className="text-[var(--text-secondary)]">{s.changedAt ? "Após alteração" : s.startedOn && s.days < 7 ? "Após início" : "Referência · 7 dias"} · {period}</span>
         {s.provisional && <span className="text-[var(--warning-orange)]">Confirmar histórico</span>}
         <span className="ml-auto whitespace-nowrap font-medium text-[var(--accent-gold-strong)]"><span className="group-open/decision:hidden">Ver motivo +</span><span className="hidden group-open/decision:inline">Fechar −</span></span>
       </summary>
       <div className="space-y-4 border-t border-[var(--border-subtle)] p-4">
         <p className="text-[12px] leading-relaxed text-[var(--text-primary)]">{s.reason}</p>
+        <p className="text-[var(--text-secondary)]">Esta análise usa {period}. O ROAS na coluna acima usa o período selecionado na tabela e pode ser diferente.</p>
         {s.provisional && <p className="rounded-md bg-[var(--warning-orange)]/8 px-3 py-2 leading-relaxed text-[var(--warning-orange)]">Leitura indicativa: não há histórico completo de alterações para este período. Confirma no Google se o orçamento, estado ou estratégia mudaram antes de agir.</p>}
         <dl className="grid grid-cols-2 gap-3 sm:grid-cols-4">
           {[
@@ -45,13 +47,14 @@ export function CampaignDecisionPanel({ decision: s, currency, analyticsHref }: 
             ["Dias com dados / esperados", `${s.coverage} / ${s.days}`],
           ].map(([label,value]) => <div key={label} className="rounded-md border border-[var(--border-subtle)] p-3"><dt className="text-[var(--text-muted)]">{label}</dt><dd className="mt-1 text-[15px] font-semibold text-[var(--text-primary)]">{value}</dd></div>)}
         </dl>
-        {s.days < 5 && s.level !== "inactive" && <div><div className="h-1.5 overflow-hidden rounded-full bg-[var(--border-subtle)]"><div className="h-full rounded-full bg-[var(--accent-gold)]" style={{ width: `${Math.min(s.days / 5, 1) * 100}%` }} /></div><p className="mt-1 text-[var(--text-muted)]">{s.days}/5 dias completos · hoje e o dia da alteração ficam de fora.</p></div>}
+        {s.days < 5 && s.level !== "inactive" && <div><div className="h-1.5 overflow-hidden rounded-full bg-[var(--border-subtle)]"><div className="h-full rounded-full bg-[var(--accent-gold)]" style={{ width: `${Math.min(s.days / 5, 1) * 100}%` }} /></div><p className="mt-1 text-[var(--text-muted)]">{s.days}/5 dias completos · hoje e o dia do início / alteração ficam de fora.</p></div>}
         <div className="grid gap-4 md:grid-cols-2">
           <div className="space-y-2 leading-relaxed text-[var(--text-secondary)]">
             <p className="font-semibold text-[var(--text-primary)]">Como interpretar</p>
             <p>{s.basis === "google" ? "Receita e ROAS pertencem apenas a esta campanha Google. O equilíbrio é uma referência estimada a partir da margem dos produtos da coleção; não é lucro confirmado desta campanha." : "Só produtos da coleção comprados por quem entrou nela na primeira visita. Todos os canais; gasto somado das campanhas desta coleção, sem duplicar vendas."}</p>
             {s.basis === "google" && <p>ROAS real da coleção no mesmo período: <strong>{s.collectionRoas === null ? "—" : multiplier(s.collectionRoas)}</strong>. Diferenças podem resultar da atribuição e do atraso de conversões do Google.</p>}
             <p>{s.changedAt ? `Período após a última alteração confirmada na Dropscale (${dayLabel(decisionDay(s.changedAt))}). Alterações diretas no Google ainda não são importadas.` : "Sem data de alteração confirmada: usamos os últimos sete dias fechados como referência, não como prova de estabilidade."}</p>
+            {s.startedOn && <p>Início indicado pelo Google: {dayLabel(s.startedOn)}. Os dias anteriores ao início não contam para a avaliação.</p>}
             <Link href={`/admin/analytics?${params}`} className="inline-flex py-1 font-medium text-[var(--accent-gold-strong)] underline underline-offset-4">Abrir Analytics deste período →</Link>
           </div>
           <div className="space-y-2 leading-relaxed text-[var(--text-secondary)]">

@@ -2608,6 +2608,7 @@ export async function attributeCampaignCollections(input: {
         if (!entry) return;
         entry.byDay.set(day, {
           firstLanding: {
+            collectionComplete: input.orders.ok && earned.unknownOrders === 0,
             campaignComplete: input.orders.ok && (unassignedGoogle.get(`${handle}|${day}`) ?? 0) === 0,
             collection: input.orders.ok ? scaleLandingSales(firstCollection.get(`${handle}|${day}`) ?? emptyLandingSales(input.costs !== null), share) : null,
             campaign: input.orders.ok ? firstCampaign.get(`${key}|${day}`) ?? emptyLandingSales(input.costs !== null) : null,
@@ -3541,7 +3542,8 @@ export async function readCampaignFirstLandingSnapshot(input: FetchAdminStoreAna
   const data = selection.snapshot.rows[0] as { rows?: AdminAnalyticsCampaign[] } | undefined;
   const allowed = new Set(input.store.activityAccountIds);
   const rows = data?.rows ?? [];
-  if (rows.some((row) => !allowed.has(row.accountId))) return { rows: [], refreshedAt: null };
+  if (!Array.isArray(rows) || rows.some((row) => !allowed.has(row.accountId) || !Array.isArray(row.timeline))
+    || new Set(rows.map(row => `${row.accountId}:${row.campaignId}`)).size !== rows.length) return { rows: [], refreshedAt: null };
   return { rows, refreshedAt: selection.snapshot.refreshedAt };
 }
 
@@ -3565,7 +3567,7 @@ export async function readCampaignDecisionSnapshot(input: FetchAdminStoreAnalyti
     && localDayIn("Europe/Lisbon", new Date(s.last_success_at)) > input.range.to)
     .sort((a,b) => {
       const overlap = (s: typeof a) => Math.min(Date.parse(s.to_day), Date.parse(input.range.to)) - Math.max(Date.parse(s.from_day), Date.parse(input.range.from));
-      return overlap(b) - overlap(a) || (b.last_success_at ?? "").localeCompare(a.last_success_at ?? "");
+      return overlap(b) - overlap(a) || Number(b.state === "ready") - Number(a.state === "ready") || (b.last_success_at ?? "").localeCompare(a.last_success_at ?? "");
     });
   const selected = candidates[0];
   const empty = { rows: [], fees: null, refreshedAt: null, state: "unavailable" as const };

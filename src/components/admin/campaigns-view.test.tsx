@@ -163,6 +163,9 @@ describe("CampaignsView approved visual structure", () => {
     expect(html).toContain("Dados incompletos: 0/7 dias");
     expect(html).toContain("Confirmar histórico");
     expect(html).toContain("Referência · 7 dias");
+    expect(html).toContain("Análise até ontem");
+    expect(html).toContain("Tabela: 08/08/2026 – 14/08/2026");
+    expect(html).toContain("O ROAS na coluna acima usa o período selecionado");
     expect(html).toContain("range=custom&amp;from=2026-09-21&amp;to=2026-09-27");
     expect(html).toContain("O sinal não altera o orçamento");
     expect(html).toContain("Cada campanha usa apenas a receita que o Google atribui ao seu próprio ID");
@@ -185,7 +188,9 @@ describe("CampaignsView approved visual structure", () => {
     expect(html).toContain("https://northwind-home.com");
     expect(html).toContain("TOTAL");
     expect(html).toContain("€2,800.00");
-    expect(html).toContain("€200.00");
+    expect(html).toContain("€120.00");
+    expect(html).not.toContain("€200.00");
+    expect(html).toContain("Campanhas ativas");
     expect(html).toContain("ROAS");
     expect(html).toContain("2.50x");
     expect(html).not.toContain(">real<");
@@ -271,6 +276,18 @@ describe("CampaignsView approved visual structure", () => {
     expect(render(history)).toContain("Escalada há 3 dias");
     expect(render([{ ...history[0], previousDailyBudget: 120, nextDailyBudget: 100 }])).toContain("Descalada há 3 dias");
     expect(render([])).toContain("Sem alterações registadas");
+  });
+
+  it("distinguishes a measured zero from missing collection attribution next to store sales", () => {
+    const data=structuredClone(clients);
+    const landing={handle:"summer",revenue:null,roas:null,collectionRevenue:0,collectionRoas:0,unassignedGoogleRevenue:0,refreshedAt:"2026-09-28T12:00:00Z"};
+    data[0].stores[0].campaigns[0].landingRoas=landing;
+    const render=()=>renderToStaticMarkup(<CampaignsView clients={data} history={[]} historyTruncated={false} range={range} />);
+    expect(render()).toContain("Há vendas na loja; nesta atualização nenhuma cumpre a regra");
+    data[0].stores[0].campaigns[0].landingRoas={...landing,collectionRevenue:null,collectionRoas:null};
+    const html=render();
+    expect(html).toContain("Atribuição incompleta · não significa zero vendas.");
+    expect(html).not.toContain("Há vendas na loja; nesta atualização nenhuma");
   });
 
   it("keeps successful source rows while warning that a store is partial", () => {

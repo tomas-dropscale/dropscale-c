@@ -39,4 +39,21 @@ describe("collection and campaign ROAS", () => {
     expect(result?.roas).toBeNull();
     expect(result?.collectionRoas).toBeNull();
   });
+  it("distinguishes unknown first visits from measured zero collection sales", () => {
+    const current=[{ad_account_id:"a",providerCampaignId:"1",spend:30},{ad_account_id:"a",providerCampaignId:"2",spend:10}];
+    const unknown=rows.map(r=>({...r,timeline:r.timeline.map(p=>({...p,collectionUnknownOrders:1}))}));
+    expect(projectFirstLandingRoas(current,unknown,"now").get("a:1")).toMatchObject({collectionRevenue:null,collectionRoas:null});
+    const zero=rows.map(r=>({...r,timeline:r.timeline.map(p=>({...p,firstLanding:{...p.firstLanding,collection:sales(0)}}))}));
+    expect(projectFirstLandingRoas(current,zero,"now").get("a:1")).toMatchObject({collectionRevenue:0,collectionRoas:0});
+    expect(projectFirstLandingRoas(current,[...rows,rows[0]],"now").size).toBe(0);
+  });
+  it("does not keep an inflated collection ratio when the current Google inventory adds a campaign", () => {
+    const current=[{ad_account_id:"a",providerCampaignId:"1",spend:30,collectionHandle:"summer"},{ad_account_id:"a",providerCampaignId:"2",spend:10,collectionHandle:"summer"},{ad_account_id:"a",providerCampaignId:"3",spend:20,collectionHandle:"summer"}];
+    const result=projectFirstLandingRoas(current,rows,"now");
+    expect(result.get("a:1")).toMatchObject({handle:"summer",collectionRevenue:null,collectionRoas:null});
+    expect(result.get("a:3")).toMatchObject({handle:"summer",collectionRevenue:null,collectionRoas:null});
+    current[0].collectionHandle="winter";
+    expect(projectFirstLandingRoas(current,rows,"now").get("a:1")).toMatchObject({handle:"winter",collectionRevenue:null,roas:null});
+    expect(projectFirstLandingRoas([{...current[0],collectionHandle:null}],rows,"now").size).toBe(0);
+  });
 });

@@ -10,11 +10,22 @@ export type LandingSales = { revenue: number; orders: number; units: number; cog
 /** Collection figures are additive shares for grouping only. Campaign figures are exact matches. */
 export type FirstLandingAttribution = {
   collection: LandingSales | null;
+  /** False when relevant collection orders have no first-visit evidence. */
+  collectionComplete?: boolean;
   campaign: LandingSales | null;
   unassignedGoogleRevenue: number | null;
   /** False for every member of a collection with unresolved Google orders, even a zero spend share. */
   campaignComplete?: boolean;
 };
+
+/** Older snapshots carry the same gap in collectionUnknownOrders. Never call it zero sales. */
+export function firstLandingCollectionSales(point: {
+  firstLanding?: FirstLandingAttribution;
+  collectionUnknownOrders?: number | null;
+}): LandingSales | null {
+  if (point.firstLanding?.collectionComplete === false || (point.collectionUnknownOrders ?? 0) > 0) return null;
+  return point.firstLanding?.collection ?? null;
+}
 
 export function firstLandingCampaignSales(value: FirstLandingAttribution | undefined): LandingSales | null {
   if (!value || !(value.campaignComplete ?? value.unassignedGoogleRevenue === 0)) return null;
@@ -32,28 +43,39 @@ export type CampaignLandingRoas = {
 };
 
 export function projectFirstLandingRoas(
-  campaigns: ReadonlyArray<{ ad_account_id: string; providerCampaignId: string; spend: number }>,
-  rows: ReadonlyArray<{ accountId: string; campaignId: string; collectionHandle?: string | null; timeline: ReadonlyArray<{ firstLanding?: FirstLandingAttribution }> }>,
+  campaigns: ReadonlyArray<{ ad_account_id: string; providerCampaignId: string; spend: number; collectionHandle?: string | null }>,
+  rows: ReadonlyArray<{ accountId: string; campaignId: string; collectionHandle?: string | null; timeline: ReadonlyArray<{ firstLanding?: FirstLandingAttribution; collectionUnknownOrders?: number | null }> }>,
   refreshedAt: string | null,
 ): Map<string, CampaignLandingRoas> {
   const result = new Map<string, CampaignLandingRoas>();
   const current = new Map(campaigns.map((campaign) => [`${campaign.ad_account_id}:${campaign.providerCampaignId}`, campaign]));
-  for (const row of rows) {
-    if (!row.collectionHandle) continue;
-    const key = `${row.accountId}:${row.campaignId}`;
-    const campaign = current.get(key);
-    if (!campaign) continue;
-    const members = rows.filter((member) => member.collectionHandle === row.collectionHandle);
-    const complete = members.every((member) => current.has(`${member.accountId}:${member.campaignId}`));
+  if (current.size !== campaigns.length || new Set(rows.map(row => `${row.accountId}:${row.campaignId}`)).size !== rows.length) return result;
+  const saved = new Map(rows.map(row => [`${row.accountId}:${row.campaignId}`, row]));
+  const handleFor = (campaign: typeof campaigns[number]) => campaign.collectionHandle === undefined
+    ? saved.get(`${campaign.ad_account_id}:${campaign.providerCampaignId}`)?.collectionHandle
+    : campaign.collectionHandle;
+  for (const [key, campaign] of current) {
+    const handle = handleFor(campaign);
+    if (!handle) continue;
+    const row = saved.get(key);
+    const members = rows.filter(member => member.collectionHandle === handle);
+    const expected = campaigns.filter(member => handleFor(member) === handle);
+    const complete = expected.every(member => saved.get(`${member.ad_account_id}:${member.providerCampaignId}`)?.collectionHandle === handle
+      && Number.isFinite(member.spend) && member.spend >= 0)
+      && members.every(member => {
+        const present = current.get(`${member.accountId}:${member.campaignId}`);
+        return present && handleFor(present) === handle;
+      });
     const collection = sumFirstLanding(members.flatMap((member) => member.timeline.map((point) => point.firstLanding)));
-    const individual = sumFirstLanding(row.timeline.map((point) => point.firstLanding));
-    const spend = members.reduce((sum, member) => sum + (current.get(`${member.accountId}:${member.campaignId}`)?.spend ?? 0), 0);
+    const measuredCollection = sumLandingSales(members.flatMap((member) => member.timeline.map(firstLandingCollectionSales)));
+    const individual = sumFirstLanding(row?.collectionHandle === handle ? row.timeline.map(point => point.firstLanding) : []);
+    const spend = expected.reduce((sum, member) => sum + member.spend, 0);
     result.set(key, {
-      handle: row.collectionHandle,
+      handle,
       revenue: individual.campaign?.revenue ?? null,
       roas: firstLandingCampaignSales(individual) && campaign.spend > 0 ? individual.campaign!.revenue / campaign.spend : null,
-      collectionRevenue: complete ? collection.collection?.revenue ?? null : null,
-      collectionRoas: complete && collection.collection && spend > 0 ? collection.collection.revenue / spend : null,
+      collectionRevenue: complete ? measuredCollection?.revenue ?? null : null,
+      collectionRoas: complete && measuredCollection && spend > 0 ? measuredCollection.revenue / spend : null,
       unassignedGoogleRevenue: collection.unassignedGoogleRevenue,
       refreshedAt,
     });
@@ -94,7 +116,9 @@ export function matchFirstVisitCampaign(
 }
 
 export function sumLandingSales(values: ReadonlyArray<LandingSales | null | undefined>): LandingSales | null {
-  if (!values.length || values.some((value) => value == null)) return null;
+  if (!values.length || values.some((value) => value == null ||
+    ![value.revenue, value.orders, value.units].every(n => Number.isFinite(n) && n >= 0) ||
+    (value.cogs !== null && (!Number.isFinite(value.cogs) || value.cogs < 0)))) return null;
   return values.reduce<LandingSales>((sum, value) => ({
     revenue: sum.revenue + value!.revenue,
     orders: sum.orders + value!.orders,
@@ -105,7 +129,7 @@ export function sumLandingSales(values: ReadonlyArray<LandingSales | null | unde
 
 export function sumFirstLanding(values: ReadonlyArray<FirstLandingAttribution | undefined>): FirstLandingAttribution {
   return {
-    collection: sumLandingSales(values.map((value) => value?.collection)),
+    collection: sumLandingSales(values.map((value) => value?.collectionComplete === false ? null : value?.collection)),
     campaign: sumLandingSales(values.map((value) => value?.campaign)),
     campaignComplete: values.length > 0 && values.every((value) => value && (value.campaignComplete ?? value.unassignedGoogleRevenue === 0)),
     unassignedGoogleRevenue: values.length && values.every((value) => typeof value?.unassignedGoogleRevenue === "number")

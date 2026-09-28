@@ -17,6 +17,7 @@ export type CampaignViewCampaign = {
   providerCampaignId: string;
   name: string;
   status: CampaignViewStatus;
+  startDate?: string | null;
   spend: number;
   dailyBudget: string | null;
   /** Currency of every money figure on the row: the store's. */
@@ -354,6 +355,7 @@ export function projectAdminCampaignsView(
           shoppingFeed: campaign.shoppingFeed,
           googleRoas: Number.isFinite(campaign.googleRoas) ? campaign.googleRoas : null,
           landingRoas: campaign.landingRoas,
+          startDate: campaign.startDate,
           actionable: bindingId.length > 0,
         };
       }),

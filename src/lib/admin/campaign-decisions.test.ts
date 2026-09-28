@@ -86,4 +86,52 @@ describe("media buyer decisions", () => {
     const s=snapshot();s.rows[0].timeline[0].spend=100;
     expect(get(s).campaigns["a:1"].roas).toBeCloseTo(280/160);
   });
+
+  it("does not mark a collection inactive when a new active member is absent from its history", () => {
+    const s=snapshot();
+    const cs=campaigns.map(c=>({...c,status:"paused" as const}));
+    const fresh={...campaigns[0],providerCampaignId:"new",landingRoas:{handle:"blusas"} as CampaignViewCampaign["landingRoas"]};
+    const result=get(s,[],[...cs,fresh]);
+    expect(result.collections.blusas).toMatchObject({level:"missing",spend:null,roas:null});
+    expect(result.collections.blusas.reason).toContain("todas as campanhas atuais");
+    expect(result.campaigns["a:new"].level).toBe("missing");
+  });
+
+  it("uses Google's actual launch date and never counts pre-launch zeros as learning days", () => {
+    const cs=campaigns.map(c=>({...c,startDate:"2026-09-25"}));
+    expect(get(snapshot(),[],cs).campaigns["a:1"]).toMatchObject({level:"learning",days:2,from:"2026-09-26",revenue:80});
+    const fresh={...campaigns[0],providerCampaignId:"new",startDate:"2026-09-28",landingRoas:{handle:"blusas"} as CampaignViewCampaign["landingRoas"]};
+    const result=get(snapshot(),[],[...campaigns,fresh]);
+    expect(result.campaigns["a:new"]).toMatchObject({level:"learning",days:0,spend:null,roas:null});
+    expect(result.collections.blusas).toMatchObject({level:"learning",days:0});
+    expect(get(snapshot(),[],[{...campaigns[0],startDate:"bad-date"}]).campaigns["a:1"].days).toBe(7);
+  });
+
+  it("does not apply an old collection margin after a campaign changes its landing collection", () => {
+    const moved={...campaigns[0],landingRoas:{handle:"casacos"} as CampaignViewCampaign["landingRoas"]};
+    const result=get(snapshot(),[],[moved,...campaigns.slice(1)]);
+    expect(result.campaigns["a:1"]).toMatchObject({level:"missing",roas:4,breakEven:null});
+    expect(result.collections.casacos.level).toBe("missing");
+    expect(result.collections.blusas.level).toBe("missing");
+  });
+
+  it("withholds collection results when relevant orders have unknown first visits, including older snapshots", () => {
+    for (const legacy of [false,true]) {
+      const s=snapshot();
+      if (legacy) s.rows[0].timeline[0].collectionUnknownOrders=1;
+      else s.rows[0].timeline[0].firstLanding!.collectionComplete=false;
+      const result=get(s);
+      expect(result.collections.blusas).toMatchObject({level:"missing",roas:null,revenue:null});
+      expect(result.campaigns["a:1"]).toMatchObject({level:"missing",roas:4,breakEven:null});
+    }
+  });
+
+  it("rejects duplicate daily rows, mixed granularities and invalid refresh dates", () => {
+    const duplicate=snapshot(); duplicate.rows[0].timeline.push(duplicate.rows[0].timeline[0]);
+    expect(get(duplicate).campaigns["a:1"]).toMatchObject({level:"missing",spend:null});
+    const hourly=snapshot(); hourly.rows[0].timeline.push({...hourly.rows[0].timeline[0],bucket:"2026-09-21T01:00:00"});
+    expect(get(hourly).campaigns["a:1"]).toMatchObject({level:"missing",spend:null});
+    expect(get({...snapshot(),refreshedAt:"bad-date"}).campaigns["a:1"].level).toBe("missing");
+    expect(get({...snapshot(),refreshedAt:"2026-09-29T11:00:00Z"}).campaigns["a:1"].level).toBe("missing");
+  });
 });

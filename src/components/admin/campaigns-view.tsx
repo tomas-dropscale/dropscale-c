@@ -530,6 +530,7 @@ function BudgetControl({
 function CampaignRow({
   campaign,
   decision,
+  periodLabel,
   analyticsHref,
   busy,
   statusError,
@@ -538,6 +539,7 @@ function CampaignRow({
 }: {
   campaign: ProjectedCampaign;
   decision?: CampaignDecision;
+  periodLabel: string;
   analyticsHref: string;
   busy: boolean;
   statusError: string | undefined;
@@ -593,10 +595,11 @@ function CampaignRow({
       </div>
 
       <CampaignMetric label="Google individual">
-        <span title={`ROAS reported by Google for campaign ${campaign.providerCampaignId}`}>
+        <span title={`ROAS reported by Google for campaign ${campaign.providerCampaignId} · ${periodLabel}${campaign.googleRoas === 0 ? " · O Google devolve zero receita atribuída neste período." : ""}`}>
           {campaign.googleRoas === null ? "—" : multiplier(campaign.googleRoas)}
         </span>
         <span className="block text-[10px] text-[var(--text-muted)]">Google individual</span>
+        <span className="block text-[10px] font-medium text-[var(--text-secondary)]">{periodLabel}</span>
       </CampaignMetric>
 
       <div className="flex justify-self-end xl:justify-self-center">
@@ -657,19 +660,23 @@ function StoreGroup({
 }) {
   const headingId = React.useId();
   const snapshot = snapshotLabel(store.providerFreshness?.refreshedAt, today);
+  const dateLabel = (day: string) => day.split("-").reverse().join("/");
+  const periodLabel = range.from === range.to
+    ? `${range.to === today ? "Hoje · " : ""}${dateLabel(range.to)}`
+    : `${dateLabel(range.from)} – ${dateLabel(range.to)}`;
   const spend = store.rollupSpend;
-  const budgets = store.campaigns.map((campaign) =>
+  const activeCampaigns = store.campaigns.filter(campaign => campaign.status === "active");
+  const budgets = activeCampaigns.map((campaign) =>
     campaign.dailyBudget === null ? null : Number(campaign.dailyBudget),
   );
   // Budgets are set in each Google account's own currency. A store total is
   // only a figure when every campaign's budget shares one currency, and it is
   // shown in that currency - never summed across currencies or relabelled.
-  const budgetCurrencies = new Set(store.campaigns.map((campaign) => campaign.budgetCurrency));
+  const budgetCurrencies = new Set(activeCampaigns.map((campaign) => campaign.budgetCurrency));
   const budgetCurrency =
-    budgetCurrencies.size === 1 ? [...budgetCurrencies][0] : null;
+    budgetCurrencies.size === 1 ? [...budgetCurrencies][0] : activeCampaigns.length === 0 ? store.currency : null;
   const dailyBudget =
     store.campaignState === "ready" &&
-    budgets.length > 0 &&
     budgetCurrency !== null &&
     budgets.every((budget): budget is number => budget !== null)
     ? budgets.reduce((sum, budget) => sum + budget, 0)
@@ -726,6 +733,9 @@ function StoreGroup({
           </Link>
         </Button>
       </header>
+      <div className="border-t border-[var(--border-subtle)] bg-[var(--bg-elevated)]/40 px-5 py-2 text-[11px] text-[var(--text-secondary)]">
+        <strong>Tabela: {periodLabel}</strong> · Os sinais de scale / kill usam dias fechados até ontem, com as datas indicadas em cada análise.
+      </div>
 
       <div
         className={cn(
@@ -769,10 +779,12 @@ function StoreGroup({
                 / day
               </span>
             )}
+            <span className="block text-[10px] text-[var(--text-muted)]">Campanhas ativas</span>
           </CampaignMetric>
           <CampaignMetric label="ROAS">
             <span title="Whole-store revenue divided by whole-store ad spend">{store.realRoas === null ? "—" : multiplier(store.realRoas)}</span>
             <span className="block text-[10px] text-[var(--text-muted)]">Global da loja</span>
+            <span className="block text-[10px] font-medium text-[var(--text-secondary)]">{periodLabel}</span>
           </CampaignMetric>
           <span className="hidden xl:block" aria-hidden />
         </li>
@@ -828,12 +840,15 @@ function StoreGroup({
                       {campaigns.length} {campaigns.length === 1 ? "campanha" : "campanhas"} · todos os canais
                       {landing.refreshedAt && <span title="When first-visit collection sales were last read"> · Sales snapshot {safeDate(SNAPSHOT_DATE_TIME, landing.refreshedAt)} (Lisbon)</span>}
                     </p>
+                    {landing.collectionRoas === 0 && (store.realRoas ?? 0) > 0 && <p className="mt-1 text-[11px] text-[var(--text-secondary)]">Há vendas na loja; nesta atualização nenhuma cumpre a regra de entrada e produtos desta coleção.</p>}
+                    {landing.collectionRevenue === null && <p className="mt-1 text-[11px] text-[var(--warning-orange)]">Atribuição incompleta · não significa zero vendas.</p>}
                   </div>
                   <CampaignMetric label="Real da coleção">
                     <span title="Collection items from first visits landing on this collection, across all channels, divided by the combined spend of its campaigns">
                       {landing.collectionRoas === null ? "—" : multiplier(landing.collectionRoas)}
                     </span>
                     <span className="block text-[10px] text-[var(--text-muted)]">Real da coleção</span>
+                    <span className="block text-[10px] font-medium text-[var(--text-secondary)]">{periodLabel}</span>
                   </CampaignMetric>
                   <span className="hidden xl:block" aria-hidden />
                   {handle && store.decisions?.collections[handle] && <CampaignDecisionPanel decision={store.decisions.collections[handle]} currency={store.currency} analyticsHref={analyticsStoreHref(clientId, store.id, range)} />}
@@ -845,6 +860,7 @@ function StoreGroup({
                   <CampaignRow
                     key={key}
                     campaign={campaign}
+                    periodLabel={periodLabel}
                     decision={store.decisions?.campaigns[decisionCampaignKey(campaign.adAccountId, campaign.providerCampaignId)]}
                     analyticsHref={analyticsStoreHref(clientId, store.id, range)}
                     busy={pending.has(key)}
