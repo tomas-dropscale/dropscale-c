@@ -17,6 +17,8 @@ import {
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
+import { CampaignDecisionPanel, CampaignDecisionGuide, decisionCategory } from "@/components/admin/campaign-decision";
+import { decisionCampaignKey, type CampaignDecision } from "@/lib/admin/campaign-decisions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -527,12 +529,16 @@ function BudgetControl({
 
 function CampaignRow({
   campaign,
+  decision,
+  analyticsHref,
   busy,
   statusError,
   onBudgetChange,
   onStatusChange,
 }: {
   campaign: ProjectedCampaign;
+  decision?: CampaignDecision;
+  analyticsHref: string;
   busy: boolean;
   statusError: string | undefined;
   onBudgetChange: (campaign: ProjectedCampaign, nextDailyBudget: string) => Promise<ActionResult>;
@@ -622,6 +628,7 @@ function CampaignRow({
           {statusError}
         </p>
       )}
+      {decision && <CampaignDecisionPanel decision={decision} currency={campaign.currency} analyticsHref={analyticsHref} />}
     </li>
   );
 }
@@ -629,6 +636,7 @@ function CampaignRow({
 function StoreGroup({
   clientId,
   store,
+  decisionFilter,
   range,
   today,
   pending,
@@ -638,6 +646,7 @@ function StoreGroup({
 }: {
   clientId: string;
   store: ProjectedCampaignClient["stores"][number];
+  decisionFilter: string;
   range: RangeSelection;
   /** The current reporting day, so a snapshot taken today shows its time alone. */
   today: string;
@@ -799,6 +808,11 @@ function StoreGroup({
 
         {[...collectionGroups].map(([handle, campaigns]) => {
           const landing = campaigns[0]?.landingRoas;
+          const shownCampaigns = campaigns.filter(campaign => {
+            const signal = store.decisions?.campaigns[decisionCampaignKey(campaign.adAccountId, campaign.providerCampaignId)];
+            return decisionFilter === "all" || (signal && decisionCategory(signal.level) === decisionFilter);
+          });
+          if (!shownCampaigns.length) return null;
           return (
             <React.Fragment key={handle === null ? "unmapped" : `collection:${handle}`}>
               {landing && (
@@ -822,14 +836,17 @@ function StoreGroup({
                     <span className="block text-[10px] text-[var(--text-muted)]">Real da coleção</span>
                   </CampaignMetric>
                   <span className="hidden xl:block" aria-hidden />
+                  {handle && store.decisions?.collections[handle] && <CampaignDecisionPanel decision={store.decisions.collections[handle]} currency={store.currency} analyticsHref={analyticsStoreHref(clientId, store.id, range)} />}
                 </li>
               )}
-              {campaigns.map((campaign) => {
+              {shownCampaigns.map((campaign) => {
                 const key = campaignKey(campaign);
                 return (
                   <CampaignRow
                     key={key}
                     campaign={campaign}
+                    decision={store.decisions?.campaigns[decisionCampaignKey(campaign.adAccountId, campaign.providerCampaignId)]}
+                    analyticsHref={analyticsStoreHref(clientId, store.id, range)}
                     busy={pending.has(key)}
                     statusError={statusErrors[key]}
                     onBudgetChange={onBudgetChange}
@@ -847,6 +864,7 @@ function StoreGroup({
 
 function ClientSection({
   client,
+  decisionFilter,
   range,
   today,
   open,
@@ -857,6 +875,7 @@ function ClientSection({
   onStatusChange,
 }: {
   client: ProjectedCampaignClient;
+  decisionFilter: string;
   range: RangeSelection;
   today: string;
   open: boolean;
@@ -925,11 +944,12 @@ function ClientSection({
           aria-label={`${client.name} stores and campaigns`}
           className="border-t border-[var(--border-subtle)]"
         >
-          {client.stores.map((store) => (
+          {client.stores.filter(store => decisionFilter === "all" || Object.values(store.decisions?.campaigns ?? {}).some(s => decisionCategory(s.level) === decisionFilter)).map((store) => (
             <StoreGroup
               key={store.id}
               clientId={client.id}
               store={store}
+              decisionFilter={decisionFilter}
               range={range}
               today={today}
               pending={pending}
@@ -961,6 +981,7 @@ export function CampaignsView({
   const inFlight = React.useRef(new Set<string>());
   const requestIds = React.useRef(new Map<string, string>());
   const [query, setQuery] = React.useState("");
+  const [decisionFilter, setDecisionFilter] = React.useState<"all" | "scale" | "review" | "observe" | "missing">("all");
   const [openClients, setOpenClients] = React.useState(
     () => new Set(clients.slice(0, 1).map((client) => client.id)),
   );
@@ -968,9 +989,14 @@ export function CampaignsView({
   const [statusErrors, setStatusErrors] = React.useState<Record<string, string>>({});
   const projected = React.useMemo(() => projectCampaignClients(clients, history, asOf), [clients, history, asOf]);
   const visibleClients = React.useMemo(
-    () => filterCampaignClients(projected, query),
-    [projected, query],
+    () => filterCampaignClients(projected, query).filter(client => decisionFilter === "all" || client.stores.some(store => Object.values(store.decisions?.campaigns ?? {}).some(s => decisionCategory(s.level) === decisionFilter))),
+    [projected, query, decisionFilter],
   );
+  const decisionCounts = { all: 0, scale: 0, review: 0, observe: 0, missing: 0 };
+  for (const client of filterCampaignClients(projected, query)) for (const store of client.stores) for (const signal of Object.values(store.decisions?.campaigns ?? {})) {
+    decisionCounts.all += 1;
+    decisionCounts[decisionCategory(signal.level)] += 1;
+  }
   // The reporting day, as the range presets count it. A range that is exactly
   // that day shows Windsor's day in progress, which fills in batches through
   // the day, so a low figure early on is not a missing account.
@@ -1081,10 +1107,10 @@ export function CampaignsView({
             id="campaign-client-performance"
             className="text-[15px] font-semibold text-[var(--text-primary)]"
           >
-            Client performance
+            Central de campanhas
           </h2>
           <p className="mt-1 text-[11.5px] text-[var(--text-muted)]">
-            Open a client to review every store and its Google campaigns.
+            Resultado da coleção, ROAS individual e sinais para decidir o próximo passo.
           </p>
           {currentDay && (
             <p className="mt-1 text-[11px] text-[var(--text-muted)]">
@@ -1130,6 +1156,14 @@ export function CampaignsView({
         </form>
       </header>
 
+      <div className="flex flex-wrap items-center gap-2 border-b border-[var(--border-subtle)] px-4 py-3 md:px-5" aria-label="Filtrar por sinal da campanha">
+        {([
+          ["all", "Todas"], ["scale", "Oportunidades de scale"], ["review", "Rever gasto / kill"], ["observe", "Observar / inativas"], ["missing", "Faltam dados"],
+        ] as const).map(([key,label]) => <button key={key} type="button" aria-pressed={decisionFilter === key} onClick={() => setDecisionFilter(key)} className={cn("focus-ring rounded-lg border px-3 py-2 text-[11px] font-medium transition-colors", decisionFilter === key ? "border-[var(--accent-gold)]/40 bg-[var(--accent-gold-dim)] text-[var(--accent-gold-strong)]" : "border-[var(--border-subtle)] text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)]")}>{label} <span className="ml-1 tabular-nums">{decisionCounts[key]}</span></button>)}
+        <p className="w-full pt-1 text-[10.5px] text-[var(--text-muted)]">Filtra as campanhas pelo sinal. Os totais da loja e da coleção continuam a incluir todas as campanhas. Expande «Ver motivo» para os dados e a explicação.</p>
+      </div>
+      <CampaignDecisionGuide />
+
       <div className="hidden grid-cols-[minmax(260px,1.6fr)_repeat(3,minmax(100px,.65fr))] gap-4 border-b border-[var(--border-subtle)] px-5 py-2.5 md:grid">
         <span className="label-caps">Client</span>
         <span className="label-caps text-center">Ad spend</span>
@@ -1142,6 +1176,7 @@ export function CampaignsView({
           <ClientSection
             key={client.id}
             client={client}
+            decisionFilter={decisionFilter}
             range={range}
             today={today}
             open={openClients.has(client.id)}
@@ -1155,7 +1190,7 @@ export function CampaignsView({
       ) : (
         <div className="flex flex-col items-center gap-3 px-6 py-14 text-center">
           <p className="text-[13px] text-[var(--text-muted)]">
-            {query.trim() ? "No clients or stores match this search." : "No client campaigns yet."}
+            {decisionFilter !== "all" ? "Nenhum cliente corresponde a este sinal e pesquisa." : query.trim() ? "No clients or stores match this search." : "No client campaigns yet."}
           </p>
           {query.trim() && (
             <Button type="button" variant="secondary" size="sm" onClick={() => setQuery("")}>

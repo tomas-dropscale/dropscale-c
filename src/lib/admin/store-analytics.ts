@@ -3545,6 +3545,38 @@ export async function readCampaignFirstLandingSnapshot(input: FetchAdminStoreAna
   return { rows, refreshedAt: selection.snapshot.refreshedAt };
 }
 
+/** Read-only decision evidence, scoped through the same ownership/authority checks as Analytics.
+ * Prefer a snapshot refreshed after yesterday closed: yesterday's hourly run is not a closed day.
+ * Never stitch overlapping snapshots (that would double count collection shares).
+ */
+export async function readCampaignDecisionSnapshot(input: FetchAdminStoreAnalyticsInput): Promise<import("./campaign-decisions").DecisionSnapshot> {
+  assertInput(input);
+  const topology = await loadTopology(input);
+  const { data, error } = await topology.service.from("admin_reporting_range_snapshots")
+    .select("from_day,to_day,state,last_success_at,payload")
+    .eq("scope_account_id", input.store.accountId)
+    .eq("authority_key", topology.authority.key)
+    .eq("family", "store_campaign_performance")
+    .lte("from_day", input.range.to).gte("to_day", input.range.from)
+    .order("last_success_at", { ascending: false }).limit(40);
+  if (error) throw new Error("Campaign decision evidence could not be read.");
+  const allowed = new Set(input.store.activityAccountIds);
+  const candidates = (data ?? []).filter(s => ["ready", "partial"].includes(s.state ?? "") && s.last_success_at
+    && localDayIn("Europe/Lisbon", new Date(s.last_success_at)) > input.range.to)
+    .sort((a,b) => {
+      const overlap = (s: typeof a) => Math.min(Date.parse(s.to_day), Date.parse(input.range.to)) - Math.max(Date.parse(s.from_day), Date.parse(input.range.from));
+      return overlap(b) - overlap(a) || (b.last_success_at ?? "").localeCompare(a.last_success_at ?? "");
+    });
+  const selected = candidates[0];
+  const empty = { rows: [], fees: null, refreshedAt: null, state: "unavailable" as const };
+  if (!selected) return empty;
+  const payload = selected.payload as unknown as Array<{ rows?: AdminAnalyticsCampaign[]; fees?: CampaignSheetFees | null }>;
+  const rows = payload?.[0]?.rows;
+  if (!Array.isArray(rows) || rows.some(r => !allowed.has(r.accountId) || !Array.isArray(r.timeline))
+    || new Set(rows.map(r => `${r.accountId}:${r.campaignId}`)).size !== rows.length) return empty;
+  return { rows, fees: payload[0].fees ?? null, refreshedAt: selected.last_success_at, state: selected.state === "ready" ? "ready" : "partial" };
+}
+
 /**
  * Just the Shopify funnel for one store, for the client's own view of it.
  *

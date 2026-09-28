@@ -737,7 +737,7 @@ async function loadBindingBudgetHistory(
       .select("*")
       .in("client_reporting_binding_id", bindingIds)
       .eq("status", "succeeded")
-      .eq("action", "budget_changed")
+      .in("action", ["budget_changed", "campaign_paused", "campaign_enabled"])
       .order("completed_at", { ascending: false })
       .order("id", { ascending: false });
     if (cursor) {
@@ -760,7 +760,7 @@ async function loadBindingBudgetHistory(
         (operation) =>
           !allowedBindingIds.has(operation.client_reporting_binding_id) ||
           operation.status !== "succeeded" ||
-          operation.action !== "budget_changed",
+          !["budget_changed", "campaign_paused", "campaign_enabled"].includes(operation.action),
       )
     ) {
       throw new ClientOnboardingError(

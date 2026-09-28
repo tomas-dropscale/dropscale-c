@@ -56,6 +56,8 @@ vi.mock("@/components/ui/input", () => ({
 vi.mock("@/lib/admin/campaigns-view", async () =>
   import("../../lib/admin/campaigns-view"),
 );
+vi.mock("@/components/admin/campaign-decision", async () => import("./campaign-decision"));
+vi.mock("@/lib/admin/campaign-decisions", async () => import("../../lib/admin/campaign-decisions"));
 
 vi.mock("@/lib/format", () => ({
   money: (value: number | string, currency: string) =>
@@ -75,6 +77,7 @@ vi.mock("@/lib/portal/range", async () => import("../../lib/portal/range"));
 
 import { presetSelection } from "../../lib/portal/range";
 import { CampaignsView } from "./campaigns-view";
+import { buildStoreCampaignDecisions } from "../../lib/admin/campaign-decisions";
 
 const clients: CampaignViewClient[] = [
   {
@@ -151,6 +154,20 @@ const history: CampaignActionHistory[] = [
 const range = { key: "d7", from: "2026-08-08", to: "2026-08-14" } as const;
 
 describe("CampaignsView approved visual structure", () => {
+  it("explains missing evidence instead of presenting a fabricated decision, with the recovery period", () => {
+    const withSignals = structuredClone(clients);
+    const store = withSignals[0].stores[0];
+    store.decisions = buildStoreCampaignDecisions(store.campaigns, [], { rows: [], fees: null, state: "unavailable", refreshedAt: null }, "2026-09-28T11:00:00Z");
+    const html = renderToStaticMarkup(<CampaignsView clients={withSignals} history={[]} historyTruncated={false} range={range} />);
+    expect(html).toContain("Faltam dados");
+    expect(html).toContain("Dados incompletos: 0/7 dias");
+    expect(html).toContain("Confirmar histórico");
+    expect(html).toContain("Referência · 7 dias");
+    expect(html).toContain("range=custom&amp;from=2026-09-21&amp;to=2026-09-27");
+    expect(html).toContain("O sinal não altera o orçamento");
+    expect(html).toContain("Cada campanha usa apenas a receita que o Google atribui ao seu próprio ID");
+    expect(html).toContain("Inativa");
+  });
   it("opens the first client and renders its real totals, store total and approved actions", () => {
     const html = renderToStaticMarkup(
       <CampaignsView clients={clients} history={history} historyTruncated={false} range={range} />,

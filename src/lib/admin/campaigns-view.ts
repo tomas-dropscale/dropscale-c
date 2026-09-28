@@ -33,6 +33,8 @@ export type CampaignViewCampaign = {
 };
 
 export type CampaignViewStore = {
+  activityAccountIds?: string[];
+  decisions?: import("./campaign-decisions").StoreCampaignDecisions;
   id: string;
   name: string;
   domain: string;
@@ -321,6 +323,7 @@ export function projectAdminCampaignsView(
     realRoas: client.realRoas,
     stores: client.accounts.map((entry) => ({
       id: entry.account.id,
+      activityAccountIds: entry.activityAccountIds,
       name: entry.account.store_name,
       domain: storeDomain(entry.account.shopify_url),
       currency: entry.account.currency,

@@ -8,6 +8,7 @@ import { PageContainer } from "@/components/ui/page-container";
 import { RangePicker } from "@/components/portal/range-picker";
 import { listCampaignActionViewState } from "@/lib/admin/campaign-actions";
 import { fetchAdminCampaigns } from "@/lib/admin/campaigns";
+import { loadCampaignDecisions } from "@/lib/admin/campaign-decisions-loader";
 import { createServiceClient } from "@/lib/supabase/service";
 import {
   campaignActionBindingIds,
@@ -72,6 +73,8 @@ export default async function AdminCampaignsPage({
     ),
   ]);
   const campaignView = projectAdminCampaignsView(overview, actionState);
+  const asOf = new Date().toISOString();
+  const clientsWithDecisions = await loadCampaignDecisions(campaignView.clients, campaignView.history, asOf);
   const intl = intlLocale(locale);
 
   return (
@@ -180,10 +183,10 @@ export default async function AdminCampaignsPage({
       ) : null}
 
       <CampaignsView
-        clients={campaignView.clients}
+        clients={clientsWithDecisions}
         history={campaignView.history}
         historyTruncated={campaignView.historyTruncated}
-        asOf={new Date().toISOString()}
+        asOf={asOf}
         range={range}
       />
 

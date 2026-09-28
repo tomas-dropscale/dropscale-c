@@ -62,6 +62,7 @@ export type AdminCampaignProviderFreshness = {
 
 export type AdminAccountCampaigns = {
   account: AdAccount;
+  activityAccountIds?: string[];
   /**
    * The live rows, not the DB shape: the page needs `startDate` to say how long
    * each collection has been running, and that is a Google field the campaigns
@@ -1067,6 +1068,7 @@ export async function fetchAdminCampaigns(
       }
       return {
         account,
+        activityAccountIds: metricAccountIds,
         campaigns,
         // Report what we just learned, not the stale row we read at the top.
         connected: connected && !authRevoked,

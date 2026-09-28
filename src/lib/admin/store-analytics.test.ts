@@ -133,6 +133,7 @@ import {
   fetchAdminStoreAnalytics,
   fetchCachedAdminStoreAnalytics,
   readCampaignFirstLandingSnapshot,
+  readCampaignDecisionSnapshot,
   refreshAdminStoreAnalyticsSnapshots,
 } from "./store-analytics";
 import { ShopifyReportingError } from "@/lib/client-onboarding/shopify";
@@ -3564,6 +3565,30 @@ describe("admin store analytics DAL", () => {
     expect((await readCampaignFirstLandingSnapshot(input)).rows).toEqual([]);
     mocks.readAdminReportingSnapshotFamilySelections.mockResolvedValue(new Map([["store_campaign_performance", { ...selection, snapshot: { ...selection.snapshot as object, rows: [{ rows: [{ ...rows[0], accountId: CHILD_ID }] }] } }]]));
     expect((await readCampaignFirstLandingSnapshot(input)).rows).toEqual([]);
+    expect(mocks.fetchLiveCampaignsDetailed).not.toHaveBeenCalled();
+    expect(mocks.createShopifyReportingAdapter).not.toHaveBeenCalled();
+  });
+
+  it("reads decisions within the current authority and only after the period closed", async () => {
+    const scoped = service([account()], null);
+    const original = scoped.from;
+    const row = { accountId: STORE_ID, campaignId: "123", timeline: [] };
+    const fees = { paymentFeePct: 3, paymentFeeFixed: 0.3, shippingCostPerOrder: 0, agencyFeeRate: 10 };
+    let snapshots = [{ from_day: "2026-08-01", to_day: "2026-08-15", state: "ready", last_success_at: "2026-08-15T10:00:00Z", payload: [{ rows: [row], fees }] }];
+    const query: Record<string, ReturnType<typeof vi.fn>> = {};
+    for (const method of ["select", "eq", "lte", "gte", "order"]) query[method] = vi.fn(() => query);
+    query.limit = vi.fn(async () => ({ data: snapshots, error: null }));
+    mocks.createServiceClient.mockReturnValue({ from: vi.fn((table: string) => table === "admin_reporting_range_snapshots" ? query : original(table)) });
+    const input = { clientId: CLIENT_ID, store: { accountId: STORE_ID, activityAccountIds: [STORE_ID], currency: "EUR", days: [] }, range: RANGE };
+    expect(await readCampaignDecisionSnapshot(input)).toEqual({ rows: [row], fees, refreshedAt: "2026-08-15T10:00:00Z", state: "ready" });
+    expect(query.eq).toHaveBeenCalledWith("authority_key", "a".repeat(64));
+    expect(query.eq).toHaveBeenCalledWith("scope_account_id", STORE_ID);
+    snapshots = [{ ...snapshots[0], last_success_at: "2026-08-14T22:59:00Z" }];
+    expect((await readCampaignDecisionSnapshot(input)).state).toBe("unavailable");
+    snapshots = [{ ...snapshots[0], last_success_at: "2026-08-15T10:00:00Z", payload: [{ rows: [{...row,accountId: CHILD_ID}], fees }] }];
+    expect((await readCampaignDecisionSnapshot(input)).rows).toEqual([]);
+    snapshots = [{ ...snapshots[0], payload: [{ rows: [row,row], fees }] }];
+    expect((await readCampaignDecisionSnapshot(input)).rows).toEqual([]);
     expect(mocks.fetchLiveCampaignsDetailed).not.toHaveBeenCalled();
     expect(mocks.createShopifyReportingAdapter).not.toHaveBeenCalled();
   });

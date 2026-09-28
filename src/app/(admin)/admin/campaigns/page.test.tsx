@@ -53,6 +53,7 @@ vi.mock("@/lib/admin/campaign-actions", () => ({
 vi.mock("@/lib/admin/campaigns", () => ({
   fetchAdminCampaigns: mocks.fetchAdminCampaigns,
 }));
+vi.mock("@/lib/admin/campaign-decisions-loader", () => ({ loadCampaignDecisions: async (clients: unknown) => clients }));
 
 vi.mock("@/lib/admin/campaigns-view", () => ({
   campaignActionBindingIds: () => [],
