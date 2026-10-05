@@ -42,6 +42,7 @@ import type {
   AdAccount,
   BillingProfile,
   BillingCycleSkip,
+  CachedBillingEvidenceReview,
   Client,
   Commission,
   Database,
@@ -135,6 +136,7 @@ export type BillingBlockerCode =
   | "google_disconnected"
   | "ledger_missing"
   | "ledger_stale"
+  | "cached_evidence_reviewed"
   | "evidence_settling"
   | "recipient_invalid"
   | "referral_term_mismatch"
@@ -153,6 +155,8 @@ export type BillingBlocker = {
 };
 
 export type BillingStorePreview = {
+  cachedEvidenceReviewId?: string;
+  cachedEvidenceReviewedBy?: string;
   accountId: string;
   storeName: string;
   accountCurrency: string;
@@ -707,6 +711,19 @@ async function calculateWeek(
     syncWindows.map((row) => [row.ad_account_id, row]),
   );
 
+  const { data: cachedReviewRows, error: cachedReviewError } = await supabase
+    .from("billing_cached_evidence_reviews")
+    .select("*")
+    .eq("period_start", week.start)
+    .eq("period_end", week.end)
+    .in("client_id", clientIds);
+  // A staggered deployment must retain the ordinary Google-only guard until
+  // migration 0104 exists. Permission or network failures must still surface.
+  if (cachedReviewError && cachedReviewError.code !== "PGRST205" && cachedReviewError.code !== "42P01") {
+    throw new Error(`Could not read cached billing approvals: ${cachedReviewError.message}`);
+  }
+  const cachedReviews = (cachedReviewRows ?? []) as CachedBillingEvidenceReview[];
+
   const { data: source, error: sourceError } = await supabase
     .from("revenue_sources")
     .select("id")
@@ -882,6 +899,16 @@ async function calculateWeek(
         ) > week.end &&
         sameLedgerSnapshot(syncWindow.ledger_snapshot, ledgerSnapshot(rows)),
       );
+      const cachedReview = !refreshedAfterClose && start
+        ? cachedReviews.find((review) =>
+            review.client_id === client.id &&
+            review.ad_account_id === account.id &&
+            review.billing_start_id === start.id &&
+            review.billing_end_id === (end?.id ?? null) &&
+            billingEvidenceIsReady(week.end, new Date(review.reviewed_at)) &&
+            sameLedgerSnapshot(review.ledger_snapshot, ledgerSnapshot(rows)),
+          )
+        : undefined;
 
       if (!start) {
         storeBlockers.push(
@@ -974,7 +1001,7 @@ async function calculateWeek(
       // optional portal OAuth may be disconnected without erasing a valid
       // agency-owned closed-week proof.
       const connected = Boolean(start && account.google_ads_customer_id);
-      if (!refreshedAfterClose) {
+      if (!refreshedAfterClose && !cachedReview) {
         storeBlockers.push(
           blocker(
             "ledger_missing",
@@ -983,6 +1010,14 @@ async function calculateWeek(
             account.id,
           ),
         );
+      }
+      if (cachedReview) {
+        storeBlockers.push(blocker(
+          "cached_evidence_reviewed",
+          `${account.store_name}: existing ledger explicitly reviewed on ${cachedReview.reviewed_at}; last source update ${cachedReview.last_ledger_update}.`,
+          "warning",
+          account.id,
+        ));
       }
 
       const lastLedgerUpdate =
@@ -1115,6 +1150,10 @@ async function calculateWeek(
       claimedRows.push(...rows);
 
       stores.push({
+        ...(cachedReview ? {
+          cachedEvidenceReviewId: cachedReview.id,
+          cachedEvidenceReviewedBy: cachedReview.reviewed_by,
+        } : {}),
         accountId: account.id,
         storeName: account.store_name,
         accountCurrency,
@@ -2588,6 +2627,13 @@ export async function issueClientWeek(input: {
     );
   }
   const { preview } = calculated;
+  if (preview.stores.some((store) => store.cachedEvidenceReviewId &&
+    (!input.issuedBy || store.cachedEvidenceReviewedBy !== input.issuedBy))) {
+    throw new BillingIssueError(
+      "Cached ledger evidence requires issuance by its explicit admin reviewer.",
+      422, "ledger_missing", preview,
+    );
+  }
   if (input.expectedReviewToken !== preview.reviewToken) {
     throw new BillingIssueError(
       "The reviewed invoice composition changed. Review it again before issuing.",

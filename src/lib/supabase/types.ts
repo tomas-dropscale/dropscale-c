@@ -394,6 +394,21 @@ export type BillingAutomationItem = {
 };
 
 /** Admin-attributed no-charge decision for one Monday-to-Sunday cycle. */
+export type CachedBillingEvidenceReview = {
+  id: string;
+  client_id: string;
+  ad_account_id: string;
+  billing_start_id: string;
+  billing_end_id: string | null;
+  period_start: string;
+  period_end: string;
+  ledger_snapshot: GoogleLedgerSnapshotRow[];
+  last_ledger_update: string;
+  reviewed_by: string;
+  reviewed_at: string;
+  reason: string;
+};
+
 export type BillingCycleSkip = {
   id: string;
   client_id: string;
@@ -1695,6 +1710,12 @@ export type Database = {
             referencedColumns: ["id"];
           },
         ];
+      };
+      billing_cached_evidence_reviews: {
+        Row: Row<CachedBillingEvidenceReview>;
+        Insert: never;
+        Update: never;
+        Relationships: [];
       };
       billing_automation_runs: {
         Row: Row<BillingAutomationRun>;
