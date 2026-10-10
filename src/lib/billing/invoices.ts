@@ -8,6 +8,7 @@
  */
 
 import "server-only";
+import { ensureServiceEndCycleSkip, reviewedServiceEnd, serviceEndBlocksNewInvoice } from "./reviewed-service-ends";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
@@ -131,6 +132,7 @@ export type BillingBlockerCode =
   | "billing_not_started"
   | "billing_start_mismatch"
   | "billing_end_mismatch"
+  | "service_ended"
   | "account_not_eur"
   | "ledger_not_eur"
   | "google_disconnected"
@@ -1401,6 +1403,9 @@ async function calculateWeek(
       : retryableInvoice
         ? []
         : stores.flatMap((store) => store.blockers);
+    if (!alreadyIssued && serviceEndBlocksNewInvoice(client.id, week.end)) {
+      blockers.unshift(blocker("service_ended", `Serviço terminado em ${reviewedServiceEnd(client.id)!.lastServiceDay}, inclusive. Novas emissões bloqueadas; a fatura final é corrigida separadamente.`, "error"));
+    }
     if (!alreadyIssued && !billingEvidenceIsReady(week.end)) {
       blockers.push(
         blocker(
@@ -2605,6 +2610,9 @@ export async function issueClientWeek(input: {
       "period_not_closed",
     );
   }
+  if (serviceEndBlocksNewInvoice(input.clientId, week.end)) {
+    throw new BillingIssueError("Service has ended. No new invoice may include days after the approved end date.", 422, "service_ended");
+  }
   if (
     !input.clientId ||
     !Number.isFinite(input.expectedAmount) ||
@@ -2902,6 +2910,10 @@ export async function issueClientWeekFromCurrentPreview(input: {
     );
   }
 
+  if (await ensureServiceEndCycleSkip(input.client, input.clientId, week.start, week.end)) {
+    return { state: "no_charge", invoice: null, amount: 0, billableSpend: 0, evidenceAccountCount: 0 };
+  }
+
   const calculated = (await calculateWeek(input.client, week, input.clientId))[0];
   if (!calculated) {
     throw new BillingIssueError(
@@ -3054,7 +3066,8 @@ export async function issueClosedBillingWeekBatch(input: {
                 clientId: preview.clientId,
                 clientName: preview.clientName,
                 billableSpend: issued.billableSpend,
-                reason: "exact_zero" as const,
+                reason: serviceEndBlocksNewInvoice(preview.clientId, week.end)
+                  ? "cycle_skipped" as const : "exact_zero" as const,
               },
             };
           }

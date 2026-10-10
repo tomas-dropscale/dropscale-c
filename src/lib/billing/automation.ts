@@ -1,4 +1,5 @@
 import "server-only";
+import { ensureServiceEndCycleSkip } from "./reviewed-service-ends";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
@@ -131,6 +132,7 @@ async function outcomeForItem(
   item: BillingAutomationItem,
 ): Promise<BillingAutomationOutcome> {
   try {
+    await ensureServiceEndCycleSkip(client, item.client_id, item.period_start, item.period_end);
     if (await billingCycleIsSkipped(client, item)) {
       return await skippedBillingRecoveryOutcome(client, item);
     }

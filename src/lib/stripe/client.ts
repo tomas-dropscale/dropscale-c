@@ -485,6 +485,9 @@ export type StripeInvoice = {
   customer?: string | { id: string } | null;
   currency?: string | null;
   total?: number;
+  amount_paid?: number;
+  livemode?: boolean;
+  lines?: { data: { id: string; amount: number; description: string | null }[]; has_more: boolean };
   amount_due?: number | null;
   amount_remaining?: number | null;
   number?: string | null;
@@ -1291,6 +1294,94 @@ export async function getInvoice(
       method: "GET",
     },
   );
+}
+
+export type StripeCreditNote = {
+  id: string; invoice: string; amount: number; currency: string;
+  status: string; pre_payment_amount: number; post_payment_amount: number;
+  number: string; pdf: string; metadata: Record<string, string>;
+};
+
+export async function getStripeAccountId(): Promise<string> {
+  return (await stripeFetch<{ id: string }>("/account", { method: "GET" })).id;
+}
+
+/** A reviewed reduction of an unpaid invoice; never refunds or credits a balance. */
+export async function creditUnpaidInvoice(input: {
+  expected: LocalStripeInvoiceExpectation;
+  correctionId: string;
+  targetCents: number;
+  lineAmountCents: number;
+  lineDescription: string;
+  memo: string;
+  reviewedBy: string;
+  apply: boolean;
+  assertLeaseOwnership: StripeMutationCheckpoint;
+}) {
+  const invoiceId = input.expected.stripeInvoiceId;
+  const originalCents = Math.round(input.expected.amount * 100);
+  const reduction = originalCents - input.targetCents;
+  if (!invoiceId || !Number.isSafeInteger(input.targetCents) || input.targetCents <= 0 || reduction <= 0) {
+    throw new StripeError("Invalid reviewed credit amount.", 400);
+  }
+  const remote = await getInvoice(invoiceId);
+  assertStripeInvoiceMatchesLocal(remote, input.expected);
+  if (remote.livemode !== true) throw new StripeError("A live invoice is required.", 409);
+  const notes = await stripeFetch<StripeList<StripeCreditNote>>("/credit_notes", {
+    method: "GET", params: { invoice: invoiceId, limit: 100 },
+  });
+  if (notes.has_more) throw new StripeError("Too many credits to review safely.", 409);
+  const matches = notes.data.filter(note => note.metadata?.dropscale_correction_id === input.correctionId);
+  if (matches.length > 1) throw new StripeError("Conflicting correction receipts.", 409);
+  const existing = matches[0];
+  const assertCredit = (note: StripeCreditNote) => {
+    if (note.invoice !== invoiceId || note.currency !== "eur" || note.amount !== reduction ||
+        note.pre_payment_amount !== reduction || note.post_payment_amount !== 0 || note.status !== "issued") {
+      throw new StripeError("The Stripe credit does not match the reviewed correction.", 409);
+    }
+  };
+  if (existing) {
+    assertCredit(existing);
+    if (remote.status !== "open" || remote.amount_paid !== 0 || remote.amount_remaining !== input.targetCents) {
+      throw new StripeError("The correction exists, but payment state changed. Review it before any further action.", 409);
+    }
+    return { applied: true, invoice: remote, credit: existing };
+  }
+  if (notes.data.some(note => note.status === "issued") || remote.status !== "open" ||
+      remote.amount_paid !== 0 || remote.amount_remaining !== originalCents) {
+    throw new StripeError("Invoice payment or credit state changed. No correction was applied.", 409);
+  }
+  const lines = remote.lines?.data.filter(line => line.amount === input.lineAmountCents && line.description === input.lineDescription) ?? [];
+  if (remote.lines?.has_more || lines.length !== 1 || reduction > input.lineAmountCents) {
+    throw new StripeError("The fee line cannot be identified unambiguously.", 409);
+  }
+  const params = {
+    invoice: invoiceId,
+    lines: [{ type: "invoice_line_item", invoice_line_item: lines[0].id, amount: reduction }],
+    reason: "order_change", memo: input.memo,
+    // A payment race must fail rather than create a refund or future balance.
+    refund_amount: 0, credit_amount: 0, out_of_band_amount: 0,
+  };
+  const preview = await stripeFetch<StripeCreditNote>("/credit_notes/preview", { method: "GET", params });
+  assertCredit(preview);
+  if (!input.apply) return { applied: false, invoice: remote, credit: preview };
+  await input.assertLeaseOwnership();
+  const credit = await stripeFetch<StripeCreditNote>("/credit_notes", {
+    params: { ...params, email_type: "credit_note", metadata: {
+      dropscale_correction_id: input.correctionId,
+      dropscale_invoice_id: input.expected.localInvoiceId,
+      reviewed_by: input.reviewedBy,
+      corrected_total_cents: String(input.targetCents),
+    } },
+    idempotencyKey: `invoice-credit:${input.correctionId}`,
+  });
+  assertCredit(credit);
+  const corrected = await getInvoice(invoiceId);
+  assertStripeInvoiceMatchesLocal(corrected, input.expected);
+  if (corrected.status !== "open" || corrected.amount_paid !== 0 || corrected.amount_remaining !== input.targetCents) {
+    throw new StripeError("Credit issued; the resulting balance requires reconciliation.", 409);
+  }
+  return { applied: true, invoice: corrected, credit };
 }
 
 /**

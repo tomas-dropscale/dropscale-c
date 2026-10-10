@@ -85,6 +85,17 @@ function issueFailure() {
 }
 
 describe("automatic billing runtime", () => {
+  it("persists the ended client's skip and never calls Stripe issuance", async () => {
+    const ended = { ...item("ended", "927cbac3-8121-456b-9d19-1e7d5c62184a"), period_start: "2026-10-12", period_end: "2026-10-18" };
+    mocks.claim.mockResolvedValue([ended]);
+    mocks.cycleIsSkipped.mockResolvedValue(true);
+    mocks.skippedOutcome.mockResolvedValue({ itemId: ended.id, claimVersion: 3, state: "no_charge", stage: "complete", code: null, invoiceId: null, amount: 0, billableSpend: 0, evidenceAccountCount: 0 });
+    const rpc = vi.fn(async () => ({ data: [{ client_id: ended.client_id, period_start: ended.period_start, period_end: ended.period_end }], error: null }));
+    await runAutomaticBilling({ rpc } as unknown as SupabaseClient<Database>, { now: NOW });
+    expect(rpc).toHaveBeenCalledWith("skip_billing_cycle", expect.objectContaining({ p_client_id: ended.client_id }));
+    expect(mocks.issue).not.toHaveBeenCalled();
+    expect(mocks.skippedOutcome).toHaveBeenCalled();
+  });
   beforeEach(() => {
     vi.resetAllMocks();
     mocks.begin.mockResolvedValue({ id: "run-1" });
