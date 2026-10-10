@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("server-only", () => ({}));
-import { creditUnpaidInvoice } from "./client";
+import { creditUnpaidInvoice, sendCorrectedInvoice } from "./client";
 
 const remote = { id: "in_closing", customer: "cus_owner", currency: "eur", total: 8027,
   status: "open", amount_paid: 0, amount_remaining: 8027, livemode: true,
@@ -74,5 +74,32 @@ describe("reviewed unpaid-invoice credit", () => {
     fetcher.mockResolvedValueOnce(reply(remote)).mockResolvedValueOnce(reply({ data: [{ ...credit, status: "void" }], has_more: false }));
     await expect(creditUnpaidInvoice(input)).rejects.toThrow();
     expect(fetcher.mock.calls.every(([, options]) => options.method === "GET")).toBe(true);
+  });
+});
+
+describe("sending a corrected invoice", () => {
+  const corrected = { ...remote, amount_remaining: 6960, customer_email: "billing@example.com" };
+  const sendInput = { expected: input.expected, targetCents: 6960, email: "billing@example.com",
+    deliveryId: "review-1", assertLeaseOwnership: vi.fn(async () => {}), onSent: vi.fn(async () => {}) };
+  it("emails the existing invoice with stable retry key and persists acceptance", async () => {
+    fetcher.mockResolvedValueOnce(reply(corrected)).mockResolvedValueOnce(reply({ email: sendInput.email }))
+      .mockResolvedValueOnce(reply(corrected));
+    await sendCorrectedInvoice(sendInput);
+    expect(fetcher.mock.calls[2][0]).toMatch(/\/invoices\/in_closing\/send$/);
+    expect(fetcher.mock.calls[2][1].headers["Idempotency-Key"]).toBe("send-corrected:review-1");
+    expect(sendInput.onSent).toHaveBeenCalledWith(corrected);
+  });
+  it.each([
+    { amount_remaining: 8027 }, { amount_paid: 6960, status: "paid" },
+    { customer_email: "other@example.com" }, { customer: "cus_other" }, { livemode: false },
+  ])("refuses a changed invoice: %j", async change => {
+    fetcher.mockResolvedValueOnce(reply({ ...corrected, ...change }));
+    await expect(sendCorrectedInvoice(sendInput)).rejects.toThrow();
+    expect(fetcher.mock.calls.every(([,options]) => options.method === "GET")).toBe(true);
+  });
+  it("does not send when the current customer recipient differs", async () => {
+    fetcher.mockResolvedValueOnce(reply(corrected)).mockResolvedValueOnce(reply({ email: "someone-else@example.com" }));
+    await expect(sendCorrectedInvoice(sendInput)).rejects.toThrow("customer email differs");
+    expect(fetcher.mock.calls.every(([,options]) => options.method === "GET")).toBe(true);
   });
 });

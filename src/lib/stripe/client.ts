@@ -1298,12 +1298,49 @@ export async function getInvoice(
 
 export type StripeCreditNote = {
   id: string; invoice: string; amount: number; currency: string;
+  created: number;
   status: string; pre_payment_amount: number; post_payment_amount: number;
   number: string; pdf: string; metadata: Record<string, string>;
 };
 
 export async function getStripeAccountId(): Promise<string> {
   return (await stripeFetch<{ id: string }>("/account", { method: "GET" })).id;
+}
+
+/** Explicit email resend of an existing corrected invoice, without issuing a new bill. */
+export async function sendCorrectedInvoice(input: {
+  expected: LocalStripeInvoiceExpectation;
+  targetCents: number;
+  email: string;
+  deliveryId: string;
+  assertLeaseOwnership: StripeMutationCheckpoint;
+  onSent: (invoice: StripeInvoice) => Promise<void>;
+}): Promise<StripeInvoice> {
+  if (!input.expected.stripeInvoiceId || !input.email.trim()) throw new StripeError("Invoice and recipient are required.", 400);
+  const invoice = await getInvoice(input.expected.stripeInvoiceId);
+  const assertSendable = (value: StripeInvoice) => {
+    assertStripeInvoiceMatchesLocal(value, input.expected);
+    if (value.livemode !== true || value.status !== "open" || value.amount_paid !== 0 ||
+        value.amount_remaining !== input.targetCents ||
+        value.customer_email?.trim().toLowerCase() !== input.email.trim().toLowerCase()) {
+      throw new StripeError("Invoice balance, payment state or recipient changed. No resend is allowed.", 409);
+    }
+  };
+  assertSendable(invoice);
+  const customer = await stripeFetch<{ email: string | null; deleted?: boolean }>(
+    `/customers/${encodeURIComponent(input.expected.customerId)}`, { method: "GET" },
+  );
+  if (customer.deleted || customer.email?.trim().toLowerCase() !== input.email.trim().toLowerCase()) {
+    throw new StripeError("The Stripe customer email differs from the approved invoice recipient.", 409);
+  }
+  await input.assertLeaseOwnership();
+  const sent = await stripeFetch<StripeInvoice>(`/invoices/${encodeURIComponent(invoice.id)}/send`, {
+    idempotencyKey: `send-corrected:${input.deliveryId}`,
+  });
+  // Persist acceptance before a post-send read or lease check can fail.
+  await input.onSent(sent);
+  assertSendable(sent);
+  return sent;
 }
 
 /** A reviewed reduction of an unpaid invoice; never refunds or credits a balance. */

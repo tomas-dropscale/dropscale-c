@@ -4,7 +4,8 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 
 type Result = { applied: boolean; account: string; invoiceNumber: string; remainingCents: number;
-  creditNumber: string | null; creditPdf: string | null; hostedUrl: string | null };
+  creditNumber: string | null; creditPdf: string | null; hostedUrl: string | null;
+  recipientEmail: string; sentAt: string | null };
 
 export function ReviewedCorrectionView({ correction }: { correction: {
   id: string; originalCents: number; targetCents: number; feeCents: number; arrearsCents: number; lastServiceDay: string;
@@ -14,12 +15,12 @@ export function ReviewedCorrectionView({ correction }: { correction: {
   const [result, setResult] = useState<Result | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  async function run(apply: boolean) {
+  async function run(apply: boolean, send = false) {
     setBusy(true); setError("");
     try {
       const response = await fetch("/api/admin/billing/reviewed-correction", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ correctionId: correction.id, apply }),
+        body: JSON.stringify({ correctionId: correction.id, apply, send }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error ?? "Falha ao verificar a correção.");
@@ -41,9 +42,11 @@ export function ReviewedCorrectionView({ correction }: { correction: {
     {result && <p role="status">{result.applied
       ? `Correção aplicada · ${result.creditNumber} · Saldo confirmado: ${(result.remainingCents / 100).toFixed(2)} €`
       : `Verificado em ${result.account}: ${result.invoiceNumber}, por pagar. Correção pronta.`}</p>}
+    {result?.sentAt && <p role="status">Fatura enviada para {result.recipientEmail} em {new Intl.DateTimeFormat("pt-PT", { timeZone: "Europe/Lisbon", dateStyle: "short", timeStyle: "short" }).format(new Date(result.sentAt))}.</p>}
     <div className="flex flex-wrap gap-3">
       <Button loading={busy} onClick={() => run(false)}>Verificar na Stripe</Button>
       {result && !result.applied && <Button variant="primary" loading={busy} onClick={() => run(true)}>Aplicar correção para {euros(correction.targetCents)} e enviar nota</Button>}
+      {result?.applied && !result.sentAt && <Button variant="primary" loading={busy} onClick={() => run(false, true)}>Enviar fatura de {euros(correction.targetCents)} para {result.recipientEmail}</Button>}
       {result?.applied && result.hostedUrl && <a href={result.hostedUrl} target="_blank" rel="noreferrer" className="underline">Abrir fatura corrigida</a>}
       {result?.applied && result.creditPdf && <a href={result.creditPdf} target="_blank" rel="noreferrer" className="underline">Nota de crédito</a>}
     </div>

@@ -4,7 +4,8 @@ import { createServiceClient } from "@/lib/supabase/service";
 import { isExactRecord, readSmallJson } from "@/lib/client-onboarding/http";
 import { DIOGO_CLOSING_CORRECTION as correction } from "@/lib/billing/reviewed-corrections";
 import { acquireBillingIssueLease, renewBillingIssueLease, releaseBillingIssueLease } from "@/lib/billing/issue-lease";
-import { authoritativeInvoiceUpdate, creditUnpaidInvoice, getStripeAccountId, StripeError } from "@/lib/stripe/client";
+import { authoritativeInvoiceUpdate, creditUnpaidInvoice, getStripeAccountId, sendCorrectedInvoice, StripeError } from "@/lib/stripe/client";
+import { requireBillingRecipientSnapshot } from "@/lib/billing/review-token";
 
 export const dynamic = "force-dynamic";
 const respond = (value: unknown, status = 200) => NextResponse.json(value, {
@@ -17,7 +18,8 @@ export async function POST(request: NextRequest) {
   if (request.headers.get("origin") !== request.nextUrl.origin) return respond({ error: "Origem inválida." }, 403);
   let body: unknown;
   try { body = await readSmallJson(request, 1024); } catch { return respond({ error: "Pedido inválido." }, 400); }
-  if (!isExactRecord(body, ["correctionId", "apply"]) || body.correctionId !== correction.id || typeof body.apply !== "boolean") {
+  if (!isExactRecord(body, ["correctionId", "apply"], ["send"]) || body.correctionId !== correction.id || typeof body.apply !== "boolean" ||
+      (body.send !== undefined && typeof body.send !== "boolean") || (body.send === true && body.apply === true)) {
     return respond({ error: "Correção não reconhecida." }, 400);
   }
   const service = createServiceClient();
@@ -48,6 +50,29 @@ export async function POST(request: NextRequest) {
       lineDescription: fee[0].label, memo: correction.memo, reviewedBy: profile.id, apply: body.apply,
       assertLeaseOwnership: () => renewBillingIssueLease(service, lease),
     });
+    const recipient = requireBillingRecipientSnapshot(local.billing_recipient);
+    let sentAt = local.stripe_sent_at && result.applied && Number.isFinite(result.credit.created) &&
+      Date.parse(local.stripe_sent_at) >= result.credit.created * 1000 ? local.stripe_sent_at : null;
+    if (body.send === true) {
+      if (!result.applied || !Number.isFinite(result.credit.created)) throw new StripeError("A correção tem de estar concluída antes do envio.", 409);
+      if (!sentAt) {
+        await sendCorrectedInvoice({
+          expected: { localInvoiceId: local.id, stripeInvoiceId: local.stripe_invoice_id,
+            customerId: client.stripe_customer_id, currency: local.currency, amount: Number(local.amount),
+            requireMetadata: true, requireManualCollection: true },
+          targetCents: correction.targetCents, email: recipient.email, deliveryId: correction.id,
+          assertLeaseOwnership: () => renewBillingIssueLease(service, lease),
+          onSent: async () => {
+            const acceptedAt = new Date().toISOString();
+            const { data: receipt, error: receiptError } = await service.from("invoices")
+              .update({ stripe_sent_at: acceptedAt, stripe_delivery_assumed_at: null, issue_error: null })
+              .eq("id", local.id).eq("stripe_invoice_id", correction.stripeInvoiceId).select("id").maybeSingle();
+            if (receiptError || !receipt) throw new Error("A Stripe aceitou o envio, mas falta guardar a confirmação local. Não voltar a enviar sem verificar.");
+            sentAt = acceptedAt;
+          },
+        });
+      }
+    }
     if (result.applied) {
       const update = authoritativeInvoiceUpdate(result.invoice, "invoice.updated", Math.floor(Date.now() / 1000));
       const { data: saved, error: saveError } = await service.from("invoices").update(update)
@@ -58,7 +83,7 @@ export async function POST(request: NextRequest) {
       originalCents: correction.originalCents, targetCents: correction.targetCents,
       remainingCents: result.invoice.amount_remaining, creditCents: result.credit.amount,
       creditNumber: result.applied ? result.credit.number : null, creditPdf: result.applied ? result.credit.pdf : null,
-      hostedUrl: result.invoice.hosted_invoice_url });
+      hostedUrl: result.invoice.hosted_invoice_url, recipientEmail: recipient.email, sentAt });
   } catch (error) {
     return respond({ error: error instanceof Error ? error.message : "Não foi possível concluir a correção." }, error instanceof StripeError ? error.status : 500);
   } finally {
