@@ -1359,8 +1359,9 @@ export async function creditUnpaidInvoice(input: {
     invoice: invoiceId,
     lines: [{ type: "invoice_line_item", invoice_line_item: lines[0].id, amount: reduction }],
     reason: "order_change", memo: input.memo,
-    // A payment race must fail rather than create a refund or future balance.
-    refund_amount: 0, credit_amount: 0, out_of_band_amount: 0,
+    // Omit all post-payment allocations. Stripe requires positive values when
+    // these optional fields are present and refuses an unallocated post-payment
+    // credit if a payment race would otherwise require a refund or balance credit.
   };
   const preview = await stripeFetch<StripeCreditNote>("/credit_notes/preview", { method: "GET", params });
   assertCredit(preview);

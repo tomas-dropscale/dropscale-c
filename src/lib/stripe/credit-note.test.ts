@@ -32,9 +32,9 @@ describe("reviewed unpaid-invoice credit", () => {
     const body = new URLSearchParams(options.body);
     expect(body.get("lines[0][invoice_line_item]")).toBe("il_fee");
     expect(body.get("lines[0][amount]")).toBe("1067");
-    expect(body.get("refund_amount")).toBe("0");
-    expect(body.get("credit_amount")).toBe("0");
-    expect(body.get("out_of_band_amount")).toBe("0");
+    expect(body.has("refund_amount")).toBe(false);
+    expect(body.has("credit_amount")).toBe(false);
+    expect(body.has("out_of_band_amount")).toBe(false);
     expect(body.get("email_type")).toBe("credit_note");
     expect(options.headers["Idempotency-Key"]).toBe("invoice-credit:review-1");
   });
