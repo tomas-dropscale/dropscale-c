@@ -9,6 +9,7 @@
 
 import "server-only";
 import { ensureServiceEndCycleSkip, reviewedServiceEnd, serviceEndBlocksNewInvoice } from "./reviewed-service-ends";
+import { reviewedWeeklyExtras } from "./reviewed-weekly-extras";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
@@ -1239,6 +1240,13 @@ async function calculateWeek(
           absorbedPeriodEnd: overdueInvoice.period_end,
         });
       }
+    }
+
+    // Extras belong to this exact Google billing cycle. Existing invoices keep
+    // their immutable snapshots, including any already-applied supplement.
+    // A week with no agency lines must not turn into a standalone service bill.
+    if (!existingInvoice && lines.some((line) => line.kind === "fee")) {
+      lines.push(...reviewedWeeklyExtras(client.id, week.start));
     }
 
     let displayStores = stores;

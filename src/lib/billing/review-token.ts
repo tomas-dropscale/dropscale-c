@@ -102,6 +102,7 @@ function stableLines(lines: InvoiceLine[]) {
     .map((line) => ({
       accountId: line.accountId,
       kind: line.kind ?? null,
+      extraId: line.extraId ?? null,
       store: line.store ?? null,
       rate: line.rate ?? null,
       pricingMode: line.pricingMode ?? null,

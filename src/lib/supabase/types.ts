@@ -230,8 +230,8 @@ export type ClientInvite = {
 export type InvoiceStatus =
   "draft" | "open" | "paid" | "void" | "uncollectible" | "waived";
 
-/** Legacy invoices may contain spend/revenue-share lines; new invoices use fee only. */
-export type InvoiceLineKind = "spend" | "fee" | "rev_share" | "arrears";
+/** Weekly agency fees may carry arrears and explicitly approved service extras. */
+export type InvoiceLineKind = "spend" | "fee" | "rev_share" | "arrears" | "service";
 
 /**
  * One line of what an invoice is made of — a snapshot, never re-derived.
@@ -247,6 +247,8 @@ export type InvoiceLine = {
   amount: number;
   accountId: string | null;
   kind?: InvoiceLineKind;
+  /** Explicitly approved one-off service supplement for this client/week. */
+  extraId?: string;
   /** Store name at billing time; a later rename must not rewrite history. */
   store?: string;
   /** 'arrears' lines: the retired overdue invoice this balance came from. */

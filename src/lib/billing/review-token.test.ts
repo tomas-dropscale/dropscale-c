@@ -41,6 +41,22 @@ describe("billing recipient snapshot", () => {
 });
 
 describe("billing review token", () => {
+  it("binds approval to the service supplement identity as well as its value", async () => {
+    const common = {
+      clientId: "client-1", week, amount: 34.8, ledgerRows: [],
+      referralTermId: null, recipient,
+    };
+    const line = {
+      kind: "service" as const, extraId: "approved-extra",
+      label: "Customer service", amount: 34.8, accountId: null,
+    };
+    const reviewed = await billingReviewToken({ ...common, lines: [line] });
+    const changed = await billingReviewToken({
+      ...common, lines: [{ ...line, extraId: "another-extra" }],
+    });
+    expect(changed).not.toBe(reviewed);
+  });
+
   it("changes when store composition changes even if the approved total is identical", async () => {
     const common = {
       clientId: "client-1",
